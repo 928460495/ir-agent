@@ -18,6 +18,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--as-of", default=None, help="分析时点 YYYY-MM-DD，默认今天")
     p.add_argument("--snapshots", default="snapshots", help="快照目录")
     p.add_argument("--show-draft", action="store_true", help="打印占位符草稿")
+    p.add_argument("--xlsx", metavar="PATH", default=None,
+                   help="导出 Excel 工作簿到指定路径")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
     a = p.parse_args(argv)
@@ -40,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     print("──── 脚注 ────")
     for n in r.audit.footnotes:
         print(n.text())
+
+    if a.xlsx:
+        from ir_agent.xlsx import build_workbook
+        out = build_workbook(r.ledger, code=a.code, period=r.period,
+                             as_of=r.as_of, path=a.xlsx, verdicts=r.verdicts)
+        print(f"\n已导出 Excel: {out}")
 
     # 验收门槛: 勾稽无失败 且 可溯源率 100%
     passed = r.reconcile.ok and r.audit.traceability == 1.0
