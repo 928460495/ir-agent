@@ -28,6 +28,8 @@ from ir_agent.sources import cninfo, eastmoney, financials, quotes, resolve
 from ir_agent.sources.financials import Statement
 from ir_agent.sources.snapshot import SnapshotStore
 from ir_agent.skips import SkipLog, SkipReason
+from ir_agent.sources.annual_pdf import ExtractionFailed, fetch_and_extract
+from ir_agent.validate.adjudicate import resolve_disagreements
 from ir_agent.validate.cross import CrossReport, cross_reconcile
 from ir_agent.validate.reconcile import ReconcileReport, reconcile
 
@@ -87,6 +89,7 @@ class ResearchRun:
     financials: object = None      # Resolution: 降级与交叉验证结果
     quotes: object = None
     cross: object = None            # CrossReport: 各源独立勾稽
+    verdicts: dict = None           # {字段: Verdict} 年报原文裁定
     skips: object = None            # SkipLog: 按原因分类
 
     def __post_init__(self) -> None:
@@ -94,6 +97,8 @@ class ResearchRun:
             self.skips = SkipLog()
         if self.warnings is None:
             self.warnings = []
+        if self.verdicts is None:
+            self.verdicts = {}
 
     def summary(self) -> str:
         lines = [f"{self.code} {self.period} @ {self.as_of.isoformat()}"]
@@ -105,12 +110,39 @@ class ResearchRun:
         if self.cross is not None and len(self.cross.per_source) > 1:
             # 交叉验证失效时更要说出来 —— 藏起来等于谎称验证过
             lines.append(self.cross.summary())
+        if self.verdicts:
+            lines.append("年报原文裁定:")
+            for k, v in self.verdicts.items():
+                lines.append(f"  · {k}: {v.describe()}")
         lines.append(self.audit.summary())
         if self.skips.entries:
             lines.append(self.skips.summary())
         for w in self.warnings:
             lines.append(f"  ⚠ {w}")
         return "\n".join(lines)
+
+
+def unresolved_disagreements(disagreements, verdicts) -> list:
+    """筛出**未被原文裁定解决**的分歧。
+
+    已裁定且有明确胜者的分歧不该再拦 —— 否则裁决白做。
+    裁不出胜者（原文与任何源都对不上）的必须继续拦。
+    """
+    return [d for d in disagreements
+            if not (verdicts.get(d.key) and verdicts[d.key].winner)]
+
+
+def _find_annual_report(announcements, year: int):
+    """在公告列表中找该年度的正式年报（排除摘要与英文版）。"""
+    want = re.compile(rf"{year}\s*年度?年?度?报告")
+    best = None
+    for a in announcements:
+        t = a.title.strip()
+        if not want.search(t) or _NOT_A_REPORT.search(t):
+            continue
+        if best is None or a.ann_date < best.ann_date:
+            best = a                      # 取首发件，不取更正重发
+    return best
 
 
 def statement_sources(eastmoney_fetch, sina_fetch):
@@ -240,6 +272,7 @@ def run(
     snapshot_dir: Path | str = "snapshots",
     period_suffix: str = "FY",
     cross_check: bool = True,
+    adjudicate_on_conflict: bool = True,
 ) -> ResearchRun:
     store = SnapshotStore(snapshot_dir)
     led = FactLedger()
@@ -283,6 +316,30 @@ def run(
     )
     for f in fin.facts:
         led.put(f)
+
+    # 2b) 本期存在分歧时，用年报原文裁定。
+    #     年报动辄数百页数 MB，只在真的有分歧时才下载。
+    verdicts: dict = {}
+    if adjudicate_on_conflict and fin.has_blocking_disagreement(period) \
+            and period_suffix == "FY":
+        annual = _find_annual_report(anns, year)
+        if annual is None:
+            warnings.append(f"{period} 存在两源分歧，但未找到 {year} 年报公告，无法裁定。")
+        else:
+            try:
+                pdf_rows = fetch_and_extract(
+                    annual.url,
+                    keys=["total_assets", "total_liabilities", "total_equity",
+                          "equity_attr_parent", "minority_equity"],
+                    cache_dir=Path(snapshot_dir) / "pdf")
+                picked, verdicts = resolve_disagreements(
+                    fin.raw, pdf_rows, period, primary=fin.primary)
+                led = FactLedger()
+                for f in picked:
+                    led.put(f)
+            except (ExtractionFailed, OSError) as e:
+                warnings.append(f"年报裁定失败（{e.__class__.__name__}），"
+                                f"沿用 Tier-1 取值: {str(e)[:80]}")
 
     # 3) 行情。Tier-1 腾讯（含市值/PE/PB）/ Tier-2 新浪（仅价格）。
     quote_res = _quote_facts(code, store, cross_check=cross_check)
@@ -370,6 +427,6 @@ def run(
     return ResearchRun(code=code, as_of=as_of, period=period, ledger=led,
                        store=store, reconcile=rec, audit=aud, draft=draft,
                        financials=fin, quotes=quote_res, skips=skips,
-                       cross=xr, warnings=warnings)
+                       cross=xr, warnings=warnings, verdicts=verdicts)
 
 

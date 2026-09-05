@@ -6,7 +6,7 @@ import argparse
 import sys
 from datetime import date
 
-from ir_agent.pipeline import run
+from ir_agent.pipeline import run, unresolved_disagreements
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,8 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     # 验收门槛: 勾稽无失败 且 可溯源率 100%
     passed = r.reconcile.ok and r.audit.traceability == 1.0
     if a.strict:
-        if r.financials is not None and r.financials.has_blocking_disagreement(r.period):
-            print("\n本期存在两源分歧。", file=sys.stderr); passed = False
+        if r.financials is not None:
+            open_ds = unresolved_disagreements(
+                r.financials.disagreements_in(r.period), r.verdicts)
+            if open_ds:
+                keys = "、".join(sorted({d.key for d in open_ds}))
+                print(f"\n本期存在未裁定的两源分歧: {keys}", file=sys.stderr)
+                passed = False
         if r.cross is not None and not r.cross.ok:
             print("\n跨源勾稽有源未通过，疑似字段映射错位。", file=sys.stderr)
             passed = False
