@@ -110,3 +110,80 @@ class TestDerivedFactReferences:
         assert "[[" not in out
         assert "40.00%" in out
         assert len(notes) == 1
+
+
+class TestPercentileAndCountFormatting:
+    """分位数与家数是新单位，format_value 不认识就会把 Decimal 原始精度
+    直接打出来（66.66666666666666666666666667 分位）。"""
+
+    def _f(self, unit, v):
+        from ir_agent.ledger import Fact, Method
+        from decimal import Decimal
+        from datetime import date
+        return Fact(key="x", value=Decimal(v), unit=unit, currency=None,
+                    period="2025FY", as_of=date(2026, 4, 20),
+                    source_id="s", method=Method.COMPUTED)
+
+    def test_percentile_is_rounded_to_whole_numbers(self):
+        from ir_agent.citation import format_value
+        assert format_value(self._f("分位", "66.6666666666666666")) == "67 分位"
+
+    def test_percentile_keeps_the_unit(self):
+        from ir_agent.citation import format_value
+        assert format_value(self._f("分位", "100")) == "100 分位"
+
+    def test_peer_count_is_an_integer(self):
+        from ir_agent.citation import format_value
+        assert format_value(self._f("家", "4")) == "4 家"
+
+    def test_no_raw_decimal_precision_survives(self):
+        from ir_agent.citation import format_value
+        s = format_value(self._f("分位", "33.33333333333333333333"))
+        assert len(s) < 10
+
+
+class TestAuditUsesMethodNotNamingConvention:
+    """审计原本靠 source_id.startswith("calc_") 判断派生事实 ——
+    这是字符串前缀约定，换个前缀就漏。可比事实用 comps_ 前缀，
+    于是 9 条全被误判为「缺失快照」，可溯源率从 100% 掉到 66.7%。
+    正确依据是 Fact.method: COMPUTED 的溯源在 derived_from 链上，
+    本来就不该有快照。"""
+
+    def _run(self, source_id, method, confidence=1.0):
+        from datetime import date
+        from decimal import Decimal
+        from ir_agent.audit import audit
+        from ir_agent.ledger import Fact, FactLedger
+        from ir_agent.sources.snapshot import SnapshotStore
+        import tempfile
+
+        led = FactLedger()
+        led.put(Fact(key="roe", value=Decimal("0.3"), unit="ratio",
+                     currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                     source_id=source_id, method=method,
+                     confidence=confidence))
+        with tempfile.TemporaryDirectory() as d:
+            return audit("ROE [[roe@2025FY]]。", led, SnapshotStore(d),
+                         as_of=date(2026, 6, 1))
+
+    def test_computed_fact_needs_no_snapshot_whatever_the_prefix(self):
+        from ir_agent.ledger import Method
+        r = self._run("comps_600519_2025FY", Method.COMPUTED)
+        assert r.missing_snapshots == []
+        assert r.traceability == 1.0
+
+    def test_calc_prefix_still_passes(self):
+        from ir_agent.ledger import Method
+        assert self._run("calc_roe_2025FY", Method.COMPUTED).missing_snapshots == []
+
+    def test_reported_fact_without_a_snapshot_is_still_flagged(self):
+        """真正该有快照却没有的，必须继续报出来。"""
+        from ir_agent.ledger import Method
+        r = self._run("em_g_income_xyz", Method.REPORTED)
+        assert r.missing_snapshots == ["em_g_income_xyz"]
+
+    def test_extracted_fact_from_a_pdf_still_needs_provenance(self):
+        from ir_agent.ledger import Method
+        # EXTRACTED 按 V0 的不变量必须带 confidence < 1.0
+        r = self._run("cninfo_pdf_p148", Method.EXTRACTED, confidence=0.9)
+        assert r.missing_snapshots == ["cninfo_pdf_p148"]

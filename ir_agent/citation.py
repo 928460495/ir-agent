@@ -13,7 +13,11 @@ from decimal import Decimal
 
 from ir_agent.ledger import Fact, FactLedger
 
-REF_RE = re.compile(r"\[\[([A-Za-z0-9_\-]+)#([A-Za-z0-9_.]+)@([A-Za-z0-9_\-]+)\]\]")
+# 两种写法都支持:
+#   [[key@period]]            分析师用 —— 来源由账本解析，短且跨运行稳定
+#   [[source#key@period]]     显式指定来源 —— 同一 key 有多个来源时的唯一手段
+REF_RE = re.compile(
+    r"\[\[(?:([A-Za-z0-9_\-]+)#)?([A-Za-z0-9_.]+)@([A-Za-z0-9_\-]+)\]\]")
 
 _YI = Decimal("100000000")
 _WAN = Decimal("10000")
@@ -53,7 +57,12 @@ def format_value(fact: Fact) -> str:
         return f"{v:.2f} 元"
     if fact.unit == "x":
         return f"{v:.2f}x"
-    return f"{v} {fact.unit}"
+    if fact.unit == "分位":
+        return f"{v:.0f} 分位"
+    if fact.unit == "家":
+        return f"{v:.0f} 家"
+    # 兜底也要限精度 —— 未知单位不该把 Decimal 原始精度打进研报
+    return f"{v:.2f} {fact.unit}".replace(".00 ", " ")
 
 
 def render(
@@ -75,13 +84,15 @@ def render(
                 f"账本中没有 {key}@{period}，但正文引用了它。"
             ) from e
 
-        if fact.source_id != source_id:
+        # 简写形式不指定来源 —— 由账本解析。省的是分析师的输入，不是溯源:
+        # 脚注里仍然写入真实 source_id。
+        if source_id is not None and fact.source_id != source_id:
             raise UnresolvedReferenceError(
                 f"{key}@{period} 的 source_id 不匹配：正文写的是 {source_id!r}，"
                 f"账本记录为 {fact.source_id!r}。"
             )
 
-        ident = (source_id, key, period)
+        ident = (fact.source_id, key, period)
         if ident not in seen:
             seen[ident] = len(seen) + 1
             notes.append(Footnote(

@@ -207,3 +207,56 @@ class TestReadableOutput:
     def test_percentile_reads_as_position_not_bare_number(self):
         t = build_comps("600519", self.ROWS, period="2025FY", as_of=date(2026, 6, 1))
         assert "分位" in t.summary(["pb"])
+
+
+class TestCompsFactsEnterTheLedger:
+    """分位数必须进事实账本，否则分析师无法在正文中引用 ——
+    实跑时正文写「毛利率处于 100 分位」被审计判为裸数字，正是因为
+    这个数字在账本里不存在。"""
+
+    def _table(self):
+        return build_comps("600519", TestBuildComps.ROWS,
+                           period="2025FY", as_of=date(2026, 6, 1))
+
+    def test_percentile_is_written_as_a_computed_fact(self):
+        from ir_agent.comps import comps_facts
+        from ir_agent.ledger import FactLedger, Method
+        led = FactLedger()
+        comps_facts(self._table(), led)
+        f = led.get("pb.percentile", "2025FY", as_of=date(2026, 6, 1))
+        assert f.value == D("100")
+        assert f.method is Method.COMPUTED
+
+    def test_median_is_also_recorded(self):
+        from ir_agent.comps import comps_facts
+        from ir_agent.ledger import FactLedger
+        led = FactLedger()
+        comps_facts(self._table(), led)
+        assert led.get("pb.peer_median", "2025FY",
+                       as_of=date(2026, 6, 1)).value == D("4.10")
+
+    def test_peer_count_is_recorded_so_the_reader_knows_the_base(self):
+        """「100 分位」在 3 家里和在 30 家里说服力完全不同。"""
+        from ir_agent.comps import comps_facts
+        from ir_agent.ledger import FactLedger
+        led = FactLedger()
+        comps_facts(self._table(), led)
+        assert led.get("peer_count", "2025FY",
+                       as_of=date(2026, 6, 1)).value == D("3")
+
+    def test_facts_are_referenceable_by_the_analyst(self):
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.comps import comps_facts
+        from ir_agent.ledger import FactLedger
+        led = FactLedger()
+        comps_facts(self._table(), led)
+        cat = FactCatalog.from_ledger(led, "2025FY", as_of=date(2026, 6, 1))
+        assert "[[pb.percentile@2025FY]]" in cat.tokens
+
+    def test_metric_absent_from_the_target_produces_no_percentile(self):
+        from ir_agent.comps import comps_facts
+        from ir_agent.ledger import FactLedger, LookAheadError
+        led = FactLedger()
+        comps_facts(self._table(), led)
+        with pytest.raises(KeyError):
+            led.get("pe_ttm.percentile", "2025FY", as_of=date(2026, 6, 1))

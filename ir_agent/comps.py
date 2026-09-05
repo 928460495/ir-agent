@@ -222,3 +222,41 @@ def peer_metrics_from_ledger(ledger, period: str, as_of: date,
         except (KeyError, LookAheadError):
             continue
     return out
+
+
+def comps_facts(table: "CompsTable", ledger, source_id: str | None = None) -> list:
+    """把可比结论写进事实账本，供分析师在正文中引用。
+
+    不入账本，分析师就只能把「处于 100 分位」写成字面数字 —— 而审计会正确地
+    把它判为裸数字驳回。占位符契约要求「每个数字都来自账本」，分位数不例外。
+
+    同时写入 peer_count: 「100 分位」在 3 家里和在 30 家里说服力完全不同，
+    读者必须能看到基数。
+    """
+    from ir_agent.ledger import Fact, Method
+
+    sid = source_id or f"comps_{table.target}_{table.period}"
+    out = []
+
+    def put(key: str, value: Decimal, unit: str) -> None:
+        f = Fact(key=key, value=value, unit=unit, currency=None,
+                 period=table.period, as_of=table.as_of, source_id=sid,
+                 method=Method.COMPUTED,
+                 derived_from=tuple(f"{r.code}@{r.period}" for r in table.rows))
+        ledger.put(f)
+        out.append(f)
+
+    put("peer_count", Decimal(len(table.rows)), "家")
+
+    for metric in sorted({k for r in table.rows for k in r.metrics}):
+        if metric not in table.target_row.metrics:
+            continue                      # 目标没有该指标，分位数无从谈起
+        pct = table.percentile(metric)
+        if pct is not None:
+            put(f"{metric}.percentile", pct, "分位")
+        med = table.median(metric)
+        if med is not None:
+            put(f"{metric}.peer_median", med,
+                "ratio" if metric in _RATIO else "x")
+
+    return out

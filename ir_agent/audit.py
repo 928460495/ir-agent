@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ir_agent.citation import Footnote, audit_bare_numbers, render
-from ir_agent.ledger import FactLedger
+from ir_agent.ledger import Method, FactLedger
 from ir_agent.sources.snapshot import SnapshotStore
 
 
@@ -56,10 +56,12 @@ def audit(
     bare = audit_bare_numbers(draft)
     rendered, notes = render(draft, ledger, as_of=as_of)
 
+    # 依据 method 而非 source_id 前缀: 前缀是命名约定，换一个就漏。
+    # COMPUTED 事实由算子从其它事实推出，溯源在 derived_from 链上，本无快照。
     missing: list[str] = []
     for n in notes:
-        if n.source_id.startswith("calc_"):
-            continue                       # 派生事实的溯源在 derived_from 链上
+        if n.method == Method.COMPUTED.value:
+            continue
         try:
             store.load(n.source_id)
         except KeyError:
