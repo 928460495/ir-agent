@@ -65,3 +65,28 @@ class TestRestatementSemantics:
     def test_single_filing_uses_its_own_date(self):
         got = disclosure_dates([ann("2025年年度报告", date(2026, 4, 30))])
         assert got["2025FY"] == date(2026, 4, 30)
+
+
+class TestForeignLanguageVariants:
+    """英文版与中文版同内容，重复计入会污染披露日。
+    泸州老窖实测: 中文年报 2026-04-29、英文版 2026-05-16，
+    因排除规则只写了「英文版」而漏掉「（英文）」，披露日被推后 17 天 ——
+    在可比分析里会导致该公司被误判为「尚未披露」而移出样本。"""
+
+    @pytest.mark.parametrize("title", [
+        "2025年年度报告（英文版）",
+        "2025年年度报告（英文）",
+        "2025年年度报告(英文)",
+        "2025年度报告（英文版）",
+        "2025 Annual Report",
+        "2025年年度报告（H股）",
+    ])
+    def test_non_chinese_editions_are_excluded(self, title):
+        assert disclosure_dates([ann(title, date(2026, 5, 16))]) == {}
+
+    def test_the_chinese_edition_still_sets_the_date(self):
+        got = disclosure_dates([
+            ann("2025年年度报告", date(2026, 4, 29)),
+            ann("2025年年度报告（英文）", date(2026, 5, 16)),
+        ])
+        assert got["2025FY"] == date(2026, 4, 29)
