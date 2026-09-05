@@ -23,8 +23,10 @@ class Verdict:
         if self.winner is None:
             return (f"原文 {self.pdf_value}：无任何数据源与之一致 —— "
                     f"提取或口径可能有误，需人工复核")
+        if not self.losers:
+            return "各源均与原文一致"
         gaps = "，".join(f"{s} 偏离 {self.rel_diffs[s]:.2%}" for s in self.losers)
-        return f"原文判定 {self.winner} 正确" + (f"；{gaps}" if gaps else "")
+        return f"原文判定 {self.winner} 正确；{gaps}"
 
 
 def adjudicate(
@@ -36,14 +38,15 @@ def adjudicate(
     diffs = {s: abs(v - pdf_value) / scale for s, v in candidates.items()}
     matches = [s for s, d in diffs.items() if d <= rel_tol]
     winner = min(matches, key=lambda s: diffs[s]) if matches else None
+    # 只有**未与原文一致**的源才算输家 —— 两源都对时不该有输家
+    losers = sorted(s for s, d in diffs.items() if d > rel_tol)
     return Verdict(pdf_value=pdf_value, winner=winner,
-                   losers=sorted(s for s in candidates if s != winner),
-                   rel_diffs=diffs)
+                   losers=losers, rel_diffs=diffs)
 
 
 def resolve_disagreements(
     facts_by_source: dict[str, list],
-    pdf_rows: dict[str, list[Decimal]],
+    pdf_rows: dict[str, dict[int, Decimal]],
     period: str,
     primary: str | None = None,
     rel_tol: Decimal = DEFAULT_REL_TOL,
@@ -66,9 +69,11 @@ def resolve_disagreements(
     chosen: list = []
 
     for (key, per), per_source in by_key.items():
-        pdf_vals = pdf_rows.get(key) if per == period else None
-        if pdf_vals:
-            v = adjudicate(pdf_vals[0],
+        # 按年份取值，不按列位置 —— 摘要页的列序与主表相反
+        year = int(period[:4]) if per == period and period[:4].isdigit() else None
+        pdf_val = (pdf_rows.get(key) or {}).get(year) if year else None
+        if pdf_val is not None:
+            v = adjudicate(pdf_val,
                            {s: f.value for s, f in per_source.items()},
                            rel_tol=rel_tol)
             verdicts[key] = v

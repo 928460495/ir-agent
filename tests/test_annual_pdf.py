@@ -85,17 +85,17 @@ class TestColumnYears:
 class TestExtractRows:
     def test_finds_total_assets_for_the_current_year(self):
         rows = extract_rows(P148, ["total_assets"])
-        assert rows["total_assets"][0] == D("627761") * D("1000000")
+        assert rows["total_assets"][2025] == D("627761") * D("1000000")
 
-    def test_prior_year_column_is_also_captured(self):
+    def test_prior_year_is_keyed_by_its_own_year(self):
         rows = extract_rows(P148, ["total_assets"])
-        assert rows["total_assets"][1] == D("668022") * D("1000000")
+        assert rows["total_assets"][2024] == D("668022") * D("1000000")
 
     def test_label_variants_map_to_the_same_key(self):
         """年报用「归属于本公司股东权益合计」，接口用「归属于母公司…」。"""
         text = P148.replace("资产总计", "归属于本公司股东权益合计")
         rows = extract_rows(text, ["equity_attr_parent"])
-        assert rows["equity_attr_parent"][0] == D("627761") * D("1000000")
+        assert rows["equity_attr_parent"][2025] == D("627761") * D("1000000")
 
     def test_absent_label_is_omitted_not_zeroed(self):
         rows = extract_rows(P148, ["total_liabilities"])
@@ -143,8 +143,8 @@ class TestLiveShenhua:
             "http://static.cninfo.com.cn/finalpage/2026-03-31/1225064293.PDF",
             keys=["total_assets", "total_liabilities", "total_equity"],
             cache_dir=tmp_path)
-        assert got["total_assets"][0] == D("627761") * D("1000000")
-        assert got["total_liabilities"][0] == D("146310") * D("1000000")
+        assert got["total_assets"][2025] == D("627761") * D("1000000")
+        assert got["total_liabilities"][2025] == D("146310") * D("1000000")
 
     def test_the_pdf_sides_with_sina_not_eastmoney(self, tmp_path):
         from ir_agent.sources.annual_pdf import fetch_and_extract
@@ -152,7 +152,31 @@ class TestLiveShenhua:
         got = fetch_and_extract(
             "http://static.cninfo.com.cn/finalpage/2026-03-31/1225064293.PDF",
             keys=["total_assets"], cache_dir=tmp_path)
-        v = adjudicate(pdf_value=got["total_assets"][0],
+        v = adjudicate(pdf_value=got["total_assets"][2025],
                        candidates={"eastmoney": D("903830000000"),
                                    "sina": D("627761000000.00")})
         assert v.winner == "sina"
+
+
+class TestBothSourcesCorrect:
+    """两源都与原文一致时不该有「输家」。
+    实测中神华的利润表两源完全相同，却被报成「eastmoney 正确；sina 偏离 0.00%」
+    —— 读者会以为新浪出了问题。"""
+
+    def test_agreeing_sources_produce_no_losers(self):
+        from ir_agent.validate.adjudicate import adjudicate
+        v = adjudicate(pdf_value=D("100"),
+                       candidates={"eastmoney": D("100"), "sina": D("100")})
+        assert v.losers == []
+
+    def test_describe_says_both_agree(self):
+        from ir_agent.validate.adjudicate import adjudicate
+        v = adjudicate(pdf_value=D("100"),
+                       candidates={"eastmoney": D("100"), "sina": D("100")})
+        assert "均与原文一致" in v.describe()
+
+    def test_genuine_loser_is_still_named(self):
+        from ir_agent.validate.adjudicate import adjudicate
+        v = adjudicate(pdf_value=D("100"),
+                       candidates={"eastmoney": D("200"), "sina": D("100")})
+        assert v.losers == ["eastmoney"] and v.winner == "sina"

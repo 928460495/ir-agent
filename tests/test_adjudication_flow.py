@@ -27,8 +27,8 @@ SHENHUA = {
     "sina": [fact("sina", "total_assets", "627761000000"),
              fact("sina", "total_liabilities", "146310000000")],
 }
-PDF = {"total_assets": [D("627761000000")],
-       "total_liabilities": [D("146310000000")]}
+PDF = {"total_assets": {2025: D("627761000000")},
+       "total_liabilities": {2025: D("146310000000")}}
 
 
 class TestResolveDisagreements:
@@ -55,7 +55,7 @@ class TestResolveDisagreements:
         assert "revenue" not in verdicts
 
     def test_no_source_matches_the_pdf_yields_no_winner(self):
-        bad = {"total_assets": [D("111")]}
+        bad = {"total_assets": {2025: D("111")}}
         out, verdicts = resolve_disagreements(SHENHUA, bad, "2025FY",
                                               primary="eastmoney")
         assert verdicts["total_assets"].winner is None

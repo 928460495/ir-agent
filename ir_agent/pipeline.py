@@ -330,7 +330,11 @@ def run(
                 pdf_rows = fetch_and_extract(
                     annual.url,
                     keys=["total_assets", "total_liabilities", "total_equity",
-                          "equity_attr_parent", "minority_equity"],
+                          "equity_attr_parent", "minority_equity",
+                          "revenue", "cost_of_revenue", "net_profit",
+                          "net_profit_attr_parent", "minority_interest_profit",
+                          "cash_net_change", "cash_begin", "cash_end",
+                          "cf_net_profit"],
                     cache_dir=Path(snapshot_dir) / "pdf")
                 picked, verdicts = resolve_disagreements(
                     fin.raw, pdf_rows, period, primary=fin.primary)
