@@ -44,6 +44,18 @@ def _ask(prompt: Prompt, show: Show, question: str, parse, hint: str = ""):
             show(f"  ✗ {e}" + (f"　{hint}" if hint else ""))
 
 
+def _url(raw: str) -> str:
+    if not raw.startswith(("http://", "https://")) or " " in raw:
+        raise ValueError(f"URL 需以 http:// 或 https:// 开头且不含空格，得到 {raw[:36]!r}")
+    return raw
+
+
+def _nonblank(raw: str) -> str:
+    if not raw.strip():
+        raise ValueError("不能为空")
+    return raw.strip()
+
+
 def _rate(raw: str) -> Decimal:
     v = Decimal(raw)
     if not (Decimal("-1") < v < Decimal("1")):
@@ -57,8 +69,11 @@ def _basis(prompt: Prompt, show: Show, label: str) -> list[Basis]:
                 lambda s: s if s in {"1", "2", "3"} else
                 (_ for _ in ()).throw(ValueError("请输入 1、2 或 3")))
     if kind == "1":
-        url = _ask(prompt, show, "  来源 URL：", lambda s: s)
-        quote = _ask(prompt, show, "  原文摘录：", lambda s: s)
+        # 每格当场校验 —— 等三格都收完再一起检查，会在最后抛异常并丢掉已填内容
+        url = _ask(prompt, show, "  来源 URL：", _url,
+                   hint="应形如 https://yield.chinabond.com.cn/")
+        quote = _ask(prompt, show, "  原文摘录：", _nonblank,
+                     hint="摘录来源页面上的原话，供事后复核")
         when = _ask(prompt, show, "  抓取日期 (YYYY-MM-DD)：",
                     lambda s: datetime.strptime(s, "%Y-%m-%d").date(),
                     hint="外部资料会变，日期决定了事后能否复核")
@@ -66,7 +81,8 @@ def _basis(prompt: Prompt, show: Show, label: str) -> list[Basis]:
     if kind == "2":
         return [_ask(prompt, show, "  账本占位符（如 [[revenue.yoy@2025FY]]）：",
                      Basis.fact)]
-    return [_ask(prompt, show, "  正文中的原句（须逐字存在）：", Basis.report)]
+    return [Basis.report(_ask(prompt, show, "  正文中的原句（须逐字存在）：",
+                              _nonblank))]
 
 
 def interactive_review(

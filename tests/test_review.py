@@ -140,3 +140,43 @@ class TestContextIsShown:
         interactive_review(prompt=scripted(*FULL), show=shown.append,
                            context={"历史营收增速": "-1.21%"})
         assert any("-1.21%" in str(s) for s in shown)
+
+
+class TestFieldsAreValidatedOnEntry:
+    """URL 必须**输入当场**校验，不能等三个字段都收完再一起检查 ——
+    后者会在最后抛异常并丢掉已填的内容。实测用户把「国债收益率页面、
+    原文摘录、日期」整段贴进 URL 格，程序在收完日期后才崩。
+    """
+
+    def test_bad_url_is_reasked_immediately(self):
+        answers = ("0.09", "1",
+                   "国债收益率页面、原文摘录、日期 2026-09-07",   # 不是 URL
+                   "https://yield.chinabond.com.cn/",
+                   "十年期国债 2.50%", "2026-09-06",
+                   "0.025", "1", "https://stats.gov.cn/", "GDP", "2026-09-06",
+                   "0.02", "0.03", "0.04", "0.04", "0.04",
+                   "2", "[[revenue.yoy@2025FY]]")
+        a = interactive_review(prompt=scripted(*answers), show=lambda *_: None)
+        assert a.basis["wacc"][0].ref == "https://yield.chinabond.com.cn/"
+
+    def test_the_error_message_names_the_problem(self):
+        shown = []
+        answers = ("0.09", "1", "不是网址", "https://a.cn/", "摘录", "2026-09-06",
+                   "0.025", "1", "https://b.cn/", "GDP", "2026-09-06",
+                   "0.02", "0.03", "0.04", "0.04", "0.04",
+                   "2", "[[revenue.yoy@2025FY]]")
+        interactive_review(prompt=scripted(*answers), show=shown.append)
+        assert any("URL" in str(s) for s in shown)
+
+    def test_blank_quote_is_reasked(self):
+        answers = ("0.09", "1", "https://a.cn/", "   ", "有效摘录", "2026-09-06",
+                   "0.025", "1", "https://b.cn/", "GDP", "2026-09-06",
+                   "0.02", "0.03", "0.04", "0.04", "0.04",
+                   "2", "[[revenue.yoy@2025FY]]")
+        a = interactive_review(prompt=scripted(*answers), show=lambda *_: None)
+        assert a.basis["wacc"][0].quote == "有效摘录"
+
+    def test_blank_report_quote_is_reasked(self):
+        answers = (*FULL[:15], "3", "  ", "毛利率维持在高位")
+        a = interactive_review(prompt=scripted(*answers), show=lambda *_: None)
+        assert a.basis["growth_rates"][0].quote == "毛利率维持在高位"
