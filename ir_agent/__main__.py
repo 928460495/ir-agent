@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--show-draft", action="store_true", help="打印占位符草稿")
     p.add_argument("--write", action="store_true",
                    help="用 claude -p 撰写正文（无需 API key，走现有登录）")
+    p.add_argument("--debate", action="store_true",
+                   help="正文写完后进行多空辩论（需配合 --write）")
     p.add_argument("--model", default=None, help="指定模型，如 claude-opus-5")
     p.add_argument("--html", metavar="PATH", default=None,
                    help="生成可交互 HTML 看板")
@@ -74,6 +76,18 @@ def main(argv: list[str] | None = None) -> int:
             print(n.text())
         print()
         print(written.summary())
+
+        if a.debate:
+            from ir_agent.debate import DebateRefused, run_debate
+            print("\n正在进行多空辩论…", file=sys.stderr)
+            try:
+                d = run_debate(cat, draft=body, client=client)
+                print(f"辩论完成：累计 ${client.total_cost_usd:.4f} · "
+                      f"{client.calls} 次调用", file=sys.stderr)
+                print("\n──── 多空辩论 ────")
+                print(d.summary())
+            except DebateRefused as e:
+                print(f"\n辩论中止：{e}", file=sys.stderr)
 
     route_result = None
     try:
