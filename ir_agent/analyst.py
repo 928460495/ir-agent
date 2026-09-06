@@ -52,6 +52,9 @@ LABELS = {
     "last_price": "最新价", "net_profit_ttm": "归母净利润(TTM)",
     "net_profit_attr_parent_ttm": "归母净利润(TTM)",
     "revenue_ttm": "营业收入(TTM)", "ps_ttm": "PS(TTM)",
+    # 估值假设 —— method=ESTIMATED，脚注里与实测数据区分
+    "wacc": "折现率 WACC（假设）", "terminal_growth": "永续增长率（假设）",
+    **{f"growth_y{i}": f"第 {i} 年营收增速（假设）" for i in range(1, 11)},
 }
 
 # 同义 key: 保留前者，后者不重复进清单 —— 两条都摆出来会让模型

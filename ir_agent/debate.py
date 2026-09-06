@@ -57,6 +57,7 @@ class ChallengeKind(str, Enum):
     LOGIC = "逻辑错误"
     UNSOURCED = "无据断言"
     IGNORED = "反面证据被忽略"
+    ASSUMPTION = "假设不当"
     OTHER = "其他"
 
 
@@ -168,18 +169,48 @@ def _ask(client: Client, prompt: str, catalog: FactCatalog,
     raise DebateRefused(f"参与者反复违反占位符契约：{'；'.join(last)}")
 
 
+def _assumption_block(assumptions, period: str) -> str:
+    """把假设与其依据摊开供质疑 —— 依据看不见就无从挑战。
+
+    取值一律写占位符: 假设已作为 ESTIMATED 事实入账本，这里再打成字面值
+    会让模型照抄后被判违规 —— 往 prompt 里塞裸数字再惩罚模型引用它，
+    是自相矛盾的契约。（实测辩论曾因此中止。）
+    """
+    lines = ["\n**估值假设（同样在评审范围内）**"]
+    rows = [("折现率 WACC", [f"[[wacc@{period}]]"], "wacc"),
+            ("永续增长率", [f"[[terminal_growth@{period}]]"], "terminal_growth"),
+            ("预测期营收增速",
+             [f"[[growth_y{i}@{period}]]"
+              for i in range(1, len(assumptions.growth_rates) + 1)],
+             "growth_rates")]
+    for label, tokens, key in rows:
+        lines.append(f"  {label}：{'、'.join(tokens)}")
+        for b in assumptions.basis.get(key, []):
+            lines.append(f"    依据：{b.describe()}")
+    return "\n".join(lines) + "\n"
+
+
 def run_debate(
     catalog: FactCatalog,
     draft: str,
     client: Client,
+    assumptions=None,
+    period: str = "",
     max_rounds: int = 2,
     max_attempts: int = 3,
 ) -> DebateResult:
     facts = catalog.render_for_prompt()
     ctx = f"\n**可用事实**\n{facts}\n\n**待评审正文**\n{draft}\n"
+    challenger = _CHALLENGER
+    if assumptions is not None:
+        # 只有真的把假设摆出来时，才让质疑者去挑它 —— 否则规则说明本身
+        # 就会污染「未传假设」的场景。
+        ctx += _assumption_block(assumptions, period)
+        challenger += ("  · 假设不当 —— 估值假设的取值与依据不匹配，"
+                       "或与正文结论自相矛盾\n")
 
     result = DebateResult()
-    raw = _ask(client, _CHALLENGER + ctx, catalog, max_attempts)
+    raw = _ask(client, challenger + ctx, catalog, max_attempts)
     result.transcript.append(("质疑者", raw))
     result.challenges = parse_challenges(raw)
     result.rounds = 1
