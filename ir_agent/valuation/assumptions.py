@@ -36,16 +36,15 @@ class Assumptions:
     wacc: Decimal
     terminal_growth: Decimal
     growth_rates: list[Decimal]
-    basis: dict[str, str] = field(default_factory=dict)
+    basis: dict[str, list] = field(default_factory=dict)   # key -> [Basis]
     reviewed_by: str | None = None
     reviewed_at: date | None = None
 
     def __post_init__(self) -> None:
-        missing = [k for k in REQUIRED_BASIS
-                   if not str(self.basis.get(k, "")).strip()]
+        missing = [k for k in REQUIRED_BASIS if not self.basis.get(k)]
         if missing:
             raise UnsupportedAssumption(
-                f"以下假设缺少依据说明：{'、'.join(missing)}。"
+                f"以下假设缺少依据：{'、'.join(missing)}。"
                 "审核者面对一个孤零零的数字无从判断 —— 依据是审核的前提。"
             )
         if self.wacc <= 0:
@@ -65,19 +64,52 @@ class Assumptions:
     def approved(self) -> bool:
         return self.reviewed_by is not None and self.reviewed_at is not None
 
-    def approve(self, reviewer: str, when: date) -> "Assumptions":
-        """返回**新对象** —— 原对象保持未审核，便于留痕对比。"""
+    def approve(self, reviewer: str, when: date, *,
+                ledger=None, body: str | None = None,
+                as_of: date | None = None) -> "Assumptions":
+        """核验依据后返回**新对象** —— 原对象保持未审核，便于留痕对比。
+
+        必须同时给出账本与正文作为证据: 不给证据就不能审核，
+        否则契约又退回成走过场。
+        """
+        from ir_agent.valuation.basis import validate
+
         if not reviewer.strip():
             raise ValueError("审核人不能为空。")
+        if ledger is None or body is None or as_of is None:
+            raise UnsupportedAssumption(
+                "审核必须同时提供证据（ledger / body / as_of）才能核验依据 —— "
+                "不核验的审核就是走过场。")
+
+        problems: list[str] = []
+        for key, bases in self.basis.items():
+            problems += [f"[{key}] {p}" for p in
+                         validate(list(bases), ledger, body, as_of)]
+        if problems:
+            raise UnsupportedAssumption(
+                "依据核验未通过，拒绝审核：\n  " + "\n  ".join(problems))
+
         return replace(self, reviewed_by=reviewer, reviewed_at=when)
 
-    def revise(self, basis_note: str, **changes) -> "Assumptions":
-        """修改假设并**自动撤销审核** —— 改过就必须重审。"""
+    def revise(self, basis_note: str, basis: dict[str, list] | None = None,
+               **changes) -> "Assumptions":
+        """修改假设并**自动撤销审核**。
+
+        改了取值就必须给出新依据 —— 原依据是为旧数字写的，未必还成立。
+        沿用旧依据会让「已核验」的标记跟着一个新数字继续挂着，
+        比没有审核更危险。
+        """
         if not basis_note.strip():
             raise UnsupportedAssumption("修改假设必须说明理由。")
         new_basis = dict(self.basis)
-        for k in changes:
-            new_basis[k] = f"{new_basis.get(k, '')}；{basis_note}".lstrip("；")
+        supplied = basis or {}
+        missing = [k for k in changes
+                   if k in REQUIRED_BASIS and not supplied.get(k)]
+        if missing:
+            raise UnsupportedAssumption(
+                f"修改了 {'、'.join(missing)} 但未提供新依据 —— "
+                "原依据是为旧数字写的，不能顺延。")
+        new_basis.update(supplied)
         return replace(self, **changes, basis=new_basis,
                        reviewed_by=None, reviewed_at=None)
 
@@ -85,9 +117,13 @@ class Assumptions:
         state = (f"已审核（{self.reviewed_by} · {self.reviewed_at}）"
                  if self.approved else "**未审核 —— 不得据此出具估值结论**")
         lines = [f"估值假设：{state}",
-                 f"  WACC {self.wacc:.2%}　依据：{self.basis['wacc']}",
-                 f"  永续增长 {self.terminal_growth:.2%}　依据：{self.basis['terminal_growth']}",
+                 f"  WACC {self.wacc:.2%}",
+                 *[f"    依据：{b.describe()}" for b in self.basis.get("wacc", [])],
+                 f"  永续增长 {self.terminal_growth:.2%}",
+                 *[f"    依据：{b.describe()}"
+                   for b in self.basis.get("terminal_growth", [])],
                  f"  预测期 {len(self.growth_rates)} 年，增速 "
                  + "、".join(f"{g:.1%}" for g in self.growth_rates),
-                 f"    依据：{self.basis['growth_rates']}"]
+                 *[f"    依据：{b.describe()}"
+                   for b in self.basis.get("growth_rates", [])]]
         return "\n".join(lines)

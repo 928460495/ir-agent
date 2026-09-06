@@ -87,12 +87,18 @@ class TestProvenanceIsTheInteraction:
 class TestValuationGateIsVisible:
     def _assumptions(self, approved: bool):
         from ir_agent.valuation.assumptions import Assumptions
+        from ir_agent.valuation.basis import Basis
+        ext = lambda u, q: Basis.external(u, q, date(2026, 6, 1))
         a = Assumptions(wacc=D("0.09"), terminal_growth=D("0.025"),
                         growth_rates=[D("0.05")] * 5,
-                        basis={"wacc": "无风险利率+β×ERP",
-                               "terminal_growth": "不超过名义 GDP",
-                               "growth_rates": "行业分析"})
-        return a.approve("谢海量", date(2026, 6, 1)) if approved else a
+                        basis={"wacc": [ext("https://x.cn/gz", "无风险利率 2.5%")],
+                               "terminal_growth": [ext("https://x.cn/g", "名义 GDP 5%")],
+                               "growth_rates": [ext("https://x.cn/i", "行业增速 4%")]})
+        if not approved:
+            return a
+        from ir_agent.ledger import FactLedger
+        return a.approve("谢海量", date(2026, 6, 1), ledger=FactLedger(),
+                         body="", as_of=date(2026, 6, 1))
 
     def test_unreviewed_assumptions_are_flagged_prominently(self, tmp_path, run_obj):
         h = html(tmp_path, run_obj, assumptions=self._assumptions(False))
@@ -105,7 +111,7 @@ class TestValuationGateIsVisible:
     def test_assumption_basis_is_shown_not_just_the_number(self, tmp_path, run_obj):
         """只给数字不给依据，读者无从判断假设是否合理。"""
         h = html(tmp_path, run_obj, assumptions=self._assumptions(True))
-        assert "无风险利率" in h
+        assert "无风险利率" in h      # 外部依据的原文片段
 
     def test_no_valuation_section_when_absent(self, tmp_path, run_obj):
         assert "每股价值" not in html(tmp_path, run_obj)
