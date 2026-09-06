@@ -298,8 +298,16 @@ def run_review(code: str, r, as_of: date, out_dir: str | Path,
         except (KeyError, LookAheadError):
             continue
 
+    # 推导的建议与约束一并呈给审核者 —— 审核时看得见推导，比事后翻
+    # assumptions.yaml 的注释有用得多。推不出来也不阻断审核。
     try:
-        a = interactive_review(context=ctx)
+        from ir_agent.valuation.derive import derive
+        proposals = derive(r.ledger, r.period, as_of, years=FORECAST_YEARS)
+    except Exception:                                       # noqa: BLE001
+        proposals = None
+
+    try:
+        a = interactive_review(context=ctx, derived=proposals)
     except ReviewAborted as e:
         raise SystemExit(str(e))
 

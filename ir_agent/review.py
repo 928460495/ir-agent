@@ -90,10 +90,21 @@ def interactive_review(
     show: Show = print,
     years: int = 5,
     context: dict | None = None,
+    derived=None,
 ) -> Assumptions:
+    """derived: valuation.derive.Derived —— 推导出的建议与约束。
+
+    传入时永续增长率的上限改用**账本宏观事实算出的值**，而不是硬编码的
+    MAX_TERMINAL_GROWTH。硬编码常数管不住「这一年的名义 GDP 增速是多少」，
+    而那恰恰是这条约束的全部含义。
+    """
     show("── 估值假设审核 ──　随时输入 q 中止")
     for k, v in (context or {}).items():
         show(f"  参考：{k} {v}")
+    if derived is not None:
+        show("")
+        for line in derived.describe().split("\n"):
+            show(f"  {line}")
 
     show("\n[1/3] 折现率 WACC")
     wacc = _ask(prompt, show, "  取值（小数，如 0.09）：", _rate)
@@ -106,10 +117,14 @@ def interactive_review(
         # 当场拦住，而不是等构造对象时抛异常 —— 后者要重填全部
         if v >= wacc:
             raise ValueError(f"须低于 WACC {wacc}，否则终值发散")
-        if v > MAX_TERMINAL_GROWTH:
+        cap = MAX_TERMINAL_GROWTH
+        why = "长期名义 GDP 增速上限"
+        if derived is not None and derived.terminal_ceiling.value is not None:
+            cap = derived.terminal_ceiling.value
+            why = "按账本宏观事实算出的上限"
+        if v > cap:
             raise ValueError(
-                f"高于长期名义 GDP 增速上限 {MAX_TERMINAL_GROWTH} —— "
-                "这意味着公司最终吞掉整个经济")
+                f"高于{why} {cap} —— 这意味着公司最终吞掉整个经济")
         return v
 
     tg = _ask(prompt, show, "  取值（小数，如 0.025）：", _tg)
