@@ -72,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.full:
         from ir_agent.full import report, run_full
         print(r.summary())
-        report(run_full(a.code, r, as_of, a.full, model=a.model),
+        report(run_full(a.code, r, as_of, a.full, model=a.model,
+                        snapshot_dir=a.snapshots),
                out_dir=a.full, year=a.year)
         return 0
 

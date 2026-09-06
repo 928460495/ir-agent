@@ -90,6 +90,60 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, list[str]]:
     return f"{peers.summary()}\n{agg.summary()}", "", [r.period]
 
 
+def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str]:
+    """可比公司分析入账本。返回 (摘要, 失败说明)。
+
+    这是全流程最贵的一段: 每家可比公司都要跑一遍完整取数（财报 + 行情 +
+    交叉验证）。因此先按市值就近挑出六家再取数 —— 对 18 家同业逐一跑完，
+    多花的时间买不到任何结论，规模差两个数量级的 PE/PB 本来就不可比。
+    """
+    from ir_agent.comparables import NoComparables, select
+    from ir_agent.comps import (
+        InsufficientPeers,
+        build_comps,
+        comps_facts,
+        fetch_row,
+        peer_metrics_from_ledger,
+    )
+    from ir_agent.pipeline import run as run_pipeline
+    from ir_agent.sources.industry import IndustryUnavailable, peer_set
+
+    try:
+        sel = select(peer_set(code))
+    except (IndustryUnavailable, NoComparables) as e:
+        return "", f"可比分析（{e}）"
+
+    def fetch(c: str, period: str, when: date):
+        pr = run_pipeline(c, year=int(period[:4]), as_of=when,
+                          snapshot_dir=snapshot_dir,
+                          period_suffix=period[4:] or "FY",
+                          adjudicate_on_conflict=False)
+        spot = next((f.period for f in (pr.quotes.facts if pr.quotes else [])
+                     if f.key == "market_cap"), None)
+        return {"name": c,
+                "metrics": peer_metrics_from_ledger(pr.ledger, period, when, spot)}
+
+    print(f"可比分析：{len(sel.chosen)} 家…", file=sys.stderr)
+    rows, excluded = [], []
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    # 标的自身直接用主流程已有的账本，不重复取数
+    from ir_agent.comps import CompsRow
+    rows.append(CompsRow(code=code, name=code, period=r.period,
+                         metrics=peer_metrics_from_ledger(r.ledger, r.period,
+                                                          as_of, spot)))
+    for peer in sel.chosen:
+        row, exc = fetch_row(peer.code, r.period, as_of, fetch)
+        (rows.append(row) if row else excluded.append(exc))
+
+    try:
+        table = build_comps(code, rows, r.period, as_of, excluded)
+    except (InsufficientPeers, ValueError) as e:
+        return "", f"可比分析（{e}）"
+    comps_facts(table, r.ledger)
+    return f"{sel.summary()}\n{table.summary()}", ""
+
+
 def _route(code: str):
     """估值方法路由。失败不阻断流程 —— 其余产物仍然有价值。"""
     try:
@@ -125,7 +179,8 @@ def _macro_periods(r) -> tuple[str, ...]:
 
 
 def _write_and_debate(r, code: str, model: str | None,
-                      macro_summary: str = "", industry_summary: str = ""):
+                      macro_summary: str = "", industry_summary: str = "",
+                      comps_summary: str = ""):
     """撰写 → 辩论 → 回写。返回 (正文, 成立挑战数, 辩论摘要, 开销, 失败说明)。"""
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
@@ -136,6 +191,7 @@ def _write_and_debate(r, code: str, model: str | None,
     try:
         print(f"撰写正文（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
         body, _ = write_body(cat, client, code=code, period=r.period,
+                             comps_summary=comps_summary or None,
                              macro_summary=macro_summary or None,
                              industry_summary=industry_summary or None)
 
@@ -152,7 +208,8 @@ def _write_and_debate(r, code: str, model: str | None,
 
 
 def run_full(code: str, r, as_of: date, out_dir: str | Path,
-             model: str | None = None) -> ResearchOutcome:
+             model: str | None = None,
+             snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     arts: dict[str, str] = {}
@@ -174,8 +231,15 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     if industry_err:
         skipped.append(industry_err)
 
+    try:
+        comps_md, comps_err = _load_comps(code, r, as_of, snapshot_dir)
+    except Exception as e:                                  # noqa: BLE001
+        comps_md, comps_err = "", f"可比分析（{e.__class__.__name__}: {e}）"
+    if comps_err:
+        skipped.append(comps_err)
+
     body, upheld, debate_md, cost, err = _write_and_debate(
-        code=code, r=r, model=model,
+        code=code, r=r, model=model, comps_summary=comps_md,
         macro_summary=macro_md, industry_summary=industry_md)
     if err:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
