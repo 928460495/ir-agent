@@ -57,6 +57,12 @@ EM_REPORTS: dict[str, ReportSpec] = {
         "TOTAL_EQUITY": "total_equity",
         "TOTAL_PARENT_EQUITY": "equity_attr_parent",
         "MINORITY_EQUITY": "minority_equity",
+        # ↓ DCF 的净负债分量
+        "MONETARYFUNDS": "cash_and_equivalents",
+        "SHORT_LOAN": "short_loan",
+        "LONG_LOAN": "long_loan",
+        "BOND_PAYABLE": "bond_payable",
+        "NONCURRENT_LIAB_1YEAR": "noncurrent_liab_1y",
     }),
     "income": ReportSpec({
         "OPERATE_INCOME": "revenue",
@@ -71,6 +77,9 @@ EM_REPORTS: dict[str, ReportSpec] = {
         "CCE_ADD": "cash_net_change",
         "BEGIN_CCE": "cash_begin",
         "END_CCE": "cash_end",
+        # ↓ DCF 的自由现金流分量
+        "NETCASH_OPERATE": "cf_operating",
+        "CONSTRUCT_LONG_ASSET": "capex",
     }),
 }
 
