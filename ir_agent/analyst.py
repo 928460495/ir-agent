@@ -67,6 +67,17 @@ LABELS = {
     "company.market_share_delta": "本司市占率变化",
     "company.industry_rank": "本司行业排名",
     "company.revenue_yoy_vs_industry": "本司相对行业超额增速",
+    # 可比 —— comps_facts 写入的键。没有标签就会在提示词里显示成裸 key，
+    # 模型看到 "pb.percentile" 而不是「PB 同业分位」，用错的概率明显更高。
+    "peer_count": "可比公司家数",
+    **{f"{m}.percentile": f"{lab} 同业分位" for m, lab in (
+        ("pb", "PB"), ("pe_ttm", "PE(TTM)"), ("roe", "ROE"),
+        ("net_margin", "净利率"), ("gross_margin", "毛利率"),
+        ("asset_turnover", "总资产周转率"), ("equity_multiplier", "权益乘数"))},
+    **{f"{m}.peer_median": f"{lab} 同业中位数" for m, lab in (
+        ("pb", "PB"), ("pe_ttm", "PE(TTM)"), ("roe", "ROE"),
+        ("net_margin", "净利率"), ("gross_margin", "毛利率"),
+        ("asset_turnover", "总资产周转率"), ("equity_multiplier", "权益乘数"))},
 }
 
 # 同义 key: 保留前者，后者不重复进清单 —— 两条都摆出来会让模型
