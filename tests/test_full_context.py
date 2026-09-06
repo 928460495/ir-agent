@@ -165,3 +165,24 @@ def test_假设定不出与不适用DCF是两回事():
     assert "--full out/x" in acts[0] and "--review" in acts[0]
     assert next_actions(Stage.NOT_APPLICABLE, "600519") != acts
     assert "不适用 DCF" in next_actions(Stage.NOT_APPLICABLE, "600519")[0]
+
+
+def test_折现率口径给模型时不含裸数字():
+    """同一个自相矛盾的契约出现过三次: 摘要里、标签里、口径行里。
+    这条测试把「我自己的提示词不许有账本外的数字」变成可执行的约束。"""
+    from ir_agent.citation import audit_bare_numbers
+    from ir_agent.full import _CN_TENOR
+
+    line = (f"  无风险利率（{_CN_TENOR[10]}年期国债）　[[rate.cgb_10y@2026-09-04]]\n"
+            "  β（对沪深300，周频，两年窗口，前复权）"
+            "　[[beta@2026-09-04]]　R²　[[beta.r_squared@2026-09-04]]")
+    assert audit_bare_numbers(line) == []
+
+
+def test_事实标签本身不含裸数字():
+    """标签会原样进提示词。标签里写「10 年期国债」，模型照抄就被驳回。"""
+    from ir_agent.analyst import LABELS
+    from ir_agent.citation import audit_bare_numbers
+
+    bad = {k: v for k, v in LABELS.items() if audit_bare_numbers(v)}
+    assert not bad, f"这些标签含裸数字，会诱导模型写出无法引用的数字: {bad}"

@@ -176,3 +176,26 @@ class TestCatalogLegibility:
                        source_id="calc_x", method=Method.COMPUTED))
         cat = FactCatalog.from_ledger(l, period="2025FY", as_of=AS_OF)
         assert sum(1 for e in cat.entries if "ttm" in e.key) == 1
+
+
+class Test驳回信息要能被执行:
+    def _cat(self):
+        from datetime import date
+        from decimal import Decimal
+        from ir_agent.ledger import Fact, FactLedger, Method
+        led = FactLedger()
+        led.put(Fact(key="industry.peer_count", value=Decimal(19), unit="家",
+                     period="2025FY", as_of=date(2025, 1, 1),
+                     source_id="t", method=Method.COMPUTED))
+        return FactCatalog.from_ledger(led, "2025FY", date(2026, 9, 7))
+
+    def test_能对上账本的裸数字直接给出占位符(self):
+        """只说「19 是裸数字」，模型得自己在几十条事实里找；指出占位符一轮就改对。"""
+        from ir_agent.analyst import _violations
+        v = _violations("行业共 19 家，[[industry.peer_count@2025FY]]", self._cat())
+        assert any("应写作 [[industry.peer_count@2025FY]]" in x for x in v)
+
+    def test_对不上的仍原样报出(self):
+        from ir_agent.analyst import _violations
+        v = _violations("毛利率 91.18%，[[industry.peer_count@2025FY]]", self._cat())
+        assert any("91.18%" in x and "应写作" not in x for x in v)

@@ -286,3 +286,13 @@ class Test期间标签白名单的实测缺口:
     def test_月度豁免不吞掉相邻数值(self):
         got = audit_bare_numbers("2026-07 当月同比 3.5%")
         assert "3.5%" in " ".join(got)
+
+    def test_指数名称不是数值(self):
+        """「沪深300」的 300 是名字的一部分 —— 而白名单里没有任何占位符
+        能代替一个指数的名字。实测正文写「对沪深300 的敏感度」时被驳回。"""
+        assert audit_bare_numbers("β 系对沪深300 回归所得，中证500 同理") == []
+        assert audit_bare_numbers("上证50 与科创50 成分") == []
+
+    def test_期限标签不是数值(self):
+        assert audit_bare_numbers("10年期国债与 30 年期国债") == []
+        assert audit_bare_numbers("十年期国债到期收益率") == []

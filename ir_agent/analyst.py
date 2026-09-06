@@ -54,7 +54,10 @@ LABELS = {
     "revenue_ttm": "营业收入(TTM)", "ps_ttm": "PS(TTM)",
     # 估值假设 —— method=ESTIMATED，脚注里与实测数据区分
     "wacc": "折现率 WACC（假设）", "terminal_growth": "永续增长率（假设）",
-    **{f"growth_y{i}": f"第 {i} 年营收增速（假设）" for i in range(1, 11)},
+    # 序数用中文: 标签会原样进提示词，「第 1 年」里的 1 会被审计判成裸数字，
+    # 而它根本不是数值，账本里也没有任何占位符能代替它。
+    **{f"growth_y{i}": f"第{cn}年营收增速（假设）" for i, cn in enumerate(
+        "一二三四五六七八九十", start=1)},
     # 宏观 —— 名义/实际必须分列，永续增长率对齐的是名义
     "macro.gdp_nominal": "名义 GDP", "macro.gdp_nominal_yoy": "名义 GDP 同比",
     "macro.gdp_real_yoy": "实际 GDP 同比",
@@ -69,7 +72,8 @@ LABELS = {
     "company.revenue_yoy_vs_industry": "本司相对行业超额增速",
     # 折现率输入 —— β 脱离窗口与基准没有意义，标签里点明口径
     "beta": "β（对沪深300，周频两年）", "beta.r_squared": "β 回归 R²",
-    **{f"rate.cgb_{t}y": f"{t} 年期国债到期收益率" for t in (2, 5, 10, 30)},
+    **{f"rate.cgb_{t}y": f"{cn}年期国债到期收益率"
+       for t, cn in ((2, "两"), (5, "五"), (10, "十"), (30, "三十"))},
     # 可比 —— comps_facts 写入的键。没有标签就会在提示词里显示成裸 key，
     # 模型看到 "pb.percentile" 而不是「PB 同业分位」，用错的概率明显更高。
     "peer_count": "可比公司家数",
@@ -239,6 +243,35 @@ def build_prompt(
     return "".join(parts)
 
 
+import re as _re
+
+# 取字符串里的数字本体。裸数字提取出的是「19」，而账本显示值是「19 家」
+# —— 单位不在 audit 的识别列表里，直接比对必然对不上。
+_NUM_CORE = _re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+def _hint(literal: str, catalog: FactCatalog) -> str:
+    """能对上账本的数字，直接把占位符告诉模型。
+
+    只报「17.05% 是裸数字」，模型得自己在几十条事实里找对应项，常常找错或
+    换个说法绕开。指出确切的占位符，一轮就能改对。
+
+    更要紧的是别把**不可能满足**的项混进来: 清单里只要有一个模型无从修复的
+    数字（如指数名称里的 300），整个重试循环就变成不可满足的约束，连本来
+    能改的那几个也一起卡死。实测正是这样连挂三次。
+    """
+    def core(x: str) -> str | None:
+        m = _NUM_CORE.search(x)
+        return m.group(0).replace(",", "") if m else None
+
+    want = core(literal)
+    if want is not None:
+        for e in catalog.entries:
+            if core(e.display) == want:
+                return f"{literal}（应写作 {e.token}）"
+    return literal
+
+
 def _violations(body: str, catalog: FactCatalog) -> list[str]:
     """返回违规说明列表；空列表表示通过。"""
     out: list[str] = []
@@ -248,7 +281,8 @@ def _violations(body: str, catalog: FactCatalog) -> list[str]:
 
     bare = audit_bare_numbers(body)
     if bare:
-        out.append("以下数字是字面值，必须改写为占位符：" + "、".join(bare[:10]))
+        out.append("以下数字是字面值，必须改写为占位符："
+                   + "、".join(_hint(b, catalog) for b in bare[:10]))
 
     if catalog.ledger is not None and catalog.as_of is not None:
         try:

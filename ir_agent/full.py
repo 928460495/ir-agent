@@ -80,7 +80,10 @@ def _load_capm(code: str, r, as_of: date) -> tuple[str, str, str]:
             errs.append("无风险利率（该时点无可见收益率）")
         else:
             human.append("  " + rf.describe())
-            prompt.append(f"  无风险利率（{rf.tenor} 年期国债）　{rf.ref}")
+            # 期限用中文数字: 提示词里出现「10」而正文又无处引用它，
+            # 等于诱导模型写裸数字再驳回它。
+            prompt.append(f"  无风险利率（{_CN_TENOR.get(rf.tenor, '')}年期国债）"
+                          f"　{rf.ref}")
     except RatesUnavailable as e:
         errs.append(f"无风险利率（{e}）")
 
@@ -90,7 +93,8 @@ def _load_capm(code: str, r, as_of: date) -> tuple[str, str, str]:
             r.ledger.put(f)
         human.append("  " + b.describe())
         per = b.as_of.isoformat()
-        line = (f"  β（对沪深300，周频 {b.observations} 期，2 年窗口，前复权）"
+        # 观测期数与窗口年数同样不能以裸数字出现在提示词里
+        line = (f"  β（对沪深300，周频，两年窗口，前复权）"
                 f"　[[beta@{per}]]　R²　[[beta.r_squared@{per}]]")
         if b.weak_fit:
             line += "\n    ⚠ R² 偏低，β 对本标的解释力有限，CAPM 适用性存疑，"\
@@ -210,6 +214,8 @@ def _route(code: str):
 
 # 挂在自己期间上（而非公司报告期）的事实前缀
 _CONTEXT_PREFIXES = ("macro.", "rate.", "beta")
+
+_CN_TENOR = {2: "两", 5: "五", 10: "十", 30: "三十"}
 
 
 def _macro_periods(r) -> tuple[str, ...]:
