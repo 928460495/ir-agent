@@ -326,6 +326,10 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     assumptions = valuation = sensitivity = None
     stage = Stage.NOT_APPLICABLE
     if rt is not None and rt.method is ValuationMethod.DCF:
+        # DCF 适用但没定出假设，与「本标的不适用 DCF」是两回事。混为一谈
+        # 会让摘要报出「不适用 DCF」，而真实情况是模型没给出合法假设 ——
+        # 前者无解，后者人工接手就能继续。
+        stage = Stage.AWAITING_REVIEW
         if not body:
             skipped.append("估值（无正文，模型无从给出假设的正文依据）")
         else:

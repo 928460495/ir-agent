@@ -51,8 +51,10 @@ class TestOutcomeReportsWhatIsMissing:
 
 class TestNextActions:
     def test_awaiting_review_tells_the_user_to_review(self):
+        """审核门取消后，这个 stage 的含义变了: 不再是「等人来审」，
+        而是「模型没定出合法假设，人工可以接手」。指引要说清是哪一种。"""
         acts = next_actions(Stage.AWAITING_REVIEW, code="600519")
-        assert acts and "审核" in acts[0]
+        assert acts and "模型未能给出" in acts[0] and "人工接手" in acts[0]
 
     def test_awaiting_review_names_the_assumptions_file(self):
         acts = next_actions(Stage.AWAITING_REVIEW, code="600519",

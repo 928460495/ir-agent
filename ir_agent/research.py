@@ -79,7 +79,8 @@ def next_actions(stage: Stage, code: str,
         path = assumptions_path or f"{out}/assumptions.yaml"
         y = f"--year {year}" if year else "--year <年度>"
         return [
-            "审核估值假设 —— 推荐交互式录入，逐项问答、当场校验，不必手写 YAML：\n"
+            "模型未能给出通过校验的假设。可人工接手 —— 推荐交互式录入，"
+            "逐项问答、当场校验，不必手写 YAML：\n"
             f"     python -m ir_agent {code} {y} --full {out} "
             f"--review --reviewer <你的名字>",
             f"或手工编辑 {path} 后：\n"
