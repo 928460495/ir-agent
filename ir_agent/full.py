@@ -480,12 +480,14 @@ def run_stage2(code: str, r, as_of: date, out_dir: str | Path,
     # 第二阶段重建看板时口径不能丢 —— 审核之后反而看不到样本覆盖，
     # 恰好是最需要它的时候。宏观与行业事实此刻已在账本里，重算即可。
     macro_md, _, _ = _load_macro(r, as_of)
+    capm_md, _, _ = _load_capm(code, r, as_of)
     try:
         industry_md, _, _ = _load_industry(code, r, as_of)
     except Exception:                                       # noqa: BLE001
         industry_md = ""
     build_dashboard(r, path=out / "dashboard.html", route=rt,
-                    context={"宏观": macro_md, "行业": industry_md},
+                    context={"宏观": macro_md, "折现率输入": capm_md,
+                             "行业": industry_md},
                     assumptions=res.valuation.assumptions,
                     valuation=res.valuation, sensitivity=res.sensitivity)
     build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
