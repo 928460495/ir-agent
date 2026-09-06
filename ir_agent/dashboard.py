@@ -46,6 +46,8 @@ th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule)}
 th{color:var(--dim);font-weight:600;font-size:.78rem}
 td.n{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:.8rem;color:var(--dim)}
+/* 口径原样保留换行与缩进 —— 它本来就是分层缩进的文本 */
+.ctx{white-space:pre-wrap;margin:8px 0 0;line-height:1.65;overflow-x:auto}
 .grid td.hit{background:var(--accent);color:#fff;font-weight:700}
 details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:.85rem}
 .note{border-left:3px solid var(--warn);padding-left:12px;color:var(--dim);font-size:.9rem}
@@ -91,7 +93,13 @@ def build_dashboard(
     assumptions=None,
     valuation=None,
     sensitivity=None,
+    context=None,
 ) -> Path:
+    """context: {标题: 摘要文本}，用于呈现宏观/行业/可比的**口径**。
+
+    口径不进看板，读者就只能看到「市占率 47%」这个结论，看不到它建立在
+    19 家全覆盖之上还是 12 家残缺样本之上 —— 后者会系统性高估。
+    """
     a, rec = run.audit, run.reconcile
     parts: list[str] = []
 
@@ -113,6 +121,17 @@ def build_dashboard(
 
     for w in getattr(run, "warnings", []) or []:
         parts.append(f'<div class="note bad">⚠ {_e(w)}</div>')
+
+    # ── 分析口径 ──────────────────────────────────────────
+    # 放在正文之前: 读者应当先知道结论建立在什么样本和什么分类层级上，
+    # 再去读结论本身。
+    if context:
+        parts.append("<h2>分析口径</h2>")
+        for title, text in context.items():
+            if not text:
+                continue
+            parts.append(f'<div class="card"><b>{_e(title)}</b>'
+                         f'<pre class="mono ctx">{_e(text)}</pre></div>')
 
     # ── 正文 ──────────────────────────────────────────────
     parts.append("<h2>研究正文</h2>")

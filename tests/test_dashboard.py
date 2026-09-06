@@ -203,3 +203,22 @@ class TestBasisRendersReadably:
                     reviewed_by=a.reviewed_by, reviewed_at=a.reviewed_at)
         h = html(tmp_path, run_obj, assumptions=a)
         assert "yield.chinabond" in h and "几乎不依赖财务杠杆" in h
+
+
+def test_分析口径进看板且在正文之前(tmp_path, run_obj):
+    """读者应当先知道结论建立在什么样本上，再读结论本身。"""
+    out = html(tmp_path, run_obj,
+               context={"行业": "覆盖 12/18 家（67%）\n  ⚠ 低于 70%",
+                        "宏观": "名义 GDP 同比 5.43%"})
+    assert "分析口径" in out
+    assert "覆盖 12/18 家" in out and "名义 GDP 同比" in out
+    assert out.index("分析口径") < out.index("研究正文")
+
+
+def test_口径为空时不留空壳(tmp_path, run_obj):
+    out = html(tmp_path, run_obj, context={"行业": "", "宏观": ""})
+    assert "<pre" not in out.split("研究正文")[0]
+
+
+def test_无口径参数时行为不变(tmp_path, run_obj):
+    assert "分析口径" not in html(tmp_path, run_obj)
