@@ -113,6 +113,51 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         route_reason=rt.reason if rt else "")
 
 
+def run_stage2(code: str, r, as_of: date, out_dir: str | Path,
+               assumptions_path: str, reviewer: str) -> ResearchOutcome:
+    """第二阶段: 读入已审核的假设 → 建模 → 重建看板与工作簿。"""
+    from ir_agent.assumptions_io import AssumptionFileError, load_assumptions
+    from ir_agent.stage2 import ValuationBlocked, value_from_file
+
+    out = Path(out_dir)
+    report_md = out / "report.md"
+    if not report_md.exists():
+        raise SystemExit(
+            f"找不到 {report_md} —— 请先运行第一阶段：\n"
+            f"  python -m ir_agent {code} --year <年度> --full {out}")
+    body = report_md.read_text(encoding="utf-8")
+
+    try:
+        a = load_assumptions(assumptions_path)
+    except AssumptionFileError as e:
+        raise SystemExit(f"假设文件有误：{e}")
+
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    try:
+        res = value_from_file(assumptions=a, ledger=r.ledger, body=body,
+                              period=r.period, spot_period=spot or r.period,
+                              as_of=as_of, reviewer=reviewer)
+    except ValuationBlocked as e:
+        raise SystemExit(f"无法出具估值：\n{e}")
+
+    rt, _ = _route(code)
+    build_dashboard(r, path=out / "dashboard.html", route=rt,
+                    assumptions=res.valuation.assumptions,
+                    valuation=res.valuation, sensitivity=res.sensitivity)
+    build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
+                   path=out / "model.xlsx", verdicts=r.verdicts)
+
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of, stage=Stage.VALUED,
+        artifacts={"研究正文": str(report_md),
+                   "看板（含估值）": str(out / "dashboard.html"),
+                   "工作簿": str(out / "model.xlsx")},
+        route_reason=(f"每股价值 {res.valuation.value_per_share:,.2f} 元"
+                      f"（终值占比 {res.valuation.terminal_share:.1%}，"
+                      f"审核 {reviewer}）"))
+
+
 def report(outcome: ResearchOutcome) -> None:
     print()
     print(outcome.summary())
