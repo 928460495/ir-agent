@@ -21,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--write", action="store_true",
                    help="用 claude -p 撰写正文（无需 API key，走现有登录）")
     p.add_argument("--model", default=None, help="指定模型，如 claude-opus-5")
+    p.add_argument("--html", metavar="PATH", default=None,
+                   help="生成可交互 HTML 看板")
     p.add_argument("--xlsx", metavar="PATH", default=None,
                    help="导出 Excel 工作簿到指定路径")
     p.add_argument("--strict", action="store_true",
@@ -72,6 +74,26 @@ def main(argv: list[str] | None = None) -> int:
             print(n.text())
         print()
         print(written.summary())
+
+    route_result = None
+    try:
+        from ir_agent.market import market_of
+        from ir_agent.sources import eastmoney
+        from ir_agent.valuation.route import annual_series, route as route_fn
+        em, _ = eastmoney.fetch_statements_em(a.code, market=market_of(a.code))
+        hist = annual_series(em, "net_profit")
+        if hist:
+            route_result = route_fn(
+                eastmoney.detect_company_type(a.code, market_of(a.code)),
+                hist, hist[-1])
+            print(f"\n估值方法：{route_result.describe()}")
+    except Exception as e:                          # noqa: BLE001
+        print(f"\n估值方法路由未完成：{e.__class__.__name__}", file=sys.stderr)
+
+    if a.html:
+        from ir_agent.dashboard import build_dashboard
+        out = build_dashboard(r, path=a.html, route=route_result)
+        print(f"已生成看板: {out}")
 
     if a.xlsx:
         from ir_agent.xlsx import build_workbook

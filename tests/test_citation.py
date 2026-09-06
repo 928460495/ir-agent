@@ -187,3 +187,28 @@ class TestAuditUsesMethodNotNamingConvention:
         # EXTRACTED 按 V0 的不变量必须带 confidence < 1.0
         r = self._run("cninfo_pdf_p148", Method.EXTRACTED, confidence=0.9)
         assert r.missing_snapshots == ["cninfo_pdf_p148"]
+
+
+class TestFootnoteCarriesItsRenderedValue:
+    """脚注应当知道自己渲染成了什么 —— 下游（看板回填来源提示、
+    Excel 定位单元格）都需要把正文里的数字对回脚注，
+    没有这个字段就只能重新算一遍，容易与正文不一致。"""
+
+    def _notes(self):
+        from datetime import date
+        from decimal import Decimal
+        from ir_agent.citation import render
+        from ir_agent.ledger import Fact, FactLedger, Method
+        l = FactLedger()
+        l.put(Fact(key="roe", value=Decimal("0.3365"), unit="ratio",
+                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="calc_x", method=Method.COMPUTED))
+        return render("ROE [[roe@2025FY]]。", l, as_of=date(2026, 6, 1))
+
+    def test_display_matches_what_appears_in_the_text(self):
+        out, notes = self._notes()
+        assert notes[0].display in out
+
+    def test_display_is_the_formatted_form(self):
+        _, notes = self._notes()
+        assert notes[0].display == "33.65%"

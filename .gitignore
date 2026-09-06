@@ -4,3 +4,6 @@ snapshots/
 runs/
 .pytest_cache/
 .DS_Store
+preview_dashboard.html
+*.html
+!templates/*.html

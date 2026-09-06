@@ -35,6 +35,7 @@ class Footnote:
     source_id: str
     as_of: date
     method: str
+    display: str = ""      # 该引用在正文中渲染成的字符串
 
     def text(self) -> str:
         return (
@@ -98,7 +99,7 @@ def render(
             notes.append(Footnote(
                 marker=seen[ident], key=key, period=period,
                 source_id=fact.source_id, as_of=fact.as_of,
-                method=fact.method.value,
+                method=fact.method.value, display=format_value(fact),
             ))
         return format_value(fact)
 
