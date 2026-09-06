@@ -156,7 +156,9 @@ def parse_em_rows(rows: list[dict], spec: ReportSpec, source_id: str):
 def fetch_statements_em(
     code: str,
     market: str = "SH",
-    page_size: int = 12,
+    # 40 期约覆盖 10 个年度。默认 12 只剩 3 个年度，
+    # 不足以判定周期性（见 valuation/route.py）。
+    page_size: int = 40,
     store=None,
     session: requests.Session | None = None,
     company_type: CompanyType | None = None,
