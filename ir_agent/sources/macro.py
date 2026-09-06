@@ -162,7 +162,43 @@ def fetch_gdp(size: int = 24) -> list[Fact]:
             source_id=SOURCE_ID, method=Method.COMPUTED,
             derived_from=(f"macro.gdp_nominal@{period}",
                           f"macro.gdp_nominal@{year - 1}{period[4:]}")))
+
+    facts.extend(_nominal_cagr(levels))
     return facts
+
+
+# 永续增长率要对齐的是**长期趋势**，不是最近一期的点值。名义 GDP 增速本身
+# 在趋势性下行，拿某一期的同比外推到永续，等于把周期位置误当成结构参数。
+CAGR_YEARS = 5
+
+
+def _nominal_cagr(levels: dict[str, tuple[Decimal, str, date]]) -> list[Fact]:
+    """名义 GDP 的多年复合增速。
+
+    只用同口径期间（都是 FY，或都是 H1）两端计算 —— 拿 FY 和 H1 的水平值
+    比，比出来的是季节性，不是增长。
+    """
+    out: list[Fact] = []
+    for suffix in ("FY", "H1", "Q1-Q3", "Q1"):
+        same = sorted((int(p[:4]), p) for p in levels if p[4:] == suffix)
+        if len(same) < 2:
+            continue
+        (y0, p0), (y1, p1) = same[0], same[-1]
+        span = min(y1 - y0, CAGR_YEARS)
+        if span < 2:
+            continue                      # 两年跨度算不出「趋势」，只是同比
+        y0, p0 = next((y, p) for y, p in same if y == y1 - span)
+        start, end = levels[p0][0], levels[p1][0]
+        if start <= 0:
+            continue
+        out.append(Fact(
+            key="macro.gdp_nominal_cagr", value=(end / start) ** (Decimal(1) / span) - 1,
+            unit="ratio", period=p1,
+            as_of=max(levels[p0][2], levels[p1][2]),
+            source_id=SOURCE_ID, method=Method.COMPUTED,
+            derived_from=(f"macro.gdp_nominal@{p0}", f"macro.gdp_nominal@{p1}")))
+        break                             # 一个口径足够，FY 优先
+    return out
 
 
 def fetch_macro(size: int = 24) -> list[Fact]:

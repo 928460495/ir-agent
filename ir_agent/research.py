@@ -122,6 +122,16 @@ growth_rates_basis:
 """
 
 
-def assumption_template(years: int) -> str:
+def assumption_template(years: int, derived=None) -> str:
+    """假设模板。derived 为 valuation.derive.Derived 时附上推导建议值。
+
+    建议值以**注释**形式出现，不落到 value 上 —— 预填数字会让人直接点通过，
+    人工审核门就退化成一个回车。注释既给出分析锚点，又保留「必须自己填」
+    这个动作。这是刻意的摩擦。
+    """
     rows = "\n".join(f"  - year: {i}\n    rate: null" for i in range(1, years + 1))
-    return _TEMPLATE.format(years=rows)
+    body = _TEMPLATE.format(years=rows)
+    if derived is None:
+        return body
+    head = "\n".join("# " + ln for ln in derived.describe().split("\n"))
+    return f"{head}\n#\n# 上列为系统据宏观与行业事实推导的建议值，仅供参考。\n#\n{body}"

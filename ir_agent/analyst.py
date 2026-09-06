@@ -55,6 +55,18 @@ LABELS = {
     # 估值假设 —— method=ESTIMATED，脚注里与实测数据区分
     "wacc": "折现率 WACC（假设）", "terminal_growth": "永续增长率（假设）",
     **{f"growth_y{i}": f"第 {i} 年营收增速（假设）" for i in range(1, 11)},
+    # 宏观 —— 名义/实际必须分列，永续增长率对齐的是名义
+    "macro.gdp_nominal": "名义 GDP", "macro.gdp_nominal_yoy": "名义 GDP 同比",
+    "macro.gdp_real_yoy": "实际 GDP 同比",
+    "macro.cpi_yoy": "CPI 同比", "macro.ppi_yoy": "PPI 同比",
+    # 行业
+    "industry.revenue": "行业营业收入", "industry.revenue_yoy": "行业营收同比",
+    "industry.cr5": "行业 CR5", "industry.peer_count": "行业样本家数",
+    "industry.coverage": "行业数据覆盖率",
+    "company.market_share": "本司市占率",
+    "company.market_share_delta": "本司市占率变化",
+    "company.industry_rank": "本司行业排名",
+    "company.revenue_yoy_vs_industry": "本司相对行业超额增速",
 }
 
 # 同义 key: 保留前者，后者不重复进清单 —— 两条都摆出来会让模型
@@ -130,12 +142,41 @@ _RULES = """你是一名卖方分析师，正在撰写研究报告正文。
 - 定性表述（「显著高于」「小幅回落」「处于同业前列」）可以自由使用，
   这正是你的价值所在。
 
+**结构（自上而下，每一层的结论都要被下一层用到）**
+
+这个顺序不是排版偏好，是论证顺序。顶级投行的首次覆盖报告都遵循同一条链：
+宏观景气 → 行业格局 → 公司在行业中的位置 → 同业估值坐标 → 盈利预测假设。
+每一段用 ## 二级标题。
+
+1. **投资要点** —— 三到五句话讲清核心判断：这家公司值得关注的理由是什么，
+   最关键的一个变量是什么。这是全文的结论，写在最前面。
+2. **宏观环境** —— 只写与本行业需求相关的部分。价格类（CPI/PPI）对应
+   成本与提价能力，GDP 增速对应总需求。**不相关就明说不相关**，
+   不要为了凑段落硬拉关系。
+3. **行业格局** —— 行业增速、集中度、本司份额及其变化。
+   核心问题：这是一个扩张的行业还是收缩的行业？本司在其中是得份额还是失份额？
+4. **公司经营** —— 收入与利润的构成和趋势；ROE 拆到三因子（净利率 ×
+   周转率 × 权益乘数），说明是哪一项在驱动。
+5. **财务结构** —— 资产负债与现金。利润和现金是否匹配，差在哪里。
+6. **同业比较** —— 本司在同业中的估值与盈利能力位置。
+   注意分位数的样本量：三家里的「第一」和三十家里的「第一」不是一回事。
+7. **盈利预测的关键假设** —— **本节是全文的枢纽，必须写。**
+   逐条说明预测期收入增速、利润率应当锚定在什么之上，依据是前面哪一节的
+   哪个事实。**不要给出具体的假设数值** —— 数值由人工在审核环节确定，
+   你的任务是把「凭什么」讲清楚。典型写法：
+   「收入增速应以行业增速 [[industry.revenue_yoy@...]] 为基准，
+   考虑本司份额变化 [[company.market_share_delta@...]] 作方向性调整」。
+   若行业在收缩而你认为公司仍能增长，必须在此说明理由 —— 这正是
+   最容易被质疑的地方。
+8. **风险提示** —— 具体到会证伪上述假设的事件，不写「市场波动」这类套话。
+
 **写作要求**
 - 中文，卖方研报语体，不用第一人称。
-- 结构：经营概览 / 盈利质量 / 财务结构 / 风险提示，各段用 ## 二级标题。
-- 每段都要有**解读**而不只是复述数字：为什么 ROE 是这个水平（拆到三因子）、
-  毛利率变化说明了什么、现金与利润是否匹配。
-- 不做投资评级，不给目标价 —— 那需要估值模型，本阶段尚未接入。
+- 每段都要有**解读**而不只是复述数字。数字本身脚注里都有，正文的价值在于
+  说明它意味着什么。
+- 上下层要真的咬合：第 7 节的每一条假设，都应能追溯到第 2–6 节的某个结论。
+  写不出这条链，说明前面的分析没做到位。
+- 不做投资评级，不给目标价 —— 那需要估值模型，在人工审核假设之后才进行。
 - 只输出正文 Markdown，不要前言、不要解释你的写作过程。
 """
 
@@ -146,11 +187,25 @@ def build_prompt(
     period: str,
     comps_summary: str | None = None,
     context: str | None = None,
+    macro_summary: str | None = None,
+    industry_summary: str | None = None,
 ) -> str:
+    """组装提示词。
+
+    宏观/行业/可比三段以**摘要**形式给出口径说明（覆盖率、样本量、分类层级），
+    数值本身仍只能通过占位符引用。摘要里出现的数字是给模型判断用的上下文，
+    与「可用事实」表同源 —— 提示词里出现裸数字、正文里却禁止引用，
+    是自相矛盾的契约，这一点此前踩过。
+    """
     parts = [_RULES,
              f"\n**标的**：{code}　**报告期**：{period}\n",
              "\n**可用事实**（左为含义，中为数值仅供你判断，右为必须写入的占位符）\n",
              catalog.render_for_prompt(), "\n"]
+    if macro_summary:
+        parts.append(f"\n**宏观口径**\n{macro_summary}\n")
+    if industry_summary:
+        parts.append(f"\n**行业口径**（决定第 3 节能下多强的结论）\n"
+                     f"{industry_summary}\n")
     if comps_summary:
         parts.append(f"\n**可比公司对照**\n{comps_summary}\n")
     if context:
@@ -187,11 +242,15 @@ def write_body(
     period: str = "",
     comps_summary: str | None = None,
     context: str | None = None,
+    macro_summary: str | None = None,
+    industry_summary: str | None = None,
     max_attempts: int = 3,
 ) -> tuple[str, int]:
     """调用模型撰写正文，违规则驳回重写。返回 (正文, 实际尝试次数)。"""
     prompt = build_prompt(catalog, code=code, period=period,
-                          comps_summary=comps_summary, context=context)
+                          comps_summary=comps_summary, context=context,
+                          macro_summary=macro_summary,
+                          industry_summary=industry_summary)
     last: list[str] = []
 
     for attempt in range(1, max_attempts + 1):

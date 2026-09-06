@@ -17,7 +17,9 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 
-# 永续增长率上限。高于长期名义 GDP 增速意味着公司最终吞掉整个经济。
+# 永续增长率的**兜底**上限。高于长期名义 GDP 增速意味着公司最终吞掉整个经济。
+# 账本里有宏观事实时，实际上限由 derive.terminal_ceiling 按名义 GDP 算出，
+# 通常比这个兜底值更紧 —— 硬编码常数管不住「这一年的 GDP 增速是多少」。
 MAX_TERMINAL_GROWTH = Decimal("0.06")
 
 REQUIRED_BASIS = ("wacc", "terminal_growth", "growth_rates")
