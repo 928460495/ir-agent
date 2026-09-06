@@ -145,29 +145,60 @@ class CompsTable:
         return "\n".join(lines)
 
 
-    def for_prompt(self, metrics: list[str] | None = None) -> str:
-        """给模型看的口径: 数字一律写成占位符。
+    def for_prompt(self, ledger=None, as_of=None,
+                   spot: str | None = None,
+                   metrics: list[str] | None = None) -> str:
+        """给模型看的口径: 数字一律写成占位符，且**每个都验证过能解析**。
 
         summary() 里的「本司 0.56x  中位数 0.40x  83 分位  覆盖 7/7」在提示词中
         是四个账本外的裸数字，模型照抄就会被审计驳回。分位数与中位数本来就已
         由 comps_facts 入账（正是为了让正文能引用），这里给出引用写法即可。
         「覆盖 7/7」这种比值不入账本，改为口径说明，不给数字。
+
+        **本司自身的取值不一定挂在报告期上**: PB / PE(TTM) 是即期指标，
+        挂在报价日。早前这里一律拼 self.period，产出了 [[pe_ttm@2025FY]]
+        这种解析不了的占位符 —— 递给模型一个假占位符，等于教它伪造引用。
+        现在候选期间依次试 spot 与 period，并逐个过 ledger 验证。
         """
+        from ir_agent.citation import resolves
+
+        def ok(ref: str) -> bool:
+            if ledger is None or as_of is None:
+                return True                  # 无账本可验时不拦，交给下游审计
+            return resolves(ref, ledger, as_of)
+
+        def own(metric: str) -> str | None:
+            for per in ([spot] if spot else []) + [self.period]:
+                ref = f"[[{metric}@{per}]]"
+                if ok(ref):
+                    return ref
+            return None
+
         keys = metrics or sorted({k for r in self.rows for k in r.metrics})
         p = self.period
-        lines = [f"可比样本共 [[peer_count@{p}]] 家（含标的自身）"]
+        lines = []
+        head = f"[[peer_count@{p}]]"
+        lines.append(f"可比样本共 {head} 家（含标的自身）" if ok(head)
+                     else "可比样本（含标的自身）")
         for k in keys:
             if k not in self.target_row.metrics:
                 lines.append(f"  – {label(k)}：标的缺该指标，本节不得比较")
                 continue
-            bits = [f"本司 [[{k}@{p}]]"]
-            if self.median(k) is not None:
-                bits.append(f"同业中位数 [[{k}.peer_median@{p}]]")
-            if self.percentile(k) is not None:
-                bits.append(f"分位 [[{k}.percentile@{p}]]")
+            bits = []
+            mine = own(k)
+            if mine:
+                bits.append(f"本司 {mine}")
+            for suffix, name in ((".peer_median", "同业中位数"),
+                                 (".percentile", "分位")):
+                ref = f"[[{k}{suffix}@{p}]]"
+                if (self.median(k) is not None if suffix == ".peer_median"
+                        else self.percentile(k) is not None) and ok(ref):
+                    bits.append(f"{name} {ref}")
+            if not bits:
+                continue
             miss = len(self.rows) - self.coverage(k)
             if miss:
-                bits.append(f"（{miss} 家缺该指标，未计入）")
+                bits.append("（部分同业缺该指标，未计入）")
             lines.append(f"  · {label(k):8} " + "　".join(bits))
         for e in self.excluded:
             lines.append(f"  ✗ 已排除 {e.name}: {e.reason}")

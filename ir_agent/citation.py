@@ -145,6 +145,26 @@ _LABELS = re.compile(
 _NUMERIC = re.compile(r"\d+(?:[.,]\d+)*\s*(?:%|亿|万|元|倍|x|个百分点)?")
 
 
+def resolves(placeholder: str, ledger: FactLedger, as_of: date) -> bool:
+    """该占位符此刻能否解析成真值。
+
+    存在的理由: 递给模型一个解析不了的占位符，等于教它伪造引用 —— 而伪造
+    引用比裸数字更隐蔽（格式完全合法，只是账本里没有那条事实）。实测踩到的
+    是 [[pe_ttm@2025FY]]: PB / PE 是**即期**指标，挂在报价日上，不在会计期，
+    而拼提示词的代码一律用了报告期。
+
+    因此凡是要写进提示词的占位符，一律先过这道验证，而不是逐个字段打补丁。
+    """
+    m = REF_RE.fullmatch(placeholder.strip())
+    if m is None:
+        return False
+    try:
+        ledger.get(m.group(2), m.group(3), as_of=as_of)
+    except Exception:                                        # noqa: BLE001
+        return False
+    return True
+
+
 def audit_bare_numbers(text: str) -> list[str]:
     """返回正文中未经账本的裸数字。空列表 = 全部数字可溯源。"""
     stripped = REF_RE.sub(" ", text)

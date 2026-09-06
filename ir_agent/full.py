@@ -196,7 +196,8 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]
         return "", "", f"可比分析（{e}）"
     comps_facts(table, r.ledger)
     return (f"{sel.summary()}\n{table.summary()}",
-            f"{sel.for_prompt()}\n{table.for_prompt()}", "")
+            f"{sel.for_prompt()}\n"
+            + table.for_prompt(ledger=r.ledger, as_of=as_of, spot=spot), "")
 
 
 def _route(code: str):

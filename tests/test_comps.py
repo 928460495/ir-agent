@@ -260,3 +260,62 @@ class TestCompsFactsEnterTheLedger:
         comps_facts(self._table(), led)
         with pytest.raises(KeyError):
             led.get("pe_ttm.percentile", "2025FY", as_of=date(2026, 6, 1))
+
+
+class Test提示词里的占位符必须能解析:
+    """递给模型一个解析不了的占位符，等于教它伪造引用 —— 而伪造引用比裸数字
+    更隐蔽：格式完全合法，只是账本里没有那条事实。实测栽在 [[pe_ttm@2025FY]]。"""
+
+    def _setup(self):
+        from datetime import date
+        from decimal import Decimal as Dc
+        from ir_agent.ledger import Fact, FactLedger, Method
+        led = FactLedger()
+        # PB/PE 是即期指标，挂在报价日；ROE 挂在会计期
+        for k, per in (("pb", "2026-09-04"), ("pe_ttm", "2026-09-04"),
+                       ("roe", "2025FY"), ("pb.peer_median", "2025FY"),
+                       ("pb.percentile", "2025FY"), ("roe.peer_median", "2025FY"),
+                       ("roe.percentile", "2025FY"), ("peer_count", "2025FY")):
+            led.put(Fact(key=k, value=Dc("1.5"), unit="x", period=per,
+                         as_of=date(2025, 1, 1), source_id="t",
+                         method=Method.COMPUTED))
+        rows = [CompsRow(code="600519", name="茅台", period="2025FY",
+                         metrics={"pb": Dc("6.8"), "pe_ttm": Dc("20.2"),
+                                  "roe": Dc("0.33")}),
+                CompsRow(code="000858", name="五粮液", period="2025FY",
+                         metrics={"pb": Dc("2.3"), "pe_ttm": Dc("15.1"),
+                                  "roe": Dc("0.16")}),
+                CompsRow(code="000568", name="老窖", period="2025FY",
+                         metrics={"pb": Dc("2.0"), "pe_ttm": Dc("14.0"),
+                                  "roe": Dc("0.20")})]
+        return led, build_comps("600519", rows, "2025FY", date(2026, 9, 7))
+
+    def test_即期指标用报价日而非报告期(self):
+        from datetime import date
+        led, t = self._setup()
+        out = t.for_prompt(ledger=led, as_of=date(2026, 9, 7), spot="2026-09-04")
+        assert "[[pe_ttm@2026-09-04]]" in out
+        assert "[[pe_ttm@2025FY]]" not in out          # 这个解析不了
+
+    def test_会计期指标仍用报告期(self):
+        from datetime import date
+        led, t = self._setup()
+        out = t.for_prompt(ledger=led, as_of=date(2026, 9, 7), spot="2026-09-04")
+        assert "[[roe@2025FY]]" in out
+
+    def test_解析不了的占位符一律不出现在提示词里(self):
+        from datetime import date
+        from ir_agent.citation import REF_RE, resolves
+        led, t = self._setup()
+        out = t.for_prompt(ledger=led, as_of=date(2026, 9, 7), spot="2026-09-04")
+        refs = [m.group(0) for m in REF_RE.finditer(out)]
+        assert refs
+        bad = [r for r in refs if not resolves(r, led, date(2026, 9, 7))]
+        assert not bad, f"提示词含无法解析的占位符: {bad}"
+
+    def test_提示词不含裸数字(self):
+        from datetime import date
+        from ir_agent.citation import audit_bare_numbers
+        led, t = self._setup()
+        out = t.for_prompt(ledger=led, as_of=date(2026, 9, 7), spot="2026-09-04")
+        assert audit_bare_numbers(out) == []
