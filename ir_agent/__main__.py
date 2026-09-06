@@ -86,6 +86,23 @@ def main(argv: list[str] | None = None) -> int:
                       f"{client.calls} 次调用", file=sys.stderr)
                 print("\n──── 多空辩论 ────")
                 print(d.summary())
+
+                if d.upheld_count:
+                    from ir_agent.revision import RevisionFailed, revise_from_verdicts
+                    print("\n正在按裁决修订正文…", file=sys.stderr)
+                    try:
+                        body2, changed = revise_from_verdicts(
+                            cat, body, d.challenges, client)
+                        if changed:
+                            final = audit(body2, r.ledger, r.store, as_of=r.as_of)
+                            print(f"修订完成：累计 ${client.total_cost_usd:.4f} · "
+                                  f"{client.calls} 次调用", file=sys.stderr)
+                            print("\n──── 修订后正文 ────")
+                            print(final.rendered)
+                            print()
+                            print(final.summary())
+                    except RevisionFailed as e:
+                        print(f"\n修订失败：{e}", file=sys.stderr)
             except DebateRefused as e:
                 print(f"\n辩论中止：{e}", file=sys.stderr)
 

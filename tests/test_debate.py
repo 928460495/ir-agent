@@ -156,3 +156,45 @@ class TestRunDebate:
                        client=self._client(RAW, "分析师回应。", self.VERDICT),
                        max_rounds=1)
         assert "逻辑错误" in r.summary()
+
+
+class TestEnumerationIsStructureNotContent:
+    """列表编号在任何写法下都是结构，不是需要溯源的数字。
+
+    实测同一 prompt 两次运行用了不同格式: 一次 [挑战 1]，一次裸编号 ——
+    后者让辩论在第一轮就中止（「裸数字：1、2」）。只剥一种写法不够。
+    """
+    @staticmethod
+    def s(t):
+        from ir_agent.debate import strip_structure
+        return strip_structure(t)
+
+    def test_bracketed_marker(self):
+        assert "1" not in self.s("[挑战 1] 类型：逻辑错误")
+
+    def test_bracketed_verdict(self):
+        assert "2" not in self.s("[裁决 2] 成立")
+
+    def test_bare_prefix_marker(self):
+        assert "1" not in self.s("挑战 1：类型 逻辑错误")
+
+    def test_line_leading_ordinal(self):
+        assert "3" not in self.s("3. 该句无据")
+
+    def test_chinese_ordinal_list(self):
+        assert "2" not in self.s("2、该句无据")
+
+    def test_plain_bracket_index(self):
+        assert "1" not in self.s("[1] 某挑战")
+
+    def test_content_numbers_survive(self):
+        """正文里的真数字必须留下 —— 剥过头就等于关掉了裸数字检测。"""
+        out = self.s("营业收入 1688.38 亿元")
+        assert "1688.38" in out
+
+    def test_percent_in_the_middle_survives(self):
+        assert "4.50" in self.s("质疑：净利率 4.50% 有误")
+
+    def test_year_like_number_at_line_start_survives(self):
+        """行首的 2025 是年份不是编号，不该被结构剥离吃掉。"""
+        assert "2025" in self.s("2025 年公司营收下滑")

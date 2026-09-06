@@ -31,9 +31,20 @@ _CHALLENGE = re.compile(
     r"(?:原文[：:]\s*(?P<passage>[^\n]+)\n)?"
     r"质疑[：:]\s*(?P<body>.+?)(?=\n\s*\[挑战|\Z)",
     re.S)
-# 结构标记 [挑战 1] / [裁决 2] 里的编号是**格式**不是内容，
-# 审计裸数字前必须先剥掉 —— 否则每一稿都会因自己的编号被驳回。
-_STRUCT = re.compile(r"\[(?:挑战|裁决)\s*\d+\]")
+# 列表编号在任何写法下都是**结构**不是内容，审计裸数字前必须剥掉 ——
+# 否则每一稿都会因自己的编号被驳回，辩论走不出第一轮。实测同一 prompt
+# 两次运行用了不同格式（[挑战 1] 与裸编号），只剥一种不够。
+# 但不能剥过头: 「1688.38 亿元」「4.50%」「2025 年」都必须留下。
+_STRUCT = re.compile(
+    r"\[(?:挑战|裁决)?\s*\d{1,2}\]"          # [挑战 1] / [裁决 2] / [1]
+    r"|(?:挑战|裁决)\s*\d{1,2}(?=[：:\s])"      # 挑战 1： / 裁决 2
+    r"|^\s*\d{1,2}\s*[.、)）](?=\s|\S)",       # 行首 3. / 2、 / 1)
+    re.M)
+
+
+def strip_structure(text: str) -> str:
+    """剥掉列表编号等结构标记，保留内容中的真实数字。"""
+    return _STRUCT.sub(" ", text)
 _VERDICT = re.compile(r"\[裁决\s*(\d+)\]\s*(?P<stand>成立|不成立)\s*(?P<why>.*?)"
                       r"(?=\n\s*\[裁决|\Z)", re.S)
 
@@ -147,7 +158,7 @@ def _ask(client: Client, prompt: str, catalog: FactCatalog,
     p, last = prompt, []
     for _ in range(max_attempts):
         out = client(p)
-        audited = _STRUCT.sub("[]", out)
+        audited = strip_structure(out)
         last = [v for v in _violations(audited, catalog)
                 if "没有引用任何事实占位符" not in v]   # 质疑可以不含数字
         if not last:
