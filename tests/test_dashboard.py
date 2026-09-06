@@ -140,3 +140,66 @@ class TestEscaping:
         h = html(tmp_path, run_obj)
         assert "<script>alert(1)</script>" not in h
         assert "&lt;script&gt;" in h
+
+
+class TestBasisRendersReadably:
+    """basis 从字符串改为结构化对象后，看板那处忘了跟着改，
+    页面上直接印出 Basis(kind=<BasisKind.EXTERNAL: 'external'>, ref=...) ——
+    技术上没错，但对读者毫无意义，而依据恰恰是审核者最该看的东西。"""
+
+    @staticmethod
+    def _led():
+        """审核会真的核验依据 —— 引用的事实必须存在于账本中。"""
+        from ir_agent.ledger import Fact, FactLedger, Method
+        l = FactLedger()
+        l.put(Fact(key="revenue.yoy", value=D("-0.0121"), unit="ratio",
+                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="calc_x", method=Method.COMPUTED))
+        return l
+
+    def _a(self):
+        from ir_agent.ledger import FactLedger
+        from ir_agent.valuation.assumptions import Assumptions
+        from ir_agent.valuation.basis import Basis
+        a = Assumptions(
+            wacc=D("0.09"), terminal_growth=D("0.025"),
+            growth_rates=[D("0.04")] * 5,
+            basis={"wacc": [Basis.external("https://yield.chinabond.com.cn/",
+                                           "十年期国债 2.50%", date(2026, 9, 7))],
+                   "terminal_growth": [Basis.external("https://stats.gov.cn/",
+                                                      "GDP 约 5%", date(2026, 9, 7))],
+                   "growth_rates": [Basis.fact("[[revenue.yoy@2025FY]]")]})
+        return a.approve("谢海量", date(2026, 9, 7), ledger=self._led(),
+                         body="", as_of=date(2026, 9, 7))
+
+    def test_no_python_repr_leaks(self, tmp_path, run_obj):
+        h = html(tmp_path, run_obj, assumptions=self._a())
+        assert "BasisKind" not in h and "Basis(" not in h
+
+    def test_external_source_url_is_shown(self, tmp_path, run_obj):
+        h = html(tmp_path, run_obj, assumptions=self._a())
+        assert "yield.chinabond.com.cn" in h
+
+    def test_quoted_evidence_is_shown(self, tmp_path, run_obj):
+        h = html(tmp_path, run_obj, assumptions=self._a())
+        assert "十年期国债" in h
+
+    def test_retrieval_date_is_shown(self, tmp_path, run_obj):
+        """外部资料会变，抓取日期是复核的前提。"""
+        assert "2026-09-07" in html(tmp_path, run_obj, assumptions=self._a())
+
+    def test_fact_reference_is_shown(self, tmp_path, run_obj):
+        h = html(tmp_path, run_obj, assumptions=self._a())
+        assert "revenue.yoy@2025FY" in h
+
+    def test_multiple_bases_all_render(self, tmp_path, run_obj):
+        from ir_agent.valuation.basis import Basis
+        a = self._a()
+        a = type(a)(wacc=a.wacc, terminal_growth=a.terminal_growth,
+                    growth_rates=a.growth_rates,
+                    basis={**a.basis,
+                           "wacc": [*a.basis["wacc"],
+                                    Basis.report("公司几乎不依赖财务杠杆")]},
+                    reviewed_by=a.reviewed_by, reviewed_at=a.reviewed_at)
+        h = html(tmp_path, run_obj, assumptions=a)
+        assert "yield.chinabond" in h and "几乎不依赖财务杠杆" in h

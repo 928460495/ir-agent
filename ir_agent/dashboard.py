@@ -126,9 +126,17 @@ def build_dashboard(
             parts.append(f'<div class="card">估值方法：<b>{_e(route.method.value)}</b>'
                          f'<br><span class="mono">{_e(route.reason)}</span></div>')
         if assumptions is not None:
+            def _bases(bk: str) -> str:
+                # basis 是 Basis 对象列表 —— 直接 _e() 会把 Python repr
+                # 印到页面上。依据恰恰是审核者最该看清的东西。
+                items = assumptions.basis.get(bk, [])
+                if not items:
+                    return "—"
+                return "<br>".join(_e(b.describe()) for b in items)
+
             rows = "".join(
                 f"<tr><td>{_e(k)}</td><td class='n'>{_e(v)}</td>"
-                f"<td class='mono'>{_e(assumptions.basis.get(bk, ''))}</td></tr>"
+                f"<td class='mono'>{_bases(bk)}</td></tr>"
                 for k, v, bk in [
                     ("WACC", _pct(assumptions.wacc), "wacc"),
                     ("永续增长率", _pct(assumptions.terminal_growth), "terminal_growth"),
