@@ -113,6 +113,34 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         route_reason=rt.reason if rt else "")
 
 
+def run_review(code: str, r, as_of: date, out_dir: str | Path,
+               reviewer: str) -> ResearchOutcome:
+    """交互式审核 → 写 yaml → 直接建模。一步走完人工那一关。"""
+    from ir_agent.ledger import LookAheadError
+    from ir_agent.review import ReviewAborted, interactive_review, to_yaml
+
+    out = Path(out_dir)
+    ctx = {}
+    for key, label in (("revenue.yoy", "上期营收同比"),
+                       ("net_profit.yoy", "上期净利同比"),
+                       ("roe", "本期 ROE")):
+        try:
+            f = r.ledger.get(key, r.period, as_of=r.as_of)
+            ctx[label] = f"{f.value * 100:.2f}%"
+        except (KeyError, LookAheadError):
+            continue
+
+    try:
+        a = interactive_review(context=ctx)
+    except ReviewAborted as e:
+        raise SystemExit(str(e))
+
+    path = out / "assumptions.yaml"
+    path.write_text(to_yaml(a), encoding="utf-8")
+    print(f"\n已写入 {path}")
+    return run_stage2(code, r, as_of, out_dir, str(path), reviewer)
+
+
 def run_stage2(code: str, r, as_of: date, out_dir: str | Path,
                assumptions_path: str, reviewer: str) -> ResearchOutcome:
     """第二阶段: 读入已审核的假设 → 建模 → 重建看板与工作簿。"""

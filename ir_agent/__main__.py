@@ -32,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--assumptions", metavar="PATH", default=None,
                    help="已审核的假设文件（第二阶段，需配合 --full 与 --reviewer）")
     p.add_argument("--reviewer", default=None, help="假设审核人署名")
+    p.add_argument("--review", action="store_true",
+                   help="交互式录入并审核假设，随后直接建模（需 --full 与 --reviewer）")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
     a = p.parse_args(argv)
@@ -44,6 +46,16 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                      # noqa: BLE001
         print(f"运行失败: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
+
+    if a.review:
+        if not (a.full and a.reviewer):
+            print("--review 需同时给出 --full <目录> 与 --reviewer <署名>",
+                  file=sys.stderr)
+            return 2
+        from ir_agent.full import report, run_review
+        print(r.summary())
+        report(run_review(a.code, r, as_of, a.full, a.reviewer))
+        return 0
 
     if a.assumptions:
         if not (a.full and a.reviewer):
