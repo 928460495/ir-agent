@@ -92,3 +92,56 @@ def test_模板注释含永续上限与依据():
     assert "永续增长率上限" in t
     assert "[[macro.gdp_nominal_yoy@2026H1]]" in t
     assert "仅供参考" in t
+
+
+# ── 提示词口径不得含账本外的裸数字 ────────────────────────────
+
+def test_行业口径给模型时写成占位符():
+    """往 prompt 里塞裸数字再惩罚模型引用它，是自相矛盾的契约。"""
+    from decimal import Decimal as Dc
+
+    from ir_agent.citation import audit_bare_numbers
+    from ir_agent.industry_facts import IndustryAggregate
+
+    agg = IndustryAggregate(
+        target="600519", target_name="贵州茅台", industry="白酒Ⅲ",
+        period="2025FY", prior_period="2024FY", as_of=date(2026, 4, 30),
+        revenues={"600519": Dc(100), "a": Dc(50), "b": Dc(30), "c": Dc(20)},
+        prior={"600519": Dc(80), "a": Dc(50), "b": Dc(30), "c": Dc(20)})
+
+    assert audit_bare_numbers(agg.for_prompt()) == []
+    # 给人看的那份仍然是读数，两者不能合一
+    assert audit_bare_numbers(agg.summary()) != []
+
+
+def test_可比口径给模型时不含同业市值():
+    """同业市值不是标的的财务事实，没进账本，写进提示词就不可引用。"""
+    from decimal import Decimal as Dc
+
+    from ir_agent.citation import audit_bare_numbers
+    from ir_agent.comparables import Selection, Sized
+
+    sel = Selection(target="600519",
+                    chosen=[Sized("000858", "五粮液", Dc("2794e8")),
+                            Sized("600809", "山西汾酒", Dc("1495e8"))],
+                    universe=18, dropped=[], target_cap=Dc("16626e8"))
+    txt = sel.for_prompt()
+    assert "2,794" not in txt and "1,495" not in txt
+    assert "五粮液" in txt and "山西汾酒" in txt
+    assert audit_bare_numbers(txt) == []
+
+
+def test_覆盖不足时口径明确禁止下结论():
+    from decimal import Decimal as Dc
+
+    from ir_agent.industry_facts import IndustryAggregate, Missing
+
+    agg = IndustryAggregate(
+        target="t", target_name="标的", industry="某行业",
+        period="2025FY", prior_period="2024FY", as_of=date(2026, 4, 30),
+        revenues={"t": Dc(100), "a": Dc(50)},
+        prior={"t": Dc(80), "a": Dc(50)},
+        missing=[Missing(c, c, "无数据") for c in "wxyz"])
+    txt = agg.for_prompt()
+    assert "不得给出这三类结论" in txt
+    assert "market_share" not in txt          # 不给不成立的占位符

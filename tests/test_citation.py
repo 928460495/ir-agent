@@ -255,3 +255,34 @@ class TestIdentifiersAreNotBareNumbers:
     def test_far_future_number_is_not_treated_as_a_year(self):
         """9999 不是年份，是个数字。"""
         assert self._a("某项为 9999。") != []
+
+
+class Test期间标签白名单的实测缺口:
+    """这些全部来自一次真实运行被驳回的正文 —— 都是误判，不是幻觉。"""
+
+    def test_月度期间标签整体豁免(self):
+        """宏观层引入 2026-07 后踩到: 年份规则剥掉 2026 却留下 -07。"""
+        assert audit_bare_numbers("CPI 同比在 2026-05、2026-06、2026-07 维持低位") == []
+
+    def test_财年与上半年(self):
+        assert audit_bare_numbers("贵州茅台2025财年延续了…") == []
+        assert audit_bare_numbers("2026上半年名义GDP同比进一步回落") == []
+        assert audit_bare_numbers("2025全年与2026下半年") == []
+
+    def test_指标名称里的数字不是数值(self):
+        assert audit_bare_numbers("行业CR5为高位，公司作为CR5中份额最高者") == []
+        assert audit_bare_numbers("CR10 同样集中") == []
+
+    def test_段落序号豁免(self):
+        assert audit_bare_numbers("（1）行业出清节奏 （2）终端价格 (3) 杠杆结构") == []
+
+    def test_豁免不会放过真实数值(self):
+        """括号里带单位的是数值，不是序号。"""
+        assert audit_bare_numbers("营收（1.2 亿元）") != []
+        assert audit_bare_numbers("同比 5.4%") != []
+        assert audit_bare_numbers("共 7 家样本") != []
+        assert audit_bare_numbers("处于 100 分位") != []
+
+    def test_月度豁免不吞掉相邻数值(self):
+        got = audit_bare_numbers("2026-07 当月同比 3.5%")
+        assert "3.5%" in " ".join(got)

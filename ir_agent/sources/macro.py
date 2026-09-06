@@ -233,13 +233,26 @@ class MacroSnapshot:
             return None
         return max(seen, key=lambda f: (period_sort_key(f.period), f.as_of))
 
+    _SHOWN = (("macro.gdp_nominal_yoy", "名义 GDP 同比"),
+              ("macro.gdp_real_yoy", "实际 GDP 同比"),
+              ("macro.cpi_yoy", "CPI 同比"),
+              ("macro.ppi_yoy", "PPI 同比"))
+
     def describe(self) -> str:
-        lines = []
-        for key, label in (("macro.gdp_nominal_yoy", "名义 GDP 同比"),
-                           ("macro.gdp_real_yoy", "实际 GDP 同比"),
-                           ("macro.cpi_yoy", "CPI 同比"),
-                           ("macro.ppi_yoy", "PPI 同比")):
-            f = self.latest(key)
-            if f is not None:
-                lines.append(f"  {label}（{f.period}）{f.value * 100:.2f}%")
+        """给人看的：直接写数值。"""
+        lines = [f"  {label}（{f.period}）{f.value * 100:.2f}%"
+                 for key, label in self._SHOWN
+                 if (f := self.latest(key)) is not None]
+        return "\n".join(lines) or "  （该时点无可见宏观数据）"
+
+    def for_prompt(self) -> str:
+        """给模型看的：写成**占位符**。
+
+        提示词里出现账本没有的裸数字，模型复述它就会被审计驳回 —— 往
+        prompt 里塞裸数字再惩罚模型引用它，是自相矛盾的契约。这些数字
+        本来就都在账本里，直接给出可引用的写法即可。
+        """
+        lines = [f"  {label}　[[{key}@{f.period}]]"
+                 for key, label in self._SHOWN
+                 if (f := self.latest(key)) is not None]
         return "\n".join(lines) or "  （该时点无可见宏观数据）"

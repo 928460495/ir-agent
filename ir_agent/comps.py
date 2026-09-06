@@ -145,6 +145,35 @@ class CompsTable:
         return "\n".join(lines)
 
 
+    def for_prompt(self, metrics: list[str] | None = None) -> str:
+        """给模型看的口径: 数字一律写成占位符。
+
+        summary() 里的「本司 0.56x  中位数 0.40x  83 分位  覆盖 7/7」在提示词中
+        是四个账本外的裸数字，模型照抄就会被审计驳回。分位数与中位数本来就已
+        由 comps_facts 入账（正是为了让正文能引用），这里给出引用写法即可。
+        「覆盖 7/7」这种比值不入账本，改为口径说明，不给数字。
+        """
+        keys = metrics or sorted({k for r in self.rows for k in r.metrics})
+        p = self.period
+        lines = [f"可比样本共 [[peer_count@{p}]] 家（含标的自身）"]
+        for k in keys:
+            if k not in self.target_row.metrics:
+                lines.append(f"  – {label(k)}：标的缺该指标，本节不得比较")
+                continue
+            bits = [f"本司 [[{k}@{p}]]"]
+            if self.median(k) is not None:
+                bits.append(f"同业中位数 [[{k}.peer_median@{p}]]")
+            if self.percentile(k) is not None:
+                bits.append(f"分位 [[{k}.percentile@{p}]]")
+            miss = len(self.rows) - self.coverage(k)
+            if miss:
+                bits.append(f"（{miss} 家缺该指标，未计入）")
+            lines.append(f"  · {label(k):8} " + "　".join(bits))
+        for e in self.excluded:
+            lines.append(f"  ✗ 已排除 {e.name}: {e.reason}")
+        return "\n".join(lines)
+
+
 def build_comps(
     target: str,
     rows: list[CompsRow],

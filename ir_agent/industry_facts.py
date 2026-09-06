@@ -192,6 +192,38 @@ class IndustryAggregate:
             lines.append(f"  – 另有 {len(self.missing) - 6} 家缺失")
         return "\n".join(lines)
 
+    def for_prompt(self) -> str:
+        """给模型看的口径: 数字写成**占位符**。
+
+        提示词里出现账本没有的裸数字，模型复述它就会被审计驳回 —— 往
+        prompt 里塞裸数字再惩罚模型引用它，是自相矛盾的契约。这些数字
+        本来就都在账本里（见 industry_facts），直接给出可引用的写法。
+        """
+        p = self.period
+        lines = [f"行业分类 {self.industry}",
+                 f"  样本家数　[[industry.peer_count@{p}]]"
+                 f"　覆盖率　[[industry.coverage@{p}]]"]
+        if not self.covered:
+            lines.append(f"  ⚠ 覆盖率低于 {MIN_COVERAGE * 100:.0f}% —— "
+                         "行业总量、集中度、市占率均不成立，本节不得给出这三类结论")
+        if self.yoy is not None:
+            lines.append(f"  行业营收同比　[[industry.revenue_yoy@{p}]]"
+                         f"（在两期都有数的公司上计算）")
+        if self.excess_growth is not None:
+            lines.append("  本司相对行业超额增速　"
+                         f"[[company.revenue_yoy_vs_industry@{p}]]")
+        if self.covered:
+            lines.append(f"  行业营收　[[industry.revenue@{p}]]"
+                         f"　CR5　[[industry.cr5@{p}]]")
+            lines.append(f"  本司市占率　[[company.market_share@{p}]]"
+                         f"　排名　[[company.industry_rank@{p}]]"
+                         f"　份额变化　[[company.market_share_delta@{p}]]")
+        if self.thin:
+            lines.append("  ⚠ 同业样本偏薄，行业口径仅供参考，不得据此下强结论")
+        if self.missing:
+            lines.append(f"  注：{len(self.missing)} 家无数据，已排除在上述口径之外")
+        return "\n".join(lines)
+
 
 def aggregate(peers, period: str, prior_period: str, as_of: date,
               fetch) -> IndustryAggregate:

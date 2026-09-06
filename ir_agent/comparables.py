@@ -122,6 +122,20 @@ class Selection:
         return "\n".join(lines)
 
 
+    def for_prompt(self) -> str:
+        """给模型看的：只列名字，不给市值。
+
+        同业市值没有进事实账本（它们不是标的的财务事实），写进提示词就是
+        一批不可引用的裸数字。模型需要知道的是「和谁比、按什么规则选的」，
+        这两件事不需要数字。
+        """
+        names = "、".join(s.name for s in self.chosen)
+        # 同业总数也不写 —— 它同样没有对应的账本事实（industry.peer_count
+        # 统计的是「有营收数据的家数」，与这里的同业总数不是一回事）
+        return (f"可比公司自同业中按市值就近选取，依次为：{names}。\n"
+                "  （按市值就近而非取最大者 —— 规模差两个数量级的 PE/PB 不可比）")
+
+
 def select(peers, n: int = DEFAULT_N,
            session: requests.Session | None = None) -> Selection:
     """从 Peers 中挑出 n 家市值近邻。

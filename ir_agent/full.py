@@ -38,22 +38,26 @@ def _prior_period(period: str) -> str | None:
     return f"{int(period[:4]) - 1}{period[4:]}"
 
 
-def _load_macro(r, as_of: date) -> tuple[str, str]:
-    """宏观事实入账本。返回 (摘要, 失败说明)。"""
+def _load_macro(r, as_of: date) -> tuple[str, str, str]:
+    """宏观事实入账本。返回 (给人看的摘要, 给模型看的口径, 失败说明)。
+
+    两份摘要不能合一: 看板要读数，提示词要占位符。给模型看数值而它又
+    无法引用，就是在诱导它写裸数字然后驳回它 —— 自相矛盾的契约。
+    """
     from ir_agent.sources.macro import MacroSnapshot, MacroUnavailable, fetch_macro
 
     try:
         facts = fetch_macro()
     except MacroUnavailable as e:
-        return "", f"宏观事实（{e}）"
+        return "", "", f"宏观事实（{e}）"
     for f in facts:
         r.ledger.put(f)
     snap = MacroSnapshot(facts, as_of=as_of)
-    return snap.describe(), ""
+    return snap.describe(), snap.for_prompt(), ""
 
 
-def _load_industry(code: str, r, as_of: date) -> tuple[str, str, list[str]]:
-    """行业聚合入账本。返回 (摘要, 失败说明, 涉及的期间)。
+def _load_industry(code: str, r, as_of: date) -> tuple[str, str, str]:
+    """行业聚合入账本。返回 (给人看的摘要, 给模型看的口径, 失败说明)。
 
     逐家取同业营收要走十几到几十次网络调用，是全流程里最慢的一段。失败不
     阻断 —— 没有行业分析的报告仍然有价值，但必须在 skipped 里说清楚缺了什么，
@@ -66,12 +70,12 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, list[str]]:
 
     prior = _prior_period(r.period)
     if prior is None:
-        return "", f"行业聚合（无法推出 {r.period} 的上年同期）", []
+        return "", "", f"行业聚合（无法推出 {r.period} 的上年同期）"
 
     try:
         peers = peer_set(code)
     except IndustryUnavailable as e:
-        return "", f"行业聚合（{e}）", []
+        return "", "", f"行业聚合（{e}）"
 
     cache: dict[str, dict] = {}
 
@@ -87,11 +91,11 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, list[str]]:
     agg = aggregate(peers, r.period, prior, as_of, fetch)
     for f in industry_facts(agg):
         r.ledger.put(f)
-    return f"{peers.summary()}\n{agg.summary()}", "", [r.period]
+    return (f"{peers.summary()}\n{agg.summary()}", agg.for_prompt(), "")
 
 
-def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str]:
-    """可比公司分析入账本。返回 (摘要, 失败说明)。
+def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]:
+    """可比公司分析入账本。返回 (给人看的摘要, 给模型看的口径, 失败说明)。
 
     这是全流程最贵的一段: 每家可比公司都要跑一遍完整取数（财报 + 行情 +
     交叉验证）。因此先按市值就近挑出六家再取数 —— 对 18 家同业逐一跑完，
@@ -111,7 +115,7 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str]:
     try:
         sel = select(peer_set(code))
     except (IndustryUnavailable, NoComparables) as e:
-        return "", f"可比分析（{e}）"
+        return "", "", f"可比分析（{e}）"
 
     def fetch(c: str, period: str, when: date):
         pr = run_pipeline(c, year=int(period[:4]), as_of=when,
@@ -139,9 +143,10 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str]:
     try:
         table = build_comps(code, rows, r.period, as_of, excluded)
     except (InsufficientPeers, ValueError) as e:
-        return "", f"可比分析（{e}）"
+        return "", "", f"可比分析（{e}）"
     comps_facts(table, r.ledger)
-    return f"{sel.summary()}\n{table.summary()}", ""
+    return (f"{sel.summary()}\n{table.summary()}",
+            f"{sel.for_prompt()}\n{table.for_prompt()}", "")
 
 
 def _route(code: str):
@@ -221,26 +226,29 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
 
     # 宏观与行业必须在撰写之前入账本 —— 正文的第 2、3 节要引用它们，
     # 而假设推导也要靠它们。顺序错了，两边都拿不到。
-    macro_md, macro_err = _load_macro(r, as_of)
+    # 每层都产出两份摘要: _md 给看板与人看（读数），_pr 给模型看（占位符）
+    macro_md, macro_pr, macro_err = _load_macro(r, as_of)
     if macro_err:
         skipped.append(macro_err)
     try:
-        industry_md, industry_err, _ = _load_industry(code, r, as_of)
+        industry_md, industry_pr, industry_err = _load_industry(code, r, as_of)
     except Exception as e:                                  # noqa: BLE001
-        industry_md, industry_err = "", f"行业聚合（{e.__class__.__name__}: {e}）"
+        industry_md = industry_pr = ""
+        industry_err = f"行业聚合（{e.__class__.__name__}: {e}）"
     if industry_err:
         skipped.append(industry_err)
 
     try:
-        comps_md, comps_err = _load_comps(code, r, as_of, snapshot_dir)
+        comps_md, comps_pr, comps_err = _load_comps(code, r, as_of, snapshot_dir)
     except Exception as e:                                  # noqa: BLE001
-        comps_md, comps_err = "", f"可比分析（{e.__class__.__name__}: {e}）"
+        comps_md = comps_pr = ""
+        comps_err = f"可比分析（{e.__class__.__name__}: {e}）"
     if comps_err:
         skipped.append(comps_err)
 
     body, upheld, debate_md, cost, err = _write_and_debate(
-        code=code, r=r, model=model, comps_summary=comps_md,
-        macro_summary=macro_md, industry_summary=industry_md)
+        code=code, r=r, model=model, comps_summary=comps_pr,
+        macro_summary=macro_pr, industry_summary=industry_pr)
     if err:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
         skipped.append("研究正文")
@@ -348,7 +356,7 @@ def run_stage2(code: str, r, as_of: date, out_dir: str | Path,
     rt, _ = _route(code)
     # 第二阶段重建看板时口径不能丢 —— 审核之后反而看不到样本覆盖，
     # 恰好是最需要它的时候。宏观与行业事实此刻已在账本里，重算即可。
-    macro_md, _ = _load_macro(r, as_of)
+    macro_md, _, _ = _load_macro(r, as_of)
     try:
         industry_md, _, _ = _load_industry(code, r, as_of)
     except Exception:                                       # noqa: BLE001
