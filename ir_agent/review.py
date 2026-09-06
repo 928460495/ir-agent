@@ -155,11 +155,13 @@ def _basis_yaml(bases: list[Basis]) -> str:
     return "\n".join(out)
 
 
-def to_yaml(a: Assumptions) -> str:
+def to_yaml(a: Assumptions, header: str | None = None) -> str:
     """写回 YAML —— 必须能被 assumptions_io 读回，否则交互白做。"""
     rows = "\n".join(f"  - year: {i}\n    rate: {g}"
                      for i, g in enumerate(a.growth_rates, 1))
-    return (f"# 估值假设 —— 经交互式审核录入于 {date.today()}\n\n"
+    # 抬头随来源变化 —— 模型自定的假设写「经交互式审核录入」是谎报
+    head = header or f"# 估值假设 —— 经交互式审核录入于 {date.today()}"
+    return (f"{head}\n\n"
             f"wacc: {a.wacc}\nwacc_basis:\n{_basis_yaml(a.basis['wacc'])}\n\n"
             f"terminal_growth: {a.terminal_growth}\n"
             f"terminal_growth_basis:\n"

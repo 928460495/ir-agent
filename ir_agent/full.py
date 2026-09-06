@@ -396,10 +396,10 @@ def _autovalue(*, code, r, body, as_of, model, out, cost):
         return None, None, None, f"估值（{e}）", cost
 
     (out / "assumptions.yaml").write_text(
-        "# 本文件由**模型自主决定**，未经人工审核。\n"
-        "# 取消人工审核门后，代码仍校验: 永续 ≤ 宏观上限、永续 < WACC、\n"
-        "# 依据可核验、WACC 必须能引用正文中的论证原话。\n"
-        "#\n" + to_yaml(d.assumptions)
+        to_yaml(d.assumptions, header=(
+            "# 估值假设 —— 由**模型自主决定**，未经人工审核。\n"
+            "# 已通过的机器校验: 永续 ≤ 宏观事实算出的上限、永续 < WACC、\n"
+            "# 各项依据可核验、WACC 的论证出自本报告正文。"))
         + "\n# ── 模型给出的理由原文 ──\n"
         + "\n".join("# " + ln for ln in d.rationale.split("\n")),
         encoding="utf-8")

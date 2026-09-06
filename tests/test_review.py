@@ -180,3 +180,19 @@ class TestFieldsAreValidatedOnEntry:
         answers = (*FULL[:15], "3", "  ", "毛利率维持在高位")
         a = interactive_review(prompt=scripted(*answers), show=lambda *_: None)
         assert a.basis["growth_rates"][0].quote == "毛利率维持在高位"
+
+
+def test_yaml抬头随来源变化():
+    """模型自定的假设写「经交互式审核录入」是谎报。"""
+    from decimal import Decimal as Dc
+    from ir_agent.review import to_yaml
+    from ir_agent.valuation.assumptions import Assumptions
+    from ir_agent.valuation.basis import Basis
+
+    a = Assumptions(wacc=Dc("0.09"), terminal_growth=Dc("0.025"),
+                    growth_rates=[Dc("0.03")],
+                    basis={k: [Basis.report("理由")] for k in
+                           ("wacc", "terminal_growth", "growth_rates")})
+    assert "经交互式审核录入" in to_yaml(a)
+    out = to_yaml(a, header="# 由模型自主决定")
+    assert "由模型自主决定" in out and "经交互式审核录入" not in out
