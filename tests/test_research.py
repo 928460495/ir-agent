@@ -93,3 +93,37 @@ class TestAssumptionTemplate:
     def test_growth_path_matches_the_year_count(self):
         from ir_agent.research import assumption_template
         assert assumption_template(years=3).count("- year:") == 3
+
+
+class TestNextActionsGiveRunnableCommands:
+    """指引里的命令必须能直接跑。
+
+    实测第一版打出的是
+        python -m ir_agent 600519 --year <年度> --assumptions ... --reviewer ...
+    缺了必需的 --full，粘贴即失败 —— 指引给一条跑不通的命令，
+    比不给指引更糟。
+    """
+
+    def _acts(self):
+        return next_actions(Stage.AWAITING_REVIEW, code="600519",
+                            assumptions_path="out/600519/assumptions.yaml",
+                            out_dir="out/600519", year=2025)
+
+    def test_interactive_path_is_offered_first(self):
+        """交互式录入不必手写 YAML，应作为首选给出。"""
+        assert "--review" in self._acts()[0]
+
+    def test_every_command_includes_the_required_full_flag(self):
+        cmds = [a for a in self._acts() if "python -m ir_agent" in a]
+        assert cmds and all("--full" in c for c in cmds)
+
+    def test_commands_carry_a_concrete_year_not_a_placeholder(self):
+        cmds = [a for a in self._acts() if "python -m ir_agent" in a]
+        assert all("<年度>" not in c and "--year 2025" in c for c in cmds)
+
+    def test_manual_yaml_path_is_still_offered(self):
+        assert any("--assumptions" in a for a in self._acts())
+
+    def test_reviewer_flag_is_present_in_both(self):
+        cmds = [a for a in self._acts() if "python -m ir_agent" in a]
+        assert all("--reviewer" in c for c in cmds)

@@ -186,11 +186,13 @@ def run_stage2(code: str, r, as_of: date, out_dir: str | Path,
                       f"审核 {reviewer}）"))
 
 
-def report(outcome: ResearchOutcome) -> None:
+def report(outcome: ResearchOutcome, out_dir: str | None = None,
+           year: int | None = None) -> None:
     print()
     print(outcome.summary())
     acts = next_actions(outcome.stage, outcome.code,
-                        outcome.artifacts.get("假设模板"))
+                        outcome.artifacts.get("假设模板"),
+                        out_dir=out_dir, year=year)
     if acts:
         print("\n下一步：")
         for i, act in enumerate(acts, 1):

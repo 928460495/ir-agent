@@ -54,7 +54,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         from ir_agent.full import report, run_review
         print(r.summary())
-        report(run_review(a.code, r, as_of, a.full, a.reviewer))
+        report(run_review(a.code, r, as_of, a.full, a.reviewer),
+               out_dir=a.full, year=a.year)
         return 0
 
     if a.assumptions:
@@ -64,13 +65,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         from ir_agent.full import report, run_stage2
         print(r.summary())
-        report(run_stage2(a.code, r, as_of, a.full, a.assumptions, a.reviewer))
+        report(run_stage2(a.code, r, as_of, a.full, a.assumptions,
+                          a.reviewer), out_dir=a.full, year=a.year)
         return 0
 
     if a.full:
         from ir_agent.full import report, run_full
         print(r.summary())
-        report(run_full(a.code, r, as_of, a.full, model=a.model))
+        report(run_full(a.code, r, as_of, a.full, model=a.model),
+               out_dir=a.full, year=a.year)
         return 0
 
     print(r.summary())

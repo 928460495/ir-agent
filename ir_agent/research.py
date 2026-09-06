@@ -63,16 +63,26 @@ class ResearchOutcome:
 
 
 def next_actions(stage: Stage, code: str,
-                 assumptions_path: str | None = None) -> list[str]:
-    """下一步该做什么。空列表 = 无阻塞。"""
+                 assumptions_path: str | None = None,
+                 out_dir: str | None = None,
+                 year: int | None = None) -> list[str]:
+    """下一步该做什么。空列表 = 无阻塞。
+
+    命令必须**能直接粘贴运行** —— 给一条跑不通的命令比不给指引更糟。
+    """
     if stage is Stage.AWAITING_REVIEW:
-        path = assumptions_path or f"out/{code}/assumptions.yaml"
+        out = out_dir or f"out/{code}"
+        path = assumptions_path or f"{out}/assumptions.yaml"
+        y = f"--year {year}" if year else "--year <年度>"
         return [
-            f"审核估值假设：编辑 {path}，为每项填入取值与可核验的依据。",
+            "审核估值假设 —— 推荐交互式录入，逐项问答、当场校验，不必手写 YAML：\n"
+            f"     python -m ir_agent {code} {y} --full {out} "
+            f"--review --reviewer <你的名字>",
+            f"或手工编辑 {path} 后：\n"
+            f"     python -m ir_agent {code} {y} --full {out} "
+            f"--assumptions {path} --reviewer <你的名字>",
             "依据须为三类之一：账本占位符 / 已辩论正文的引文 / "
             "外部来源（URL + 原文片段 + 抓取日期）。",
-            f"审核完成后：python -m ir_agent {code} --year <年度> "
-            f"--assumptions {path} --reviewer <你的名字>",
         ]
     if stage is Stage.NOT_APPLICABLE:
         return ["本标的经路由判定不适用 DCF，应改用 PB–ROE 或情景法；"
