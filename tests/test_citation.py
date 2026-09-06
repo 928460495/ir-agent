@@ -212,3 +212,46 @@ class TestFootnoteCarriesItsRenderedValue:
     def test_display_is_the_formatted_form(self):
         _, notes = self._notes()
         assert notes[0].display == "33.65%"
+
+
+class TestIdentifiersAreNotBareNumbers:
+    """股票代码与年份不是需要溯源的数字。
+
+    实测招商银行首稿被驳回，违规项是「600036、2025、2025」—— 模型写
+    「招商银行（600036）2025 年度…」就被判违规。代价是每次多一到两轮调用
+    （招行 3 次 $0.50 vs 神华 1 次 $0.14，贵 3.5 倍），更糟的是它在训练
+    模型回避提及标的本身。
+    """
+    @staticmethod
+    def _a(text):
+        from ir_agent.citation import audit_bare_numbers
+        return audit_bare_numbers(text)
+
+    def test_six_digit_stock_code_is_not_flagged(self):
+        assert self._a("招商银行（600036）本期…") == []
+
+    def test_stock_code_with_market_prefix_is_not_flagged(self):
+        assert self._a("标的 sh600519 与 sz000858。") == []
+
+    def test_bare_year_is_not_flagged(self):
+        assert self._a("2025 年公司经营稳健。") == []
+
+    def test_year_range_is_not_flagged(self):
+        assert self._a("2021 至 2025 年间…") == []
+
+    def test_a_real_figure_is_still_flagged(self):
+        assert any("1688.38" in x for x in self._a("营业收入 1688.38 亿元。"))
+
+    def test_a_percentage_is_still_flagged(self):
+        assert self._a("毛利率 91.18%。") != []
+
+    def test_a_plain_large_number_is_still_flagged(self):
+        assert self._a("净利润 853 亿元。") != []
+
+    def test_code_and_figure_together_flags_only_the_figure(self):
+        out = self._a("招商银行（600036）营业收入 3375.32 亿元。")
+        assert out == ["3375.32 亿"]      # 命中值含单位
+
+    def test_far_future_number_is_not_treated_as_a_year(self):
+        """9999 不是年份，是个数字。"""
+        assert self._a("某项为 9999。") != []
