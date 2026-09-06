@@ -18,6 +18,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--as-of", default=None, help="分析时点 YYYY-MM-DD，默认今天")
     p.add_argument("--snapshots", default="snapshots", help="快照目录")
     p.add_argument("--show-draft", action="store_true", help="打印占位符草稿")
+    p.add_argument("--write", action="store_true",
+                   help="用 claude -p 撰写正文（无需 API key，走现有登录）")
+    p.add_argument("--model", default=None, help="指定模型，如 claude-opus-5")
     p.add_argument("--xlsx", metavar="PATH", default=None,
                    help="导出 Excel 工作簿到指定路径")
     p.add_argument("--strict", action="store_true",
@@ -42,6 +45,33 @@ def main(argv: list[str] | None = None) -> int:
     print("──── 脚注 ────")
     for n in r.audit.footnotes:
         print(n.text())
+
+    if a.write:
+        from ir_agent.analyst import AnalystRefused, FactCatalog, write_body
+        from ir_agent.clients.claude_cli import ClaudeCliError, make_client
+        from ir_agent.audit import audit
+
+        spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                     if f.key == "market_cap"), None)
+        cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
+                                      extra_periods=(spot,) if spot else ())
+        client = make_client(model=a.model)
+        print(f"\n正在撰写正文（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
+        try:
+            body, attempts = write_body(cat, client, code=a.code, period=r.period)
+        except (AnalystRefused, ClaudeCliError) as e:
+            print(f"\n撰写失败：{e}", file=sys.stderr)
+            return 2
+        written = audit(body, r.ledger, r.store, as_of=r.as_of)
+        print(f"撰写完成：{attempts} 次尝试 · "
+              f"${client.total_cost_usd:.4f} · {client.calls} 次调用", file=sys.stderr)
+        print("\n──── 分析师正文 ────")
+        print(written.rendered)
+        print("──── 脚注 ────")
+        for n in written.footnotes:
+            print(n.text())
+        print()
+        print(written.summary())
 
     if a.xlsx:
         from ir_agent.xlsx import build_workbook

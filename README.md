@@ -66,6 +66,7 @@ python -m pytest -q                  # 含真实网络请求，约 25s
 | `comps.py` / `comps_cli.py` | 可比公司分析 |
 | `xlsx.py` | Excel 导出（活公式） |
 | `analyst.py` | **V1** 分析师 Agent 与占位符契约强制执行 |
+| `clients/claude_cli.py` | 通过 `claude -p` 调模型，无需 API key |
 | `sources/annual_pdf.py` | 年报 PDF 提取（合并资产负债表） |
 | `audit.py` | 验收审计 |
 | `pipeline.py` | 端到端编排 |
@@ -212,6 +213,30 @@ Tier 顺序解决「默认信谁」，裁决解决「这一次谁对」—— �
 编不了数字」在实践中成立的原因；只有契约没有强制执行，等于没有契约。
 
 模块与 LLM 供应商无关：client 是任意 `str -> str` 可调用。
+
+### 不需要 API key
+
+    python -m ir_agent 600519 --year 2025 --write
+
+`--write` 通过 `claude -p --output-format json` 以子进程调用模型，
+**用你现有的 Claude Code 登录，不需要任何 API key** —— 这是官方文档指定的
+「从其它语言驱动同一 agent loop」的方式。prompt 走 stdin 而非 argv：
+研报 prompt 有数千字符，走命令行参数会撞上系统的参数长度上限。
+
+**计费**：2026-06-15 起 `claude -p` 的用量**不计入订阅的交互式额度池**，
+而是消耗每档订阅附带的月度 Agent SDK credit（Pro $20 / Max 5x $100 /
+Max 20x $200，按标准 API 费率）。响应里的 `total_cost_usd` 是真实开销，
+每次运行都会累计上报 —— 一篇研报约 $0.05，但驳回重写与后续的多空辩论
+会成倍增加。
+
+**限制**：官方不允许第三方产品对外提供 claude.ai 登录或额度。自用没问题；
+若要分发给他人，须改用 API key（`analyst.py` 的 client 是任意
+`str -> str` 可调用，换一个实现即可）。
+
+登录过期时报错明确并给出解法，不静默失败：
+
+    撰写失败：Claude Code 登录已过期
+    请在你自己的终端运行 `claude`，按提示 /login 重新登录后重试。
 
 ### 占位符简写 [[key@period]]
 
