@@ -419,6 +419,14 @@ def run(
             break
 
     # 5) 校验 + 草稿 + 审计
+    try:
+        from ir_agent.valuation.inputs import cash_gap_warning
+        cw = cash_gap_warning(led, period, as_of=as_of)
+        if cw:
+            warnings.append(cw)
+    except Exception:                               # noqa: BLE001
+        pass
+
     rec = reconcile(led, period, as_of=as_of)
     by_source: dict[str, list] = {}
     for name, fs in fin.raw.items():

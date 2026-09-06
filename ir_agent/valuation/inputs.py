@@ -60,6 +60,34 @@ def net_debt(ledger: FactLedger, period: str, as_of: date) -> Fact:
                   [*parts, cash], currency=cash.currency)
 
 
+# 货币资金低于期末现金超过此比例，视为「现金分类在别处」
+CASH_GAP_TOLERANCE = Decimal("0.10")
+
+
+def cash_gap_warning(ledger: FactLedger, period: str, as_of: date) -> str | None:
+    """资产负债表的货币资金 vs 现金流量表的期末现金，差得多就报出来。
+
+    贵州茅台实测: 货币资金 516.9 亿而期末现金 1264.3 亿，差额在「拆出资金」
+    991 亿（集团财务公司的同业拆出）。只按货币资金算净负债会少算约 750 亿
+    净现金，DCF 每股价值被低估约 60 元。
+
+    穷举类现金科目会一直追着新情况跑；检测不一致才可持续 —— **对不上就报出来
+    交给人判断，取值仍用保守的货币资金**。把拆出资金视作自由现金是一个判断，
+    应由人做，不该由代码默认。
+    """
+    mf = _optional(ledger, "cash_and_equivalents", period, as_of)
+    ce = _optional(ledger, "cash_end", period, as_of)
+    if mf is None or ce is None or ce.value <= 0:
+        return None
+    if mf.value >= ce.value * (Decimal(1) - CASH_GAP_TOLERANCE):
+        return None
+    yi = Decimal("1e8")
+    return (f"货币资金 {mf.value / yi:,.0f} 亿显著低于期末现金及现金等价物 "
+            f"{ce.value / yi:,.0f} 亿 —— 现金可能分类在拆出资金、"
+            f"交易性金融资产等科目。净负债按货币资金计算会偏高"
+            f"（净现金偏低），估值相应偏保守，请人工核对。")
+
+
 def shares_outstanding(ledger: FactLedger, spot_period: str, as_of: date) -> Fact:
     """股本 = 总市值 ÷ 股价。
 

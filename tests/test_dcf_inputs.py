@@ -113,3 +113,53 @@ class TestSharesOutstanding:
     def test_missing_quote_refuses(self):
         with pytest.raises(MissingInput, match="market_cap"):
             shares_outstanding(led(last_price=10), "2026-09-04", as_of=AS_OF)
+
+
+class TestCashClassificationGap:
+    """货币资金显著低于现金流量表期末现金 = 现金被分类在别处。
+
+    贵州茅台实测: 货币资金 516.9 亿，但期末现金及现金等价物 1264.3 亿 ——
+    差额在「拆出资金」991 亿（集团财务公司的同业拆出）。只按货币资金算净负债，
+    会少算约 750 亿净现金，DCF 每股价值被低估约 60 元。
+
+    穷举类现金科目会一直追着新情况跑；**检测不一致**才是可持续的做法 ——
+    对不上就报出来交给人判断，而不是悄悄用一个偏低的数。
+    """
+
+    YI = D("1e8")
+
+    def _led(self, monetary_yi, cash_end_yi):
+        """入参以「亿元」为单位，转成账本的「元」 —— 告警文案按亿元展示，
+        测试数据必须是真实量级才验得到格式。"""
+        return led(cash_and_equivalents=monetary_yi * self.YI,
+                   cash_end=cash_end_yi * self.YI, short_loan=0)
+
+    def test_consistent_cash_produces_no_warning(self):
+        from ir_agent.valuation.inputs import cash_gap_warning
+        assert cash_gap_warning(self._led(1000, 1000), P, as_of=AS_OF) is None
+
+    def test_small_gap_is_tolerated(self):
+        """受限资金等原因造成的小幅差异是常态。"""
+        from ir_agent.valuation.inputs import cash_gap_warning
+        assert cash_gap_warning(self._led(1000, 950), P, as_of=AS_OF) is None
+
+    def test_large_shortfall_is_reported(self):
+        from ir_agent.valuation.inputs import cash_gap_warning
+        w = cash_gap_warning(self._led(517, 1264), P, as_of=AS_OF)
+        assert w and "净负债" in w
+
+    def test_warning_states_both_figures(self):
+        from ir_agent.valuation.inputs import cash_gap_warning
+        w = cash_gap_warning(self._led(517, 1264), P, as_of=AS_OF)
+        assert "517" in w and "1,264" in w
+
+    def test_missing_either_figure_yields_no_warning(self):
+        """缺数据不是不一致 —— 不该报一个无从判断的告警。"""
+        from ir_agent.valuation.inputs import cash_gap_warning
+        assert cash_gap_warning(led(cash_and_equivalents=500), P,
+                                as_of=AS_OF) is None
+
+    def test_net_debt_still_uses_the_conservative_figure(self):
+        """告警归告警，取值仍用货币资金 —— 把拆出资金当自由现金是另一个
+        判断，应由人做，不该由代码默认。"""
+        assert net_debt(self._led(517, 1264), P, as_of=AS_OF).value == D("-517") * self.YI
