@@ -21,17 +21,18 @@
     中间线性过渡
 
 单调、无拐点，两端都说得清出处。行业增速、超额增速、份额变化作为**依据**
-一并列出 —— 它们不被外推，但要让审核者看见，好回答那个真正该问的问题:
+一并列出 —— 它们不被外推，但必须摆在决策前，好回答那个真正该问的问题:
 行业在收缩，起点该不该下调。
 
 **永续增长率不给建议值，只给上限。** 永续增速刻画的是无限期之后的状态，
 任何一期数据都推导不出它: 名义 GDP 当期同比 5.43%，而五年 CAGR 因 2020 年
 疫情低基数被顶到 6.26% —— 点值受周期位置影响，CAGR 受基期影响，两个都有偏。
 系统能正当做的是取两者较小划一条不得越过的线（保守方向: 上限估高了才危险），
-把判断留给人。
+判断本身留给决策方 —— 现在是模型自己（见 autodecide.py）。
 
-无风险利率不在免费数据源里（中债接口 404，东财无该报表），因此 WACC 仍然
-只能走 EXTERNAL 依据，由人工填 URL + 摘录 + 日期。如实标注，不假装能自动推导。
+无风险利率不在免费数据源里（中债接口 404，东财无该报表），因此 WACC 推不出来。
+自主模式下它的理由必须先写进研报正文，再以正文原话作为依据 —— 折现率的论证
+要摆在读者看得到的地方。如实标注，不假装能自动推导。
 """
 
 from __future__ import annotations
@@ -51,7 +52,8 @@ DEFAULT_YEARS = 5
 
 WACC_NOTE = (
     "无风险利率不在可用的免费数据源内（中债接口 404，东财无该报表），"
-    "WACC 需人工填写并提供外部依据：URL + 原文摘录 + 抓取日期")
+    "因此 WACC 无法由账本事实推导，只能靠判断 —— 其理由必须写进研报正文，"
+    "再以正文原话作为依据")
 
 
 @dataclass(frozen=True)
@@ -59,8 +61,8 @@ class Proposal:
     """一条假设的建议值/约束及其依据。
 
     标量用 value，逐年序列用 values。两者皆为 None 表示推不出来 —— 此时
-    必须退回人工，而不是给一个看起来合理的默认值。默认值一旦印在模板里
-    就会被照单接受，那等于绕过人工审核门。
+    必须如实报告推不出来，而不是给一个看起来合理的默认值 —— 默认值会被
+    照单接受，那等于既无推导也无判断，只剩一串来历不明的数字。
     """
 
     key: str
@@ -149,7 +151,7 @@ def growth_rates(ledger: FactLedger, period: str, as_of: date,
     start = _get(ledger, "revenue.yoy", period, as_of)
     if start is None:
         return Proposal("growth_rates", [],
-                        f"账本中无 revenue.yoy@{period} —— 无法确定衰减起点，需人工填写")
+                        f"账本中无 revenue.yoy@{period} —— 无法确定衰减起点")
 
     bases = [Basis.fact(f"[[revenue.yoy@{period}]]")]
     context: list[str] = []
@@ -166,9 +168,9 @@ def growth_rates(ledger: FactLedger, period: str, as_of: date,
              else start for i in range(years)]
 
     note = ("自公司当期增速线性衰减至永续增速" if terminal is not None else
-            "永续增速待人工确定，此处以起点平推 —— 定下之后路径会线性收敛至该值")
+            "永续增速尚未确定，此处以起点平推 —— 定下之后路径会线性收敛至该值")
     if context:
-        note += "；行业口径供审核判断起点：" + "、".join(context)
+        note += "；行业口径供判断起点：" + "、".join(context)
     if not context:
         note += "（行业事实缺失，起点无行业参照）"
     return Proposal("growth_rates", bases, note, values=rates)
@@ -183,7 +185,7 @@ class Derived:
     wacc_note: str = WACC_NOTE
 
     def describe(self) -> str:
-        lines = ["假设建议（**建议而非决定**，仍须经人工审核门）",
+        lines = ["假设推导（建议与硬约束）",
                  f"  永续增长率上限　{self.terminal_ceiling.describe()}"]
         lines += [f"      · {b.describe()}" for b in self.terminal_ceiling.bases]
         lines.append(f"  预测期增速　{self.growth.describe()}")

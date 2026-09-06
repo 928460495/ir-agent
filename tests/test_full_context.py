@@ -53,7 +53,7 @@ def test_宏观期间被纳入可引用范围():
 def test_宏观期间按时间倒序且有上限():
     r = _R(_led(*[("macro.cpi_yoy", f"2026-{m:02d}") for m in range(1, 9)]))
     got = _macro_periods(r)
-    assert len(got) <= 4
+    assert len(got) <= 6
     assert got[0] == "2026-08"          # 最新在前
     assert list(got) == sorted(got, reverse=True)
 
@@ -65,6 +65,15 @@ def test_无法解析的期间被跳过而非崩溃():
 
 def test_无宏观事实时返回空():
     assert _macro_periods(_R(_led(("revenue", "2025FY")))) == ()
+
+
+def test_利率与β的期间也进目录():
+    """它们挂在观测日上，不是公司报告期。不进目录，正文就引用不到，
+    而提示词又要求用 β 论证 WACC —— 模型只能写裸数字然后被驳回。"""
+    r = _R(_led(("rate.cgb_10y", "2026-09-04"), ("beta", "2026-09-04"),
+                ("revenue", "2025FY")))
+    assert "2026-09-04" in _macro_periods(r)
+    assert "2025FY" not in _macro_periods(r)
 
 
 # ── 假设模板 ─────────────────────────────────────────────────

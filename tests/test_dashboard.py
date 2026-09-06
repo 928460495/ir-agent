@@ -101,8 +101,9 @@ class TestValuationGateIsVisible:
                          body="", as_of=date(2026, 6, 1))
 
     def test_unreviewed_assumptions_are_flagged_prominently(self, tmp_path, run_obj):
+        """措辞随「审核门取消」改成「未定案」—— 无论谁定的，没定就不能出结论。"""
         h = html(tmp_path, run_obj, assumptions=self._assumptions(False))
-        assert "未审核" in h
+        assert "未定案" in h and "不得据此出具" in h
 
     def test_reviewed_assumptions_name_the_reviewer(self, tmp_path, run_obj):
         h = html(tmp_path, run_obj, assumptions=self._assumptions(True))
@@ -222,3 +223,36 @@ def test_口径为空时不留空壳(tmp_path, run_obj):
 
 def test_无口径参数时行为不变(tmp_path, run_obj):
     assert "分析口径" not in html(tmp_path, run_obj)
+
+
+def _assump(by):
+    from decimal import Decimal as Dc
+    from ir_agent.valuation.assumptions import Assumptions
+    from ir_agent.valuation.basis import Basis
+    return Assumptions(
+        wacc=Dc("0.09"), terminal_growth=Dc("0.025"),
+        growth_rates=[Dc("0.03")],
+        basis={k: [Basis.report("理由")] for k in
+               ("wacc", "terminal_growth", "growth_rates")},
+        reviewed_by=by, reviewed_at=date(2026, 9, 7))
+
+
+def test_模型自主决定不得显示成已审核(tmp_path, run_obj):
+    """显示成人工审核，读者会以为有人看过并负责 —— 比没有审核更糟。"""
+    from ir_agent.valuation.autodecide import MODEL_MARK
+    out = html(tmp_path, run_obj, assumptions=_assump(MODEL_MARK))
+    assert "由模型自主决定" in out and "未经人工复核" in out
+    assert "已由" not in out
+    assert "light warn" in out          # 不是绿灯
+
+
+def test_人工审核仍显示署名(tmp_path, run_obj):
+    out = html(tmp_path, run_obj, assumptions=_assump("谢海量"))
+    assert "谢海量" in out and "已审核" in out
+    assert "模型自主决定" not in out
+
+
+def test_模型决定时列出通过了哪些机器校验(tmp_path, run_obj):
+    from ir_agent.valuation.autodecide import MODEL_MARK
+    out = html(tmp_path, run_obj, assumptions=_assump(MODEL_MARK))
+    assert "宏观事实算出的上限" in out and "依据可核验" in out

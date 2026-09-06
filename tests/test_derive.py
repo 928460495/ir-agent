@@ -121,11 +121,11 @@ def test_行业事实进入依据但不参与外推():
     assert all(r > D("-0.18") for r in p.values)  # 没有一年退到行业当期增速
 
 
-def test_行业口径写进说明供审核判断起点():
+def test_行业口径写进说明供判断起点():
     note = growth_rates(_full(), P, AS_OF, terminal=D("0.03")).note
     assert "行业增速 -18.26%" in note
     assert "份额变化 +8.13%" in note
-    assert "供审核判断起点" in note
+    assert "供判断起点" in note
 
 
 def test_无永续增速时以起点平推并说明():
@@ -141,10 +141,10 @@ def test_缺行业事实时仍可推导但点明缺失():
 
 
 def test_无公司增速时不给默认值():
-    """给一个「看起来合理」的默认值等于绕过人工审核门。"""
+    """默认值会被照单接受 —— 那等于既无推导也无判断，只剩来历不明的数字。"""
     p = growth_rates(_led([("industry.revenue_yoy", P, "0.05")]), P, AS_OF)
     assert not p.ok and p.bases == []
-    assert "需人工填写" in p.describe()
+    assert "无法推导" in p.describe() and "无法确定衰减起点" in p.describe()
 
 
 def test_单年预测不触发除零():
@@ -153,10 +153,12 @@ def test_单年预测不触发除零():
 
 # ── 汇总 ─────────────────────────────────────────────────────
 
-def test_汇总声明WACC仍需人工():
+def test_汇总如实说明WACC推不出来():
+    """免费源里没有无风险利率 —— 不假装能自动推导，也不再指向人工。"""
     d = derive(_full(), P, AS_OF)
-    assert "人工填写" in d.wacc_note and "无风险利率" in d.wacc_note
-    assert "建议而非决定" in d.describe()
+    assert "无风险利率" in d.wacc_note
+    assert "无法由账本事实推导" in d.wacc_note
+    assert "正文" in d.wacc_note          # 理由必须写进读者看得到的地方
 
 
 def test_汇总接受已定的永续增速用于收敛():

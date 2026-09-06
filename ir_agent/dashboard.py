@@ -113,9 +113,16 @@ def build_dashboard(
     if a.bare_numbers:
         lights.append(("bad", f"裸数字 {len(a.bare_numbers)} 处"))
     if assumptions is not None:
-        lights.append(("ok" if assumptions.approved else "bad",
-                       "估值假设已审核" if assumptions.approved
-                       else "估值假设未审核 —— 不得据此出具结论"))
+        # 「模型自主决定」和「人工审核」必须一眼可辨。把前者显示成后者，
+        # 读者会以为有人看过并负责 —— 那比没有审核更糟。
+        from ir_agent.valuation.autodecide import MODEL_MARK
+        by_model = assumptions.reviewed_by == MODEL_MARK
+        if not assumptions.approved:
+            lights.append(("bad", "估值假设未定案 —— 不得据此出具结论"))
+        elif by_model:
+            lights.append(("warn", "估值假设由模型自主决定 —— 未经人工复核"))
+        else:
+            lights.append(("ok", f"估值假设已由 {assumptions.reviewed_by} 审核"))
     parts.append('<div class="lights">' + "".join(
         f'<span class="light {c}">{_e(t)}</span>' for c, t in lights) + "</div>")
 
@@ -160,9 +167,17 @@ def build_dashboard(
                     ("WACC", _pct(assumptions.wacc), "wacc"),
                     ("永续增长率", _pct(assumptions.terminal_growth), "terminal_growth"),
                     ("预测期", f"{len(assumptions.growth_rates)} 年", "growth_rates")])
-            state = (f"已审核：{_e(assumptions.reviewed_by)} · {assumptions.reviewed_at}"
-                     if assumptions.approved
-                     else "<b>未审核 —— 不得据此出具估值结论</b>")
+            if not assumptions.approved:
+                state = "<b>未定案 —— 不得据此出具估值结论</b>"
+            elif by_model:
+                state = ("<b>由模型自主决定，未经人工复核</b> · "
+                         f"{assumptions.reviewed_at}<br>"
+                         "已通过的机器校验：永续增长率 ≤ 宏观事实算出的上限、"
+                         "永续 &lt; WACC、各项依据可核验、"
+                         "WACC 的论证出自本报告正文")
+            else:
+                state = (f"已审核：{_e(assumptions.reviewed_by)} · "
+                         f"{assumptions.reviewed_at}")
             parts.append(f'<div class="card"><div class="note">{state}</div>'
                          f"<table><tr><th>假设</th><th>取值</th><th>依据</th></tr>"
                          f"{rows}</table></div>")

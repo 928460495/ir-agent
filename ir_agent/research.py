@@ -1,12 +1,16 @@
-"""端到端编排 —— 产出所有能自动产出的东西，并在人工审核门前停下。
+"""端到端编排 —— 一次跑完，估值假设由模型自主决定。
 
-**自动化必须诚实地停在审核门前。** 假设未经审核不得建模，这是设计约束
-而非未完成的功能。因此完整流程分两段:
+原设计在人工审核门前停下，理由是无风险利率与永续增长率推不出来。现在:
+无风险利率有了逐日的国债收益率曲线，β 由回归自算，只剩风险溢价与永续
+增速是判断 —— 这两项改由模型自己拿主意（见 valuation/autodecide.py）。
 
-    第一段（全自动）  数据 → 路由 → 撰写 → 辩论 → 修订 → 看板 / Excel
-                      并写出**待审核的假设模板**
-    ——— 人工审核假设 ———
-    第二段            建模 → 估值补入看板与 Excel
+    数据 → 路由 → 宏观/行业/可比/折现率输入 → 撰写 → 辩论 → 修订
+         → 模型自定假设（代码校验）→ 建模 → 看板 / Excel
+
+**取消的是审核门，不是校验。** 永续 ≤ 宏观事实算出的上限、永续 < WACC、
+依据必须可核验、WACC 必须能引用正文里的论证原话 —— 这些一条没少。
+少掉的是「有人看过并负责」，因此产物一律标注为模型决定，不冒充人工审核。
+人工路径仍然保留（--review / --assumptions），只是不再是必经之路。
 
 产物清单必须**显式列出缺什么**。只列已完成的部分，读者会以为报告是完整的 ——
 这与 V0 的「缺数据时跳过而非通过」是同一条原则。
@@ -21,7 +25,7 @@ from enum import Enum
 
 
 class Stage(str, Enum):
-    AWAITING_REVIEW = "awaiting_review"      # 待人工审核假设
+    AWAITING_REVIEW = "awaiting_review"      # 假设待定（模型未能给出合法假设）
     NOT_APPLICABLE = "not_applicable"        # 路由判定不适用 DCF
     VALUED = "valued"                        # 已建模
     FAILED = "failed"
@@ -54,7 +58,7 @@ class ResearchOutcome:
         if self.route_reason:
             lines.append(f"  · 估值方法：{self.route_reason}")
         if self.stage is Stage.AWAITING_REVIEW:
-            lines.append("  ⚠ 估值未建模 —— 假设待人工审核，报告尚不完整")
+            lines.append("  ⚠ 估值未建模 —— 假设尚未定案，报告尚不完整")
         elif self.stage is Stage.NOT_APPLICABLE:
             lines.append("  ⚠ 估值未建模 —— 本标的不适用 DCF")
         for s in self.skipped:
@@ -126,8 +130,9 @@ def assumption_template(years: int, derived=None) -> str:
     """假设模板。derived 为 valuation.derive.Derived 时附上推导建议值。
 
     建议值以**注释**形式出现，不落到 value 上 —— 预填数字会让人直接点通过，
-    人工审核门就退化成一个回车。注释既给出分析锚点，又保留「必须自己填」
-    这个动作。这是刻意的摩擦。
+    审核就退化成一个回车。注释既给出分析锚点，又保留「必须自己填」这个动作。
+    仅用于保留下来的人工路径（--review / --assumptions）；主流程已改为
+    模型自主决定，不经过这个模板。
     """
     rows = "\n".join(f"  - year: {i}\n    rate: null" for i in range(1, years + 1))
     body = _TEMPLATE.format(years=rows)

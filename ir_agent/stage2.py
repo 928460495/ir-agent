@@ -56,6 +56,7 @@ def value_from_file(
     as_of: date,
     reviewer: str,
 ) -> Stage2Result:
+    """人工署名路径。仍然保留 —— 取消的是**强制**审核门，不是审核能力。"""
     if not reviewer.strip():
         raise ValuationBlocked("必须指明审核人 —— 估值要有署名才有责任。")
 
@@ -66,7 +67,30 @@ def value_from_file(
         raise ValuationBlocked(
             f"依据核验未通过，无法审核：\n{e}\n"
             "请修正 assumptions.yaml 中的依据后重试。") from e
+    return _value(approved, ledger, body, period, spot_period, as_of)
 
+
+def value_from_assumptions(
+    assumptions: Assumptions,
+    ledger: FactLedger,
+    body: str,
+    period: str,
+    spot_period: str,
+    as_of: date,
+) -> Stage2Result:
+    """模型自主路径。假设已由 autodecide 定下并经 approve 校验。
+
+    与 value_from_file 共用同一段建模逻辑 —— 决策来源不同，算法必须相同，
+    否则「模型算的」和「人审的」会悄悄变成两个模型。
+    """
+    if not assumptions.approved:
+        raise ValuationBlocked(
+            "假设尚未定案（reviewed_by 为空），拒绝建模。")
+    return _value(assumptions, ledger, body, period, spot_period, as_of)
+
+
+def _value(approved: Assumptions, ledger: FactLedger, body: str,
+           period: str, spot_period: str, as_of: date) -> Stage2Result:
     try:
         fcf = free_cash_flow(ledger, period, as_of=as_of)
         nd = net_debt(ledger, period, as_of=as_of)
