@@ -7,3 +7,4 @@ runs/
 preview_dashboard.html
 *.html
 !templates/*.html
+out/

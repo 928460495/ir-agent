@@ -27,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="生成可交互 HTML 看板")
     p.add_argument("--xlsx", metavar="PATH", default=None,
                    help="导出 Excel 工作簿到指定路径")
+    p.add_argument("--full", metavar="DIR", default=None,
+                   help="端到端：撰写+辩论+回写+看板+Excel+假设模板，产物写入该目录")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
     a = p.parse_args(argv)
@@ -39,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                      # noqa: BLE001
         print(f"运行失败: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
+
+    if a.full:
+        from ir_agent.full import report, run_full
+        print(r.summary())
+        report(run_full(a.code, r, as_of, a.full, model=a.model))
+        return 0
 
     print(r.summary())
     if a.show_draft:
