@@ -159,6 +159,17 @@ def check(view: MacroView, ledger: FactLedger, evidence: str, as_of: date,
             f"传导路径至少 {MIN_CHANNELS} 条 —— 「政策转向宽松」写在哪篇研报里"
             "都成立，对判断本标的没有帮助；有帮助的是那条链")
 
+    from ir_agent.citation import audit_prose
+
+    prose = {"政策取向描述": "", **{f"传导「{c.driver[:12]}」": c.driver + c.path
+                                    for c in view.channels}}
+    bad = audit_prose(prose)
+    if bad:
+        raise MacroViewFailed(
+            "描述里出现了账本外的数字：" + "、".join(bad) +
+            " —— 这些描述会原样进入研报撰写环节，而那里的数字必须可溯源；"
+            "请改成不带具体数字的说法，或改用占位符")
+
     holder = [view] + view.channels
     attribute(holder, evidence, corpus)
     flat = [b for x in holder for b in x.bases]
@@ -182,6 +193,7 @@ PROMPT = """基于下面的宏观资料，给出政策取向与它到本行业�
 **硬性要求**
 - 引用必须**逐字照抄**下面的资料，一个字都不能改。
 - 资料里没讲到的，不要凭印象补。
+- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本 —— 一个无处可查的数字会让整篇报告卡在无法修复的驳回上。需要数字时用给你的占位符，否则改成不带数字的说法。
 - 你的政策取向会与期限利差形态交叉核对，方向相反时需在正文说明缘由。
 
 {evidence}

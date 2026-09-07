@@ -284,3 +284,44 @@ def test_宏观定性摘要安全():
     v.conflicts = MV.cross_check(v, led, AS_OF)
     assert v.conflicts, "用例本身要触发矛盾"
     assert_prompt_safe(v.summary(), led)
+
+
+# ── 第九次: 模型写进结构化产出的描述字段 ─────────────────────
+
+def test_月份指代不算裸数字():
+    """跑长电时实测: 宏观定性写「8月制造业PMI回升」「9月加息预期升温」，
+    两个月份都被判成裸数字。月份是日历指代不是财务数值 ——
+    与已在白名单里的「第一季度」同一条道理。"""
+    from ir_agent.citation import audit_bare_numbers
+    assert audit_bare_numbers("8月制造业PMI回升，9月加息预期升温") == []
+    assert audit_bare_numbers("12月订单回补") == []
+
+
+def test_描述字段里的数字被拦在模块自己的重试循环里():
+    """**这是第九次同类错误，但性质与前八次不同。** 前八次是我往提示词里
+    放了模型用不了的东西；这次是模型写进结构化产出的描述字段，那些字段
+    随后原样进了分析师提示词。实测长电: 传导路径写着「当前处于91%历史
+    估值分位的A股半导体板块……」，91% 在账本里没有对应事实。
+
+    危害更隐蔽: 分析师抄进正文 → 被裸数字审计驳回 → 而它**无从修复**，
+    没有占位符可以替代。整个重试循环变成不可满足的约束。
+
+    拦在模块自己的循环里，模型改得动 —— 换个不带数字的说法即可。"""
+    from ir_agent.citation import audit_prose
+    bad = audit_prose({"传导": "当前处于91%历史估值分位的半导体板块承压"})
+    assert bad and "91%" in bad[0]
+    assert audit_prose({"传导": "当前估值分位偏高的半导体板块承压"}) == []
+
+
+@pytest.mark.parametrize("mod,exc,mk", [
+    ("macro_view", "MacroViewFailed", "macro"),
+    ("strategy", "StrategyFailed", "strategy"),
+    ("value_chain", "ChainFailed", "chain"),
+])
+def test_三个定性模块都装了这道闸(mod, exc, mk):
+    import importlib
+    import inspect
+    m = importlib.import_module(f"ir_agent.{mod}")
+    src = inspect.getsource(m.check)
+    assert "audit_prose" in src, f"{mod}.check 没有核验描述字段"
+    assert "不要写具体数字" in m.PROMPT, f"{mod} 的提示词没有讲清这条"

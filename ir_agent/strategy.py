@@ -264,6 +264,7 @@ PROMPT = """基于下面的年报原文与账本事实，做战略分析。
 - 引年报时必须**逐字照抄**，一个字都不能改，否则核验通不过。
 - 占位符只能用上面列出的那些。
 - 年报未设的章节，相关判断**明说无据**，不要凭印象补足。
+- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本 —— 一个无处可查的数字会让整篇报告卡在无法修复的驳回上。需要数字时用给你的占位符，否则改成不带数字的说法。
 - 判断与数字打架时（例如年报自述成本优势、而毛利率处于同业低分位），
   **把矛盾写出来**，那正是研报该说的东西。
 
@@ -352,6 +353,16 @@ def check(view: StrategyView, ledger: FactLedger, evidence: str,
         raise StrategyFailed(
             "关键不确定性至少两条 —— 少于两条，Bear/Base/Bull 三情景就没有"
             "定性依据，只能靠调参数")
+
+    from ir_agent.citation import audit_prose
+
+    bad = audit_prose({f"不确定性「{u.what[:12]}」": u.what + u.direction
+                       for u in view.uncertainties})
+    if bad:
+        raise StrategyFailed(
+            "描述里出现了账本外的数字：" + "、".join(bad) +
+            " —— 这些描述会原样进入研报撰写环节，而那里的数字必须可溯源；"
+            "请改成不带具体数字的说法")
 
     attribute((*view.moats, *view.forces, *view.uncertainties),
               evidence, corpus)

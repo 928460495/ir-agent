@@ -231,6 +231,18 @@ def check(view: ChainView, ledger: FactLedger, evidence: str, as_of: date,
     if Role.UPSTREAM not in view.power or Role.DOWNSTREAM not in view.power:
         raise ChainFailed("须同时给出对上游与对下游的议价判断")
 
+    from ir_agent.citation import audit_prose
+
+    prose = {f"环节「{x.name[:12]}」": x.name + x.note for x in view.links}
+    if view.size:
+        prose["行业规模口径"] = view.size.label
+    bad = audit_prose(prose)
+    if bad:
+        raise ChainFailed(
+            "描述里出现了账本外的数字：" + "、".join(bad) +
+            " —— 这些描述会原样进入研报撰写环节，而那里的数字必须可溯源；"
+            "请改成不带具体数字的说法")
+
     items = list(view.links) + ([view.size] if view.size else [])
     attribute(items, evidence, corpus)
     flat = [b for x in view.links for b in x.bases]
@@ -258,6 +270,7 @@ PROMPT = """基于下面的资料，梳理本公司所处的产业链。
 - 引用必须**逐字照抄**下面的资料，一个字都不能改，否则核验通不过。
 - 资料里没讲到的环节，**不要凭常识补全**。产业链看起来完整但其中一环
   是编的，比缺一环更糟。
+- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本 —— 一个无处可查的数字会让整篇报告卡在无法修复的驳回上。需要数字时用给你的占位符，否则改成不带数字的说法。
 - 议价判断会与账本里的应付/应收天数同业分位交叉核对，方向相反时你需要
   在正文里说明缘由。
 
