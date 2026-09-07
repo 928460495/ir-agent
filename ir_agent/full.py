@@ -24,6 +24,7 @@ from ir_agent.research import (
     next_actions,
 )
 from ir_agent.revision import RevisionFailed, revise_from_verdicts
+from ir_agent.valuation.scenarios import Case as SCase
 from ir_agent.sources import eastmoney
 from ir_agent.valuation.route import ValuationMethod, annual_series, route
 from ir_agent.xlsx import build_workbook
@@ -124,6 +125,7 @@ def _load_strategy(r, as_of: date, client, spot=None) -> tuple[str, str, str]:
     except Exception as e:                                  # noqa: BLE001
         return "", "", f"战略分析（{e.__class__.__name__}: {str(e)[:120]}）"
     r.sections = sections
+    r.strategy_view = view          # 情景分析要用它识别出的关键不确定性
     return view.summary(), view.summary(), sec_err
 
 
@@ -649,6 +651,10 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
                 skipped.append(verr)
             else:
                 stage = Stage.VALUED
+            if getattr(r, "scenario_err", ""):
+                skipped.append(r.scenario_err)
+            if getattr(r, "scenario_md", ""):
+                ctx["情景"] = r.scenario_md
 
     build_dashboard(r, path=out / "dashboard.html", route=rt, context=ctx,
                     assumptions=assumptions, valuation=valuation,
@@ -665,11 +671,69 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         reason = (f"每股价值 {valuation.value_per_share:,.2f} 元"
                   f"（终值占比 {valuation.terminal_share:.1%}，"
                   f"假设由模型自主决定，未经人工复核）")
+        scen = getattr(r, "scenarios", None)
+        if scen is not None:
+            # **区间比点估计更有信息量。** 只报一个数会让读者以为它精确，
+            # 而这个数完全取决于几条本就不确定的假设。
+            lo = scen.values[SCase.BEAR].value_per_share
+            hi = scen.values[SCase.BULL].value_per_share
+            reason += f"；情景区间 {lo:,.2f}~{hi:,.2f} 元"
 
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=stage,
         artifacts=arts, skipped=skipped, upheld=upheld,
         cost_usd=Decimal(str(cost)), route_reason=reason)
+
+
+def _load_scenarios(r, body, assumptions, as_of, client, spot):
+    """把战略分析识别的不确定性落成 Bear/Base/Bull。
+
+    与 stage2 那张 5×5 网格是两回事: 网格回答「假设错了多少，估值差多少」，
+    换成任何一家公司长得都一样；情景回答「战略分析识别出的那几条不确定性
+    一旦兑现，这家公司值多少钱」。
+    """
+    from ir_agent.valuation import scenarios as SC
+    from ir_agent.valuation.inputs import (MissingInput, free_cash_flow,
+                                           net_debt, shares_outstanding)
+
+    view = getattr(r, "strategy_view", None)
+    if view is None or not view.uncertainties:
+        return None, "", "情景分析（无战略分析产出的关键不确定性）"
+    try:
+        fcf = free_cash_flow(r.ledger, r.period, as_of=as_of)
+        nd = net_debt(r.ledger, r.period, as_of=as_of)
+        sh = shares_outstanding(r.ledger, spot or r.period, as_of=as_of)
+    except MissingInput as e:
+        return None, "", f"情景分析（估值输入缺失：{e}）"
+
+    unc = "\n".join(f"  · {u.what} → {u.driver}（不利时{u.direction}）"
+                     for u in view.uncertainties)
+    base_txt = (f"  收入增速逐年 {'、'.join(str(g) for g in assumptions.growth_rates)}"
+                f"\n  WACC {assumptions.wacc}"
+                f"\n  永续增速 {assumptions.terminal_growth}")
+    prompt = SC.PROMPT.format(
+        uncertainties=unc, base=base_txt,
+        anchors="　".join(SC.anchors(r.ledger, as_of)) or "（无）",
+        drivers="、".join(SC.MODELLABLE))
+
+    last = ""
+    for attempt in range(1, 4):
+        try:
+            shifts = SC.parse(client(prompt))
+            out = SC.build(assumptions, shifts, view.uncertainties,
+                           fcf_base=fcf.value, net_debt=nd.value,
+                           shares=sh.value, ledger=r.ledger, body=body,
+                           as_of=as_of)
+        except SC.ScenarioFailed as e:
+            last = str(e)
+            prompt = (f"{prompt}\n\n---\n"
+                      f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
+                      "请修正后重新输出全部情景行。\n")
+            continue
+        for f in SC.scenario_facts(out, r.period, as_of):
+            r.ledger.put(f)
+        return out, out.summary(), ""
+    return None, "", f"情景分析（连续三次不可核验：{last[:100]}）"
 
 
 def _autovalue(*, code, r, body, as_of, model, out, cost):
@@ -693,7 +757,6 @@ def _autovalue(*, code, r, body, as_of, model, out, cost):
     except (AutoDecideFailed, ClaudeCliError) as e:
         return None, None, None, f"估值（{e.__class__.__name__}: {e}）", \
             cost + client.total_cost_usd
-    cost += client.total_cost_usd
 
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
@@ -712,7 +775,15 @@ def _autovalue(*, code, r, body, as_of, model, out, cost):
         + "\n# ── 模型给出的理由原文 ──\n"
         + "\n".join("# " + ln for ln in d.rationale.split("\n")),
         encoding="utf-8")
-    return d.assumptions, res.valuation, res.sensitivity, "", cost
+
+    scen, scen_md, scen_err = _load_scenarios(
+        r, body, d.assumptions, as_of, client, spot)
+    r.scenarios, r.scenario_md, r.scenario_err = scen, scen_md, scen_err
+
+    # client 的 total_cost_usd 是**累计值** —— 中途加一次、末尾再加一次
+    # 会把前半段重复计入。整段用同一个 client，因此只在这里加一次。
+    return d.assumptions, res.valuation, res.sensitivity, "", \
+        cost + client.total_cost_usd
 
 
 def run_review(code: str, r, as_of: date, out_dir: str | Path,
