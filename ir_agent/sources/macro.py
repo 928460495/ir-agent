@@ -213,6 +213,12 @@ LEADING = "领先"
 COINCIDENT = "同步"
 LAGGING = "滞后"
 
+# 归类依据 CFA 的三条定义（转折点先于/接近/晚于整体经济），套用到 A 股
+# 可得指标上 —— **这是本项目的映射，不是课程逐个指定的**。课程唯一明确
+# 点名的是「股票市场」与「利率利差」属领先。
+# PPI 归为同步而非滞后: 工业品价格与工业生产周期基本同步，它领先于企业
+# 利润但不领先于产出。CPI 归滞后是通行做法（Conference Board 的滞后
+# 指数含服务业 CPI）。
 INDICATOR_CLASS: dict[str, str] = {
     "macro.pmi_manufacturing": LEADING,
     "macro.pmi_services": LEADING,
@@ -223,8 +229,8 @@ INDICATOR_CLASS: dict[str, str] = {
     "macro.gdp_nominal_yoy": COINCIDENT,
     "macro.gdp_nominal": COINCIDENT,
     "macro.gdp_nominal_cagr": COINCIDENT,
+    "macro.ppi_yoy": COINCIDENT,
     "macro.cpi_yoy": LAGGING,
-    "macro.ppi_yoy": LAGGING,
 }
 
 

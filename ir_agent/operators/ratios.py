@@ -169,6 +169,7 @@ def _market(f) -> dict:
         v = None if eqp.value <= 0 else mc.value / eqp.value
         out["pb"] = (v, [mc, eqp])
     if op and ie and tax and tp and te and cash:
+        # EBIT 与 DOL / Altman Z 同一口径 —— 中国准则下营业利润已扣息
         ebit = op.value + max(ie.value, Decimal(0))
         rate = Decimal(0) if tp.value == 0 else tax.value / tp.value
         invested = te.value + _debt_of(f) - cash.value

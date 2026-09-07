@@ -19,6 +19,8 @@
   · **生命周期** —— 影响行业盈利能力如何度量。判据是增速水平 + 增速
     波动 + 集中度，不是单看增速: 高集中度 + 负增长是成熟末期/衰退，
     低集中度 + 负增长可能只是周期底部。
+    **课程只提出「生命周期阶段影响盈利能力度量」，没有给判据 ——
+    阈值与规则是本项目的启发式。**
 
   · **周期敏感度** —— 课程给的三个决定因素（销售性质、经营杠杆、
     财务杠杆）**三个都可算**。它是宏观与行业之间真正的接口:
@@ -40,7 +42,9 @@ SOURCE_ID = "industry_profile"
 HHI_UNCONCENTRATED = Decimal("0.15")
 HHI_MODERATE = Decimal("0.25")
 
-# 生命周期的增速门槛
+# 生命周期的增速门槛。**课程只说「行业盈利能力受生命周期阶段影响」，
+# 没有给判据，这两个阈值是本项目的启发式** —— 15% 约为高成长行业的
+# 常见量级，3% 约为名义 GDP 增速的下沿。据此下结论时要知道它们是自定的。
 GROWTH_HIGH = Decimal("0.15")
 GROWTH_LOW = Decimal("0.03")
 
@@ -177,23 +181,43 @@ def lifecycle(revenue_by_period: dict[str, Decimal],
 
 @dataclass(frozen=True)
 class CyclicalSensitivity:
-    """课程给的三个决定因素。分数越高，对周期越敏感。"""
+    """课程（Bodie Ch.17）给的三个决定因素:
+
+        Sales（necessities / discretionary）、Operating leverage、
+        Financial leverage —— 「↑ leverage, ↑ sensitivity」
+
+    前两项与课程一一对应。第一项**销售性质**课程只给了定性描述，
+    这里用「行业营收增速对名义 GDP 增速的弹性」作**操作化代理** ——
+    必需品的收入弹性低、可选消费的高，这是该定性区分背后的经济学含义。
+    但这是本项目的操作化，不是课程给定的度量，据此下结论时要说明。
+    """
 
     operating_leverage: Decimal | None    # 行业中位 DOL
     financial_leverage: Decimal | None    # 行业中位权益乘数
-    gdp_elasticity: Decimal | None        # 行业营收增速对名义 GDP 增速的弹性
+    gdp_elasticity: Decimal | None        # 销售性质的代理
     n: int
 
     @property
+    def elasticity_suspect(self) -> bool:
+        """负弹性意味着「GDP 上行时行业收入下行」。对绝大多数行业这不是
+        发现，而是样本太短或处在自身供给周期上的噪声 —— 必须标注，
+        不能悄悄取绝对值当成高敏感度。"""
+        return self.gdp_elasticity is not None and self.gdp_elasticity < 0
+
+    @property
     def score(self) -> Decimal | None:
-        """三项合成。任一项缺失即不给分数 —— 三缺一的合成分会误导。"""
+        """三项合成。任一项缺失即不给分数 —— 三缺一的合成分会误导。
+
+        **合成方式是本项目的启发式，课程没有给公式。** 取几何平均是为了
+        让任一项接近中性（=1）时整体不被另外两项拉高，且量纲不同的三项
+        不会因加法而被隐式加权。阈值 2.0 / 1.3 同样是启发式。
+        """
         if None in (self.operating_leverage, self.financial_leverage,
                     self.gdp_elasticity):
             return None
-        # 各项归一到「相对中性值的倍数」再取几何式平均
         o = max(self.operating_leverage, Decimal(1))
         f = max(self.financial_leverage, Decimal(1))
-        g = abs(self.gdp_elasticity)
+        g = abs(self.gdp_elasticity)      # 取绝对值＝看共动强度，符号另行标注
         return (o * f * max(g, Decimal("0.1"))) ** (Decimal(1) / 3)
 
     def describe(self) -> str:
@@ -208,17 +232,35 @@ class CyclicalSensitivity:
         if sc is None:
             return base + "　—— 分量不全，不合成敏感度分数"
         level = "高" if sc >= Decimal("2") else ("中" if sc >= Decimal("1.3") else "低")
-        return base + f"　→ 周期敏感度 {sc:.2f}（{level}）"
+        out = base + f"　→ 周期敏感度 {sc:.2f}（{level}，启发式合成）"
+        if self.elasticity_suspect:
+            out += ("　⚠ GDP 弹性为负 —— 多半是样本过短或行业自身供给周期"
+                    "所致，该分量的可靠性存疑")
+        return out
 
 
 def dol(led: FactLedger, period: str, as_of: date) -> Decimal | None:
-    """经营杠杆度 DOL = 1 + 固定成本 / 营业利润。
+    """经营杠杆度 DOL = 1 + 固定成本 / EBIT。
+
+    **分母必须加回利息费用。** 中国准则把「财务费用」列在「营业总成本」
+    之内，因此**营业利润是扣息之后的**。直接拿它当分母，算出的杠杆里
+    混进了财务杠杆 —— 而周期敏感度另有一个独立的财务杠杆因子，
+    等于把同一件事算两遍。这与 quality.altman_z 中 C 项的处理保持一致。
+
+    **口径选择**: 课程给了两版 ——
+        DOL = 1 + FC/OCF                    （假设无利息、无折旧、无税）
+        DOL = 1 + [FC(1−t) − Dep×t]/OCF     （含折旧与税，OCF 为税后）
+    这里用的是教科书标准形式 `1 + FC/EBIT`，即把折旧计入固定成本、
+    分母取税前息前利润。它与第一版在无折旧无税时等价，
+    且不需要逐家估算有效税率 —— 后者在同业间差异很大，会引入更多噪声。
 
     固定成本用「管理费用 + 研发费用 + 折旧摊销」近似 —— 这三项都不随
     销量短期变动。销售费用不计入: 它含大量随收入变动的渠道返利与运费。
     """
-    op = _get(led, "operating_profit", period, as_of)
-    if op is None or op <= 0:
+    from ir_agent.operators.aggregates import ebit as _ebit
+
+    e = _ebit(led, period, as_of)
+    if e is None or e <= 0:
         return None                       # 亏损公司的 DOL 无意义
     fixed = Decimal(0)
     got = False
@@ -227,7 +269,7 @@ def dol(led: FactLedger, period: str, as_of: date) -> Decimal | None:
         if v is not None:
             fixed += abs(v)
             got = True
-    return Decimal(1) + fixed / op if got else None
+    return Decimal(1) + fixed / e if got else None
 
 
 def gdp_elasticity(industry_yoy: dict[str, Decimal],

@@ -140,12 +140,35 @@ def test_次选与差距一并报出():
 
 
 def test_缺失维度显式记录():
-    """Fidelity 框架第五维取不到 —— 缺一维就说缺一维，不拿四维硬套。"""
+    """Fidelity 用于定义阶段的五维是 Activity/Credit/Profits/Policy/
+    Inventories-Sales。利润与库存销售都取不到 —— 两维都要声明。"""
     v = cycle.assess(_scenario([50] * 3, ["0.0"] * 3, [0.03] * 3,
                                [0.01] * 3, ["0.0"] * 3), AS_OF)
+    assert any("利润" in m for m in v.missing)
     assert any("库存与销售" in m for m in v.missing)
-    assert "未覆盖维度" in v.describe()
+    assert v.coverage == "3/5 个阶段维度"          # 给人看，带比例
+    assert v.coverage_note == "部分阶段维度"        # 给模型看，定性
+    assert "未覆盖" in v.describe()
     assert "该判定未覆盖" in v.for_prompt()
+
+
+def test_通胀是补充分析不参与打分():
+    """Fidelity 原文: inflation 属于 complementary analysis，
+    不是定义阶段的维度。拿它打分等于用框架外的变量定义框架内的阶段。"""
+    v = cycle.assess(_scenario([50] * 3, ["0.0"] * 3, [0.03] * 3,
+                               [0.01] * 3, ["0.035"] * 3), AS_OF)
+    assert "通胀" not in {s.dimension for s in v.signals}
+    assert "通胀" in {s.dimension for s in v.complementary}
+    assert "不参与阶段判定" in v.describe()
+    assert "未参与阶段判定" in v.for_prompt()
+
+
+def test_通胀读数变化不改变阶段判定():
+    base = dict(pmi=[50] * 3, gap=["0.0"] * 3,
+                tens=[0.03] * 3, twos=[0.01] * 3)
+    low = cycle.assess(_scenario(**base, ppi=["-0.05"] * 3), AS_OF)
+    high = cycle.assess(_scenario(**base, ppi=["0.08"] * 3), AS_OF)
+    assert low.scores == high.scores
 
 
 # ── 传导 ─────────────────────────────────────────────────────

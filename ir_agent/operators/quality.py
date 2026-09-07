@@ -200,12 +200,15 @@ def altman_z(ledger: FactLedger, period: str, as_of: date,
     if ta == 0 or tl == 0:
         return None, "总资产或总负债为 0，该模型无定义"
 
-    ie = _get(ledger, "interest_expense_fe", period, as_of)
-    ebit = got["op"].value + (max(ie.value, Decimal(0)) if ie else Decimal(0))
+    from ir_agent.operators.aggregates import ebit as _ebit
+
+    e = _ebit(ledger, period, as_of)      # 与 DOL/ROIC 同一口径
+    if e is None:
+        return None, "无法计算 EBIT"
 
     a = (got["ca"].value - got["cl"].value) / ta
     b = got["re"].value / ta
-    c = ebit / ta
+    c = e / ta
     d = mc.value / tl
     e = got["rev"].value / ta
     z = (Decimal("1.2") * a + Decimal("1.4") * b + Decimal("3.3") * c

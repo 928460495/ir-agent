@@ -248,3 +248,66 @@ class Test提示词口径:
                      ledgers=leds, metrics=["roe"])
         txt = prof.for_prompt()
         assert "代表性有限" in txt and "必须说明" in txt
+
+
+class Test方法论一致性:
+    """逐条对照教材，防止「看起来合理」的偏离。"""
+
+    def test_DOL分母必须加回利息(self):
+        """中国准则把财务费用列在营业总成本内，营业利润是**扣息后**的。
+        直接拿它当分母会把财务杠杆混进经营杠杆 —— 而周期敏感度另有
+        独立的财务杠杆因子，等于算两遍。"""
+        no_debt = _led({"operating_profit": 100, "admin_expense": 50})
+        with_debt = _led({"operating_profit": 100, "admin_expense": 50,
+                          "interest_expense_fe": 100})
+        # 同样的固定成本与营业利润，有息公司的 EBIT 更高 → DOL 更低
+        assert dol(with_debt, P, AS_OF) < dol(no_debt, P, AS_OF)
+        assert dol(with_debt, P, AS_OF) == D(1) + D(50) / D(200)
+
+    def test_利息收入为负不倒扣EBIT(self):
+        """利息费用为负（利息收入大于支出）时不应把 EBIT 扣低。"""
+        a = dol(_led({"operating_profit": 100, "admin_expense": 50}), P, AS_OF)
+        b = dol(_led({"operating_profit": 100, "admin_expense": 50,
+                      "interest_expense_fe": -30}), P, AS_OF)
+        assert a == b
+
+    def test_EBIT只有一份实现(self):
+        """同一个概念不能两处两种算法 —— 此前 altman_z 加回了利息、
+        dol 没加回。改为共享算子，用行为验证而非比对源码。"""
+        from ir_agent.operators.aggregates import ebit
+        led = _led({"operating_profit": 100, "interest_expense_fe": 40})
+        assert ebit(led, P, AS_OF) == D(140)
+        # DOL 的分母确实用的是它
+        led2 = _led({"operating_profit": 100, "interest_expense_fe": 40,
+                     "admin_expense": 70})
+        assert dol(led2, P, AS_OF) == D(1) + D(70) / D(140)
+
+    def test_负弹性被标注而非悄悄取绝对值(self):
+        """「GDP 上行时行业收入下行」多半是样本噪声，不是发现。"""
+        from ir_agent.industry_profile import CyclicalSensitivity
+        s = CyclicalSensitivity(D("9.51"), D("2.31"), D("-1.42"), 17)
+        assert s.elasticity_suspect
+        assert "GDP 弹性为负" in s.describe() and "可靠性存疑" in s.describe()
+        ok = CyclicalSensitivity(D("9.51"), D("2.31"), D("1.42"), 17)
+        assert not ok.elasticity_suspect and "存疑" not in ok.describe()
+
+    def test_合成分数标注为启发式(self):
+        """课程没给合成公式，阈值也是自定的 —— 不能显得像标准做法。"""
+        from ir_agent.industry_profile import CyclicalSensitivity
+        s = CyclicalSensitivity(D("2"), D("1.5"), D("1.5"), 10)
+        assert "启发式合成" in s.describe()
+
+    def test_三因子对应课程原文(self):
+        """Bodie Ch.17: Sales(necessities/discretionary) / Operating leverage
+        / Financial leverage。前两项一一对应，第一项用弹性作代理并声明。"""
+        from ir_agent.industry_profile import CyclicalSensitivity
+        doc = CyclicalSensitivity.__doc__
+        assert "necessities" in doc and "discretionary" in doc
+        assert "操作化代理" in doc and "不是课程给定的度量" in doc
+
+    def test_HHI阈值对应司法部指南(self):
+        """DOJ/FTC 横向合并指南: <1500 分散、1500–2500 中度、>2500 高度
+        （0–10000 标度）。折算到 0–1 即 0.15 / 0.25。"""
+        from ir_agent.industry_profile import (HHI_MODERATE,
+                                               HHI_UNCONCENTRATED)
+        assert HHI_UNCONCENTRATED == D("0.15") and HHI_MODERATE == D("0.25")

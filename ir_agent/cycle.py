@@ -20,9 +20,19 @@
    陡峭化（都对应宽松预期），区分它们的是活动指标在**回升还是下行**。
    只看某一期的读数会把复苏初期误判成衰退。
 
-**覆盖的是四维不是五维。** Fidelity 框架的第五维「库存与销售」需要
-工业企业产成品存货数据，东财对应报表取不到（实测 RPT_ECONOMY_* 下
-社融、工业增加值、库存均无配置）。缺一维就说缺一维，不拿四维硬套。
+**覆盖的是三维，不是四维也不是五维。** Fidelity 用于定义阶段的五个维度是
+Activity / Credit / **Profits** / Policy / Inventories-Sales。其中:
+
+  · 活动、信贷、政策 —— 可取（PMI、M1−M2 剪刀差、期限利差）
+  · **利润** —— 宏观口径取不到。工业企业利润总额在东财 RPT_ECONOMY_*
+    下无配置；企业景气指数（BOOM_INDEX）是调查型信心指数，不是利润，
+    拿它顶替是另一次口径替换，不做。
+  · **库存与销售** —— 同样取不到
+
+**通胀不参与阶段打分。** Fidelity 原文把它列为**补充分析**而非阶段维度:
+「may be enhanced by adding complementary analysis on industries and
+inflation」。早前的实现把 PPI 当成第四个打分维度，等于用框架外的变量
+定义框架内的阶段 —— 已改为与 Fidelity 一致，单独作为补充信息呈现。
 """
 
 from __future__ import annotations
@@ -138,11 +148,21 @@ def credit(ledger: FactLedger, as_of: date) -> Signal | None:
 
 
 def policy(ledger: FactLedger, as_of: date) -> Signal | None:
-    """政策 —— 期限利差（10Y − 2Y）。
+    """政策 —— 期限利差。
 
     陡峭化对应宽松预期，平坦或倒挂对应紧缩。**但陡峭化同时出现在早周期
     与衰退**（都是宽松），所以它单独不能定阶段，必须与活动方向合看 ——
     这正是本模块坚持「水平 + 方向」的原因。
+
+    **口径替代需声明**: 课程点名的领先指标是「10 年期国债 − 联邦基金
+    利率」（长端减**政策利率**）。A 股没有对应的政策利率日频序列，
+    这里用 **10Y − 2Y** 代替 —— 两年期国债是政策预期最直接的载体，
+    也是衰退预测文献里的通行口径。但它不是课程原文的那个利差，
+    据此下结论时应当知道这个替换。
+
+    课程同时点名**股票市场**为领先指标。本模块不采用: 它不属于
+    Fidelity 用于定义阶段的五个维度，且在个股研报里用市场方向去判断
+    周期、再用周期去支撑该股票的估值，论证上是自我循环。
     """
     ten = dict(_series(ledger, "rate.cgb_10y", as_of, n=90))
     two = dict(_series(ledger, "rate.cgb_2y", as_of, n=90))
@@ -174,10 +194,18 @@ def inflation(ledger: FactLedger, as_of: date) -> Signal | None:
                   f"PPI 同比 [[macro.ppi_yoy@{per}]]")
 
 
-DIMENSIONS = (activity, credit, policy, inflation)
+# 参与阶段打分的维度 —— 只包含 Fidelity 用于定义阶段的那些且数据可得的
+DIMENSIONS = (activity, credit, policy)
 
-# Fidelity 框架的第五维，当前数据源取不到 —— 显式记录而非默默略去
-MISSING_DIMENSION = "库存与销售（需工业企业产成品存货，东财无对应报表）"
+# 补充分析（Fidelity 原文的定位），呈现但**不参与打分**
+COMPLEMENTARY = (inflation,)
+
+# 框架内但取不到的维度 —— 显式记录而非默默略去
+MISSING_DIMENSIONS = (
+    "利润（Fidelity 的 Profits 维度。工业企业利润总额在东财无对应报表；"
+    "企业景气指数是信心调查不是利润，不作替代）",
+    "库存与销售（需工业企业产成品存货，东财无对应报表）",
+)
 
 
 # ── 阶段画像与打分 ────────────────────────────────────────────
@@ -185,31 +213,32 @@ MISSING_DIMENSION = "库存与销售（需工业企业产成品存货，东财�
 # 没有明确期望，不参与打分 —— 强行给每格都填一个期望会制造虚假的精确。
 
 _PROFILE: dict[Phase, dict[str, tuple[str | None, Direction | None]]] = {
+# 逐格对照 Fidelity Exhibit 2 的原文措辞:
+#   EARLY      Activity rebounds / Credit begins to grow / Policy still stimulative
+#   MID        Growth peaking / Credit growth strong / Policy neutral
+#   LATE       Growth moderating / Credit tightens / Policy contractionary
+#   RECESSION  Falling activity / Credit dries up / Policy eases
     Phase.EARLY: {
-        # 早周期的定义特征是**反弹本身**，不是水平低 —— PMI 刚上穿 50 时
-        # 水平已经算「高」，但仍处早周期。对水平不设期望，只看方向。
+        # 「rebounds」—— 定义特征是**反弹本身**，不是水平低。PMI 刚上穿 50
+        # 时水平已经算「高」，但仍处早周期。对水平不设期望，只看方向。
         "活动": (None, Direction.UP),
-        "信贷": (None, Direction.UP),        # 开始增长
-        "政策": ("高", None),                # 利差陡峭 = 仍宽松
-        "通胀": ("低", None),
+        "信贷": (None, Direction.UP),        # begins to grow
+        "政策": ("高", None),                # still stimulative → 利差陡峭
     },
     Phase.MID: {
-        "活动": ("高", Direction.FLAT),      # 扩张区但增速见顶
-        "信贷": ("高", None),
-        "政策": (None, Direction.DOWN),      # 开始平坦化
-        "通胀": (None, Direction.UP),
+        "活动": ("高", Direction.FLAT),      # growth peaking：仍高但不再加速
+        "信贷": ("高", None),                # credit growth strong
+        "政策": (None, Direction.DOWN),      # neutral：由宽松转中性，利差平坦化
     },
     Phase.LATE: {
-        "活动": ("高", Direction.DOWN),      # 仍在扩张区但转头向下
-        "信贷": (None, Direction.DOWN),      # 收紧
-        "政策": ("低", None),                # 平坦或倒挂 = 紧缩
-        "通胀": ("高", None),
+        "活动": ("高", Direction.DOWN),      # moderating：仍在扩张区但转头向下
+        "信贷": (None, Direction.DOWN),      # tightens
+        "政策": ("低", None),                # contractionary → 平坦或倒挂
     },
     Phase.RECESSION: {
-        "活动": ("低", Direction.DOWN),      # 收缩区且继续下行
-        "信贷": ("低", None),                # 枯竭
-        "政策": (None, Direction.UP),        # 重新陡峭化 = 转向宽松
-        "通胀": (None, Direction.DOWN),
+        "活动": ("低", Direction.DOWN),      # falling activity
+        "信贷": ("低", None),                # dries up
+        "政策": (None, Direction.UP),        # eases → 重新陡峭化
     },
 }
 
@@ -217,7 +246,6 @@ _THRESHOLD = {
     "活动": PMI_NEUTRAL,
     "信贷": Decimal(0),
     "政策": Decimal("0.005"),
-    "通胀": Decimal(0),
 }
 
 
@@ -242,10 +270,26 @@ def _score(sig: Signal, want: tuple[str | None, Direction | None]) -> Decimal:
 
 @dataclass
 class CycleView:
-    signals: list[Signal]
+    signals: list[Signal]                 # 参与打分的维度
     scores: dict[Phase, Decimal]
     as_of: date
-    missing: list[str] = field(default_factory=lambda: [MISSING_DIMENSION])
+    complementary: list[Signal] = field(default_factory=list)   # 不参与打分
+    missing: list[str] = field(default_factory=lambda: list(MISSING_DIMENSIONS))
+
+    @property
+    def coverage(self) -> str:
+        """给人看: 带比例。"""
+        n = len(self.signals)
+        return f"{n}/{n + len(self.missing)} 个阶段维度"
+
+    @property
+    def coverage_note(self) -> str:
+        """给模型看: 定性表述。
+
+        覆盖率是个说明而不是待引用的值，账本里没有对应事实 ——
+        写成「1/3」模型照抄就是裸数字。
+        """
+        return ("部分阶段维度" if self.missing else "全部阶段维度")
 
     @property
     def ranked(self) -> list[tuple[Phase, Decimal]]:
@@ -275,24 +319,32 @@ class CycleView:
             lines.append(f"  ⚠ 与次选差距仅 {self.confidence:.2f} —— "
                          f"处于 {r[0][0].value}／{r[1][0].value} 交界，"
                          "不宜据此下强结论")
+        lines.append(f"  依据 {self.coverage}（Fidelity 框架共五维）")
         for s in self.signals:
             lines.append(f"  · {s.describe()}")
+        for s in self.complementary:
+            lines.append(f"  ◦ {s.describe()}　（补充分析，不参与阶段判定）")
         for m in self.missing:
-            lines.append(f"  – 未覆盖维度：{m}")
+            lines.append(f"  – 未覆盖：{m}")
         return "\n".join(lines)
 
     def for_prompt(self) -> str:
         if not self.scores:
             return "  （无可用宏观信号，本节不下周期判断）"
         r = self.ranked
-        lines = [f"  当前判定：{r[0][0].value}（次选 {r[1][0].value}）"]
+        lines = [f"  当前判定：{r[0][0].value}（次选 {r[1][0].value}）"
+                 f"　依据{self.coverage_note}"]
         for s in self.signals:
             lines.append(f"    {s.for_prompt()}")
+        for s in self.complementary:
+            lines.append(f"    {s.for_prompt()}　（补充分析，未参与阶段判定）")
         if self.at_boundary:
             lines.append("    ⚠ 首选与次选分差很小，处于阶段交界 —— "
                          "正文中必须说明这一点，不得当作确定的阶段判断")
         for m in self.missing:
             lines.append(f"    – 该判定未覆盖：{m}")
+        lines.append("    维度不全时阶段判定的把握相应下降，正文中不得"
+                     "把它当作确定结论")
         lines.append("    Fidelity 框架下各阶段的板块含义需结合本行业的"
                      "周期敏感度一并判断，敏感度越高传导越强")
         return "\n".join(lines)
@@ -302,15 +354,23 @@ def assess(ledger: FactLedger, as_of: date) -> CycleView:
     """对四个阶段各打一个匹配分，取最高。**不用状态机** ——
     课程明确说阶段可能被跳过或回退。"""
     signals = [s for fn in DIMENSIONS if (s := fn(ledger, as_of)) is not None]
+    extra = [s for fn in COMPLEMENTARY if (s := fn(ledger, as_of)) is not None]
     if not signals:
-        return CycleView(signals=[], scores={}, as_of=as_of)
+        return CycleView(signals=[], scores={}, as_of=as_of, complementary=extra)
 
     scores: dict[Phase, Decimal] = {}
     for phase, profile in _PROFILE.items():
         parts = [_score(s, profile[s.dimension]) for s in signals
                  if s.dimension in profile]
         scores[phase] = sum(parts) / len(parts) if parts else Decimal(0)
-    return CycleView(signals=signals, scores=scores, as_of=as_of)
+    # 打分维度不足三个时，阶段判定实质上是在猜 —— 记进缺失说明
+    missing = list(MISSING_DIMENSIONS)
+    if len(signals) < len(DIMENSIONS):
+        got = {s.dimension for s in signals}
+        missing += [f"{d}（数据缺失）" for d in ("活动", "信贷", "政策")
+                    if d not in got]
+    return CycleView(signals=signals, scores=scores, as_of=as_of,
+                     complementary=extra, missing=missing)
 
 
 def cycle_facts(view: CycleView, period: str) -> list[Fact]:

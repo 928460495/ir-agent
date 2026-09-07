@@ -75,6 +75,30 @@ def interest_bearing_debt(ledger: FactLedger, period: str,
                 "有息负债")
 
 
+def ebit(ledger: FactLedger, period: str, as_of: date) -> Decimal | None:
+    """息税前利润。**中国准则下必须加回利息费用。**
+
+    「财务费用」在中国准则里列于「营业总成本」之内，因此**营业利润是
+    扣息之后的**。凡是要衡量「与融资结构无关的经营表现」的地方 ——
+    DOL、ROIC、Altman Z 的 C 项 —— 都必须先加回利息，否则算出来的
+    东西里混着财务杠杆。
+
+    单独成函数而非各处复写: 这个概念此前在 quality.altman_z 里加回了、
+    在 industry_profile.dol 里没加回，同一件事两种算法。
+
+    利息费用为负（利息收入大于支出）时不倒扣 —— 那不是融资成本。
+    """
+    try:
+        op = ledger.get("operating_profit", period, as_of=as_of).value
+    except (KeyError, LookAheadError):
+        return None
+    try:
+        ie = ledger.get("interest_expense_fe", period, as_of=as_of).value
+    except (KeyError, LookAheadError):
+        return op
+    return op + max(ie, Decimal(0))
+
+
 def compute(ledger: FactLedger, period: str, as_of: date) -> dict[str, Fact]:
     """能算的都算出来写回账本；分量全缺的项跳过而非中断。
 
