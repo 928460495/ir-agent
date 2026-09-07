@@ -292,3 +292,50 @@ class TestCosmeticViolationsDoNotStarveTheReport:
         bad = "引用[[company.made_up@2025FY]]。"
         with pytest.raises(AnalystRefused):
             write_body(self._cat(), lambda p: bad, max_attempts=3)
+
+
+class TestHintMustNotMisdirect:
+    """错误的指认比没有指认更糟。
+
+    **实测踩到，代价是整篇报告三次都没产出。** 正文写「β 明显高于 1」——
+    那个 1 是 β 的定义基准（市场组合的 β 恒为 1），账本里不可能有。而
+    company.industry_rank 显示为「1 名」，数字部分一样，于是驳回信息成了
+    「1（应写作 [[company.industry_rank@2025FY]]）」，等于让模型写
+    「β 高于行业排名」。照做荒谬、不照做违规，两条路都不通。
+    """
+
+    def _cat(self):
+        from datetime import date
+        from decimal import Decimal
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.ledger import Fact, FactLedger, Method
+        led = FactLedger()
+        for k, v, u in (("company.industry_rank", "1", "名"),
+                        ("beta", "1.58", "x"),
+                        ("gross_margin", "0.1415", "ratio")):
+            led.put(Fact(key=k, value=Decimal(v), unit=u, period="2025FY",
+                         as_of=date(2025, 1, 1), source_id="t",
+                         method=Method.COMPUTED))
+        return FactCatalog.from_ledger(led, "2025FY", date(2026, 9, 7))
+
+    def test_光秃秃的个位整数不给指认(self):
+        from ir_agent.analyst import _hint
+        out = _hint("1", self._cat())
+        assert "industry_rank" not in out
+        assert "定义上的基准值" in out and "改用文字表述" in out
+
+    def test_带单位的仍然给出正确指认(self):
+        from ir_agent.analyst import _hint
+        assert "[[company.industry_rank@2025FY]]" in _hint("1 名", self._cat())
+        assert "[[beta@2025FY]]" in _hint("1.58", self._cat())
+        assert "[[gross_margin@2025FY]]" in _hint("14.15%", self._cat())
+
+    def test_数字撞上但单位对不上时不指认(self):
+        """1.58x 与 1.58% 不是同一个东西。"""
+        from ir_agent.analyst import _hint
+        assert "beta" not in _hint("1.58%", self._cat())
+
+    def test_规则里讲清了定义基准值的写法(self):
+        from ir_agent.analyst import _RULES
+        assert "定义上的基准值用文字表述" in _RULES
+        assert "β 明显高于市场平均水平" in _RULES

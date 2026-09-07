@@ -171,6 +171,9 @@ _RULES = """你是一名卖方分析师，正在撰写研究报告正文。
   一律引用占位符原样照抄。
 - **不得自行拼造占位符**。清单里没有的字段就是没有 —— 该说「数据未披露」，
   不要编造。
+- **定义上的基准值用文字表述，不要写数字**。β 的基准 1、PMI 的荣枯线、
+  收入弹性的分界，这些是定义而不是数据，账本里没有对应事实，写成数字会被
+  裸数字审计驳回且无从修复。写「β 明显高于市场平均水平」而不是「β 高于 1」。
 - **占位符渲染后自带单位**，其后不要再补一遍。清单「数值」一列显示的就是
   渲染结果 —— 显示「17 分位」，就写「处于同业 [[…]]」而不是
   「处于同业 [[…]]分位」；显示「4 家」，就写「有效竞争者 [[…]]」而不是
@@ -327,10 +330,30 @@ def _hint(literal: str, catalog: FactCatalog) -> str:
         return m.group(0).replace(",", "") if m else None
 
     want = core(literal)
-    if want is not None:
-        for e in catalog.entries:
-            if core(e.display) == want:
-                return f"{literal}（应写作 {e.token}）"
+    if want is None:
+        return literal
+
+    # **只比数字本身会给出错误的指认。** 实测: 正文写「β 明显高于 1」——
+    # 那个 1 是 β 的定义基准（市场组合的 β 恒为 1），账本里不可能有。
+    # 而 company.industry_rank 显示为「1 名」，数字部分一样，于是提示成了
+    # 「1（应写作 [[company.industry_rank@2025FY]]）」——「β 高于行业排名」。
+    # 照做荒谬、不照做违规，**两条路都不通**，模型连挂三次。
+    #
+    # 因此: 光秃秃的个位整数不给指认（多半是序数或定义基准），
+    # 有单位的必须单位也对得上。
+    if _NUM_CORE.fullmatch(literal.strip()) and len(want) < 2:
+        return (f"{literal}（账本中没有能对应它的事实。若它是**定义上的基准值**"
+                "，如 β 的基准 1、PMI 的荣枯线，请改用文字表述"
+                "，例如「β 明显高于市场平均水平」；若是数据，"
+                "请改用清单里的占位符）")
+    lit_unit = literal.strip()[len(want):].strip().lstrip("0123456789., ")
+    for e in catalog.entries:
+        if core(e.display) != want:
+            continue
+        disp_unit = e.display.strip()[len(core(e.display) or ""):].strip()
+        if lit_unit and lit_unit not in disp_unit:
+            continue        # 数字撞上了但单位对不上 —— 不是同一个东西
+        return f"{literal}（应写作 {e.token}）"
     return literal
 
 
