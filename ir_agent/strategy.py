@@ -251,8 +251,8 @@ PROMPT = """基于下面的年报原文与账本事实，做战略分析。
 **一、护城河**（至多两条，宁缺毋滥）
 格式：`护城河: <成本优势|网络效应|无形资产|转换成本|有效规模|无明显护城河> | <宽|窄|无> | 「年报原文逐字引用」`
 
-**二、波特五力**（五条都要给）
-格式：`五力: <力的名称> | <高|中|低> | <对本司有利|中性|对本司不利> | 「年报原文」或 [[占位符]]`
+**二、波特五力**（五条都要给，名称必须逐字照抄，不要改写）
+格式：`五力: <{forces}> | <高|中|低> | <对本司有利|中性|对本司不利> | 「年报原文」或 [[占位符]]`
 
 **三、关键不确定性 → 情景驱动因子**（两到三条）
 这一条是战略分析与估值之间的桥。每条不确定性必须映射到一个**可调的
@@ -310,7 +310,9 @@ def parse(text: str) -> StrategyView:
         try:
             kind = MoatKind(p[0])
         except ValueError as e:
-            raise StrategyFailed(f"未知的护城河类型 {p[0]!r}") from e
+            raise StrategyFailed(
+                f"未知的护城河类型 {p[0]!r}，必须逐字使用以下之一："
+                + "、".join(k.value for k in MoatKind)) from e
         if kind is not MoatKind.NONE and p[1] not in STRENGTH:
             raise StrategyFailed(f"护城河强度须为 宽/窄/无，得到 {p[1]!r}")
         view.moats.append(MoatView(kind, p[1], _basis(p[2], "护城河")))
@@ -320,7 +322,14 @@ def parse(text: str) -> StrategyView:
         try:
             force = Force(p[0])
         except ValueError as e:
-            raise StrategyFailed(f"未知的力 {p[0]!r}") from e
+            # **驳回信息必须列出合法取值。** 长电实测: 模型写
+            # 「现有竞争者的竞争强度」，与枚举值「现有竞争强度」只差两个字，
+            # 而原信息只说「未知的力」，不给对照表 —— 模型连挂三次，
+            # 整个战略分析没能产出。护城河那一行的提示词列了取值，
+            # 五力这一行没列，是纯粹的疏漏。
+            raise StrategyFailed(
+                f"未知的力 {p[0]!r}，必须逐字使用以下五个名称之一："
+                + "、".join(f.value for f in Force)) from e
         if p[1] not in INTENSITY:
             raise StrategyFailed(f"五力强度须为 高/中/低，得到 {p[1]!r}")
         view.forces.append(ForceView(force, p[1], p[2], _basis(p[3], "五力")))
@@ -380,7 +389,9 @@ def assess(client, ledger: FactLedger, period: str, as_of: date,
     """让模型做战略分析，逐轮校验。返回 (结论, 证据文本)。"""
     evidence = for_prompt(ledger, period, as_of, sections, spot, corpus)
     annual = annual_text(sections)
-    prompt = PROMPT.format(drivers="、".join(MAPPABLE_DRIVERS), evidence=evidence)
+    prompt = PROMPT.format(drivers="、".join(MAPPABLE_DRIVERS),
+                           forces="|".join(f.value for f in Force),
+                           evidence=evidence)
     last = ""
     for attempt in range(1, max_attempts + 1):
         out = client(prompt)

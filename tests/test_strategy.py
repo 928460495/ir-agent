@@ -295,3 +295,28 @@ def test_年报正文与外部资料严格分开():
     通过核验 —— 引文是真的，出处是假的，比引文造假更难发现。"""
     assert EXT not in strategy.annual_text(_sections())
     assert QUOTE in strategy.annual_text(_sections())
+
+
+def test_力名称写错时列出合法取值():
+    """**长电实测: 战略分析因此整个没能产出。** 模型写「现有竞争者的竞争
+    强度」，与枚举值「现有竞争强度」只差两个字，而驳回信息只说「未知的力」，
+    不给对照表 —— 连挂三次。护城河那一行的提示词列了取值，五力这一行没列，
+    是纯粹的疏漏。"""
+    with pytest.raises(StrategyFailed) as e:
+        strategy.parse(f"五力: 现有竞争者的竞争强度 | 高 | 中性 | 「{QUOTE}」")
+    for f in Force:
+        assert f.value in str(e.value)
+
+
+def test_护城河类型写错时也列出合法取值():
+    with pytest.raises(StrategyFailed) as e:
+        strategy.parse(f"护城河: 品牌溢价 | 宽 | 「{QUOTE}」")
+    assert "无形资产" in str(e.value) and "成本优势" in str(e.value)
+
+
+def test_提示词逐字列出五力名称():
+    c = _Client(_out())
+    strategy.assess(c, _led(), P, AS_OF, _sections())
+    for f in Force:
+        assert f.value in c.prompts[0]
+    assert "逐字照抄" in c.prompts[0]

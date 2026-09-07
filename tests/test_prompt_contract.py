@@ -325,3 +325,39 @@ def test_三个定性模块都装了这道闸(mod, exc, mk):
     src = inspect.getsource(m.check)
     assert "audit_prose" in src, f"{mod}.check 没有核验描述字段"
     assert "不要写具体数字" in m.PROMPT, f"{mod} 的提示词没有讲清这条"
+
+
+def test_占位符后重复单位被拦下():
+    """**跑长电时实测，几乎每处分位数都中招。** format_value 渲染出
+    「17 分位」「57.02 天」「4 家」，而中文自然写法是「处于同业 X 分位」，
+    模型于是又补了一遍单位，正文出现「17 分位分位」「4 家家」「66.25 天天」。
+
+    根因是规则里从没说过「占位符渲染后自带单位」。"""
+    from ir_agent.citation import audit_unit_duplication
+
+    led = FactLedger()
+    _fact(led, "gross_margin.percentile", "17", unit="分位")
+    _fact(led, "industry.effective_players", "4", unit="家")
+    bad = audit_unit_duplication(
+        "处于同业[[gross_margin.percentile@2024FY]]分位，"
+        "有效竞争者[[industry.effective_players@2024FY]]家", led, AS_OF)
+    assert len(bad) == 2
+    ok = audit_unit_duplication(
+        "处于同业[[gross_margin.percentile@2024FY]]，"
+        "有效竞争者[[industry.effective_players@2024FY]]", led, AS_OF)
+    assert ok == []
+
+
+def test_撰写闸门接上了单位重复检查():
+    from ir_agent.analyst import FactCatalog, _violations
+
+    led = FactLedger()
+    _fact(led, "gross_margin.percentile", "17", unit="分位")
+    cat = FactCatalog(ledger=led, as_of=AS_OF)
+    v = _violations("处于同业[[gross_margin.percentile@2024FY]]分位。", cat)
+    assert any("重复写了单位" in x for x in v)
+
+
+def test_规则里讲清了占位符自带单位():
+    from ir_agent.analyst import _RULES
+    assert "占位符渲染后自带单位" in _RULES and "17 分位分位" in _RULES

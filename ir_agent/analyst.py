@@ -27,6 +27,7 @@ from ir_agent.citation import (
     REF_RE,
     UnresolvedReferenceError,
     audit_bare_numbers,
+    audit_unit_duplication,
     format_value,
     render,
 )
@@ -170,6 +171,10 @@ _RULES = """你是一名卖方分析师，正在撰写研究报告正文。
   一律引用占位符原样照抄。
 - **不得自行拼造占位符**。清单里没有的字段就是没有 —— 该说「数据未披露」，
   不要编造。
+- **占位符渲染后自带单位**，其后不要再补一遍。清单「数值」一列显示的就是
+  渲染结果 —— 显示「17 分位」，就写「处于同业 [[…]]」而不是
+  「处于同业 [[…]]分位」；显示「4 家」，就写「有效竞争者 [[…]]」而不是
+  「有效竞争者 [[…]]家」。否则正文会出现「17 分位分位」「4 家家」。
 - 定性表述（「显著高于」「小幅回落」「处于同业前列」）可以自由使用，
   这正是你的价值所在。
 
@@ -346,6 +351,14 @@ def _violations(body: str, catalog: FactCatalog) -> list[str]:
             render(body, catalog.ledger, as_of=catalog.as_of)
         except UnresolvedReferenceError as e:
             out.append(f"以下引用在事实账本中不存在，属于伪造：{e}")
+
+    if catalog.ledger is not None and catalog.as_of is not None:
+        dup = audit_unit_duplication(body, catalog.ledger, catalog.as_of)
+        if dup:
+            out.append(
+                "以下占位符后重复写了单位（渲染值已自带单位）："
+                + "、".join(dup[:8])
+                + " —— 请把紧跟其后的那个单位词删掉并调整句子。")
 
     if not REF_RE.search(body):
         out.append("正文没有引用任何事实占位符 —— 研报不能没有数字。")

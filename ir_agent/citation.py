@@ -204,3 +204,36 @@ def audit_prose(fields: dict[str, str]) -> list[str]:
         for n in audit_bare_numbers(text or ""):
             bad.append(f"{name}「{n}」")
     return bad
+
+
+# 渲染值末尾可能带的单位词。用于检测「占位符后又补了一遍单位」。
+_UNIT_TAILS = ("分位", "亿元", "万元", "个百分点", "天", "家", "元", "倍", "x", "%")
+
+
+def audit_unit_duplication(body: str, ledger: FactLedger,
+                           as_of: date) -> list[str]:
+    """占位符渲染后自带单位，其后又紧跟同一个单位词 —— 重复。
+
+    **跑长电时实测，几乎每处分位数都中招。** format_value 渲染出「17 分位」
+    「57.02 天」「4 家」，而中文的自然写法是「处于同业 X 分位」「周转 X 天」，
+    模型于是在占位符后又写了一遍单位:
+
+        处于同业17 分位分位　　同业中位数66.25 天天　　有效竞争者4 家家
+
+    根因是规则里从没说过「占位符渲染后自带单位」。这类错误模型改得动，
+    因此驳回是可满足的 —— 但事前在提示词里说清更省一轮。
+
+    不做自动删除: 「[[receivable_days]]天数较长」删掉那个「天」会剩下
+    「数较长」。判成违规让模型重写整句，比代码替人改字安全。
+    """
+    out: list[str] = []
+    for m in REF_RE.finditer(body):
+        try:
+            fact = ledger.get(m.group(2), m.group(3), as_of=as_of)
+        except Exception:                                    # noqa: BLE001
+            continue
+        shown = format_value(fact)
+        tail = next((u for u in _UNIT_TAILS if shown.endswith(u)), None)
+        if tail and body[m.end():m.end() + len(tail)] == tail:
+            out.append(f"{m.group(0)} 之后紧跟「{tail}」")
+    return out
