@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -48,40 +48,195 @@ def report_name(stmt: str, company_type: CompanyType) -> str:
 @dataclass(frozen=True)
 class ReportSpec:
     fields: dict[str, str]          # 东财字段 -> 规范化 key
+    # 规范化 key -> 同义 key。用于一个模板缺某个概念、但另一个字段在该模板下
+    # 语义等同的情形。实测: 银行/保险的利润表没有 TOTAL_OPERATE_INCOME，
+    # 因为对它们而言「营业收入」就是全部营业收入，不存在「营业总收入」这一层。
+    # 不做这个别名，所有以 revenue_total 为分母的指标都会误报为「数据缺失」。
+    aliases: dict = field(default_factory=dict)
 
 
-EM_REPORTS: dict[str, ReportSpec] = {
-    "balance": ReportSpec({
-        "TOTAL_ASSETS": "total_assets",
-        "TOTAL_LIABILITIES": "total_liabilities",
-        "TOTAL_EQUITY": "total_equity",
-        "TOTAL_PARENT_EQUITY": "equity_attr_parent",
-        "MINORITY_EQUITY": "minority_equity",
-        # ↓ DCF 的净负债分量
-        "MONETARYFUNDS": "cash_and_equivalents",
-        "SHORT_LOAN": "short_loan",
-        "LONG_LOAN": "long_loan",
-        "BOND_PAYABLE": "bond_payable",
-        "NONCURRENT_LIAB_1YEAR": "noncurrent_liab_1y",
-    }),
-    "income": ReportSpec({
-        "OPERATE_INCOME": "revenue",
-        "TOTAL_OPERATE_INCOME": "revenue_total",
-        "OPERATE_COST": "cost_of_revenue",
-        "NETPROFIT": "net_profit",
-        "PARENT_NETPROFIT": "net_profit_attr_parent",
-        "MINORITY_INTEREST": "minority_interest_profit",
-    }),
-    "cashflow": ReportSpec({
-        "NETPROFIT": "cf_net_profit",
-        "CCE_ADD": "cash_net_change",
-        "BEGIN_CCE": "cash_begin",
-        "END_CCE": "cash_end",
-        # ↓ DCF 的自由现金流分量
-        "NETCASH_OPERATE": "cf_operating",
-        "CONSTRUCT_LONG_ASSET": "capex",
-    }),
+# ── 字段映射 ──────────────────────────────────────────────────
+# **按模板分设，不能一套通吃。** 实测四类公司的资产负债表:
+#
+#   字段                     茅台   招行   平安   中信证券
+#   TOTAL_CURRENT_ASSETS     有     —      —      —
+#   INVENTORY                有     —      —      —
+#   MONETARYFUNDS            有     —      有     有
+#   SHORT_LOAN               —      —      有     有
+#
+# 银行缺流动资产/存货**不是数据缺失，是会计上不存在** —— 银行资产负债表
+# 按流动性排序列示，不分流动与非流动。早期一套映射套四套模板，能用是因为
+# 只映射了四套都有的汇总项；一旦补明细科目，银行就会全空，而系统分不清
+# 「本就没有」和「取数失败」。适用性判定见 metrics.py。
+
+# 四套模板共有的骨架
+_COMMON_BALANCE = {
+    "TOTAL_ASSETS": "total_assets",
+    "TOTAL_LIABILITIES": "total_liabilities",
+    "TOTAL_EQUITY": "total_equity",
+    "TOTAL_PARENT_EQUITY": "equity_attr_parent",
+    "MINORITY_EQUITY": "minority_equity",
+    "FIXED_ASSET": "fixed_asset",
+    "CIP": "construction_in_progress",
+    "INTANGIBLE_ASSET": "intangible_asset",
+    "USERIGHT_ASSET": "useright_asset",
+    "SHARE_CAPITAL": "share_capital",
+    "CAPITAL_RESERVE": "capital_reserve",
+    "SURPLUS_RESERVE": "surplus_reserve",
+    "UNASSIGN_RPOFIT": "retained_earnings",     # Altman Z 的 B 项
+    "BOND_PAYABLE": "bond_payable",
+    "LEASE_LIAB": "lease_liability",
+    "TAX_PAYABLE": "tax_payable",
+    "STAFF_SALARY_PAYABLE": "staff_salary_payable",
+    "DEFER_TAX_ASSET": "deferred_tax_asset",
+    "DEFER_TAX_LIAB": "deferred_tax_liability",
 }
+
+_COMMON_INCOME = {
+    "OPERATE_INCOME": "revenue",
+    "TOTAL_OPERATE_INCOME": "revenue_total",
+    "OPERATE_PROFIT": "operating_profit",
+    "TOTAL_PROFIT": "total_profit",
+    "INCOME_TAX": "income_tax",
+    "OPERATE_TAX_ADD": "operating_tax_surcharge",
+    "NETPROFIT": "net_profit",
+    "PARENT_NETPROFIT": "net_profit_attr_parent",
+    "MINORITY_INTEREST": "minority_interest_profit",
+    "DEDUCT_PARENT_NETPROFIT": "net_profit_deducted",
+    "BASIC_EPS": "basic_eps",
+    "INVEST_INCOME": "investment_income",
+}
+
+_COMMON_CASHFLOW = {
+    "NETPROFIT": "cf_net_profit",
+    "CCE_ADD": "cash_net_change",
+    "BEGIN_CCE": "cash_begin",
+    "END_CCE": "cash_end",
+    "NETCASH_OPERATE": "cf_operating",
+    "NETCASH_INVEST": "cf_investing",
+    "NETCASH_FINANCE": "cf_financing",
+    "CONSTRUCT_LONG_ASSET": "capex",
+    "PAY_ALL_TAX": "tax_paid",
+    # 分配股利、利润或偿付利息支付的现金 —— 中国准则把它放在**筹资活动**，
+    # 因此 A 股的经营活动现金流是未扣利息的。派息率与 kd 的交叉验证都用它。
+    "ASSIGN_DIVIDEND_PORFIT": "dividend_interest_paid",
+    # 折旧摊销四件套 —— FCF 直接法必需，此前全部缺失
+    "FA_IR_DEPR": "depreciation_fixed_asset",
+    "IA_AMORTIZE": "amortization_intangible",
+    "LPE_AMORTIZE": "amortization_long_prepaid",
+    "USERIGHT_ASSET_AMORTIZE": "amortization_useright",
+    # 营运资本变动三件套 —— 接口直接给了 ΔNWC 的分解
+    "INVENTORY_REDUCE": "wc_inventory_decrease",
+    "OPERATE_RECE_REDUCE": "wc_receivable_decrease",
+    "OPERATE_PAYABLE_ADD": "wc_payable_increase",
+}
+
+# 工商业专有 —— 流动/非流动划分、存货、应收应付、三费
+_GENERAL_BALANCE = {
+    **_COMMON_BALANCE,
+    "MONETARYFUNDS": "cash_and_equivalents",
+    "TOTAL_CURRENT_ASSETS": "current_assets",
+    "TOTAL_CURRENT_LIAB": "current_liabilities",
+    "TOTAL_NONCURRENT_ASSETS": "noncurrent_assets",
+    "TOTAL_NONCURRENT_LIAB": "noncurrent_liabilities",
+    "INVENTORY": "inventory",
+    "ACCOUNTS_RECE": "accounts_receivable",
+    "NOTE_ACCOUNTS_RECE": "note_accounts_receivable",
+    "PREPAYMENT": "prepayment",
+    "ACCOUNTS_PAYABLE": "accounts_payable",
+    "NOTE_ACCOUNTS_PAYABLE": "note_accounts_payable",
+    "CONTRACT_LIAB": "contract_liability",      # 合同负债（原预收款项）
+    "SHORT_LOAN": "short_loan",
+    "LONG_LOAN": "long_loan",
+    "NONCURRENT_LIAB_1YEAR": "noncurrent_liab_1y",
+    "GOODWILL": "goodwill",
+    "INVEST_REALESTATE": "investment_property",
+}
+
+_GENERAL_INCOME = {
+    **_COMMON_INCOME,
+    "OPERATE_COST": "cost_of_revenue",
+    "TOTAL_OPERATE_COST": "cost_total",
+    "SALE_EXPENSE": "selling_expense",
+    "MANAGE_EXPENSE": "admin_expense",
+    "RESEARCH_EXPENSE": "rd_expense",
+    "FINANCE_EXPENSE": "finance_expense",
+    # 财务费用中的利息费用 —— 算 kd 与利息保障倍数的分母
+    "FE_INTEREST_EXPENSE": "interest_expense_fe",
+    "FE_INTEREST_INCOME": "interest_income_fe",
+    "CREDIT_IMPAIRMENT_INCOME": "credit_impairment",
+}
+
+# 银行专有 —— 生息资产/负债、利息与手续费净收入、业务及管理费
+_BANK_BALANCE = {
+    **_COMMON_BALANCE,
+    "CASH_DEPOSIT_PBC": "cash_deposit_pbc",
+    "DEPOSIT_INTERBANK": "deposit_interbank",
+    "LOAN_ADVANCE": "loan_advance",             # 发放贷款和垫款
+    "ACCEPT_DEPOSIT": "accept_deposit",         # 吸收存款
+    "BORROW_FUND": "borrow_fund",
+    "LEND_FUND": "lend_fund",
+}
+
+_BANK_INCOME = {
+    **_COMMON_INCOME,
+    "INTEREST_NI": "interest_net_income",
+    "INTEREST_INCOME": "interest_income",
+    "INTEREST_EXPENSE": "interest_expense",
+    "FEE_COMMISSION_NI": "fee_commission_net_income",
+    "BUSINESS_MANAGE_EXPENSE": "business_manage_expense",
+    "CREDIT_IMPAIRMENT_LOSS": "credit_impairment_loss",
+}
+
+# 保险与证券: 有货币资金与借款，但无流动性划分与存货
+_FINANCIAL_BALANCE = {
+    **_COMMON_BALANCE,
+    "MONETARYFUNDS": "cash_and_equivalents",
+    "SHORT_LOAN": "short_loan",
+    "LONG_LOAN": "long_loan",
+    "ACCOUNTS_PAYABLE": "accounts_payable",
+    "ACCOUNTS_RECE": "accounts_receivable",
+}
+
+_FINANCIAL_INCOME = {
+    **_COMMON_INCOME,
+    "INTEREST_INCOME": "interest_income",
+    "INTEREST_EXPENSE": "interest_expense",
+    "FEE_COMMISSION_NI": "fee_commission_net_income",
+}
+
+_BY_TYPE: dict[CompanyType, dict[str, ReportSpec]] = {
+    CompanyType.GENERAL: {
+        "balance": ReportSpec(_GENERAL_BALANCE),
+        "income": ReportSpec(_GENERAL_INCOME),
+        "cashflow": ReportSpec(_COMMON_CASHFLOW),
+    },
+    CompanyType.BANK: {
+        "balance": ReportSpec(_BANK_BALANCE),
+        "income": ReportSpec(_BANK_INCOME, {"revenue_total": "revenue"}),
+        "cashflow": ReportSpec(_COMMON_CASHFLOW),
+    },
+    CompanyType.INSURANCE: {
+        "balance": ReportSpec(_FINANCIAL_BALANCE),
+        "income": ReportSpec(_FINANCIAL_INCOME, {"revenue_total": "revenue"}),
+        "cashflow": ReportSpec(_COMMON_CASHFLOW),
+    },
+    CompanyType.SECURITIES: {
+        "balance": ReportSpec(_FINANCIAL_BALANCE),
+        "income": ReportSpec(_FINANCIAL_INCOME, {"revenue_total": "revenue"}),
+        "cashflow": ReportSpec(_COMMON_CASHFLOW),
+    },
+}
+
+STATEMENTS = ("balance", "income", "cashflow")
+
+
+def specs_for(ct: CompanyType) -> dict[str, ReportSpec]:
+    return _BY_TYPE[ct]
+
+
+# 兼容旧调用 —— 通用模板即原先那一套的超集
+EM_REPORTS: dict[str, ReportSpec] = _BY_TYPE[CompanyType.GENERAL]
 
 _MMDD = {"1231": "FY", "0930": "Q1-Q3", "0630": "H1", "0331": "Q1"}
 
@@ -162,6 +317,32 @@ def parse_em_rows(rows: list[dict], spec: ReportSpec, source_id: str):
     return facts
 
 
+def _alias_facts(facts, spec: ReportSpec):
+    """按模板声明补出同义事实。
+
+    只在目标 key 该期**确实没有**时才补，绝不覆盖真值。补出的事实标记为
+    COMPUTED 并写明 derived_from —— 它是一次口径映射，不是原始披露，
+    脚注里必须能看出这个区别。
+    """
+    from ir_agent.ledger import Fact, Method
+
+    if not spec.aliases:
+        return []
+    have = {(f.key, f.period) for f in facts}
+    by = {(f.key, f.period): f for f in facts}
+    out = []
+    for target, src in spec.aliases.items():
+        for (key, period), f in by.items():
+            if key != src or (target, period) in have:
+                continue
+            out.append(Fact(
+                key=target, value=f.value, unit=f.unit, period=period,
+                as_of=f.as_of, currency=f.currency, source_id=f.source_id,
+                method=Method.COMPUTED,
+                derived_from=(f"{src}@{period}",)))
+    return out
+
+
 def fetch_statements_em(
     code: str,
     market: str = "SH",
@@ -178,7 +359,9 @@ def fetch_statements_em(
     all_facts = []
     sids: dict[str, str] = {}
 
-    for name, spec in EM_REPORTS.items():
+    # 按公司类型取对应模板的字段映射 —— 银行取银行的科目，
+    # 而不是拿工商业的科目去银行报表里找、找不到再当成缺数据。
+    for name, spec in specs_for(ct).items():
         params = {
             "reportName": report_name(name, ct),
             "columns": "ALL",
@@ -202,7 +385,9 @@ def fetch_statements_em(
                           fetched_at=fetched_at, params=params)
                if store else f"em_{ct.value.lower()}_{name}_{code}_{fetched_at:%Y%m%d%H%M%S}")
         sids[name] = sid
-        all_facts.extend(parse_em_rows(rows, spec, source_id=sid))
+        parsed = parse_em_rows(rows, spec, source_id=sid)
+        all_facts.extend(parsed)
+        all_facts.extend(_alias_facts(parsed, spec))
         time.sleep(_PAUSE)
 
     return all_facts, sids
