@@ -27,6 +27,8 @@ from ir_agent.sources.external import Corpus
 # 篇型权重。数值只用于排序，不构成任何分析结论。
 _DEEP = re.compile(r"深度|专题|框架|年度策略|投资策略|行业报告|全景|梳理|研究")
 _THIN = re.compile(r"周报|日报|晨报|月报|快报|数据点评|跟踪")
+# 宏观报告里，境外主题对 A 股单个标的的分析帮助有限，排在后面。
+_OFFSHORE = re.compile(r"美国|美联储|海外|欧洲|日本|全球")
 
 
 def _rank(r: R.Report) -> tuple[int, date]:
@@ -38,8 +40,16 @@ def _rank(r: R.Report) -> tuple[int, date]:
     return (score, r.published)
 
 
+def _rank_macro(r: R.Report) -> tuple[int, date]:
+    score, _ = _rank(r)
+    if _OFFSHORE.search(r.title):
+        score -= 1
+    return (score, r.published)
+
+
 def gather(*, as_of: date, code: str = "", industry_code: str = "",
            company_texts: int = 3, industry_texts: int = 4,
+           macro_texts: int = 2,
            months: int = 24) -> tuple[Corpus, R.Consensus | None]:
     """取回公司与行业研报，装配语料库并算出一致预期。
 
@@ -63,6 +73,13 @@ def gather(*, as_of: date, code: str = "", industry_code: str = "",
         rs = R.search(as_of=as_of, industry_code=industry_code,
                       months=months, limit=200)
         for r in sorted(rs, key=_rank, reverse=True)[:industry_texts]:
+            _ingest(corpus, r, as_of)
+
+    if macro_texts:
+        # 宏观报告时效性强得多 —— 半年前对政策取向的判断多半已经作废，
+        # 因此窗口比行业与个股短。
+        rs = R.search_macro(as_of=as_of, months=6, limit=100)
+        for r in sorted(rs, key=_rank_macro, reverse=True)[:macro_texts]:
             _ingest(corpus, r, as_of)
 
     return corpus, consensus

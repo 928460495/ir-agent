@@ -147,6 +147,28 @@ def credit(ledger: FactLedger, as_of: date) -> Signal | None:
                   f"M1−M2 剪刀差 [[macro.m1_m2_gap@{per}]]（{tag}）")
 
 
+FLAT_SPREAD = Decimal("0.005")      # 平坦与陡峭的分界
+
+
+def policy_shape(ledger: FactLedger, as_of: date) -> tuple[str, str] | None:
+    """期限利差的形态与其对应的政策取向，返回 (形态, 取向)。
+
+    单独成函数是因为宏观定性判断也要用它做交叉印证 —— 同一个概念两处
+    各写一遍，迟早会像 EBIT 那样一处加回利息、一处没加。
+    """
+    ten = dict(_series(ledger, "rate.cgb_10y", as_of, n=90))
+    two = dict(_series(ledger, "rate.cgb_2y", as_of, n=90))
+    common = sorted(set(ten) & set(two), key=period_key)
+    if len(common) < 2:
+        return None
+    lvl = ten[common[-1]] - two[common[-1]]
+    if lvl < 0:
+        return "倒挂", "收紧"
+    if lvl < FLAT_SPREAD:
+        return "平坦", "收紧"
+    return "陡峭", "宽松"
+
+
 def policy(ledger: FactLedger, as_of: date) -> Signal | None:
     """政策 —— 期限利差。
 
@@ -171,7 +193,7 @@ def policy(ledger: FactLedger, as_of: date) -> Signal | None:
         return None
     spread = [ten[p] - two[p] for p in common]
     lvl = spread[-1]
-    shape = "倒挂" if lvl < 0 else ("平坦" if lvl < Decimal("0.005") else "陡峭")
+    shape = policy_shape(ledger, as_of)[0]
     last = common[-1]
     return Signal("政策", lvl, _direction(spread[-20:], flat=Decimal("0.0005")),
                   f"期限利差 {lvl * 100:.2f}pp（{shape}）",

@@ -111,6 +111,7 @@ def test_离散度出现在摘要():
 def test_装配时正文取回失败不丢整条(monkeypatch):
     monkeypatch.setattr(R, "search", lambda **k: [_rep("深度", industry="白酒Ⅱ")]
                         if k.get("code") else [])
+    monkeypatch.setattr(R, "search_macro", lambda **k: [])
     monkeypatch.setattr(R, "fetch_text", lambda r: "")
     monkeypatch.setattr(R, "industry_map", lambda: {})
     cp, cs = C.gather(as_of=AS_OF, code="600519")
@@ -119,6 +120,7 @@ def test_装配时正文取回失败不丢整条(monkeypatch):
 
 def test_无券商跟踪时语料库为空而非报错(monkeypatch):
     monkeypatch.setattr(R, "search", lambda **k: [])
+    monkeypatch.setattr(R, "search_macro", lambda **k: [])
     cp, cs = C.gather(as_of=AS_OF, code="000001")
     assert cp.docs == [] and cs is None
     assert "无" in cp.summary()
@@ -178,3 +180,20 @@ def test_给模型的一致预期只有占位符():
                     eps={2026: R.Estimate(2026, 42, D("68.43"), D("65.77"),
                                           D("77.75"))})
     assert audit_bare_numbers(C.consensus_prompt(c)) == []
+
+
+def test_宏观报告也进语料库(monkeypatch):
+    """GDP/CPI/PMI 这些读数早就有了，但「政策在往哪个方向走」一句都没有。"""
+    monkeypatch.setattr(R, "search", lambda **k: [])
+    monkeypatch.setattr(R, "search_macro",
+                        lambda **k: [_rep("宏观深度：政策取向展望")])
+    monkeypatch.setattr(R, "fetch_text", lambda r: "政策延续宽松")
+    cp, _ = C.gather(as_of=AS_OF, code="600519")
+    assert len(cp.docs) == 1 and cp.docs[0].text == "政策延续宽松"
+
+
+def test_境外主题的宏观报告排在后面():
+    """「美联储议息」对判断某家 A 股白酒公司帮助有限。"""
+    rs = [_rep("宏观周报：美联储议息前瞻", "2026-09-07"),
+          _rep("宏观深度：国内财政发力路径", "2026-09-06")]
+    assert "国内财政" in sorted(rs, key=C._rank_macro, reverse=True)[0].title

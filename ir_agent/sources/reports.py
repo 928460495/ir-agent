@@ -33,6 +33,7 @@ import json
 import re
 import ssl
 import statistics
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -42,7 +43,12 @@ from ir_agent.sources.external import Document, Tier
 
 _LIST = "https://reportapi.eastmoney.com/report/list"
 _BK = "https://reportapi.eastmoney.com/report/bk?bkCode=016"
+# 宏观研究走另一个端点。list 接口的 qType=3 返回空，jg 接口才有数据。
+_JG = "https://reportapi.eastmoney.com/report/jg"
 _PAGE = "https://data.eastmoney.com/report/info/{code}.html"
+# 宏观研报没有 infoCode，只有 encodeUrl，详情页也是另一条路径。
+_MACRO_PAGE = ("https://data.eastmoney.com/report/"
+               "zw_macresearch.jshtml?encodeUrl={enc}")
 _REF = "https://data.eastmoney.com/report/"
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -99,9 +105,13 @@ class Report:
     # 预测已折算到绝对财年: {2026: EPS, 2027: EPS, ...}
     eps: dict[int, Decimal] = field(default_factory=dict)
     pe: dict[int, Decimal] = field(default_factory=dict)
+    encode_url: str = ""
 
     @property
     def url(self) -> str:
+        if not self.info_code and self.encode_url:
+            return _MACRO_PAGE.format(
+                enc=urllib.parse.quote(self.encode_url, safe=""))
         return _PAGE.format(code=self.info_code)
 
 
@@ -130,7 +140,8 @@ def _row_to_report(row: dict) -> Report | None:
             pe[y + off] = v
 
     return Report(
-        info_code=str(row.get("infoCode", "")),
+        info_code=str(row.get("infoCode", "") or ""),
+        encode_url=str(row.get("encodeUrl", "") or ""),
         title=str(row.get("title", "")).strip(),
         org=str(row.get("orgSName") or row.get("orgName") or "").strip(),
         published=published,
@@ -171,6 +182,29 @@ def search(*, as_of: date, code: str = "", industry_code: str = "",
     return sorted(out, key=lambda r: r.published, reverse=True)
 
 
+def search_macro(*, as_of: date, months: int = 6,
+                 limit: int = MAX_FETCH) -> list[Report]:
+    """宏观研究报告。
+
+    补的是宏观分析里此前完全没有的那一半: GDP/CPI/PMI 这些**读数**接口
+    早就有了，但「这些读数意味着什么、政策在往哪个方向走」一句都没有。
+    读数能定位周期象限，定不出政策取向。
+    """
+    begin = (as_of - timedelta(days=int(months * 30.5))).isoformat()
+    url = (f"{_JG}?pageSize={limit}&beginTime={begin}"
+           f"&endTime={as_of.isoformat()}&pageNo=1&fields=&qType=3")
+    try:
+        payload = json.loads(_get(url))
+    except Exception:
+        return []
+    out = []
+    for row in payload.get("data") or []:
+        r = _row_to_report(row)
+        if r is not None and r.published <= as_of:
+            out.append(r)
+    return sorted(out, key=lambda r: r.published, reverse=True)
+
+
 def fetch_text(report: Report) -> str:
     """取研报正文。取不到返回空串 —— 标题本身仍有价值，不因此丢弃整条。"""
     try:
@@ -189,7 +223,7 @@ def fetch_text(report: Report) -> str:
 
 def to_document(report: Report, text: str, retrieved: date) -> Document:
     return Document(
-        doc_id=report.info_code, url=report.url, title=report.title,
+        doc_id=report.info_code or report.encode_url[:16], url=report.url, title=report.title,
         publisher=report.org, tier=Tier.SELLSIDE,
         published=report.published, retrieved=retrieved,
         text=text or report.title)

@@ -98,6 +98,19 @@ def _load_sections(r):
         return None, f"年报叙述章节（{e.__class__.__name__}: {e}）"
 
 
+def _load_macro_view(r, as_of: date, client, macro_pr: str):
+    """宏观定性: 政策取向与传导路径。补的是读数之外的那一半。"""
+    from ir_agent import macro_view as MV
+
+    if r.corpus is None or not r.corpus.docs:
+        return "", "", "宏观定性（无外部宏观资料，政策取向缺文字依据）"
+    try:
+        view, _ = MV.assess(client, r.corpus, r.ledger, as_of, macro_pr)
+    except Exception as e:                                  # noqa: BLE001
+        return "", "", f"宏观定性（{e.__class__.__name__}: {str(e)[:120]}）"
+    return view.summary(), view.summary(), ""
+
+
 def _load_strategy(r, as_of: date, client, spot=None) -> tuple[str, str, str]:
     """战略分析: 护城河、五力、关键不确定性 → 情景驱动因子。"""
     from ir_agent import strategy
@@ -555,6 +568,10 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     qual_client = make_client(model=model)
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
+    mview_md, mview_pr, mview_err = _load_macro_view(
+        r, as_of, qual_client, macro_pr)
+    if mview_err:
+        skipped.append(mview_err)
     strat_md, strat_pr, strat_err = _load_strategy(r, as_of, qual_client, spot)
     if strat_err:
         skipped.append(strat_err)
@@ -564,7 +581,8 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
 
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, comps_summary=comps_pr,
-        macro_summary=macro_pr, industry_summary=industry_pr,
+        macro_summary=(macro_pr + ("\n\n" + mview_pr if mview_pr else "")),
+        industry_summary=industry_pr,
         strategy_summary=strat_pr, chain_summary=chain_pr,
         consensus_summary=ext_pr)
     cost += getattr(qual_client, "total_cost_usd", 0.0)
@@ -579,7 +597,7 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         (out / "report.md").write_text(r.audit.rendered, encoding="utf-8")
         arts["研究正文"] = str(out / "report.md")
 
-    ctx = {"宏观": macro_md, "商业周期": cycle_md, "折现率输入": capm_md,
+    ctx = {"宏观": macro_md, "宏观定性": mview_md, "商业周期": cycle_md, "折现率输入": capm_md,
            "行业": industry_md, "产业链": chain_md, "可比": comps_md,
            "战略": strat_md, "外部资料": ext_md}
 

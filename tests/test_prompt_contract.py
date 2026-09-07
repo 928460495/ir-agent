@@ -264,3 +264,23 @@ def test_产业链缺规模时的说明安全():
     v = VC.parse("\n".join([f"环节: {r.value} | n | note | 「{q}」"
                             for r in VC.Role]))
     assert_prompt_safe(v.summary(), FactLedger())
+
+
+def test_宏观定性摘要安全():
+    """含交叉印证的矛盾提示 —— 里面绝不能出现利差读数。"""
+    from ir_agent import macro_view as MV
+
+    q = "央行下调政策利率，货币环境延续宽松"
+    v = MV.parse("\n".join([
+        f"政策取向: 宽松 | 「{q}」",
+        f"传导: 政策利率下调 | 收入预期改善→场景恢复 | 利好 | 「{q}」",
+        f"传导: 流动性宽松 | 折现率下行→估值中枢抬升 | 利好 | 「{q}」"]))
+    led = FactLedger()
+    for p_, d in (("2026-09-01", date(2026, 9, 1)),
+                  ("2026-09-05", date(2026, 9, 5))):
+        for k, val in (("rate.cgb_10y", "0.020"), ("rate.cgb_2y", "0.026")):
+            led.put(Fact(key=k, value=D(val), unit="ratio", period=p_,
+                         as_of=d, source_id="t", method=Method.REPORTED))
+    v.conflicts = MV.cross_check(v, led, AS_OF)
+    assert v.conflicts, "用例本身要触发矛盾"
+    assert_prompt_safe(v.summary(), led)
