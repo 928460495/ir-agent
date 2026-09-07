@@ -536,12 +536,26 @@ def _write_and_debate(r, code: str, model: str | None,
         print("多空辩论…", file=sys.stderr)
         d = run_debate(cat, draft=body, client=client, period=r.period)
 
+        note = ""
         if d.upheld_count:
             print(f"回写 {d.upheld_count} 项成立的挑战…", file=sys.stderr)
-            body, _ = revise_from_verdicts(cat, body, d.challenges, client)
+            try:
+                body, _ = revise_from_verdicts(cat, body, d.challenges, client)
+            except RevisionFailed as e:
+                # **回写失败不该毙掉整篇报告。** 正文已通过全部闸门、辩论
+                # 也已留痕，只是某条挑战没能落实到文字上。丢掉全部产出，
+                # 读者既拿不到分析、也看不到那条挑战 —— 反而更不透明。
+                #
+                # 保留未修订稿并**如实标注哪条没落实**: 辩论记录里有完整
+                # 的质疑与裁决，读者可以自己判断。这与「缺什么必须显式说
+                # 出来」是同一条原则。
+                note = (f"辩论回写未完成（{e}）—— "
+                        "正文为**未修订稿**，上述挑战未落实到文字，"
+                        "阅读时请对照 debate.md 自行判断")
+                print(f"回写失败，保留未修订稿：{str(e)[:80]}", file=sys.stderr)
 
-        return body, d.upheld_count, d.summary(), client.total_cost_usd, ""
-    except (AnalystRefused, DebateRefused, RevisionFailed, ClaudeCliError) as e:
+        return body, d.upheld_count, d.summary(), client.total_cost_usd, note
+    except (AnalystRefused, DebateRefused, ClaudeCliError) as e:
         return None, 0, "", client.total_cost_usd, f"{e.__class__.__name__}: {e}"
 
 
@@ -615,9 +629,11 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         strategy_summary=strat_pr, chain_summary=chain_pr,
         consensus_summary=ext_pr)
     cost += getattr(qual_client, "total_cost_usd", 0.0)
-    if err:
+    if err and body is None:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
         skipped.append("研究正文")
+    elif err:
+        skipped.append(err)          # 正文仍在，只是带着未落实的挑战
     if debate_md:
         (out / "debate.md").write_text(debate_md, encoding="utf-8")
         arts["辩论记录"] = str(out / "debate.md")

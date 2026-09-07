@@ -203,3 +203,24 @@ def test_路由到PBROE时必须说明该方法尚未实现():
     assert "PB_ROE" in src, "PB–ROE 路由没有被显式处理"
     assert "尚未实现" in src
     assert "不是「本标的无法估值」" in src
+
+
+def test_回写失败不丢弃正文():
+    """**跑长电第五轮时踩到。** 撰写通过了全部闸门、辩论也跑完并留痕
+    （5 项挑战成立），只是有一条挑战没能落实到文字上，整篇报告就被丢掉了。
+
+    读者因此既拿不到分析、也看不到那条挑战 —— 反而更不透明。正确处置是
+    保留未修订稿并如实标注哪条没落实，辩论记录里有完整的质疑与裁决。
+    """
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full._write_and_debate)
+    assert "except RevisionFailed" in src, "回写失败仍会连正文一起丢掉"
+    assert "未修订稿" in src
+    # RevisionFailed 不应再出现在「整轮放弃」的那个 except 里
+    fatal = src.split("except (")[-1].split(")")[0]
+    assert "RevisionFailed" not in fatal
+
+    run = inspect.getsource(full.run_full)
+    assert "err and body is None" in run, "有正文时不应报「研究正文」缺失"
