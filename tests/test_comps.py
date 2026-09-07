@@ -319,3 +319,61 @@ class Test提示词里的占位符必须能解析:
         led, t = self._setup()
         out = t.for_prompt(ledger=led, as_of=date(2026, 9, 7), spot="2026-09-04")
         assert audit_bare_numbers(out) == []
+
+
+class Test跨模板的可比性:
+    """同业未必同质。拿银行的流动比率和制造业比不是「数值不同」，
+    是**没有可比性** —— 银行根本不区分流动与非流动。"""
+
+    def _table(self, types):
+        from decimal import Decimal as D
+        from ir_agent.comps import CompsRow, build_comps
+        from datetime import date
+        rows = [CompsRow(code=f"00000{i}", name=f"c{i}", period="2024FY",
+                         company_type=t,
+                         metrics={"roe": D("0.1") + D(i) / 100,
+                                  "current_ratio": D(1) + D(i) / 10})
+                for i, t in enumerate(types)]
+        return build_comps("000000", rows, "2024FY", date(2026, 9, 7))
+
+    def test_同质样本全部可比(self):
+        from ir_agent.sources.eastmoney import CompanyType
+        t = self._table([CompanyType.GENERAL] * 3)
+        assert not t.mixed_types
+        assert t.incomparable() == []
+        assert "失去可比性" not in t.summary()
+
+    def test_混入银行时流动比率失去可比性(self):
+        from ir_agent.sources.eastmoney import CompanyType
+        t = self._table([CompanyType.GENERAL, CompanyType.GENERAL,
+                         CompanyType.BANK])
+        assert t.mixed_types
+        assert "current_ratio" in t.incomparable()
+        assert "roe" not in t.incomparable()        # ROE 两类都成立
+        s = t.summary()
+        assert "失去可比性" in s and "流动比率" in s and "BANK" in s
+
+    def test_未标注类型时不做判定(self):
+        """旧调用不带 company_type —— 不应因此报出虚假告警。"""
+        t = self._table([None, None, None])
+        assert not t.mixed_types and t.incomparable() == []
+
+
+def test_可比指标取所有类型的交集():
+    from ir_agent.comps import comparable_metrics
+    from ir_agent.sources.eastmoney import CompanyType
+    g = set(comparable_metrics([CompanyType.GENERAL]))
+    mixed = set(comparable_metrics([CompanyType.GENERAL, CompanyType.BANK]))
+    assert "current_ratio" in g and "current_ratio" not in mixed
+    assert mixed < g
+    assert {"roe", "net_margin", "asset_turnover"} <= mixed
+
+
+def test_标签与量纲统一取自登记表():
+    from decimal import Decimal as D
+    from ir_agent.comps import label, render
+    assert label("current_ratio") == "流动比率"
+    assert label("receivable_days") == "应收账款周转天数"
+    assert render("receivable_days", D("36.5")) == "36.5 天"
+    assert render("roe", D("0.18")) == "18.00%"
+    assert render("current_ratio", D("1.5")) == "1.50x"

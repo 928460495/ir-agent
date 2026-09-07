@@ -167,6 +167,8 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]
     except (IndustryUnavailable, NoComparables) as e:
         return "", "", f"可比分析（{e}）"
 
+    from ir_agent.sources.eastmoney import detect_company_type
+
     def fetch(c: str, period: str, when: date):
         pr = run_pipeline(c, year=int(period[:4]), as_of=when,
                           snapshot_dir=snapshot_dir,
@@ -174,8 +176,10 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]
                           adjudicate_on_conflict=False)
         spot = next((f.period for f in (pr.quotes.facts if pr.quotes else [])
                      if f.key == "market_cap"), None)
-        return {"name": c,
-                "metrics": peer_metrics_from_ledger(pr.ledger, period, when, spot)}
+        ct = detect_company_type(c, market_of(c))
+        return {"name": c, "company_type": ct,
+                "metrics": peer_metrics_from_ledger(
+                    pr.ledger, period, when, spot, company_type=ct)}
 
     print(f"可比分析：{len(sel.chosen)} 家…", file=sys.stderr)
     rows, excluded = [], []
@@ -183,9 +187,12 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]
                  if f.key == "market_cap"), None)
     # 标的自身直接用主流程已有的账本，不重复取数
     from ir_agent.comps import CompsRow
+    target_ct = detect_company_type(code, market_of(code))
     rows.append(CompsRow(code=code, name=code, period=r.period,
-                         metrics=peer_metrics_from_ledger(r.ledger, r.period,
-                                                          as_of, spot)))
+                         company_type=target_ct,
+                         metrics=peer_metrics_from_ledger(
+                             r.ledger, r.period, as_of, spot,
+                             company_type=target_ct)))
     for peer in sel.chosen:
         row, exc = fetch_row(peer.code, r.period, as_of, fetch)
         (rows.append(row) if row else excluded.append(exc))

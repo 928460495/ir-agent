@@ -20,28 +20,45 @@ from decimal import Decimal
 
 MIN_NAMES = 3          # 含目标在内；两家公司的「分位数」没有意义
 
-# 指标的显示口径。量纲不同，混着打没法读。
-_RATIO = {"roe", "net_margin", "gross_margin"}
-_MULTIPLE = {"pb", "pe_ttm", "asset_turnover", "equity_multiplier"}
-_LABEL = {
-    "pb": "PB", "pe_ttm": "PE(TTM)", "roe": "ROE",
-    "net_margin": "净利率", "gross_margin": "毛利率",
-    "asset_turnover": "总资产周转率", "equity_multiplier": "权益乘数",
-}
+# 显示口径与标签一律取自指标登记表 —— 早期这里各维护一份，
+# 新增指标要改三处，漏一处就显示成裸 key 或错误量纲。
+_LEGACY_LABEL = {"pb": "PB", "pe_ttm": "PE(TTM)", "roe": "ROE"}
 
 
 def render(metric: str, v: Decimal | None) -> str:
+    from ir_agent.metrics import BY_KEY
+
     if v is None:
         return "—"
-    if metric in _RATIO:
+    unit = BY_KEY[metric].unit if metric in BY_KEY else "x"
+    if unit == "ratio":
         return f"{v * 100:.2f}%"
-    if metric in _MULTIPLE:
+    if unit == "x":
         return f"{v:.2f}x"
+    if unit == "天":
+        return f"{v:,.1f} 天"
     return f"{v:,.2f}"
 
 
 def label(metric: str) -> str:
-    return _LABEL.get(metric, metric)
+    from ir_agent.metrics import BY_KEY
+
+    if metric in BY_KEY:
+        return BY_KEY[metric].label
+    return _LEGACY_LABEL.get(metric, metric)
+
+
+def comparable_metrics(types) -> list[str]:
+    """对样本中**所有**公司类型都适用的指标。
+
+    同业集合未必同质 —— 申万二级下也可能混入报表模板不同的公司。
+    拿银行的流动比率去和制造业比不是「数值不同」，是**没有可比性**:
+    银行根本不区分流动与非流动。因此只比较交集，其余在摘要里说明为何不比。
+    """
+    from ir_agent.metrics import REGISTRY
+
+    ts = set(types)
+    return [m.key for m in REGISTRY if ts <= m.applies_to]
 
 
 class InsufficientPeers(Exception):
@@ -73,6 +90,9 @@ class CompsRow:
     name: str
     period: str
     metrics: dict[str, Decimal]
+    # 报表模板类型。同业未必同质 —— 混入不同模板的公司时，
+    # 只有对所有类型都适用的指标才有可比性。
+    company_type: object | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +126,24 @@ class CompsTable:
     def target_row(self) -> CompsRow:
         return next(r for r in self.rows if r.code == self.target)
 
+    @property
+    def company_types(self) -> set:
+        return {r.company_type for r in self.rows if r.company_type is not None}
+
+    @property
+    def mixed_types(self) -> bool:
+        return len(self.company_types) > 1
+
+    def incomparable(self) -> list[str]:
+        """样本混入不同报表模板时，哪些指标失去可比性。"""
+        if not self.mixed_types:
+            return []
+        from ir_agent.comps import comparable_metrics
+
+        ok = set(comparable_metrics(self.company_types))
+        present = {k for r in self.rows for k in r.metrics}
+        return sorted(present - ok)
+
     def _values(self, metric: str) -> list[Decimal]:
         return [r.metrics[metric] for r in self.rows if metric in r.metrics]
 
@@ -126,23 +164,51 @@ class CompsTable:
         mid = len(v) // 2
         return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
 
+    def _grouped(self, keys: list[str]) -> list[tuple[str, list[str]]]:
+        """按 FINC6600 的五类分组。字母序读不出结构 —— 课程要的是
+        「每类至少两个指标」，分组才看得出哪一类薄弱。"""
+        from ir_agent.metrics import BY_KEY, Category
+
+        buckets: dict = {c: [] for c in Category}
+        loose: list[str] = []
+        for k in keys:
+            (buckets[BY_KEY[k].category] if k in BY_KEY else loose).append(k)
+        out = [(c.value, ks) for c, ks in buckets.items() if ks]
+        if loose:
+            out.append(("其他", loose))
+        return out
+
     def summary(self, metrics: list[str] | None = None) -> str:
         keys = metrics or sorted({k for r in self.rows for k in r.metrics})
         lines = [f"可比分析 {self.target} · {self.period} @ {self.as_of.isoformat()}"
                  f"（{len(self.rows)} 家）"]
+        for cat, ks in self._grouped(keys):
+            lines.append(f"  ── {cat}")
+            lines.extend(self._metric_lines(ks))
+        bad = self.incomparable()
+        if bad:
+            names = "、".join(label(k) for k in bad)
+            kinds = "、".join(sorted(t.name for t in self.company_types))
+            lines.append(
+                f"  ⚠ 样本混入不同报表模板（{kinds}）—— 以下指标失去可比性，"
+                f"不应横向比较：{names}")
+        for e in self.excluded:
+            lines.append(f"  ✗ 已排除 {e.name}({e.code}): {e.reason}")
+        return "\n".join(lines)
+
+    def _metric_lines(self, keys: list[str]) -> list[str]:
+        lines = []
         for k in keys:
             pct, med = self.percentile(k), self.median(k)
             tv = self.target_row.metrics.get(k)
             if tv is None:
-                lines.append(f"  – {label(k):8} 目标缺该指标")
+                lines.append(f"    {label(k):12} 目标缺该指标")
                 continue
             pos = f"{pct:.0f} 分位" if pct is not None else "样本不足"
-            lines.append(f"  · {label(k):8} 本司 {render(k, tv):>9}"
-                         f"  中位数 {render(k, med):>9}  {pos:>7}"
+            lines.append(f"    {label(k):12} 本司 {render(k, tv):>11}"
+                         f"  中位数 {render(k, med):>11}  {pos:>7}"
                          f"  覆盖 {self.coverage(k)}/{len(self.rows)}")
-        for e in self.excluded:
-            lines.append(f"  ✗ 已排除 {e.name}({e.code}): {e.reason}")
-        return "\n".join(lines)
+        return lines
 
 
     def for_prompt(self, ledger=None, as_of=None,
@@ -236,6 +302,14 @@ def build_comps(
 # 后者是故障。混为一谈会让故障伪装成正常，正是 SkipReason 那套分类
 # 要解决的同一类问题。
 
+def all_metrics() -> tuple[str, ...]:
+    """全部登记指标。不再硬编码七个 —— 登记表是唯一来源。"""
+    from ir_agent.metrics import REGISTRY
+
+    return tuple(m.key for m in REGISTRY)
+
+
+# 兼容旧调用
 METRICS = ("pb", "pe_ttm", "roe", "net_margin", "gross_margin",
            "asset_turnover", "equity_multiplier")
 
@@ -265,16 +339,34 @@ def fetch_row(
                                "返回空结果")
 
     return CompsRow(code=code, name=data.get("name", code), period=period,
-                    metrics=data["metrics"]), None
+                    metrics=data["metrics"],
+                    company_type=data.get("company_type")), None
 
 
 def peer_metrics_from_ledger(ledger, period: str, as_of: date,
-                             spot: str | None = None) -> dict[str, Decimal]:
-    """从事实账本里取可比指标。取不到的指标直接缺失，不补默认值。"""
-    from ir_agent.ledger import LookAheadError
+                             spot: str | None = None,
+                             company_type=None,
+                             metrics=None) -> dict[str, Decimal]:
+    """从事实账本里取可比指标。取不到的指标直接缺失，不补默认值。
 
+    **先算再取**: 五类比率是派生量，账本里原本没有。早期这里只取七个
+    预先算好的指标，新增的流动性/偿债/效率指标即使字段齐全也拿不到。
+
+    company_type 决定算哪些 —— 银行不该出现流动比率，哪怕分母凑得出来。
+    """
+    from ir_agent.ledger import LookAheadError
+    from ir_agent.operators import ratios
+    from ir_agent.sources.eastmoney import CompanyType
+
+    ct = company_type or CompanyType.GENERAL
+    try:
+        ratios.compute(ledger, period, as_of, ct, spot=spot)
+    except Exception:                                # noqa: BLE001
+        pass                                         # 算不出就退回只取已有的
+
+    keys = metrics if metrics is not None else all_metrics()
     out: dict[str, Decimal] = {}
-    for key in METRICS:
+    for key in keys:
         # 倍数挂在即期期间上，基本面指标挂在会计期上
         per = spot if key in ("pb", "pe_ttm") and spot else period
         try:
@@ -316,7 +408,10 @@ def comps_facts(table: "CompsTable", ledger, source_id: str | None = None) -> li
             put(f"{metric}.percentile", pct, "分位")
         med = table.median(metric)
         if med is not None:
-            put(f"{metric}.peer_median", med,
-                "ratio" if metric in _RATIO else "x")
+            # 中位数的量纲必须跟原指标一致 —— 天数写成 x、比率写成 x，
+            # 渲染出来都是错的。统一取自登记表。
+            from ir_agent.metrics import BY_KEY
+            unit = BY_KEY[metric].unit if metric in BY_KEY else "x"
+            put(f"{metric}.peer_median", med, unit)
 
     return out
