@@ -94,13 +94,60 @@ def test_增速与名义GDP相当判为成熟期():
     assert lifecycle(hist, hhi=D("0.3"), gdp_cagr=GDP).stage is Lifecycle.MATURE
 
 
-def test_增长快但盈利下滑判为洗牌期():
-    """CFA 用盈利趋势区分 growth（改善）与 shakeout（下滑）。"""
+def test_增长快于经济时不判洗牌期():
+    """**这条测试原先断言的是错误行为。** 它要求营收 CAGR 30%、两倍于名义
+    GDP 的行业，因为利润率下滑就判「洗牌期」，理由文字还写着「增长放缓」——
+    用数据明确否定的判据去支撑分类。CFA 的 shakeout 首要特征就是增长放缓。
+
+    盈利下滑是值得写出来的张力（多为扩产期产能集中释放），但它不改变阶段：
+    阶段由增长轨迹定义。"""
     hist = {f"202{i}FY": D(100) * D("1.3") ** i for i in range(4)}
     m = {f"202{i}FY": D("0.30") - D(i) / 100 for i in range(4)}
     v = lifecycle(hist, hhi=D("0.1"), gdp_cagr=GDP, margin_by_period=m)
+    assert v.stage is Lifecycle.GROWTH
+    assert "背离" in v.reason and "转入洗牌期" in v.reason
+    assert "增长放缓" not in v.reason
+
+
+def test_增长慢于经济且盈利下滑才是洗牌期():
+    """这一支两条判据都成立，判洗牌期没有矛盾。"""
+    hist = {f"202{i}FY": D(100) * D("1.01") ** i for i in range(4)}
+    m = {f"202{i}FY": D("0.30") - D(i) / 100 for i in range(4)}
+    v = lifecycle(hist, hhi=D("0.1"), gdp_cagr=GDP, margin_by_period=m)
     assert v.stage is Lifecycle.SHAKEOUT
-    assert "盈利能力同时下滑" in v.reason
+
+
+# ── 利润率趋势: 首末两点不足以判趋势 ─────────────────────────
+
+def test_非单调的利润率不算可靠趋势():
+    """实测封测行业净利率 6.73→11.33→7.92→3.75→4.47→4.92:
+    首末比较判「下滑」，而最近三年是连续回升 —— 2021 的行业高点被当成了
+    起点。结论完全取决于起点落在周期的哪一段。"""
+    from ir_agent.industry_profile import margin_trend
+
+    m = {f"20{20 + i}FY": D(v) for i, v in enumerate(
+        ["0.0673", "0.1133", "0.0792", "0.0375", "0.0447", "0.0492"])}
+    txt, reliable = margin_trend(m)
+    assert reliable is False
+    assert "回升" in txt and "期末低于期初" in txt
+
+
+def test_单调序列的方向可靠():
+    from ir_agent.industry_profile import margin_trend
+
+    down = {f"202{i}FY": D("0.30") - D(i) / 100 for i in range(4)}
+    up = {f"202{i}FY": D("0.10") + D(i) / 100 for i in range(4)}
+    assert margin_trend(down) == ("持续下滑", True)
+    assert margin_trend(up) == ("持续改善", True)
+
+
+def test_不可靠的下滑不改变阶段判定():
+    """拿一个取决于起点选择的信号去推翻增速给出的判定，是让噪声压过证据。"""
+    hist = {f"202{i}FY": D(100) * D("1.01") ** i for i in range(4)}
+    m = {"2020FY": D("0.30"), "2021FY": D("0.10"),
+         "2022FY": D("0.20"), "2023FY": D("0.25")}   # 非单调，期末低于期初
+    v = lifecycle(hist, hhi=D("0.1"), gdp_cagr=GDP, margin_by_period=m)
+    assert v.stage is Lifecycle.MATURE
 
 
 def test_无GDP参照时不判成长或成熟():

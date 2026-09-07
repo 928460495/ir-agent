@@ -155,6 +155,37 @@ class LifecycleView:
         return f"{self.stage.value} —— {self.reason}"
 
 
+def margin_trend(margin_by_period: dict[str, Decimal] | None
+                 ) -> tuple[str, bool]:
+    """行业整体利润率的走向，返回 (描述, 是否可靠)。
+
+    **首末两点比较不足以判断趋势。** 序列非单调时，结论完全取决于起点落在
+    周期的哪一段 —— 强周期行业尤其如此。实测封测行业净利率
+    6.73→11.33→7.92→3.75→4.47→4.92: 首末比较判「下滑」，而最近三年是
+    连续回升，2021 的行业高点被当成了起点。
+
+    与 ratios.Trend.direction 同一条判准: 单调序列的方向可靠，
+    非单调序列只能说「首末孰高孰低」，不能当趋势用。
+    """
+    if not margin_by_period or len(margin_by_period) < 2:
+        return "", False
+    vals = [margin_by_period[p] for p in sorted(margin_by_period)]
+    diffs = [b - a for a, b in zip(vals, vals[1:])]
+    if all(d > 0 for d in diffs):
+        return "持续改善", True
+    if all(d < 0 for d in diffs):
+        return "持续下滑", True
+
+    # 非单调: 报出最近一段的方向，并声明首末比较不可靠
+    run = 1
+    while run < len(diffs) and (diffs[-run] > 0) == (diffs[-1] > 0):
+        run += 1
+    recent = "回升" if diffs[-1] > 0 else ("回落" if diffs[-1] < 0 else "持平")
+    ends = "低于" if vals[-1] < vals[0] else ("高于" if vals[-1] > vals[0]
+                                              else "持平于")
+    return (f"波动（近 {run} 期{recent}，期末{ends}期初）", False)
+
+
 def lifecycle(revenue_by_period: dict[str, Decimal],
               hhi: Decimal | None,
               gdp_cagr: Decimal | None = None,
@@ -184,14 +215,12 @@ def lifecycle(revenue_by_period: dict[str, Decimal],
     vol = ((sum((y - mean) ** 2 for y in yoys) / len(yoys)).sqrt()
            if len(yoys) >= 2 else None)
 
-    # 利润率趋势 —— CFA 用它区分 growth（改善）与 shakeout（下滑）
-    trend = ""
-    improving = deteriorating = False
-    if margin_by_period and len(margin_by_period) >= 2:
-        mp = sorted(margin_by_period)
-        delta = margin_by_period[mp[-1]] - margin_by_period[mp[0]]
-        improving, deteriorating = delta > 0, delta < 0
-        trend = "改善" if improving else ("下滑" if deteriorating else "持平")
+    # 利润率趋势 —— CFA 用它区分 growth（改善）与 shakeout（下滑）。
+    # **只有可靠（单调）的方向才允许改变阶段判定**: 拿一个取决于起点选择的
+    # 信号去推翻增速给出的判定，是让噪声压过证据。
+    trend, reliable = margin_trend(margin_by_period)
+    improving = reliable and trend == "持续改善"
+    deteriorating = reliable and trend == "持续下滑"
 
     consolidated = hhi is not None and hhi >= HHI_MODERATE
 
@@ -201,12 +230,16 @@ def lifecycle(revenue_by_period: dict[str, Decimal],
         tail = ("总量收缩" if cagr < 0 else
                 "缺名义 GDP 参照，无法判断增速是快于还是慢于经济")
     elif cagr > gdp_cagr + GDP_TOLERANCE:
+        # **增速快于经济时不判洗牌期。** CFA 的 shakeout 首要特征是
+        # 「增长放缓」；营收增速两倍于名义 GDP 却说它增长放缓，是用数据
+        # 明确否定的判据去支撑分类。盈利下滑是值得写出来的张力，
+        # 但它不改变阶段 —— 阶段由增长轨迹定义。
         stage = Lifecycle.GROWTH
         tail = "增速显著快于名义 GDP，行业在扩大其占经济的份额"
         if deteriorating:
-            stage, tail = Lifecycle.SHAKEOUT, (
-                "增速虽快于名义 GDP，但盈利能力同时下滑 —— "
-                "符合洗牌期「增长放缓、竞争激烈、盈利下滑」的特征")
+            tail += ("；但盈利能力持续下滑，与成长期通常「盈利改善」的特征"
+                     "背离 —— 多为扩产期产能集中释放所致，"
+                     "若增速随后放缓则可能转入洗牌期")
     elif cagr < 0:
         stage = Lifecycle.DECLINE
         tail = "总量负增长"
@@ -214,6 +247,8 @@ def lifecycle(revenue_by_period: dict[str, Decimal],
             stage = Lifecycle.SHAKEOUT
             tail += "但格局尚未整合 —— 更接近洗牌期而非衰退期"
     elif cagr < gdp_cagr - GDP_TOLERANCE:
+        # 这一支的增速确实慢于经济，「增长放缓 + 盈利下滑」两条都成立，
+        # 判洗牌期没有矛盾。
         stage = Lifecycle.SHAKEOUT if deteriorating else Lifecycle.MATURE
         tail = "增速显著慢于名义 GDP" + (
             "且盈利能力下滑" if deteriorating else
