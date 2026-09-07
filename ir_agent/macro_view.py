@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
+from ir_agent.lineparse import keyed
 from ir_agent.ledger import FactLedger
 from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -47,8 +48,8 @@ class Impact(str, Enum):
 
 MIN_CHANNELS = 2
 
-_STANCE = re.compile(r"^\s*政策取向\s*[:：]\s*(.+)$", re.MULTILINE)
-_CHANNEL = re.compile(r"^\s*传导\s*[:：]\s*(.+)$", re.MULTILINE)
+_STANCE = keyed("政策取向")
+_CHANNEL = keyed("传导")
 _QUOTE = re.compile(r"[「\"'“](.+?)[」\"'”]", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 

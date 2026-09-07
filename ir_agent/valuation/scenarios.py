@@ -33,6 +33,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
+from ir_agent.lineparse import keyed
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.valuation.assumptions import Assumptions
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -60,7 +61,7 @@ MODELLABLE = {
 ADVERSE = {"下调": -1, "调低": -1, "降低": -1, "下降": -1,
            "上调": +1, "调高": +1, "提高": +1, "上升": +1}
 
-_SHIFT = re.compile(r"^\s*情景\s*[:：]\s*(.+)$", re.MULTILINE)
+_SHIFT = keyed("情景")
 _QUOTE = re.compile(r"[「\"'“](.+?)[」”\"']", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?%?")

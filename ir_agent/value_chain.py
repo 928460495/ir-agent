@@ -31,6 +31,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
+from ir_agent.lineparse import keyed
 from ir_agent.ledger import Fact, FactLedger, LookAheadError, Method
 from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -65,9 +66,9 @@ BARGAIN_ANCHORS: dict[Role, tuple[str, bool]] = {
 
 MEDIAN = Decimal("0.5")   # 唯一的分界线: 比典型同业更好还是更差
 
-_LINK = re.compile(r"^\s*环节\s*[:：]\s*(.+)$", re.MULTILINE)
-_POWER = re.compile(r"^\s*议价\s*[:：]\s*(.+)$", re.MULTILINE)
-_SIZE = re.compile(r"^\s*行业规模\s*[:：]\s*(.+)$", re.MULTILINE)
+_LINK = keyed("环节")
+_POWER = keyed("议价")
+_SIZE = keyed("行业规模")
 _QUOTE = re.compile(r"[「\"'“](.+?)[」\"'”]", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")

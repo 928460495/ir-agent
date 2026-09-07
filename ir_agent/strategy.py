@@ -28,6 +28,7 @@ from datetime import date
 from decimal import Decimal
 from enum import Enum
 
+from ir_agent.lineparse import keyed
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -271,9 +272,9 @@ PROMPT = """基于下面的年报原文与账本事实，做战略分析。
 {evidence}
 """
 
-_MOAT = re.compile(r"^\s*护城河\s*[:：]\s*(.+)$", re.MULTILINE)
-_FORCE = re.compile(r"^\s*五力\s*[:：]\s*(.+)$", re.MULTILINE)
-_UNCERT = re.compile(r"^\s*不确定性\s*[:：]\s*(.+)$", re.MULTILINE)
+_MOAT = keyed("护城河")
+_FORCE = keyed("五力")
+_UNCERT = keyed("不确定性")
 _QUOTE = re.compile(r"[「\"'“](.+?)[」\"'”]", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 
