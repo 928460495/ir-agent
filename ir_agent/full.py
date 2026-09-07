@@ -60,6 +60,79 @@ def _load_macro(r, as_of: date) -> tuple[str, str, str]:
     return snap.describe(), snap.for_prompt(), ""
 
 
+def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
+    """公司之外的资料入语料库。返回 (给人看的, 给模型看的, 失败说明)。
+
+    此前宏观、行业、战略三块的资料全部来自数字接口与公司自己的年报 ——
+    没有一句话来自公司和交易所之外。取不到时如实说「外部视角缺位」，
+    不静默降级: 读者会以为那些判断有外部印证。
+    """
+    from ir_agent import corpus as C
+
+    try:
+        cp, cs = C.gather(as_of=as_of, code=code)
+    except Exception as e:                                  # noqa: BLE001
+        return "", "", f"外部资料（{e.__class__.__name__}: {e}）"
+    r.corpus, r.consensus = cp, cs
+    if cs is not None and cs.has_data():
+        from ir_agent.sources.reports import consensus_facts
+        for f in consensus_facts(cs):
+            r.ledger.put(f)
+    md = cp.summary() + "\n\n" + C.consensus_md(cs)
+    if not cp.docs:
+        return md, "", "外部资料（未取到任何券商研报，外部视角缺位）"
+    return md, C.consensus_prompt(cs), ""
+
+
+def _load_sections(r):
+    """年报叙述章节 —— 战略与产业链分析的证据基础。"""
+    from ir_agent.sources.annual_sections import extract
+    from ir_agent.sources.annual_pdf import _download
+
+    if not r.annual_url:
+        return None, "年报叙述章节（未找到年报公告）"
+    try:
+        data = _download(r.annual_url, Path("snapshots") / "pdf")
+        return extract(data, code=r.code), ""
+    except Exception as e:                                  # noqa: BLE001
+        return None, f"年报叙述章节（{e.__class__.__name__}: {e}）"
+
+
+def _load_strategy(r, as_of: date, client, spot=None) -> tuple[str, str, str]:
+    """战略分析: 护城河、五力、关键不确定性 → 情景驱动因子。"""
+    from ir_agent import strategy
+
+    sections, sec_err = _load_sections(r)
+    if sections is None and r.corpus is None:
+        return "", "", sec_err or "战略分析（无任何定性证据）"
+    try:
+        view, _ = strategy.assess(client, r.ledger, r.period, as_of,
+                                  sections, spot, corpus=r.corpus)
+    except Exception as e:                                  # noqa: BLE001
+        return "", "", f"战略分析（{e.__class__.__name__}: {str(e)[:120]}）"
+    r.sections = sections
+    return view.summary(), view.summary(), sec_err
+
+
+def _load_value_chain(r, as_of: date, client) -> tuple[str, str, str]:
+    """产业链与行业真实规模。"""
+    from ir_agent import value_chain as VC
+
+    sections = getattr(r, "sections", None)
+    if r.corpus is None and sections is None:
+        return "", "", "产业链分析（无任何资料）"
+    try:
+        view, _ = VC.analyse(client, r.corpus, r.ledger, r.period, as_of,
+                             sections)
+    except Exception as e:                                  # noqa: BLE001
+        return "", "", f"产业链分析（{e.__class__.__name__}: {str(e)[:120]}）"
+    if view.size:
+        r.ledger.put(view.size.to_fact(
+            r.corpus.docs[0].doc_id if r.corpus and r.corpus.docs else "ext",
+            as_of))
+    return view.summary(), view.summary(), ""
+
+
 def _load_cycle(r, as_of: date) -> tuple[str, str, str]:
     """商业周期定位。必须在宏观与利率都入账之后调用。"""
     from ir_agent import cycle
@@ -399,7 +472,8 @@ def _macro_periods(r) -> tuple[str, ...]:
 
 def _write_and_debate(r, code: str, model: str | None,
                       macro_summary: str = "", industry_summary: str = "",
-                      comps_summary: str = ""):
+                      comps_summary: str = "", strategy_summary: str = "",
+                      chain_summary: str = "", consensus_summary: str = ""):
     """撰写 → 辩论 → 回写。返回 (正文, 成立挑战数, 辩论摘要, 开销, 失败说明)。"""
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
@@ -412,7 +486,10 @@ def _write_and_debate(r, code: str, model: str | None,
         body, _ = write_body(cat, client, code=code, period=r.period,
                              comps_summary=comps_summary or None,
                              macro_summary=macro_summary or None,
-                             industry_summary=industry_summary or None)
+                             industry_summary=industry_summary or None,
+                             strategy_summary=strategy_summary or None,
+                             chain_summary=chain_summary or None,
+                             consensus_summary=consensus_summary or None)
 
         print("多空辩论…", file=sys.stderr)
         d = run_debate(cat, draft=body, client=client, period=r.period)
@@ -469,9 +546,28 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     if comps_err:
         skipped.append(comps_err)
 
+    # 外部资料必须在战略与产业链之前 —— 它们的定性判断要引用其中的原文。
+    ext_md, ext_pr, ext_err = _load_external(code, r, as_of)
+    if ext_err:
+        skipped.append(ext_err)
+
+    # 战略与产业链要调模型，因此共用一个 client 以便统计开销。
+    qual_client = make_client(model=model)
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    strat_md, strat_pr, strat_err = _load_strategy(r, as_of, qual_client, spot)
+    if strat_err:
+        skipped.append(strat_err)
+    chain_md, chain_pr, chain_err = _load_value_chain(r, as_of, qual_client)
+    if chain_err:
+        skipped.append(chain_err)
+
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, comps_summary=comps_pr,
-        macro_summary=macro_pr, industry_summary=industry_pr)
+        macro_summary=macro_pr, industry_summary=industry_pr,
+        strategy_summary=strat_pr, chain_summary=chain_pr,
+        consensus_summary=ext_pr)
+    cost += getattr(qual_client, "total_cost_usd", 0.0)
     if err:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
         skipped.append("研究正文")
@@ -484,7 +580,8 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         arts["研究正文"] = str(out / "report.md")
 
     ctx = {"宏观": macro_md, "商业周期": cycle_md, "折现率输入": capm_md,
-           "行业": industry_md, "可比": comps_md}
+           "行业": industry_md, "产业链": chain_md, "可比": comps_md,
+           "战略": strat_md, "外部资料": ext_md}
 
     # ── 估值 ──────────────────────────────────────────────
     # 人工审核门已取消，假设改由模型自主决定。代码仍然把能查的都查一遍

@@ -304,3 +304,42 @@ def industry_code_of(reports: list[Report]) -> tuple[str, str]:
         return "", ""
     name = max(set(names), key=names.count)
     return industry_map().get(name, ""), name
+
+
+# 一致预期在账本里的键前缀。**这些事实禁止作为估值假设的依据** ——
+# 见 valuation.autodecide 的守卫。它们是对照物，不是论据。
+CONSENSUS_PREFIX = "consensus."
+
+
+def consensus_facts(c: Consensus, source_id: str = "eastmoney_report"):
+    """一致预期落账本，好让正文能用占位符引用它。
+
+    **不落账本就没法在正文里提。** 提示词里出现裸数字、正文里却禁止引用，
+    是自相矛盾的契约 —— 这一点此前踩过八次。
+
+    as_of 取分析时点而非某篇研报的发布日: 窗口内的中位数只有在该时点
+    才算得出来，用任何一篇研报的日期都会声称它比实际更早可知。
+
+    方法记为 REPORTED —— 这些数字是券商实际报出来的，不是估算；
+    「不该拿它当论据」是**用途**上的限制，不是可靠性上的。
+    """
+    from ir_agent.ledger import Fact, Method
+
+    out = []
+
+    def put(key, value, unit, period):
+        out.append(Fact(key=key, value=Decimal(str(value)), unit=unit,
+                        period=period, as_of=c.as_of, source_id=source_id,
+                        method=Method.REPORTED))
+
+    for y, e in c.eps.items():
+        p = f"{y}FY"
+        put("consensus.eps", e.median, "currency", p)
+        put("consensus.eps_low", e.low, "currency", p)
+        put("consensus.eps_high", e.high, "currency", p)
+        put("consensus.brokers", e.n, "count", p)
+    for y, (prev, now) in c.drift.items():
+        if prev.median:
+            put("consensus.eps_revision",
+                (now.median - prev.median) / prev.median, "ratio", f"{y}FY")
+    return out

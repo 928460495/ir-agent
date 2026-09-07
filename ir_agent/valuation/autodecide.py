@@ -169,6 +169,20 @@ def check(values: dict, bases: dict, *, ledger, body: str, as_of: date,
             "WACC 的依据只能是正文原话 —— 没有人工把关时，"
             "折现率的理由必须写在读者看得到的地方，而不是 YAML 字段里")
 
+    # **卖方一致预期不得作为本模型假设的依据。**
+    # 它可以出现在正文里作对照（因此在账本中、可用占位符引用），但拿
+    # 券商的 EPS 预测去论证自己的增长率，结论绕一圈回到起点，还平白多了
+    # 一层「有依据」的外衣 —— 那不是研究。
+    from ir_agent.sources.reports import CONSENSUS_PREFIX
+
+    for name, bs in bases.items():
+        for b in bs:
+            if b.kind is BasisKind.FACT and CONSENSUS_PREFIX in b.ref:
+                raise AutoDecideFailed(
+                    f"{name} 的依据引用了卖方一致预期 {b.ref} —— "
+                    "一致预期只能作为本报告结论的对照，不能作为假设的来源。"
+                    "请给出独立的理由。")
+
     flat = [b for bs in bases.values() for b in bs]
     problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
     if problems:

@@ -122,3 +122,59 @@ def test_无券商跟踪时语料库为空而非报错(monkeypatch):
     cp, cs = C.gather(as_of=AS_OF, code="000001")
     assert cp.docs == [] and cs is None
     assert "无" in cp.summary()
+
+
+# ── 一致预期: 可引用，但不可作依据 ───────────────────────────
+
+def test_一致预期落账本才能被正文引用():
+    """不落账本就没法在正文里提。提示词里出现裸数字、正文里却禁止引用，
+    是自相矛盾的契约。"""
+    from ir_agent.ledger import Method
+    c = R.Consensus(as_of=AS_OF, window_days=180, n_reports=42,
+                    eps={2026: R.Estimate(2026, 42, D("68.43"), D("65.77"),
+                                          D("77.75"))})
+    fs = {f.key: f for f in R.consensus_facts(c)}
+    assert fs["consensus.eps"].value == D("68.43")
+    assert fs["consensus.brokers"].value == D("42")
+    assert all(f.period == "2026FY" for f in fs.values())
+    # 券商实际报出来的数字，不是估算 —— 「不该当论据」是用途限制
+    assert fs["consensus.eps"].method is Method.REPORTED
+
+
+def test_一致预期的as_of是分析时点():
+    """窗口内的中位数只有在该时点才算得出来，用某篇研报的日期会声称
+    它比实际更早可知。"""
+    c = R.Consensus(as_of=AS_OF, window_days=180,
+                    eps={2026: R.Estimate(2026, 3, D("68"), D("65"), D("70"))})
+    assert all(f.as_of == AS_OF for f in R.consensus_facts(c))
+
+
+def test_修正幅度也落账本():
+    c = R.Consensus(as_of=AS_OF, window_days=180,
+                    eps={2026: R.Estimate(2026, 2, D("68"), D("66"), D("70"))},
+                    drift={2026: (R.Estimate(2026, 5, D("85"), D("80"), D("90")),
+                                  R.Estimate(2026, 2, D("68"), D("66"), D("70")))})
+    rev = next(f for f in R.consensus_facts(c)
+               if f.key == "consensus.eps_revision")
+    assert rev.value == (D("68") - D("85")) / D("85")
+
+
+def test_一致预期不得作为估值假设的依据():
+    """拿券商的 EPS 预测论证自己的增长率，结论绕一圈回到起点。"""
+    from ir_agent.ledger import FactLedger
+    from ir_agent.valuation.autodecide import AutoDecideFailed, check
+    from ir_agent.valuation.basis import Basis
+
+    with pytest.raises(AutoDecideFailed, match="一致预期"):
+        check({"terminal_growth": D("0.02"), "wacc": D("0.09")},
+              {"wacc": [Basis.report("原话")],
+               "terminal_growth": [Basis.fact("[[consensus.eps@2026FY]]")]},
+              ledger=FactLedger(), body="原话", as_of=AS_OF, ceiling=None)
+
+
+def test_给模型的一致预期只有占位符():
+    from ir_agent.citation import audit_bare_numbers
+    c = R.Consensus(as_of=AS_OF, window_days=180, n_reports=42,
+                    eps={2026: R.Estimate(2026, 42, D("68.43"), D("65.77"),
+                                          D("77.75"))})
+    assert audit_bare_numbers(C.consensus_prompt(c)) == []

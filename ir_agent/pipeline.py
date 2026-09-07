@@ -91,6 +91,9 @@ class ResearchRun:
     cross: object = None            # CrossReport: 各源独立勾稽
     verdicts: dict = None           # {字段: Verdict} 年报原文裁定
     skips: object = None            # SkipLog: 按原因分类
+    annual_url: str = ""            # 年报 PDF，战略/产业链要从中抽叙述章节
+    corpus: object = None           # Corpus: 公司之外的资料
+    consensus: object = None        # Consensus: 卖方一致预期（仅作对照）
 
     def __post_init__(self) -> None:
         if self.skips is None:
@@ -320,9 +323,15 @@ def run(
     # 2b) 本期存在分歧时，用年报原文裁定。
     #     年报动辄数百页数 MB，只在真的有分歧时才下载。
     verdicts: dict = {}
+    # 年报 URL 与「是否发生分歧」无关: 分歧裁定用它取数字，战略与产业链
+    # 分析用它取叙述章节。此前只在有分歧时才找，导致多数公司拿不到年报
+    # 原文 —— 战略分析因此无据可依。
+    annual_ann = _find_annual_report(anns, year) if period_suffix == "FY" else None
+    annual_url = annual_ann.url if annual_ann is not None else ""
+
     if adjudicate_on_conflict and fin.has_blocking_disagreement(period) \
             and period_suffix == "FY":
-        annual = _find_annual_report(anns, year)
+        annual = annual_ann
         if annual is None:
             warnings.append(f"{period} 存在两源分歧，但未找到 {year} 年报公告，无法裁定。")
         else:
@@ -439,6 +448,7 @@ def run(
     return ResearchRun(code=code, as_of=as_of, period=period, ledger=led,
                        store=store, reconcile=rec, audit=aud, draft=draft,
                        financials=fin, quotes=quote_res, skips=skips,
-                       cross=xr, warnings=warnings, verdicts=verdicts)
+                       cross=xr, warnings=warnings, verdicts=verdicts,
+                       annual_url=annual_url)
 
 

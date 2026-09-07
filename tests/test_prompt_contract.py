@@ -198,3 +198,69 @@ def test_周期定位口径():
     txt = view.for_prompt()
     assert "阶段交界" in txt and "未覆盖" in txt
     assert "[[macro.pmi_manufacturing@2026-07]]" in txt
+
+
+# ── 第六至八次的候选: 外部资料带进来的三段新提示词文本 ──────────
+
+def test_一致预期段只有占位符():
+    """卖方 EPS 预测不在账本里就无法引用。此前八次踩的都是这一件事:
+    我往提示词里放了模型用不了的东西。"""
+    from ir_agent import corpus as C
+    from ir_agent.sources import reports as R
+    from ir_agent.sources.reports import consensus_facts
+
+    c = R.Consensus(as_of=AS_OF, window_days=180, n_reports=42,
+                    eps={2026: R.Estimate(2026, 42, D("68.43"), D("65.77"),
+                                          D("77.75"))},
+                    drift={2026: (R.Estimate(2026, 56, D("84.8"), D("80"),
+                                             D("90")),
+                                  R.Estimate(2026, 42, D("68.43"), D("65.77"),
+                                             D("77.75")))})
+    led = FactLedger()
+    for f in consensus_facts(c):
+        led.put(f)
+    assert_prompt_safe(C.consensus_prompt(c), led)
+
+
+def test_无一致预期时的说明也安全():
+    from ir_agent import corpus as C
+    assert_prompt_safe(C.consensus_prompt(None), FactLedger())
+
+
+def test_战略摘要安全():
+    from ir_agent import strategy
+    from ir_agent.strategy import Force
+
+    q = "公司拥有品质品牌工艺环境文化组成的五大核心竞争力"
+    out = "\n".join(
+        [f"护城河: 无形资产 | 宽 | 「{q}」"]
+        + [f"五力: {f.value} | 中 | 中性 | 「{q}」" for f in Force]
+        + [f"不确定性: 渠道去库存 | revenue_growth | 下调 | 「{q}」",
+           f"不确定性: 提价能力减弱 | gross_margin | 下调 | 「{q}」"])
+    v = strategy.parse(out)
+    v.unquantified = [Force.SUBSTITUTES]
+    assert_prompt_safe(v.summary(), FactLedger())
+
+
+def test_产业链摘要与矛盾提示安全():
+    """矛盾提示里必须用占位符指向分位数，不能写读数。"""
+    from ir_agent import value_chain as VC
+
+    led = FactLedger()
+    _fact(led, "payable_days.percentile", "0.17")
+    q = "上游由数万家农户分散种植"
+    v = VC.parse("\n".join([f"环节: {r.value} | n | note | 「{q}」"
+                            for r in VC.Role]
+                           + ["议价: 上游 | 强", "议价: 下游 | 强"]))
+    v.conflicts = VC.cross_check(v, led, P, AS_OF)
+    assert v.conflicts, "用例本身要触发矛盾，否则这条测试是空的"
+    assert_prompt_safe(v.summary(), led)
+
+
+def test_产业链缺规模时的说明安全():
+    from ir_agent import value_chain as VC
+
+    q = "上游由数万家农户分散种植"
+    v = VC.parse("\n".join([f"环节: {r.value} | n | note | 「{q}」"
+                            for r in VC.Role]))
+    assert_prompt_safe(v.summary(), FactLedger())

@@ -73,6 +73,32 @@ def _ingest(corpus: Corpus, r: R.Report, as_of: date) -> None:
     corpus.add_if_visible(R.to_document(r, text, as_of))
 
 
+def consensus_prompt(c: R.Consensus | None) -> str:
+    """给模型看的一致预期: **只有占位符，没有读数**。
+
+    与宏观、行业、可比三处同一条约定 —— 提示词里出现裸数字、正文里却
+    禁止引用，是自相矛盾的契约。
+    """
+    if c is None or not c.has_data():
+        return ("一致预期：本次未取到足够的券商盈利预测"
+                "（多数 A 股公司无券商跟踪）—— 无从对照")
+    lines = ["一致预期（窗口内若干篇研报，覆盖若干家券商）",
+             "  ⚠ 卖方预测仅作本报告结论的**对照**，"
+             "不得作为本报告任何假设的依据。"]
+    for y in sorted(c.eps):
+        lines.append(
+            f"  FY{y}　EPS 中位 [[consensus.eps@{y}FY]]"
+            f"（[[consensus.brokers@{y}FY]] 家，区间 "
+            f"[[consensus.eps_low@{y}FY]]~[[consensus.eps_high@{y}FY]]）")
+    for y in sorted(c.drift):
+        lines.append(f"  FY{y}　较早前的一致预期已修正 "
+                     f"[[consensus.eps_revision@{y}FY]]"
+                     f" —— 修正方向本身是信息，值得在正文中解释")
+    if c.ratings:
+        lines.append("  评级分布见看板（评级是他人观点，不入账本）")
+    return "\n".join(lines)
+
+
 def consensus_md(c: R.Consensus | None) -> str:
     """一致预期的人读版。**这是对照物，不是依据** —— 措辞上必须说死，
     否则下游会拿它当论据。"""

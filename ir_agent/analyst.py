@@ -228,6 +228,9 @@ def build_prompt(
     context: str | None = None,
     macro_summary: str | None = None,
     industry_summary: str | None = None,
+    strategy_summary: str | None = None,
+    chain_summary: str | None = None,
+    consensus_summary: str | None = None,
 ) -> str:
     """组装提示词。
 
@@ -245,8 +248,19 @@ def build_prompt(
     if industry_summary:
         parts.append(f"\n**行业口径**（决定第 3 节能下多强的结论）\n"
                      f"{industry_summary}\n")
+    if chain_summary:
+        parts.append(f"\n**产业链与公司所处环节**\n{chain_summary}\n")
+    if strategy_summary:
+        parts.append(f"\n**战略分析结论**（护城河、五力、关键不确定性）\n"
+                     f"{strategy_summary}\n")
     if comps_summary:
         parts.append(f"\n**可比公司对照**\n{comps_summary}\n")
+    if consensus_summary:
+        parts.append(
+            f"\n**卖方一致预期**（仅作本报告结论的对照）\n{consensus_summary}\n"
+            "本报告的判断必须独立得出。若你的结论与一致预期方向不同，"
+            "**说明差异从何而来** —— 那是本节最有价值的部分；"
+            "但**不得**以一致预期为依据反推本报告的任何假设。\n")
     if context:
         parts.append(f"\n**补充背景**\n{context}\n")
     return "".join(parts)
@@ -313,13 +327,19 @@ def write_body(
     context: str | None = None,
     macro_summary: str | None = None,
     industry_summary: str | None = None,
+    strategy_summary: str | None = None,
+    chain_summary: str | None = None,
+    consensus_summary: str | None = None,
     max_attempts: int = 3,
 ) -> tuple[str, int]:
     """调用模型撰写正文，违规则驳回重写。返回 (正文, 实际尝试次数)。"""
     prompt = build_prompt(catalog, code=code, period=period,
                           comps_summary=comps_summary, context=context,
                           macro_summary=macro_summary,
-                          industry_summary=industry_summary)
+                          industry_summary=industry_summary,
+                          strategy_summary=strategy_summary,
+                          chain_summary=chain_summary,
+                          consensus_summary=consensus_summary)
     last: list[str] = []
 
     for attempt in range(1, max_attempts + 1):

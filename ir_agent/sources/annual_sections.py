@@ -107,10 +107,13 @@ class SectionSet:
         return "\n".join(lines)
 
 
-def _page_texts(pdf: Path | str) -> list[str]:
+def _page_texts(pdf: Path | str | bytes) -> list[str]:
+    """接受路径或已下载的字节。走管线时 PDF 已由 annual_pdf 下载并缓存，
+    再落一次盘既慢又多一份副本。"""
     import fitz
 
-    doc = fitz.open(str(pdf))
+    doc = (fitz.open(stream=pdf, filetype="pdf") if isinstance(pdf, bytes)
+           else fitz.open(str(pdf)))
     try:
         return [pg.get_text() for pg in doc]
     finally:
@@ -180,7 +183,7 @@ def _extract_from(pages: list[str], page_idx: int, offset: int,
     return body[:max_chars].strip(), truncated
 
 
-def extract(pdf: Path | str, code: str = "",
+def extract(pdf: Path | str | bytes, code: str = "",
             wanted: tuple[str, ...] | None = None,
             max_chars: int = MAX_EXCERPT) -> SectionSet:
     """抽取指定章节的有界摘录。找不到的如实记入 missing。"""
