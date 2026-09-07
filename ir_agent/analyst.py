@@ -119,6 +119,10 @@ class FactCatalog:
     entries: list[CatalogEntry] = field(default_factory=list)
     ledger: FactLedger | None = None
     as_of: date | None = None
+    # 本次实际取回的、可供正文引述的资料。挂在这里而不是当参数传，
+    # 是因为 revision.py 复用 _violations —— 撰写与修订两条路径要用同
+    # 一副闸门，否则修订稿可以把撰写时被拦下的转述再写回去。
+    evidence: object = None
 
     @classmethod
     def from_ledger(cls, ledger: FactLedger, period: str, as_of: date,
@@ -263,6 +267,15 @@ def build_prompt(
             "但**不得**以一致预期为依据反推本报告的任何假设。\n")
     if context:
         parts.append(f"\n**补充背景**\n{context}\n")
+    ev = getattr(catalog, "evidence", None)
+    if ev is not None:
+        parts.append(
+            f"\n**出处规则**\n"
+            f"凡是写成「据……」「根据……披露」这类**归属给外部来源**的引述，"
+            f"引文必须逐字出自本次实际取回的资料，点名的机构也必须确实在其中。"
+            f"本次可引述的来源：{ev.catalogue()}。\n"
+            f"不必处处标注出处 —— 只有你**主动作出归属**时才受此约束；"
+            f"用「」作强调不受影响。\n")
     return "".join(parts)
 
 
@@ -315,6 +328,13 @@ def _violations(body: str, catalog: FactCatalog) -> list[str]:
 
     if not REF_RE.search(body):
         out.append("正文没有引用任何事实占位符 —— 研报不能没有数字。")
+
+    # 第四道闸: 出处。数字有三道闸，文字此前一道都没有 ——
+    # 捏造一个出处比捏造一个数字容易得多，也更难被发现。
+    if catalog.evidence is not None:
+        from ir_agent.attribution import audit as audit_attribution
+
+        out += audit_attribution(body, catalog.evidence)
     return out
 
 

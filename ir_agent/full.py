@@ -483,6 +483,32 @@ def _macro_periods(r) -> tuple[str, ...]:
     return tuple(sorted(out, key=lambda p: out[p], reverse=True)[:6])
 
 
+def _peer_names(code: str) -> tuple[str, ...]:
+    """本标的与同业的公司名，用于豁免出处核验里的机构名误伤。
+
+    分析中信证券这类券商时，正文本来就会反复出现「中信证券」——
+    若因为语料库里没有中信证券的研报就判它捏造出处，那是把正当用法误伤。
+    """
+    try:
+        from ir_agent.sources.taxonomy import fetch_all
+        rows = fetch_all()
+    except Exception:                                       # noqa: BLE001
+        return ()
+    me = next((e for e in rows if e.code == code), None)
+    if me is None:
+        return ()
+    return tuple(e.name for e in rows if e.path == me.path)
+
+
+def _build_evidence(r, code: str):
+    """正文可引述的资料面 —— 年报原文 + 外部语料库。"""
+    from ir_agent.attribution import Evidence
+    from ir_agent.strategy import annual_text
+
+    return Evidence(annual=annual_text(getattr(r, "sections", None)),
+                    corpus=r.corpus, peers=_peer_names(code))
+
+
 def _write_and_debate(r, code: str, model: str | None,
                       macro_summary: str = "", industry_summary: str = "",
                       comps_summary: str = "", strategy_summary: str = "",
@@ -493,6 +519,7 @@ def _write_and_debate(r, code: str, model: str | None,
     extra = _macro_periods(r) + ((spot,) if spot else ())
     cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
                                   extra_periods=extra)
+    cat.evidence = _build_evidence(r, code)
     client = make_client(model=model)
     try:
         print(f"撰写正文（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
