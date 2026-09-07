@@ -224,3 +224,74 @@ def test_摘要含三部分():
     txt = v.summary()
     assert "护城河" in txt and "现有竞争强度" in txt
     assert "关键不确定性 → 情景驱动因子" in txt
+
+
+# ── 公司之外的视角 ───────────────────────────────────────────
+
+EXT = "系列酒实现收入129.3亿元，同比-6%，终端库存得到有效去化。"
+
+
+def _corpus():
+    from datetime import date as _d
+
+    from ir_agent.sources.external import Corpus, Document, Tier
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="A1", url="https://data.eastmoney.com/report/info/A1.html",
+                   title="2026年中报点评", publisher="西南证券", tier=Tier.SELLSIDE,
+                   published=_d(2026, 8, 21), retrieved=AS_OF, text=EXT))
+    return c
+
+
+def test_可引用年报之外的资料():
+    """只看年报，战略判断的全部依据是公司对自己的描述 —— 相当于让
+    被评价方写自己的评价。"""
+    v = strategy.parse(_out(moats=[f"护城河: 无形资产 | 宽 | 「{EXT}」"]))
+    strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+
+
+def test_出处由代码判定而非模型声明():
+    """模型只写引文。代码先在年报里找，找不到再去语料库找，找到了改标
+    为 EXTERNAL 并补上 URL —— 模型没有机会张冠李戴。"""
+    from ir_agent.valuation.basis import BasisKind
+
+    v = strategy.parse(_out(moats=[f"护城河: 无形资产 | 宽 | 「{EXT}」"]))
+    strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+    b = v.moats[0].bases[0]
+    assert b.kind is BasisKind.EXTERNAL
+    assert b.ref.endswith("A1.html") and b.retrieved == AS_OF
+
+
+def test_年报引文不会被改标为外部():
+    from ir_agent.valuation.basis import BasisKind
+
+    v = strategy.parse(_out())
+    strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+    assert v.moats[0].bases[0].kind is BasisKind.REPORT
+
+
+def test_两处都找不到仍然驳回():
+    v = strategy.parse(_out(moats=["护城河: 无形资产 | 宽 | 「行业景气显著回升」"]))
+    with pytest.raises(StrategyFailed, match="不可核验|找不到"):
+        strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+
+
+def test_提示词带上外部资料与其可引用范围():
+    txt = strategy.for_prompt(_led(), P, AS_OF, _sections(), corpus=_corpus())
+    assert EXT in txt and "西南证券" in txt
+    assert "不得作为本报告任何假设的依据" in txt
+
+
+def test_没取到外部资料时明说外部视角缺位():
+    """静默地只用年报，读者会以为战略判断有外部印证。"""
+    from ir_agent.sources.external import Corpus
+
+    txt = strategy.for_prompt(_led(), P, AS_OF, _sections(),
+                              corpus=Corpus(as_of=AS_OF))
+    assert "外部视角缺位" in txt
+
+
+def test_年报正文与外部资料严格分开():
+    """若把研报正文拼进年报那段，模型引研报的话会被判为「年报原文」
+    通过核验 —— 引文是真的，出处是假的，比引文造假更难发现。"""
+    assert EXT not in strategy.annual_text(_sections())
+    assert QUOTE in strategy.annual_text(_sections())

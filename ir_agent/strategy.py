@@ -178,13 +178,30 @@ def anchors(ledger: FactLedger, period: str, as_of: date,
     return out
 
 
-def for_prompt(ledger: FactLedger, period: str, as_of: date,
-               sections, spot: str | None = None) -> str:
-    """给模型的战略分析口径: 年报摘录 + 可用的量化锚点。
+def annual_text(sections) -> str:
+    """年报摘录的纯文本，用于 REPORT 引文的逐字核验。
 
-    年报摘录是**唯一**的定性证据来源 —— 模型的 REPORT 依据必须逐字出自
-    这里，否则核验通不过。摘录本身含大量数字（年报原文），但它们不进
-    正文引用，只作判断的素材，因此不受占位符契约约束。
+    **必须与外部资料分开。** 若把研报正文也拼进这段，模型引研报的话会被
+    判为「年报原文」通过核验 —— 引文是真的，出处是假的，比引文造假更难
+    发现。归属错误在研报里是硬伤: 读者按图索骥会查不到。
+    """
+    if sections is None:
+        return ""
+    return "\n".join(s.text for s in sections.sections.values())
+
+
+def for_prompt(ledger: FactLedger, period: str, as_of: date,
+               sections, spot: str | None = None, corpus=None) -> str:
+    """给模型的战略分析口径: 年报摘录 + 外部资料 + 可用的量化锚点。
+
+    定性证据有两个来源，且**都必须是代码实际取回的**: 年报摘录与外部
+    语料库。模型的引文必须逐字出自其中之一，否则核验通不过。摘录本身含
+    大量数字（原文），但它们不进正文引用，只作判断的素材，因此不受
+    占位符契约约束。
+
+    引入外部资料的理由: 只看年报，战略判断的全部依据是**公司对自己的
+    描述** —— 相当于让被评价方写自己的评价。茅台核心竞争力一节仅 95 字，
+    据此写出的护城河判断，实质是把公司的自我宣传改写了一遍。
     """
     from ir_agent.sources.annual_sections import SECTION_LABELS
 
@@ -207,6 +224,21 @@ def for_prompt(ledger: FactLedger, period: str, as_of: date,
     if missing:
         lines.append("    以下几力无账本锚点，只能定性判断，"
                      "结论强度应相应说明：" + "、".join(f.value for f in missing))
+
+    if corpus is not None and corpus.docs:
+        from ir_agent.sources.external import TIER_LABEL, TIER_RULE
+        lines.append("\n  公司之外的资料（引用时同样须逐字照抄）：")
+        seen_tiers = set()
+        for d in corpus.docs:
+            lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
+            lines.append("  " + d.text.replace("\n", "\n  "))
+            seen_tiers.add(d.tier)
+        for t in seen_tiers:
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
+    elif corpus is not None:
+        lines.append("\n  公司之外的资料：本次未取到 —— "
+                     "外部视角缺位，战略判断全部来自公司自述，"
+                     "结论强度应相应说明")
     return "\n".join(lines)
 
 
@@ -304,9 +336,32 @@ def parse(text: str) -> StrategyView:
     return view
 
 
+def _reattribute(view: StrategyView, annual: str, corpus) -> None:
+    """引文的出处由**代码**判定，不由模型声明。
+
+    模型只写「引文」，代码先在年报里找，找不到再去外部语料库找，找到了
+    就改标为 EXTERNAL 并把 URL 补上。这样模型没有机会张冠李戴 —— 与
+    「模型只写占位符、代码填数字」是同一条思路。
+    """
+    if corpus is None:
+        return
+    from ir_agent.sources.external import norm
+    from ir_agent.valuation.basis import Basis, BasisKind
+
+    body = norm(annual)
+    for item in (*view.moats, *view.forces, *view.uncertainties):
+        for i, b in enumerate(item.bases):
+            if b.kind is not BasisKind.REPORT or norm(b.quote) in body:
+                continue
+            d = corpus.find(b.quote)
+            if d is not None:
+                item.bases[i] = Basis.external(d.url, b.quote, d.retrieved)
+
+
 def check(view: StrategyView, ledger: FactLedger, evidence: str,
-          as_of: date) -> None:
-    """依据必须可核验。REPORT 的引文要逐字出现在年报摘录里。"""
+          as_of: date, corpus=None) -> None:
+    """依据必须可核验。REPORT 引文要逐字出现在年报摘录里，
+    EXTERNAL 引文要逐字出现在语料库里。"""
     if not view.moats:
         raise StrategyFailed("未给出护城河判断 —— 「无明显护城河」也是结论，"
                              "但必须显式说出并给出依据")
@@ -319,25 +374,28 @@ def check(view: StrategyView, ledger: FactLedger, evidence: str,
             "关键不确定性至少两条 —— 少于两条，Bear/Base/Bull 三情景就没有"
             "定性依据，只能靠调参数")
 
+    _reattribute(view, evidence, corpus)
     flat = [b for x in (*view.moats, *view.forces, *view.uncertainties)
             for b in x.bases]
-    problems = validate(flat, ledger=ledger, body=evidence, as_of=as_of)
+    problems = validate(flat, ledger=ledger, body=evidence, as_of=as_of,
+                        corpus=corpus)
     if problems:
         raise StrategyFailed("依据不可核验：" + "；".join(problems))
 
 
 def assess(client, ledger: FactLedger, period: str, as_of: date,
            sections, spot: str | None = None,
-           max_attempts: int = 3) -> tuple[StrategyView, str]:
+           max_attempts: int = 3, corpus=None) -> tuple[StrategyView, str]:
     """让模型做战略分析，逐轮校验。返回 (结论, 证据文本)。"""
-    evidence = for_prompt(ledger, period, as_of, sections, spot)
+    evidence = for_prompt(ledger, period, as_of, sections, spot, corpus)
+    annual = annual_text(sections)
     prompt = PROMPT.format(drivers="、".join(MAPPABLE_DRIVERS), evidence=evidence)
     last = ""
     for attempt in range(1, max_attempts + 1):
         out = client(prompt)
         try:
             view = parse(out)
-            check(view, ledger, evidence, as_of)
+            check(view, ledger, annual, as_of, corpus)
         except StrategyFailed as e:
             last = str(e)
             prompt = (f"{prompt}\n\n---\n"
