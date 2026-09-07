@@ -9,16 +9,11 @@ from __future__ import annotations
 
 from datetime import date
 
-from ir_agent.ledger import Fact, FactLedger
+from ir_agent.ledger import FactLedger
 from ir_agent.operators.base import derive
 
 
-def _pick(ledger: FactLedger, period: str, as_of: date,
-          parent_key: str, total_key: str) -> tuple[Fact, str]:
-    try:
-        return ledger.get(parent_key, period, as_of=as_of), "parent"
-    except KeyError:
-        return ledger.get(total_key, period, as_of=as_of), "total"
+from ir_agent.operators.aggregates import parent_first as _pick
 
 
 def compute(ledger: FactLedger, period: str, as_of: date) -> dict[str, Fact]:

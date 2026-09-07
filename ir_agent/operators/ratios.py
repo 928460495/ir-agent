@@ -90,8 +90,9 @@ def _solvency(f) -> dict:
     out = {}
     if tl and te:
         out["debt_to_equity"] = (_div(tl, te), [tl, te])
-    if ta and te:
-        out["equity_multiplier"] = (_div(ta, te), [ta, te])
+    # 权益乘数、净利率、总资产周转率、ROE 一律交给 dupont 算 ——
+    # 它们必须满足 ROE = 净利率 × 周转率 × 权益乘数 这条恒等式，
+    # 在这里另算一遍必然与之打架。见 compute() 末尾。
     if op and ie:
         # 利息费用可能为负（利息收入大于支出）—— 此时倍数无意义
         v = None if ie.value <= 0 else op.value / ie.value
@@ -111,12 +112,8 @@ def _profitability(f) -> dict:
         out["gross_margin"] = (v, [rev, cost])
     if op and rt:
         out["operating_margin"] = (_div(op, rt), [op, rt])
-    if np_ and rt:
-        out["net_margin"] = (_div(np_, rt), [np_, rt])
     if np_ and ta:
         out["roa"] = (_div(np_, ta), [np_, ta])
-    if npp and eqp:
-        out["roe"] = (_div(npp, eqp), [npp, eqp])
     if bme and rt:
         # 业务及管理费在接口中为正值列示；成本收入比取绝对值口径
         v = None if rt.value == 0 else abs(bme.value) / rt.value
@@ -131,8 +128,6 @@ def _efficiency(f) -> dict:
     ta, fa = f("total_assets"), f("fixed_asset")
     ar, inv, ap = f("accounts_receivable"), f("inventory"), f("accounts_payable")
     out = {}
-    if rt and ta:
-        out["asset_turnover"] = (_div(rt, ta), [rt, ta])
     if rt and fa:
         out["fixed_asset_turnover"] = (_div(rt, fa), [rt, fa])
     if ar and rev:
@@ -259,6 +254,16 @@ def compute(ledger: FactLedger, period: str, as_of: date,
                     spec, f"{den.key}@{den.period} 为 {den.value}，该比率无定义"))
                 continue
             facts[key] = derive(ledger, key, value, spec.unit, period, inputs)
+
+    # 杜邦四项由 dupont 统一算，保证 ROE = 净利率 × 周转率 × 权益乘数。
+    # 缺分量时跳过 —— 银行等模板可能取不到其中某项。
+    try:
+        from ir_agent.operators import dupont
+        for k, v in dupont.compute(ledger, period, as_of).items():
+            if BY_KEY[k].applicable_to(company_type):
+                facts[k] = v
+    except (KeyError, LookAheadError, ZeroDivisionError):
+        pass
 
     return RatioSet(
         period=period, company_type=company_type, facts=facts,

@@ -99,6 +99,26 @@ def ebit(ledger: FactLedger, period: str, as_of: date) -> Decimal | None:
     return op + max(ie, Decimal(0))
 
 
+def parent_first(ledger: FactLedger, period: str, as_of: date,
+                 parent_key: str, total_key: str) -> tuple[Fact, str]:
+    """归母口径优先，缺失时退回全口径并返回口径标记。
+
+    **少数股东权益与少数股东损益的占比常常差得很远。** 长电科技实测:
+    少数股东损益仅占净利润 0.3%，少数股东权益却占所有者权益 8.4% ——
+    利润端几乎没有少数股东，权益端有。因此 ROE 用全口径权益算出来是
+    5.02%，归母口径是 5.46%，差 8.8%。中芯国际那一头更极端: 少数股东
+    损益占净利润 30.1%。
+
+    单独成函数与 ebit() 同一条道理: dupont 与 ratios 此前各写了一遍
+    「权益乘数」，一个归母一个全口径，两边都往账本写同一个键 ——
+    **留下哪个值取决于执行顺序**，比不一致更糟。
+    """
+    try:
+        return ledger.get(parent_key, period, as_of=as_of), "parent"
+    except (KeyError, LookAheadError):
+        return ledger.get(total_key, period, as_of=as_of), "total"
+
+
 def compute(ledger: FactLedger, period: str, as_of: date) -> dict[str, Fact]:
     """能算的都算出来写回账本；分量全缺的项跳过而非中断。
 

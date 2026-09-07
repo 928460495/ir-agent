@@ -153,3 +153,60 @@ class TestDCF:
         assert len(grid) == 3 and len(grid[0]) == 2
         # 折现率越高估值越低
         assert grid[0][0] > grid[2][0]
+
+
+class TestDuPontSingleSource:
+    """杜邦四项只能有一份实现。
+
+    跑长电科技（600584）时暴露: ratios 与 dupont 各算了一遍「权益乘数」，
+    一个用所有者权益合计（1.77x），一个用归母权益（1.94x），**两边都往
+    账本写同一个键** —— 留下哪个值取决于执行顺序，比不一致更糟。
+    对外表现是同一份研报里正文引用 1.94、可比表显示 1.77。
+    """
+
+    def _led(self):
+        from ir_agent.ledger import Fact, FactLedger, Method
+        led = FactLedger()
+        vals = {"revenue": 100, "revenue_total": 100, "total_assets": 200,
+                "total_equity": 120, "equity_attr_parent": 100,
+                "net_profit": 10, "net_profit_attr_parent": 9,
+                "cost_of_revenue": 80}
+        for k, v in vals.items():
+            led.put(Fact(key=k, value=Decimal(str(v)), unit="元",
+                         currency="CNY", period="2025FY",
+                         as_of=date(2025, 1, 1), source_id="t",
+                         method=Method.REPORTED))
+        return led
+
+    def test_两个模块给出同一个权益乘数(self):
+        from ir_agent.operators import dupont, ratios
+        led = self._led()
+        d = dupont.compute(led, "2025FY", date(2026, 1, 1))
+        r = ratios.compute(led, "2025FY", date(2026, 1, 1))
+        for k in ("net_margin", "asset_turnover", "equity_multiplier", "roe"):
+            assert d[k].value == r.facts[k].value, k
+
+    def test_归母口径优先(self):
+        """少数股东利润占比与权益占比常常差得很远 —— 长电实测利润端 0.3%、
+        权益端 8.4%。"""
+        from ir_agent.operators import ratios
+        r = ratios.compute(self._led(), "2025FY", date(2026, 1, 1))
+        assert r.facts["equity_multiplier"].value == Decimal(200) / Decimal(100)
+        assert r.facts["net_margin"].value == Decimal(9) / Decimal(100)
+
+    def test_杜邦恒等式在ratios里也成立(self):
+        from ir_agent.operators import ratios
+        f = ratios.compute(self._led(), "2025FY", date(2026, 1, 1)).facts
+        prod = (f["net_margin"].value * f["asset_turnover"].value
+                * f["equity_multiplier"].value)
+        assert abs(prod - f["roe"].value) < Decimal("1e-12")
+
+    def test_缺归母数据时退回全口径(self):
+        from ir_agent.ledger import Fact, Method
+        from ir_agent.operators import ratios
+        led = self._led()
+        led._facts.pop(("equity_attr_parent", "2025FY"))       # noqa: SLF001
+        led._facts.pop(("net_profit_attr_parent", "2025FY"))   # noqa: SLF001
+        f = ratios.compute(led, "2025FY", date(2026, 1, 1)).facts
+        assert f["equity_multiplier"].value == Decimal(200) / Decimal(120)
+        assert f["equity_multiplier"].basis == "total"
