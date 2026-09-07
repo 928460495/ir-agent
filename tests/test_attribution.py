@@ -158,3 +158,33 @@ def test_提示词讲清规则():
     cat.evidence = _ev()
     txt = build_prompt(cat, code="600519", period="2025FY")
     assert "西南证券" in txt and "不必处处标注出处" in txt
+
+
+def test_机构名豁免不牵连引文核验():
+    """分析券商时同业名单会豁免掉几十个机构名 —— 那是刻意放宽，代价是
+    机构名这一项失去约束。此时**引文核验必须仍然咬得住**，否则就是开了
+    个口子: 名字随便点，内容也随便编。"""
+    body = "据中信证券研报指出，「行业景气度已全面回升」。"
+    p = A.audit(body, _ev(peers=("中信证券",)))
+    assert len(p) == 1 and "找不到" in p[0]
+    assert "中信证券" not in p[0].split("可引述的来源")[0][:20]
+
+
+def test_机构名的前缀不粘连():
+    """最自然的写法就是「据西南证券研报」。若把「据西南证券」当作机构名，
+    它与语料库里的「西南证券」永远对不上 —— 正确归属的句子反被判捏造，
+    重试也修不好。实测踩到。"""
+    assert A.named_sources("据西南证券研报，需求承压") == ["西南证券"]
+    assert A.named_sources("根据中信证券研报指出") == ["中信证券"]
+    assert A.audit("据西南证券研报显示，「终端库存得到有效去化」。", _ev()) == []
+
+
+def test_同一机构的不同写法能对上():
+    """语料库记「国泰君安」，正文写「国泰君安证券研究所」——
+    全等比较对不上，又是一条修不好的驳回。"""
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="R2", url="https://x.cn/r2.html", title="t",
+                   publisher="国泰君安", tier=Tier.SELLSIDE,
+                   published=date(2026, 8, 1), retrieved=AS_OF, text=EXT))
+    ev = Evidence(annual=ANNUAL, corpus=c)
+    assert A.audit("据国泰君安证券研究所的研报测算，需求回暖。", ev) == []

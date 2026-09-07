@@ -45,6 +45,19 @@ _BREAK_RE = re.compile(r"[。；！？\n]")
 # 「X证券」这类机构名，出现在同一句的研究类词汇附近才检查 —— 否则会把
 # 「中信证券」作为**可比公司**分析的那种正当用法一并误伤。
 _ORG_RE = re.compile(r"[一-龥A-Za-z]{2,8}(?:证券|期货|研究所|投行)")
+# 机构名左侧常粘连的字。**必须剥掉** —— 最自然的写法就是「据西南证券
+# 研报」，若把「据西南证券」当作机构名，它与语料库里的「西南证券」永远
+# 对不上，正确归属的句子反而被判捏造，重试也修不好。实测踩到。
+_PREFIX_RE = re.compile("^(?:" + "|".join(sorted(MARKERS, key=len, reverse=True))
+                        + "|如|含|和|与|及|或|等|自|由|经|向|被)")
+
+
+def _strip_prefix(name: str) -> str:
+    while True:
+        trimmed = _PREFIX_RE.sub("", name)
+        if trimmed == name or len(trimmed) < 4:
+            return name if len(trimmed) < 4 else trimmed
+        name = trimmed
 _RESEARCH_RE = re.compile(r"研报|研究报告|研究所|分析师|覆盖|评级|盈利预测|观点")
 
 
@@ -108,7 +121,7 @@ def named_sources(body: str) -> list[str]:
     for sentence in _BREAK_RE.split(body):
         if not _RESEARCH_RE.search(sentence):
             continue
-        out += _ORG_RE.findall(sentence)
+        out += [_strip_prefix(x) for x in _ORG_RE.findall(sentence)]
     return sorted(set(out))
 
 
@@ -129,9 +142,16 @@ def audit(body: str, evidence: Evidence) -> list[str]:
                 f"归属给一个查不到的出处与捏造无异。"
                 f"可引述的来源：{evidence.catalogue()}")
 
-    known = set(evidence.publishers())
+    # **包含式匹配，不用全等。** 语料库里记的是「国泰君安」，正文可能写
+    # 「国泰君安证券研究所」；同一家机构的两种写法若因全等比较对不上，
+    # 又是一条修不好的驳回。
+    known = list(evidence.publishers()) + list(evidence.peers)
+
+    def _seen(org: str) -> bool:
+        return any(k in org or org in k for k in known)
+
     for org in named_sources(body):
-        if org in known or org in evidence.peers:
+        if _seen(org):
             continue
         out.append(
             f"正文点名了「{org}」的研究观点，但本次并未取回该机构的报告 —— "
