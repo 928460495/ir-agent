@@ -70,6 +70,14 @@ LABELS = {
     "company.market_share_delta": "本司市占率变化",
     "company.industry_rank": "本司行业排名",
     "company.revenue_yoy_vs_industry": "本司相对行业超额增速",
+    # 行业画像
+    "industry.hhi": "行业 HHI 集中度",
+    "industry.effective_players": "行业有效竞争者数",
+    "industry.revenue_cagr": "行业营收多年 CAGR",
+    "industry.dol_median": "行业经营杠杆 DOL 中位",
+    "industry.leverage_median": "行业财务杠杆中位",
+    "industry.gdp_elasticity": "行业营收对名义 GDP 弹性",
+    "industry.cyclical_score": "行业周期敏感度",
     # 折现率输入 —— β 脱离窗口与基准没有意义，标签里点明口径
     "beta": "β（对沪深300，周频两年）", "beta.r_squared": "β 回归 R²",
     **{f"rate.cgb_{t}y": f"{cn}年期国债到期收益率"

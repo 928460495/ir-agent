@@ -199,3 +199,52 @@ def test_画像结论写入账本供正文引用():
 def test_缺失项不入账本():
     prof = build("某行业", P, AS_OF, revenues={}, ledgers={})
     assert profile_facts(prof) == []
+
+
+class Test提示词口径:
+    def _prof(self):
+        leds = {f"c{i}": _led({"roe": D("0.2"), "operating_profit": D(100),
+                               "admin_expense": D(50),
+                               "equity_multiplier": D("1.5")})
+                for i in range(5)}
+        hist = {f"202{i}FY": D(100) * D("1.1") ** i for i in range(4)}
+        iy = {f"202{i}FY": D("0.1") for i in range(1, 4)}
+        gy = {f"202{i}FY": D("0.05") for i in range(1, 4)}
+        return build("甲-乙-丙", P, AS_OF,
+                     revenues={f"c{i}": D(20) for i in range(5)},
+                     ledgers=leds, revenue_history=hist, cr5=D("0.8"),
+                     industry_yoy=iy, gdp_yoy=gy, metrics=["roe"])
+
+    def test_数值写成占位符(self):
+        from ir_agent.citation import audit_bare_numbers
+        txt = self._prof().for_prompt()
+        assert "[[industry.hhi@2024FY]]" in txt
+        assert "[[industry.cyclical_score@2024FY]]" in txt
+        assert audit_bare_numbers(txt) == []
+
+    def test_定性判定直接写文字(self):
+        """集中度分档与生命周期阶段不是数值，账本里没有对应事实，
+        写成占位符反而解析不了。"""
+        txt = self._prof().for_prompt()
+        assert "成长期" in txt or "成熟期" in txt
+        assert "高度集中" in txt or "中度集中" in txt or "分散" in txt
+
+    def test_点明敏感度决定传导强度(self):
+        assert "传导强度" in self._prof().for_prompt()
+
+    def test_分量不全时不给敏感度占位符(self):
+        """score 为 None 时账本里没有 cyclical_score，给了会解析失败。"""
+        leds = {f"c{i}": _led({"roe": D("0.2")}) for i in range(5)}
+        prof = build("甲-乙-丙", P, AS_OF,
+                     revenues={f"c{i}": D(20) for i in range(5)},
+                     ledgers=leds, metrics=["roe"])
+        assert "cyclical_score" not in prof.for_prompt()
+
+    def test_分化标注进入提示词并要求说明(self):
+        leds = {f"c{i}": _led({"roe": v}) for i, v in
+                enumerate(["0.01", "0.02", "0.05", "0.30", "0.60", "0.90"])}
+        prof = build("甲-乙-丙", P, AS_OF,
+                     revenues={f"c{i}": D(10) for i in range(6)},
+                     ledgers=leds, metrics=["roe"])
+        txt = prof.for_prompt()
+        assert "代表性有限" in txt and "必须说明" in txt

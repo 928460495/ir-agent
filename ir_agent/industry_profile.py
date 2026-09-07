@@ -124,7 +124,8 @@ class LifecycleView:
     cagr: Decimal | None
     volatility: Decimal | None
     hhi: Decimal | None
-    reason: str
+    reason: str          # 带读数，给人看
+    basis: str = ""      # 定性表述，给模型看 —— 提示词里不许有账本外的数字
 
     def describe(self) -> str:
         return f"{self.stage.value} —— {self.reason}"
@@ -152,19 +153,24 @@ def lifecycle(revenue_by_period: dict[str, Decimal],
 
     concentrated = hhi is not None and hhi >= HHI_MODERATE
     if cagr >= GROWTH_HIGH:
-        stage, why = Lifecycle.GROWTH, f"{span} 年营收 CAGR {cagr * 100:.1f}%，高速扩张"
+        stage, tail = Lifecycle.GROWTH, "高速扩张"
     elif cagr >= GROWTH_LOW:
-        stage, why = Lifecycle.MATURE, f"{span} 年营收 CAGR {cagr * 100:.1f}%，稳定增长"
+        stage, tail = Lifecycle.MATURE, "稳定增长"
     elif cagr >= 0:
         stage = Lifecycle.LATE_MATURE if concentrated else Lifecycle.MATURE
-        why = (f"{span} 年营收 CAGR {cagr * 100:.1f}%，增长停滞"
-               + ("且格局已高度集中" if concentrated else "但格局仍分散，可能处周期低位"))
+        tail = ("增长停滞且格局已高度集中" if concentrated
+                else "增长停滞但格局仍分散，可能处周期低位")
     else:
         stage = Lifecycle.DECLINE if concentrated else Lifecycle.LATE_MATURE
-        why = (f"{span} 年营收 CAGR {cagr * 100:.1f}%，总量收缩"
-               + ("且格局已高度集中 —— 需求侧退坡而非份额洗牌"
-                  if concentrated else "但格局仍分散，可能是周期底部而非结构性衰退"))
-    return LifecycleView(stage, cagr, vol, hhi, why)
+        tail = ("总量收缩且格局已高度集中 —— 需求侧退坡而非份额洗牌"
+                if concentrated
+                else "总量收缩但格局仍分散，可能是周期底部而非结构性衰退")
+    # 两版: 带读数的给人看，定性的给模型看。提示词里出现账本外的数字，
+    # 模型照抄就会被审计驳回 —— 这个坑此前已经踩过三次。
+    return LifecycleView(
+        stage, cagr, vol, hhi,
+        reason=f"{span} 年营收 CAGR {cagr * 100:.1f}%，{tail}",
+        basis=f"多年营收 CAGR 口径下{tail}")
 
 
 # ── 周期敏感度 ────────────────────────────────────────────────
@@ -282,6 +288,46 @@ class IndustryProfile:
             names = "、".join(BY_KEY[s.key].label for s in spread
                               if s.key in BY_KEY)
             lines.append(f"  ⚠ 以下指标行业内部高度分化，中位数代表性有限：{names}")
+        return "\n".join(lines)
+
+    def for_prompt(self) -> str:
+        """给模型看的口径：数字一律写成占位符。
+
+        定性判定（集中度分档、生命周期阶段）不是数值，直接写文字 ——
+        它们本来就没有对应的账本事实，写成占位符反而无法解析。
+        """
+        from ir_agent.metrics import BY_KEY
+
+        p = self.period
+        lines = [f"行业画像 {self.industry}"]
+        if self.concentration:
+            lines.append(
+                f"  集中度　{self.concentration.level}"
+                f"　HHI [[industry.hhi@{p}]]"
+                f"　有效竞争者 [[industry.effective_players@{p}]]")
+        if self.lifecycle and self.lifecycle.stage is not Lifecycle.UNKNOWN:
+            line = f"  生命周期　{self.lifecycle.stage.value}"
+            if self.lifecycle.cagr is not None:
+                line += f"（多年营收 CAGR [[industry.revenue_cagr@{p}]]）"
+            lines.append(line)
+            if self.lifecycle.basis:
+                lines.append(f"    判据：{self.lifecycle.basis}")
+        if self.sensitivity and self.sensitivity.score is not None:
+            lines.append(
+                f"  周期敏感度　[[industry.cyclical_score@{p}]]"
+                f"　＝ 经营杠杆 [[industry.dol_median@{p}]]"
+                f" × 财务杠杆 [[industry.leverage_median@{p}]]"
+                f" × GDP 弹性 [[industry.gdp_elasticity@{p}]]")
+            lines.append(
+                "    该分数决定宏观周期对本行业的传导强度：分数越高，"
+                "同样的宏观变化对本行业盈利的冲击越大")
+        dispersed = [s for s in self.spreads.values() if s.dispersed]
+        if dispersed:
+            names = "、".join(BY_KEY[s.key].label for s in dispersed
+                              if s.key in BY_KEY)
+            lines.append(
+                f"  ⚠ 以下指标行业内部高度分化（四分位距超过中位数本身），"
+                f"引用「行业中位数」时必须说明其代表性有限：{names}")
         return "\n".join(lines)
 
 

@@ -146,14 +146,14 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, str]:
     # 逐家同业的完整报表在上面已经取过一次，cache 里躺着全部字段而只用了
     # revenue。这里复用同一批数据算集中度、生命周期与周期敏感度，
     # **不发起任何新的网络请求**。
-    prof_md = ""
+    prof_md = prof_pr = ""
     try:
-        prof_md = _industry_profile(peers, agg, cache, r, as_of)
+        prof_md, prof_pr = _industry_profile(peers, agg, cache, r, as_of)
     except Exception as e:                                  # noqa: BLE001
         prof_md = f"（行业画像未生成：{e.__class__.__name__}）"
 
     return (f"{peers.summary()}\n{agg.summary()}\n{prof_md}",
-            agg.for_prompt(), "")
+            f"{agg.for_prompt()}\n{prof_pr}".rstrip(), "")
 
 
 def _fact_value(ledger, key: str, period: str, as_of: date):
@@ -164,7 +164,7 @@ def _fact_value(ledger, key: str, period: str, as_of: date):
         return None
 
 
-def _industry_profile(peers, agg, cache, r, as_of: date) -> str:
+def _industry_profile(peers, agg, cache, r, as_of: date) -> tuple[str, str]:
     """由已缓存的同业事实组装行业画像。"""
     from ir_agent import industry_profile as ip
     from ir_agent.ledger import FactLedger
@@ -214,7 +214,7 @@ def _industry_profile(peers, agg, cache, r, as_of: date) -> str:
         industry_yoy=ind_yoy, gdp_yoy=gdp_yoy)
     for f in ip.profile_facts(prof):
         r.ledger.put(f)
-    return prof.summary()
+    return prof.summary(), prof.for_prompt()
 
 
 def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]:
