@@ -386,8 +386,8 @@ def cycle_facts(view: CycleView, period: str) -> list[Fact]:
 
 # ── 传导到行业 ────────────────────────────────────────────────
 
-def transmission(view: CycleView, cyclical_score: Decimal | None,
-                 industry: str) -> str:
+def transmission(view: CycleView, total_leverage: Decimal | None,
+                 industry: str, elasticity: Decimal | None = None) -> str:
     """周期阶段 × 行业敏感度 —— 这条链真正闭合的地方。
 
     课程的要求是: **说清楚行业结构将如何抑制或放大经济中的预期发展。**
@@ -396,16 +396,29 @@ def transmission(view: CycleView, cyclical_score: Decimal | None,
     """
     if view.phase is None:
         return "宏观周期无法判定，不做传导推断"
-    if cyclical_score is None:
-        return (f"当前处于{view.phase.value}，但本行业的周期敏感度分量不全，"
-                "无法量化传导强度")
+    if total_leverage is None and elasticity is None:
+        return (f"当前处于{view.phase.value}，但本行业的杠杆与弹性均不可得，"
+                "无法判断传导强度")
 
-    if cyclical_score >= Decimal(2):
-        strength, hint = "强", "宏观变化会被行业结构**放大**"
-    elif cyclical_score >= Decimal("1.3"):
-        strength, hint = "中", "宏观变化大体等比例传导"
-    else:
-        strength, hint = "弱", "宏观变化会被行业结构**抑制**"
+    # 传导强弱由两件事决定，各有各的判据，不合成为一个分数:
+    #   收入弹性 —— 宏观变化有多少传到**收入**（>1 为周期品，标准分界）
+    #   DTL      —— 收入变化有多少放大到**税前利润**（DTL=1 即不放大）
+    bits = []
+    if elasticity is not None:
+        if elasticity < 0:
+            # 负弹性在经济学上意为劣等品。对多数行业不成立，多半是样本
+            # 噪声 —— 既然不可信，就不该给出确定的需求性质判断。
+            bits.append("收入端方向不明（弹性为负，该分量不可信）")
+        elif elasticity > Decimal(1):
+            bits.append("收入端放大（周期品，弹性大于一）")
+        else:
+            bits.append("收入端受抑（非周期品，弹性介于零与一）")
+    if total_leverage is not None:
+        bits.append(f"利润端放大约 {total_leverage:.1f} 倍（DTL）"
+                    if total_leverage > Decimal("1.2")
+                    else "利润端几乎不放大（DTL 接近一）")
+    hint = "；".join(bits)
+    strength = ""
 
     tail = {
         Phase.EARLY: "该阶段历史上利好利率敏感与经济敏感板块",
@@ -415,5 +428,5 @@ def transmission(view: CycleView, cyclical_score: Decimal | None,
     }[view.phase]
     note = ("　注意首选与次选分差很小，上述判断的强度应相应打折"
             if view.at_boundary else "")
-    return (f"当前处于{view.phase.value}，{industry} 的周期敏感度为"
-            f"{strength}（{hint}）。{tail}。{note}")
+    return (f"当前处于{view.phase.value}。{industry} 的传导路径：{hint}。"
+            f"{tail}。{note}")

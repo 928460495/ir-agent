@@ -63,25 +63,52 @@ def test_营收为零或空返回None():
 
 # ── 生命周期：不能单看增速 ───────────────────────────────────
 
-def test_高集中度加负增长判为衰退():
-    """格局已定而总量在退 —— 需求侧退坡，不是份额洗牌。"""
+GDP = D("0.055")          # 名义 GDP 增速参照
+
+
+def test_负增长且格局已整合判为衰退():
+    """CFA decline: 负增长、产能过剩、竞争激烈。"""
     hist = {f"202{i}FY": D(100 - i * 10) for i in range(4)}
-    v = lifecycle(hist, hhi=D("0.35"))
+    v = lifecycle(hist, hhi=D("0.35"), gdp_cagr=GDP)
     assert v.stage is Lifecycle.DECLINE
-    assert "需求侧退坡" in v.reason
 
 
-def test_低集中度加负增长只判成熟末期():
-    """还在洗牌，可能只是周期底部 —— 估值含义与衰退完全不同。"""
+def test_负增长但格局未整合判为洗牌期():
+    """CFA shakeout: 增长放缓、竞争激烈、盈利下滑 —— 尚未整合完成。"""
     hist = {f"202{i}FY": D(100 - i * 10) for i in range(4)}
-    v = lifecycle(hist, hhi=D("0.05"))
-    assert v.stage is Lifecycle.LATE_MATURE
-    assert "周期底部" in v.reason
+    v = lifecycle(hist, hhi=D("0.05"), gdp_cagr=GDP)
+    assert v.stage is Lifecycle.SHAKEOUT
+    assert "尚未整合" in v.reason
 
 
-def test_高速增长判为成长期():
+def test_增速快于名义GDP判为成长期():
+    """CFA growth:「需求快速增长」。快慢的参照系是名义 GDP，
+    不是自定的绝对阈值。"""
     hist = {f"202{i}FY": D(100) * D("1.3") ** i for i in range(4)}
-    assert lifecycle(hist, hhi=D("0.1")).stage is Lifecycle.GROWTH
+    assert lifecycle(hist, hhi=D("0.1"),
+                     gdp_cagr=GDP).stage is Lifecycle.GROWTH
+
+
+def test_增速与名义GDP相当判为成熟期():
+    hist = {f"202{i}FY": D(100) * (D(1) + GDP) ** i for i in range(4)}
+    assert lifecycle(hist, hhi=D("0.3"), gdp_cagr=GDP).stage is Lifecycle.MATURE
+
+
+def test_增长快但盈利下滑判为洗牌期():
+    """CFA 用盈利趋势区分 growth（改善）与 shakeout（下滑）。"""
+    hist = {f"202{i}FY": D(100) * D("1.3") ** i for i in range(4)}
+    m = {f"202{i}FY": D("0.30") - D(i) / 100 for i in range(4)}
+    v = lifecycle(hist, hhi=D("0.1"), gdp_cagr=GDP, margin_by_period=m)
+    assert v.stage is Lifecycle.SHAKEOUT
+    assert "盈利能力同时下滑" in v.reason
+
+
+def test_无GDP参照时不判成长或成熟():
+    """「快不快」必须有参照系 —— 没有就不该给出成长/成熟的判断。"""
+    hist = {f"202{i}FY": D(100) * D("1.3") ** i for i in range(4)}
+    v = lifecycle(hist, hhi=D("0.1"), gdp_cagr=None)
+    assert v.stage is Lifecycle.UNKNOWN
+    assert "缺名义 GDP 参照" in v.reason
 
 
 def test_不足三期不判定():
@@ -90,14 +117,13 @@ def test_不足三期不判定():
     assert "不足三期" in v.reason
 
 
-def test_五年CAGR与单年同比可能给出相反印象():
-    """白酒实测: 5 年 CAGR +6.7% 而最近一年 -18.26% ——
-    成熟行业的周期性下行，不是结构性衰退。单看一年会判错。"""
+def test_多年CAGR与单年同比可能给出相反印象():
+    """白酒实测: 5 年 CAGR +6.7% 而最近一年 -18.26%。"""
     hist = {"2021FY": D(100), "2022FY": D(115), "2023FY": D(132),
             "2024FY": D(152), "2025FY": D(124)}      # 末年大跌
-    v = lifecycle(hist, hhi=D("0.26"))
+    v = lifecycle(hist, hhi=D("0.26"), gdp_cagr=GDP)
     assert v.cagr > 0
-    assert v.stage in (Lifecycle.MATURE, Lifecycle.GROWTH)
+    assert v.stage is not Lifecycle.DECLINE
 
 
 # ── 周期敏感度 ───────────────────────────────────────────────
@@ -133,23 +159,17 @@ def test_GDP弹性需要至少三个观测():
     assert gdp_elasticity(ind, gdp) == D(2)
 
 
-def test_分量不全时不合成敏感度分数():
-    """三缺一的合成分会误导。"""
+def test_分量缺失时不给DTL():
     from ir_agent.industry_profile import CyclicalSensitivity
-    s = CyclicalSensitivity(D("2"), D("1.5"), None, 10)
-    assert s.score is None
-    assert "分量不全" in s.describe()
-    full = CyclicalSensitivity(D("2"), D("1.5"), D("1.5"), 10)
-    assert full.score is not None and "周期敏感度" in full.describe()
+    assert CyclicalSensitivity(D("2"), None, D("1.5"), 10).total_leverage is None
 
 
-def test_重资产行业的敏感度高于轻资产():
-    """实测: 钢铁 DOL 9.51 / 敏感度 3.15（高）vs 白酒 1.66 / 1.67（中）。"""
+def test_重资产行业的总杠杆高于轻资产():
+    """实测: 钢铁 DOL 4.15 vs 白酒 1.77。"""
     from ir_agent.industry_profile import CyclicalSensitivity
-    steel = CyclicalSensitivity(D("9.51"), D("2.31"), D("-1.42"), 17)
-    baijiu = CyclicalSensitivity(D("1.66"), D("1.54"), D("1.83"), 19)
-    assert steel.score > baijiu.score
-    assert "高" in steel.describe() and "中" in baijiu.describe()
+    steel = CyclicalSensitivity(D("4.15"), D("1.6"), D("-1.42"), 17)
+    baijiu = CyclicalSensitivity(D("1.77"), D("1.0"), D("1.83"), 19)
+    assert steel.total_leverage > baijiu.total_leverage
 
 
 # ── 比率分布 ─────────────────────────────────────────────────
@@ -191,8 +211,7 @@ def test_画像结论写入账本供正文引用():
                  metrics=["roe"])
     keys = {f.key for f in profile_facts(prof)}
     assert {"industry.hhi", "industry.effective_players",
-            "industry.revenue_cagr", "industry.dol_median",
-            "industry.leverage_median", "industry.roe_median"} <= keys
+            "industry.dol_median", "industry.roe_median"} <= keys
     assert all(f.method is Method.COMPUTED for f in profile_facts(prof))
 
 
@@ -213,13 +232,14 @@ class Test提示词口径:
         return build("甲-乙-丙", P, AS_OF,
                      revenues={f"c{i}": D(20) for i in range(5)},
                      ledgers=leds, revenue_history=hist, cr5=D("0.8"),
-                     industry_yoy=iy, gdp_yoy=gy, metrics=["roe"])
+                     industry_yoy=iy, gdp_yoy=gy, gdp_cagr=D("0.055"),
+                     metrics=["roe"])
 
     def test_数值写成占位符(self):
         from ir_agent.citation import audit_bare_numbers
         txt = self._prof().for_prompt()
         assert "[[industry.hhi@2024FY]]" in txt
-        assert "[[industry.cyclical_score@2024FY]]" in txt
+        assert "[[industry.dol_median@2024FY]]" in txt
         assert audit_bare_numbers(txt) == []
 
     def test_定性判定直接写文字(self):
@@ -229,16 +249,18 @@ class Test提示词口径:
         assert "成长期" in txt or "成熟期" in txt
         assert "高度集中" in txt or "中度集中" in txt or "分散" in txt
 
-    def test_点明敏感度决定传导强度(self):
-        assert "传导强度" in self._prof().for_prompt()
+    def test_点明三者不合成(self):
+        txt = self._prof().for_prompt()
+        assert "不合成" in txt and "教材未给合成公式" in txt
 
-    def test_分量不全时不给敏感度占位符(self):
-        """score 为 None 时账本里没有 cyclical_score，给了会解析失败。"""
+    def test_分量不全时不给对应占位符(self):
+        """账本里没有的键给了会解析失败。"""
         leds = {f"c{i}": _led({"roe": D("0.2")}) for i in range(5)}
         prof = build("甲-乙-丙", P, AS_OF,
                      revenues={f"c{i}": D(20) for i in range(5)},
                      ledgers=leds, metrics=["roe"])
-        assert "cyclical_score" not in prof.for_prompt()
+        txt = prof.for_prompt()
+        assert "dtl" not in txt and "income_elasticity" not in txt
 
     def test_分化标注进入提示词并要求说明(self):
         leds = {f"c{i}": _led({"roe": v}) for i, v in
@@ -282,28 +304,58 @@ class Test方法论一致性:
                      "admin_expense": 70})
         assert dol(led2, P, AS_OF) == D(1) + D(70) / D(140)
 
-    def test_负弹性被标注而非悄悄取绝对值(self):
-        """「GDP 上行时行业收入下行」多半是样本噪声，不是发现。"""
+    def test_负弹性标注为劣等品含义存疑(self):
+        """负弹性在经济学上是「劣等品」，有明确含义，但对多数行业不成立。"""
         from ir_agent.industry_profile import CyclicalSensitivity
-        s = CyclicalSensitivity(D("9.51"), D("2.31"), D("-1.42"), 17)
+        s = CyclicalSensitivity(D("4.15"), D("1.5"), D("-1.42"), 17)
         assert s.elasticity_suspect
-        assert "GDP 弹性为负" in s.describe() and "可靠性存疑" in s.describe()
-        ok = CyclicalSensitivity(D("9.51"), D("2.31"), D("1.42"), 17)
-        assert not ok.elasticity_suspect and "存疑" not in ok.describe()
+        assert "劣等品" in s.describe() and "样本过短" in s.describe()
+        ok = CyclicalSensitivity(D("4.15"), D("1.5"), D("1.42"), 17)
+        assert not ok.elasticity_suspect
 
-    def test_合成分数标注为启发式(self):
-        """课程没给合成公式，阈值也是自定的 —— 不能显得像标准做法。"""
+    def test_不再合成单一分数(self):
+        """Bodie 只并列三个因素、未给合成公式；检索也无标准做法。
+        早前版本用几何平均自行合成并配 2.0/1.3 阈值，那是编的。"""
         from ir_agent.industry_profile import CyclicalSensitivity
         s = CyclicalSensitivity(D("2"), D("1.5"), D("1.5"), 10)
-        assert "启发式合成" in s.describe()
+        assert not hasattr(s, "score")
+        assert "启发式" not in s.describe()
+
+    def test_收入弹性用标准分界(self):
+        """需求收入弹性 >1 为周期品、0–1 为非周期品、<0 为劣等品。
+        这是标准经济学分界，不是自定阈值。"""
+        from ir_agent.industry_profile import (ELASTICITY_CYCLIC,
+                                               CyclicalSensitivity)
+        assert ELASTICITY_CYCLIC == D(1)
+        assert "周期品" in CyclicalSensitivity(None, None, D("1.8"), 5).demand_type
+        assert "非周期" in CyclicalSensitivity(None, None, D("0.6"), 5).demand_type
+        assert "劣等品" in CyclicalSensitivity(None, None, D("-1"), 5).demand_type
+
+    def test_DTL是标准构造(self):
+        """DTL = DOL × DFL 是合并经营与财务杠杆的通行做法。"""
+        from ir_agent.industry_profile import CyclicalSensitivity
+        s = CyclicalSensitivity(D("2"), D("1.5"), D("1.2"), 10)
+        assert s.total_leverage == D(3)
+        assert CyclicalSensitivity(None, D("1.5"), None, 5).total_leverage is None
+
+    def test_DFL用标准定义(self):
+        """DFL = EBIT/(EBIT − 利息)。无息公司为 1，即不放大波动。"""
+        from ir_agent.industry_profile import dfl
+        assert dfl(_led({"operating_profit": 100}), P, AS_OF) == D(1)
+        # EBIT=150, 利息=50, EBT=100 → 1.5
+        assert dfl(_led({"operating_profit": 100,
+                         "interest_expense_fe": 50}), P, AS_OF) == D("1.5")
+        # 利息吞掉九成以上 EBIT —— 数值失真，不给
+        assert dfl(_led({"operating_profit": 5,
+                         "interest_expense_fe": 100}), P, AS_OF) is None
 
     def test_三因子对应课程原文(self):
-        """Bodie Ch.17: Sales(necessities/discretionary) / Operating leverage
-        / Financial leverage。前两项一一对应，第一项用弹性作代理并声明。"""
+        """Bodie: Sales(necessities/discretionary) / Operating leverage
+        / Financial leverage。三项分列，不合成。"""
         from ir_agent.industry_profile import CyclicalSensitivity
         doc = CyclicalSensitivity.__doc__
         assert "necessities" in doc and "discretionary" in doc
-        assert "操作化代理" in doc and "不是课程给定的度量" in doc
+        assert "不做三者的合成分数" in doc
 
     def test_HHI阈值对应司法部指南(self):
         """DOJ/FTC 横向合并指南: <1500 分散、1500–2500 中度、>2500 高度

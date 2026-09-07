@@ -181,20 +181,28 @@ def _view(phase=Phase.LATE, conf=D("0.3")):
         as_of=AS_OF)
 
 
-def test_高敏感度行业标注放大():
-    """同样的宏观下行，DOL 9.5 的钢铁与 DOL 1.7 的白酒受到的冲击不是一回事。"""
-    t = cycle.transmission(_view(), D("3.15"), "钢铁")
-    assert "强" in t and "放大" in t
+def test_传导拆成收入端与利润端():
+    """两件事各有各的判据，不合成一个分数:
+    收入弹性决定宏观变化有多少传到**收入**（>1 为周期品，标准分界），
+    DTL 决定收入变化有多少放大到**税前利润**。"""
+    t = cycle.transmission(_view(), D("6.6"), "钢铁", elasticity=D("1.8"))
+    assert "收入端" in t and "周期品" in t
+    assert "利润端放大约 6.6 倍" in t
 
 
-def test_低敏感度行业标注抑制():
-    t = cycle.transmission(_view(), D("0.9"), "公用事业")
-    assert "弱" in t and "抑制" in t
+def test_非周期品标注收入端受抑():
+    t = cycle.transmission(_view(), D("1.05"), "公用事业", elasticity=D("0.4"))
+    assert "非周期品" in t and "几乎不放大" in t
 
 
-def test_敏感度缺失时不硬推():
-    t = cycle.transmission(_view(), None, "某行业")
-    assert "无法量化传导强度" in t
+def test_两项都缺时不硬推():
+    t = cycle.transmission(_view(), None, "某行业", elasticity=None)
+    assert "无法判断传导强度" in t
+
+
+def test_只有一项时仍给出该项():
+    t = cycle.transmission(_view(), None, "某行业", elasticity=D("1.5"))
+    assert "收入端" in t and "利润端" not in t
 
 
 def test_周期无法判定时不做传导():
@@ -220,3 +228,11 @@ def test_只有分数入账阶段名不入账():
 def test_无信号时不入账():
     empty = cycle.CycleView(signals=[], scores={}, as_of=AS_OF)
     assert cycle.cycle_facts(empty, "2026-07") == []
+
+
+def test_负弹性不得说成非周期品():
+    """负弹性在经济学上是劣等品，不是「弹性小于一」的非周期品。
+    而且既已标为不可信，就不该给出确定的需求性质判断。"""
+    t = cycle.transmission(_view(), D("6.6"), "钢铁", elasticity=D("-1.42"))
+    assert "非周期品" not in t
+    assert "方向不明" in t and "不可信" in t

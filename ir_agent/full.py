@@ -176,6 +176,26 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, str]:
             f"{agg.for_prompt()}\n{prof_pr}".rstrip(), "")
 
 
+def _latest_key(ledger, key: str, as_of: date) -> str:
+    """该 key 在时点内可见的最新期间标签。"""
+    from ir_agent.ledger import LookAheadError
+    from ir_agent.periods import UnknownPeriod
+    from ir_agent.periods import sort_key as pk
+
+    best, bk = "", None
+    for k, per in ledger._facts:                         # noqa: SLF001
+        if k != key:
+            continue
+        try:
+            ledger.get(k, per, as_of=as_of)
+            s = pk(per)
+        except (KeyError, LookAheadError, UnknownPeriod):
+            continue
+        if bk is None or s > bk:
+            best, bk = per, s
+    return best
+
+
 def _fact_value(ledger, key: str, period: str, as_of: date):
     from ir_agent.ledger import LookAheadError
     try:
@@ -227,11 +247,29 @@ def _industry_profile(peers, agg, cache, r, as_of: date) -> tuple[str, str]:
         if v is not None:
             gdp_yoy[per] = v
 
+    # 生命周期要拿行业增速与名义 GDP 增速比 —— 「快不快」必须有参照系。
+    gdp_cagr = _fact_value(r.ledger, "macro.gdp_nominal_cagr",
+                           _latest_key(r.ledger, "macro.gdp_nominal_cagr",
+                                       as_of), as_of)
+    # 行业整体利润率的历史 —— CFA 用它区分 growth（盈利改善）与 shakeout
+    margins: dict[str, Decimal] = {}
+    for per in history:
+        num = den = Decimal(0)
+        for c in consistent:
+            fs = cache.get(c) or {}
+            pf, rv = fs.get(("net_profit", per)), fs.get(("revenue", per))
+            if pf and rv and pf.as_of <= as_of and rv.as_of <= as_of:
+                num += pf.value
+                den += rv.value
+        if den:
+            margins[per] = num / den
+
     prof = ip.build(
         industry=peers.classification.used_path, period=r.period, as_of=as_of,
         revenues=agg.revenues, ledgers=ledgers,
         revenue_history=history, cr5=agg.cr5,
-        industry_yoy=ind_yoy, gdp_yoy=gdp_yoy)
+        industry_yoy=ind_yoy, gdp_yoy=gdp_yoy,
+        gdp_cagr=gdp_cagr, margin_history=margins)
     for f in ip.profile_facts(prof):
         r.ledger.put(f)
 
@@ -244,8 +282,11 @@ def _industry_profile(peers, agg, cache, r, as_of: date) -> tuple[str, str]:
     if view is not None:
         from ir_agent import cycle as cy
 
-        score = prof.sensitivity.score if prof.sensitivity else None
-        trans = cy.transmission(view, score, peers.classification.used_path)
+        sen = prof.sensitivity
+        trans = cy.transmission(
+            view, sen.total_leverage if sen else None,
+            peers.classification.used_path,
+            elasticity=sen.gdp_elasticity if sen else None)
     human = prof.summary() + (f"\n  传导　{trans}" if trans else "")
     model = prof.for_prompt() + (f"\n  宏观传导　{trans}" if trans else "")
     return human, model

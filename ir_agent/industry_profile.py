@@ -42,17 +42,36 @@ SOURCE_ID = "industry_profile"
 HHI_UNCONCENTRATED = Decimal("0.15")
 HHI_MODERATE = Decimal("0.25")
 
-# 生命周期的增速门槛。**课程只说「行业盈利能力受生命周期阶段影响」，
-# 没有给判据，这两个阈值是本项目的启发式** —— 15% 约为高成长行业的
-# 常见量级，3% 约为名义 GDP 增速的下沿。据此下结论时要知道它们是自定的。
-GROWTH_HIGH = Decimal("0.15")
-GROWTH_LOW = Decimal("0.03")
+# 收入弹性的分界。**这是标准经济学口径，不是自定阈值**:
+# 需求收入弹性 > 1 为周期品（cyclic good），0–1 为非周期品（noncyclic），
+# < 0 为劣等品（收入上升时需求下降）。
+ELASTICITY_CYCLIC = Decimal(1)
+
+# 行业增速相对名义 GDP 增速的容差 —— 超出即视为「显著快于/慢于经济」。
+# 用相对比较而非绝对阈值: 绝对阈值（如「15% 算高增长」）没有依据，
+# 而「是否快于名义 GDP」既是 CFA 生命周期里 growth 与 mature 的实质区别
+# （前者在扩大占经济的份额），也正好等价于收入弹性大于/小于 1。
+GDP_TOLERANCE = Decimal("0.02")
 
 
 class Lifecycle(str, Enum):
+    """CFA 的五阶段模型。判据是**定性多维**的，课程与 CFA 均未给数值阈值:
+
+        embryonic  缓慢增长、高价格、低销量、投资需求大、失败风险高
+        growth     需求快速increase、盈利改善、价格下降、竞争相对低
+        shakeout   增长放缓、竞争激烈、盈利下滑、聚焦成本
+        mature     几无增长、**行业整合**、进入壁垒高
+        decline    负增长、产能过剩、竞争激烈
+
+    本模块用三个可测信号去对应上述特征: 增速相对名义 GDP、行业利润率
+    趋势、集中度（对应 mature 的「industry consolidation」）。
+    **embryonic 不做判定** —— 萌芽期行业鲜有足够多的上市公司可供聚合，
+    从上市公司口径判不出来，判了也不可信。
+    """
+
     GROWTH = "成长期"
+    SHAKEOUT = "洗牌期"
     MATURE = "成熟期"
-    LATE_MATURE = "成熟末期"
     DECLINE = "衰退期"
     UNKNOWN = "无法判定"
 
@@ -130,17 +149,27 @@ class LifecycleView:
     hhi: Decimal | None
     reason: str          # 带读数，给人看
     basis: str = ""      # 定性表述，给模型看 —— 提示词里不许有账本外的数字
+    margin_trend: str = ""
 
     def describe(self) -> str:
         return f"{self.stage.value} —— {self.reason}"
 
 
 def lifecycle(revenue_by_period: dict[str, Decimal],
-              hhi: Decimal | None) -> LifecycleView:
-    """按增速水平 + 增速波动 + 集中度判定阶段。
+              hhi: Decimal | None,
+              gdp_cagr: Decimal | None = None,
+              margin_by_period: dict[str, Decimal] | None = None) -> LifecycleView:
+    """按 CFA 五阶段的**定性特征**判定，不用自定的数值阈值。
 
-    **不单看增速**: 高集中度 + 负增长是成熟末期或衰退（格局已定、需求在退），
-    低集中度 + 负增长更可能是周期底部（还在洗牌）。两者的估值含义完全不同。
+    三个可测信号 → CFA 的判据:
+
+      增速 vs 名义 GDP    growth「需求快速增长」/ mature「几无增长」
+                          / decline「负增长」
+      利润率趋势          growth「盈利改善」/ shakeout「盈利下滑」
+      集中度 HHI          mature「行业整合」
+
+    没有名义 GDP 参照时退化为只看增速符号，并在理由中说明 ——
+    「快不快」必须有参照系，没有参照系就不该给出「成长/成熟」的判断。
     """
     pers = sorted(revenue_by_period)
     vals = [revenue_by_period[p] for p in pers]
@@ -155,26 +184,50 @@ def lifecycle(revenue_by_period: dict[str, Decimal],
     vol = ((sum((y - mean) ** 2 for y in yoys) / len(yoys)).sqrt()
            if len(yoys) >= 2 else None)
 
-    concentrated = hhi is not None and hhi >= HHI_MODERATE
-    if cagr >= GROWTH_HIGH:
-        stage, tail = Lifecycle.GROWTH, "高速扩张"
-    elif cagr >= GROWTH_LOW:
-        stage, tail = Lifecycle.MATURE, "稳定增长"
-    elif cagr >= 0:
-        stage = Lifecycle.LATE_MATURE if concentrated else Lifecycle.MATURE
-        tail = ("增长停滞且格局已高度集中" if concentrated
-                else "增长停滞但格局仍分散，可能处周期低位")
+    # 利润率趋势 —— CFA 用它区分 growth（改善）与 shakeout（下滑）
+    trend = ""
+    improving = deteriorating = False
+    if margin_by_period and len(margin_by_period) >= 2:
+        mp = sorted(margin_by_period)
+        delta = margin_by_period[mp[-1]] - margin_by_period[mp[0]]
+        improving, deteriorating = delta > 0, delta < 0
+        trend = "改善" if improving else ("下滑" if deteriorating else "持平")
+
+    consolidated = hhi is not None and hhi >= HHI_MODERATE
+
+    if gdp_cagr is None:
+        # 无参照系时只能说符号，不能说「成长」或「成熟」
+        stage = Lifecycle.DECLINE if cagr < 0 else Lifecycle.UNKNOWN
+        tail = ("总量收缩" if cagr < 0 else
+                "缺名义 GDP 参照，无法判断增速是快于还是慢于经济")
+    elif cagr > gdp_cagr + GDP_TOLERANCE:
+        stage = Lifecycle.GROWTH
+        tail = "增速显著快于名义 GDP，行业在扩大其占经济的份额"
+        if deteriorating:
+            stage, tail = Lifecycle.SHAKEOUT, (
+                "增速虽快于名义 GDP，但盈利能力同时下滑 —— "
+                "符合洗牌期「增长放缓、竞争激烈、盈利下滑」的特征")
+    elif cagr < 0:
+        stage = Lifecycle.DECLINE
+        tail = "总量负增长"
+        if not consolidated:
+            stage = Lifecycle.SHAKEOUT
+            tail += "但格局尚未整合 —— 更接近洗牌期而非衰退期"
+    elif cagr < gdp_cagr - GDP_TOLERANCE:
+        stage = Lifecycle.SHAKEOUT if deteriorating else Lifecycle.MATURE
+        tail = "增速显著慢于名义 GDP" + (
+            "且盈利能力下滑" if deteriorating else
+            ("且格局已整合" if consolidated else "，格局尚未整合"))
     else:
-        stage = Lifecycle.DECLINE if concentrated else Lifecycle.LATE_MATURE
-        tail = ("总量收缩且格局已高度集中 —— 需求侧退坡而非份额洗牌"
-                if concentrated
-                else "总量收缩但格局仍分散，可能是周期底部而非结构性衰退")
-    # 两版: 带读数的给人看，定性的给模型看。提示词里出现账本外的数字，
-    # 模型照抄就会被审计驳回 —— 这个坑此前已经踩过三次。
+        stage = Lifecycle.MATURE
+        tail = "增速与名义 GDP 相当" + ("且格局已整合" if consolidated else "")
+
     return LifecycleView(
         stage, cagr, vol, hhi,
-        reason=f"{span} 年营收 CAGR {cagr * 100:.1f}%，{tail}",
-        basis=f"多年营收 CAGR 口径下{tail}")
+        reason=f"{span} 年营收 CAGR {cagr * 100:.1f}%，{tail}"
+               + (f"；利润率{trend}" if trend else ""),
+        basis=f"多年营收 CAGR 口径下{tail}" + (f"；利润率{trend}" if trend else ""),
+        margin_trend=trend)
 
 
 # ── 周期敏感度 ────────────────────────────────────────────────
@@ -186,56 +239,71 @@ class CyclicalSensitivity:
         Sales（necessities / discretionary）、Operating leverage、
         Financial leverage —— 「↑ leverage, ↑ sensitivity」
 
-    前两项与课程一一对应。第一项**销售性质**课程只给了定性描述，
-    这里用「行业营收增速对名义 GDP 增速的弹性」作**操作化代理** ——
-    必需品的收入弹性低、可选消费的高，这是该定性区分背后的经济学含义。
-    但这是本项目的操作化，不是课程给定的度量，据此下结论时要说明。
+    **不做三者的合成分数。** Bodie 只是并列这三个因素，没有给合成公式；
+    检索也未找到把「弹性 × 经营杠杆 × 财务杠杆」合成单一指标的标准做法。
+    早前版本用几何平均自行合成并配了 2.0 / 1.3 的阈值 —— 那是编的，
+    会让一个无依据的数字看起来像标准度量。现改为三项分别呈现，
+    每一项都用它自己有依据的口径与判据:
+
+      · **收入弹性** —— 需求收入弹性是「必需品 / 可选消费」的标准经济学
+        度量。分界为 **1**: >1 为周期品（cyclic good），0–1 为非周期品，
+        <0 为劣等品。这个阈值不是自定的。
+      · **DOL** —— 课程给的公式（见 dol 的文档）。
+      · **DFL / DTL** —— DFL = EBIT/(EBIT − 利息) 是标准定义；
+        **DTL = DOL × DFL** 是合并经营与财务杠杆的通行做法，衡量税前
+        利润对销量变动的总敏感度。课程未涉及 DFL/DTL，但它是既有的标准
+        构造，比自编的三因子合成有依据得多。弹性仍单独呈现 ——
+        它与两个杠杆量纲不同，没有理由揉进同一个乘积。
     """
 
-    operating_leverage: Decimal | None    # 行业中位 DOL
-    financial_leverage: Decimal | None    # 行业中位权益乘数
-    gdp_elasticity: Decimal | None        # 销售性质的代理
+    operating_leverage: Decimal | None      # DOL 中位
+    financial_leverage: Decimal | None      # DFL 中位
+    gdp_elasticity: Decimal | None          # 收入弹性（销售性质的度量）
     n: int
+    equity_multiplier: Decimal | None = None   # 权益乘数中位，辅助参考
+
+    @property
+    def total_leverage(self) -> Decimal | None:
+        """DTL = DOL × DFL。标准构造，非自定合成。"""
+        if self.operating_leverage is None or self.financial_leverage is None:
+            return None
+        return self.operating_leverage * self.financial_leverage
+
+    @property
+    def demand_type(self) -> str | None:
+        """按收入弹性的标准分界给出需求性质。"""
+        e = self.gdp_elasticity
+        if e is None:
+            return None
+        if e < 0:
+            return "劣等品（收入上升时需求下降）"
+        if e > ELASTICITY_CYCLIC:
+            return "周期品（收入弹性大于一）"
+        return "非周期品（收入弹性介于零与一）"
 
     @property
     def elasticity_suspect(self) -> bool:
-        """负弹性意味着「GDP 上行时行业收入下行」。对绝大多数行业这不是
-        发现，而是样本太短或处在自身供给周期上的噪声 —— 必须标注，
-        不能悄悄取绝对值当成高敏感度。"""
+        """负弹性在经济学上是「劣等品」，有明确含义，但对多数行业不成立。
+        实测钢铁得到 -1.42 —— 更可能是样本过短或行业自身供给周期所致。
+        标注而非当成发现。"""
         return self.gdp_elasticity is not None and self.gdp_elasticity < 0
 
-    @property
-    def score(self) -> Decimal | None:
-        """三项合成。任一项缺失即不给分数 —— 三缺一的合成分会误导。
-
-        **合成方式是本项目的启发式，课程没有给公式。** 取几何平均是为了
-        让任一项接近中性（=1）时整体不被另外两项拉高，且量纲不同的三项
-        不会因加法而被隐式加权。阈值 2.0 / 1.3 同样是启发式。
-        """
-        if None in (self.operating_leverage, self.financial_leverage,
-                    self.gdp_elasticity):
-            return None
-        o = max(self.operating_leverage, Decimal(1))
-        f = max(self.financial_leverage, Decimal(1))
-        g = abs(self.gdp_elasticity)      # 取绝对值＝看共动强度，符号另行标注
-        return (o * f * max(g, Decimal("0.1"))) ** (Decimal(1) / 3)
-
     def describe(self) -> str:
-        def s(x, fmt="{:.2f}"):
-            return "—" if x is None else fmt.format(x)
+        def s(x):
+            return "—" if x is None else f"{x:.2f}"
 
-        base = (f"经营杠杆 DOL 中位 {s(self.operating_leverage)}、"
-                f"财务杠杆 中位 {s(self.financial_leverage)}、"
-                f"营收对名义 GDP 弹性 {s(self.gdp_elasticity)}"
-                f"（{self.n} 家）")
-        sc = self.score
-        if sc is None:
-            return base + "　—— 分量不全，不合成敏感度分数"
-        level = "高" if sc >= Decimal("2") else ("中" if sc >= Decimal("1.3") else "低")
-        out = base + f"　→ 周期敏感度 {sc:.2f}（{level}，启发式合成）"
+        parts = [f"经营杠杆 DOL 中位 {s(self.operating_leverage)}",
+                 f"财务杠杆 DFL 中位 {s(self.financial_leverage)}"]
+        dtl = self.total_leverage
+        if dtl is not None:
+            parts.append(f"总杠杆 DTL {dtl:.2f}")
+        if self.gdp_elasticity is not None:
+            parts.append(f"收入弹性 {self.gdp_elasticity:.2f}"
+                         f"（{self.demand_type}）")
+        out = "、".join(parts) + f"（{self.n} 家）"
         if self.elasticity_suspect:
-            out += ("　⚠ GDP 弹性为负 —— 多半是样本过短或行业自身供给周期"
-                    "所致，该分量的可靠性存疑")
+            out += ("　⚠ 弹性为负在经济学上意为劣等品，对本行业多半不成立"
+                    " —— 更可能是样本过短或行业自身供给周期所致")
         return out
 
 
@@ -270,6 +338,26 @@ def dol(led: FactLedger, period: str, as_of: date) -> Decimal | None:
             fixed += abs(v)
             got = True
     return Decimal(1) + fixed / e if got else None
+
+
+def dfl(led: FactLedger, period: str, as_of: date) -> Decimal | None:
+    """财务杠杆度 DFL = EBIT / (EBIT − 利息费用)。
+
+    标准定义: 税前利润对 EBIT 变动的敏感度。无息负债的公司 DFL = 1，
+    即财务结构不放大波动。利息接近 EBIT 时 DFL 发散 —— 那是真实的
+    脆弱性，但数值不可用，此时返回 None 而非一个巨大的数。
+    """
+    from ir_agent.operators.aggregates import ebit as _ebit
+
+    e = _ebit(led, period, as_of)
+    if e is None or e <= 0:
+        return None
+    ie = _get(led, "interest_expense_fe", period, as_of)
+    interest = max(ie, Decimal(0)) if ie is not None else Decimal(0)
+    ebt = e - interest
+    if ebt <= 0 or ebt / e < Decimal("0.05"):
+        return None                       # 利息吞掉九成以上 EBIT，DFL 失真
+    return e / ebt
 
 
 def gdp_elasticity(industry_yoy: dict[str, Decimal],
@@ -354,15 +442,29 @@ class IndustryProfile:
             lines.append(line)
             if self.lifecycle.basis:
                 lines.append(f"    判据：{self.lifecycle.basis}")
-        if self.sensitivity and self.sensitivity.score is not None:
-            lines.append(
-                f"  周期敏感度　[[industry.cyclical_score@{p}]]"
-                f"　＝ 经营杠杆 [[industry.dol_median@{p}]]"
-                f" × 财务杠杆 [[industry.leverage_median@{p}]]"
-                f" × GDP 弹性 [[industry.gdp_elasticity@{p}]]")
-            lines.append(
-                "    该分数决定宏观周期对本行业的传导强度：分数越高，"
-                "同样的宏观变化对本行业盈利的冲击越大")
+        sen = self.sensitivity
+        if sen is not None:
+            bits = []
+            if sen.operating_leverage is not None:
+                bits.append(f"经营杠杆 DOL [[industry.dol_median@{p}]]")
+            if sen.financial_leverage is not None:
+                bits.append(f"财务杠杆 DFL [[industry.dfl_median@{p}]]")
+            if sen.total_leverage is not None:
+                bits.append(f"总杠杆 DTL [[industry.dtl@{p}]]")
+            if sen.gdp_elasticity is not None:
+                bits.append(f"收入弹性 [[industry.income_elasticity@{p}]]"
+                            f"（{sen.demand_type}）")
+            if bits:
+                lines.append("  周期敏感度（Bodie Ch.17 的三个决定因素，"
+                             "分列不合成）　" + "　".join(bits))
+                lines.append(
+                    "    收入弹性大于一为周期品、介于零与一为非周期品 ——"
+                    "这是标准经济学分界；DTL 越高，同样的收入波动对税前"
+                    "利润的放大越强。**三者不合成单一分数**，"
+                    "教材未给合成公式。")
+            if sen.elasticity_suspect:
+                lines.append("    ⚠ 收入弹性为负，多半是样本过短所致，"
+                             "该分量不可靠，正文中不得据此下强结论")
         dispersed = [s for s in self.spreads.values() if s.dispersed]
         if dispersed:
             names = "、".join(BY_KEY[s.key].label for s in dispersed
@@ -380,6 +482,8 @@ def build(industry: str, period: str, as_of: date,
           cr5: Decimal | None = None,
           industry_yoy: dict[str, Decimal] | None = None,
           gdp_yoy: dict[str, Decimal] | None = None,
+          gdp_cagr: Decimal | None = None,
+          margin_history: dict[str, Decimal] | None = None,
           metrics: list[str] | None = None) -> IndustryProfile:
     """由已取回的同业账本组装行业画像。不发起任何网络请求。"""
     from ir_agent.metrics import REGISTRY
@@ -389,16 +493,18 @@ def build(industry: str, period: str, as_of: date,
     hhi = prof.concentration.hhi if prof.concentration else None
 
     if revenue_history:
-        prof.lifecycle = lifecycle(revenue_history, hhi)
+        prof.lifecycle = lifecycle(revenue_history, hhi, gdp_cagr=gdp_cagr,
+                                   margin_by_period=margin_history)
 
     dols = [d for led in ledgers.values() if (d := dol(led, period, as_of))]
-    levs = [v for led in ledgers.values()
-            if (v := _get(led, "equity_multiplier", period, as_of))]
+    dfls = [d for led in ledgers.values() if (d := dfl(led, period, as_of))]
+    ems = [v for led in ledgers.values()
+           if (v := _get(led, "equity_multiplier", period, as_of))]
     prof.sensitivity = CyclicalSensitivity(
         operating_leverage=_median(dols),
-        financial_leverage=_median(levs),
+        financial_leverage=_median(dfls),
         gdp_elasticity=gdp_elasticity(industry_yoy or {}, gdp_yoy or {}),
-        n=len(ledgers))
+        n=len(ledgers), equity_multiplier=_median(ems))
 
     keys = metrics or [m.key for m in REGISTRY]
     for key in keys:
@@ -434,9 +540,10 @@ def profile_facts(prof: IndustryProfile) -> list[Fact]:
         add("industry.revenue_cagr", prof.lifecycle.cagr, "ratio")
     if prof.sensitivity:
         add("industry.dol_median", prof.sensitivity.operating_leverage, "x")
-        add("industry.leverage_median", prof.sensitivity.financial_leverage, "x")
-        add("industry.gdp_elasticity", prof.sensitivity.gdp_elasticity, "x")
-        add("industry.cyclical_score", prof.sensitivity.score, "x")
+        add("industry.dfl_median", prof.sensitivity.financial_leverage, "x")
+        add("industry.dtl", prof.sensitivity.total_leverage, "x")
+        add("industry.income_elasticity", prof.sensitivity.gdp_elasticity, "x")
+        add("industry.leverage_median", prof.sensitivity.equity_multiplier, "x")
     for key, s in prof.spreads.items():
         from ir_agent.metrics import BY_KEY
 

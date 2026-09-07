@@ -75,9 +75,10 @@ LABELS = {
     "industry.effective_players": "行业有效竞争者数",
     "industry.revenue_cagr": "行业营收多年 CAGR",
     "industry.dol_median": "行业经营杠杆 DOL 中位",
-    "industry.leverage_median": "行业财务杠杆中位",
-    "industry.gdp_elasticity": "行业营收对名义 GDP 弹性",
-    "industry.cyclical_score": "行业周期敏感度",
+    "industry.dfl_median": "行业财务杠杆 DFL 中位",
+    "industry.dtl": "行业总杠杆 DTL",
+    "industry.income_elasticity": "行业收入弹性",
+    "industry.leverage_median": "行业权益乘数中位",
     # 折现率输入 —— β 脱离窗口与基准没有意义，标签里点明口径
     "beta": "β（对沪深300，周频两年）", "beta.r_squared": "β 回归 R²",
     **{f"rate.cgb_{t}y": f"{cn}年期国债到期收益率"
