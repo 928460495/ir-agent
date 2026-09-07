@@ -89,8 +89,17 @@ def validate(
     ledger: FactLedger,
     body: str,
     as_of: date,
+    corpus=None,
 ) -> list[str]:
-    """逐条核验依据，返回问题列表。空列表 = 全部可核验。"""
+    """逐条核验依据，返回问题列表。空列表 = 全部可核验。
+
+    **corpus 是 EXTERNAL 的核验基准。** 三类依据现在一视同仁:
+    FACT 对账本、REPORT 对正文、EXTERNAL 对语料库 —— 引文都必须逐字
+    出自代码实际取回的东西。
+
+    corpus 为 None 时保留旧行为（只检查格式）。这不是留后门: WACC 的
+    无风险利率等少数几处，URL 由 rates.py 生成、模型碰不到，本来就无从
+    捏造。但凡把外部资料交给模型自由引用的地方，都必须传 corpus。"""
     if not bases:
         return ["未提供任何依据。"]
 
@@ -110,5 +119,11 @@ def validate(
                 problems.append(
                     f"依据引用的正文片段「{b.quote[:30]}」在正文中找不到 —— "
                     "与凭空捏造无异。")
-        # EXTERNAL 无法在本地核验，但已留下 URL、原文与日期供人复核
+        elif b.kind is BasisKind.EXTERNAL:
+            if corpus is None:
+                # 未提供语料库: 已留下 URL、原文与日期供人复核
+                continue
+            bad = corpus.verify(b.quote, b.ref)
+            if bad:
+                problems.append(bad)
     return problems
