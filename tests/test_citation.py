@@ -296,3 +296,7 @@ class Test期间标签白名单的实测缺口:
     def test_期限标签不是数值(self):
         assert audit_bare_numbers("10年期国债与 30 年期国债") == []
         assert audit_bare_numbers("十年期国债到期收益率") == []
+
+    def test_货币层次是口径名不是数值(self):
+        assert audit_bare_numbers("M1−M2 剪刀差走阔，M2 同比回落") == []
+        assert audit_bare_numbers("M0 与 M3 口径") == []

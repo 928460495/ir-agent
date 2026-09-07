@@ -201,11 +201,91 @@ def _nominal_cagr(levels: dict[str, tuple[Decimal, str, date]]) -> list[Fact]:
     return out
 
 
+# ── 指标的三分法（CFA 口径）────────────────────────────────
+# 领先: 转折点先于整体经济，用于**预测**
+# 同步: 转折点与整体经济接近，用于识别**当前**状态
+# 滞后: 转折点晚于整体经济，趋势确立后才变化
+#
+# 不标注这个，研报只能把六个数平铺出来。课程 W2 workshop 专门用一整个
+# activity 让学生举例并解释三者的区别 —— 它是宏观分析的组织原则，
+# 不是分类标签。
+LEADING = "领先"
+COINCIDENT = "同步"
+LAGGING = "滞后"
+
+INDICATOR_CLASS: dict[str, str] = {
+    "macro.pmi_manufacturing": LEADING,
+    "macro.pmi_services": LEADING,
+    "macro.m1_yoy": LEADING,
+    "macro.m2_yoy": LEADING,
+    "macro.m1_m2_gap": LEADING,          # 信贷周期
+    "macro.gdp_real_yoy": COINCIDENT,
+    "macro.gdp_nominal_yoy": COINCIDENT,
+    "macro.gdp_nominal": COINCIDENT,
+    "macro.gdp_nominal_cagr": COINCIDENT,
+    "macro.cpi_yoy": LAGGING,
+    "macro.ppi_yoy": LAGGING,
+}
+
+
+def classify(key: str) -> str | None:
+    return INDICATOR_CLASS.get(key)
+
+
+def fetch_pmi(size: int = 24) -> list[Fact]:
+    """采购经理指数。**最重要的领先指标** —— 荣枯线 50。
+
+    单位用 index 而非 ratio: PMI 是扩散指数，49.8 不是 49.8%，
+    当成比率会在正文里渲染成「4980.00%」。
+    """
+    facts: list[Fact] = []
+    for row in _get("RPT_ECONOMY_PMI", size):
+        period, as_of = _month_period(str(row.get("TIME") or ""),
+                                      _report_date(row))
+        for col, key in (("MAKE_INDEX", "macro.pmi_manufacturing"),
+                         ("NMAKE_INDEX", "macro.pmi_services")):
+            v = _dec(row.get(col))
+            if v is not None:
+                facts.append(Fact(key=key, value=v, unit="index",
+                                  period=period, as_of=as_of,
+                                  source_id=SOURCE_ID, method=Method.REPORTED))
+    return facts
+
+
+def fetch_money(size: int = 24) -> list[Fact]:
+    """货币供应量同比与 M1−M2 剪刀差。
+
+    剪刀差是**信贷周期**的核心读数: M1 是活期存款为主的可动用资金，
+    M2 含定期。剪刀差走阔说明资金在活化（企业愿意投资、居民愿意消费），
+    收窄或转负说明资金在沉淀。课程把信贷周期单列一节，理由之一正是
+    「强峰值与随后的系统性银行危机密切相关」。
+    """
+    facts: list[Fact] = []
+    for row in _get("RPT_ECONOMY_CURRENCY_SUPPLY", size):
+        period, as_of = _month_period(str(row.get("TIME") or ""),
+                                      _report_date(row))
+        m1 = _dec(row.get("CURRENCY_SAME"))
+        m2 = _dec(row.get("BASIC_CURRENCY_SAME"))
+        for v, key in ((m1, "macro.m1_yoy"), (m2, "macro.m2_yoy")):
+            if v is not None:
+                facts.append(Fact(key=key, value=v / 100, unit="ratio",
+                                  period=period, as_of=as_of,
+                                  source_id=SOURCE_ID, method=Method.REPORTED))
+        if m1 is not None and m2 is not None:
+            facts.append(Fact(
+                key="macro.m1_m2_gap", value=(m1 - m2) / 100, unit="ratio",
+                period=period, as_of=as_of, source_id=SOURCE_ID,
+                method=Method.COMPUTED,
+                derived_from=(f"macro.m1_yoy@{period}",
+                              f"macro.m2_yoy@{period}")))
+    return facts
+
+
 def fetch_macro(size: int = 24) -> list[Fact]:
     """全部宏观事实。任一子项失败不影响其余 —— 宏观是背景信息，缺一项不该阻断研究。"""
     facts: list[Fact] = []
     errors: list[str] = []
-    for fn in (fetch_gdp, fetch_cpi_ppi):
+    for fn in (fetch_gdp, fetch_cpi_ppi, fetch_pmi, fetch_money):
         try:
             facts.extend(fn(size))
         except MacroUnavailable as e:
@@ -233,17 +313,40 @@ class MacroSnapshot:
             return None
         return max(seen, key=lambda f: (period_sort_key(f.period), f.as_of))
 
-    _SHOWN = (("macro.gdp_nominal_yoy", "名义 GDP 同比"),
+    # 按三分法排序 —— 领先在前，因为它回答「接下来会怎样」，
+    # 而研报的宏观一节要给的是展望，不是回顾。
+    _SHOWN = (("macro.pmi_manufacturing", "制造业 PMI"),
+              ("macro.pmi_services", "非制造业 PMI"),
+              ("macro.m1_m2_gap", "M1−M2 剪刀差"),
+              ("macro.m1_yoy", "M1 同比"),
+              ("macro.m2_yoy", "M2 同比"),
+              ("macro.gdp_nominal_yoy", "名义 GDP 同比"),
               ("macro.gdp_real_yoy", "实际 GDP 同比"),
               ("macro.cpi_yoy", "CPI 同比"),
               ("macro.ppi_yoy", "PPI 同比"))
 
+    @staticmethod
+    def _fmt(f: Fact) -> str:
+        # PMI 是扩散指数不是比率，乘 100 会变成「4980.00%」
+        return f"{f.value:.1f}" if f.unit == "index" else f"{f.value * 100:.2f}%"
+
     def describe(self) -> str:
-        """给人看的：直接写数值。"""
-        lines = [f"  {label}（{f.period}）{f.value * 100:.2f}%"
-                 for key, label in self._SHOWN
-                 if (f := self.latest(key)) is not None]
-        return "\n".join(lines) or "  （该时点无可见宏观数据）"
+        """给人看的：直接写数值，并按三分法分组。"""
+        groups: dict[str, list[str]] = {}
+        for key, label in self._SHOWN:
+            f = self.latest(key)
+            if f is None:
+                continue
+            cls = classify(key) or "其他"
+            note = ""
+            if key == "macro.pmi_manufacturing":
+                note = "（荣枯线 50，" + ("扩张" if f.value >= 50 else "收缩") + "）"
+            groups.setdefault(cls, []).append(
+                f"{label}（{f.period}）{self._fmt(f)}{note}")
+        if not groups:
+            return "  （该时点无可见宏观数据）"
+        return "\n".join(f"  [{cls}] " + "　".join(items)
+                          for cls, items in groups.items())
 
     def for_prompt(self) -> str:
         """给模型看的：写成**占位符**。
@@ -252,7 +355,18 @@ class MacroSnapshot:
         prompt 里塞裸数字再惩罚模型引用它，是自相矛盾的契约。这些数字
         本来就都在账本里，直接给出可引用的写法即可。
         """
-        lines = [f"  {label}　[[{key}@{f.period}]]"
-                 for key, label in self._SHOWN
-                 if (f := self.latest(key)) is not None]
-        return "\n".join(lines) or "  （该时点无可见宏观数据）"
+        groups: dict[str, list[str]] = {}
+        for key, label in self._SHOWN:
+            f = self.latest(key)
+            if f is None:
+                continue
+            cls = classify(key) or "其他"
+            groups.setdefault(cls, []).append(f"{label} [[{key}@{f.period}]]")
+        if not groups:
+            return "  （该时点无可见宏观数据）"
+        lines = ["  指标按 CFA 三分法归类。**领先指标回答「接下来会怎样」**，"
+                 "宏观一节要给的是展望而非回顾："]
+        for cls in ("领先", "同步", "滞后"):
+            if cls in groups:
+                lines.append(f"  [{cls}] " + "　".join(groups[cls]))
+        return "\n".join(lines)
