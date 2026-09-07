@@ -243,3 +243,52 @@ class TestReportStructure:
     def test_假设可追溯的层级引用与章节号一致(self):
         from ir_agent.analyst import _RULES
         assert "第 8 节的每一条假设" in _RULES and "第 2–7 节" in _RULES
+
+
+class TestCosmeticViolationsDoNotStarveTheReport:
+    """排版问题不该毙掉整篇报告。
+
+    **实测踩到。** 加上「占位符后重复写单位」的检查之后重跑长电，模型在
+    重写过程中反而伪造了一个占位符，三次耗尽，最终一个字都没产出 ——
+    而上一轮至少出了一份带「17 分位分位」的完整报告。为错字阻断整篇报告
+    是比例失当，与之前出处闸门那次是同一个毛病。
+    """
+
+    def _cat(self):
+        from datetime import date
+        from decimal import Decimal
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.ledger import Fact, FactLedger, Method
+        led = FactLedger()
+        led.put(Fact(key="gross_margin.percentile", value=Decimal("17"),
+                     unit="分位", period="2025FY", as_of=date(2025, 1, 1),
+                     source_id="t", method=Method.COMPUTED))
+        return FactCatalog(ledger=led, as_of=date(2026, 9, 7))
+
+    def test_单位重复被归为排版类(self):
+        from ir_agent.analyst import is_cosmetic
+        assert is_cosmetic("以下占位符后重复写了单位（渲染值已自带单位）：…")
+
+    def test_伪造占位符不是排版类(self):
+        from ir_agent.analyst import is_cosmetic
+        assert not is_cosmetic("以下引用在事实账本中不存在，属于伪造：…")
+        assert not is_cosmetic("以下数字是字面值，必须改写为占位符：…")
+
+    def test_最后一轮只剩排版问题则收下(self):
+        from ir_agent.analyst import write_body
+        bad = "毛利率处于同业[[gross_margin.percentile@2025FY]]分位。"
+        calls = []
+
+        def client(p):
+            calls.append(p)
+            return bad
+
+        body, n = write_body(self._cat(), client, max_attempts=3)
+        assert body == bad and n == 3
+        assert len(calls) == 3, "前两轮仍应驳回重写，只是最后一轮收下"
+
+    def test_仍有实质违规则照常拒绝(self):
+        from ir_agent.analyst import AnalystRefused, write_body
+        bad = "引用[[company.made_up@2025FY]]。"
+        with pytest.raises(AnalystRefused):
+            write_body(self._cat(), lambda p: bad, max_attempts=3)

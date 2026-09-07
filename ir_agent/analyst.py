@@ -334,6 +334,18 @@ def _hint(literal: str, catalog: FactCatalog) -> str:
     return literal
 
 
+# 排版类违规: 值得驳回重写，但**不值得为它毙掉整篇报告**。
+# 「17 分位分位」读着别扭，与「引用了账本里不存在的事实」不是一个量级 ——
+# 后者是造假，前者是错字。实测踩到: 加上单位检查那一轮，模型在重写中
+# 反而伪造了一个占位符，三次耗尽，最终一个字都没产出 —— 而上一轮至少
+# 出了一份带错字的完整报告。**为排版问题阻断整篇报告是比例失当。**
+COSMETIC = ("重复写了单位",)
+
+
+def is_cosmetic(v: str) -> bool:
+    return any(k in v for k in COSMETIC)
+
+
 def _violations(body: str, catalog: FactCatalog) -> list[str]:
     """返回违规说明列表；空列表表示通过。"""
     out: list[str] = []
@@ -400,6 +412,10 @@ def write_body(
         body = client(prompt)
         last = _violations(body, catalog)
         if not last:
+            return body, attempt
+        if attempt == max_attempts and all(is_cosmetic(v) for v in last):
+            # 最后一轮只剩排版问题 —— 收下这一稿。带几个错字的完整报告
+            # 好过没有报告；问题本身仍会出现在验收审计里，不会被藏起来。
             return body, attempt
         prompt = (
             f"{prompt}\n\n---\n"
