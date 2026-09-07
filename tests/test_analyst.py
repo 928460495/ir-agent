@@ -199,3 +199,47 @@ class Test驳回信息要能被执行:
         from ir_agent.analyst import _violations
         v = _violations("毛利率 91.18%，[[industry.peer_count@2025FY]]", self._cat())
         assert any("91.18%" in x and "应写作" not in x for x in v)
+
+
+class TestReportStructure:
+    """报告结构必须给每个已接入的模块留位置。
+
+    此前产业链、护城河/五力、一致预期只是提示词末尾的附加材料，
+    1–8 节里没有任何一节提到它们 —— 模型被告知「这里有些材料」，
+    却没被告知「要写成一节」。跑长电时才发现这个缺口。
+    """
+
+    def _sections(self):
+        import re
+        from ir_agent.analyst import _RULES
+        return [ln for ln in _RULES.split("\n") if re.match(r"^\d+\. ", ln)]
+
+    def test_九节且编号连续(self):
+        secs = self._sections()
+        assert len(secs) == 9
+        assert [s.split(".")[0] for s in secs] == [str(i) for i in range(1, 10)]
+
+    def test_每个模块都有归属章节(self):
+        from ir_agent.analyst import _RULES
+        for kw in ("产业链", "护城河", "五力", "一致预期", "关键不确定性"):
+            assert kw in _RULES, f"结构里没有 {kw} 的位置"
+
+    def test_产业链要为五力提供因果(self):
+        """产业链不是背景介绍 —— 它要解释议价能力从何而来。
+        两节各写各的，等于把因和果拆开摆着。"""
+        from ir_agent.analyst import _RULES
+        assert "产业链不是背景介绍" in _RULES and "提供因果" in _RULES
+
+    def test_一致预期只作对照(self):
+        from ir_agent.analyst import _RULES
+        assert "不得" in _RULES and "反过来用一致预期" in _RULES
+
+    def test_引号规则写进了写作要求(self):
+        """长电那一版是被出处核验挡死的，直接原因之一就是模型给术语加了
+        引号。事前说清比事后驳回省一轮。"""
+        from ir_agent.analyst import _RULES
+        assert "引号只用于逐字引述" in _RULES
+
+    def test_假设可追溯的层级引用与章节号一致(self):
+        from ir_agent.analyst import _RULES
+        assert "第 8 节的每一条假设" in _RULES and "第 2–7 节" in _RULES
