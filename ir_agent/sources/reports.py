@@ -41,6 +41,7 @@ from decimal import Decimal
 from ir_agent.sources.external import Document, Tier
 
 _LIST = "https://reportapi.eastmoney.com/report/list"
+_BK = "https://reportapi.eastmoney.com/report/bk?bkCode=016"
 _PAGE = "https://data.eastmoney.com/report/info/{code}.html"
 _REF = "https://data.eastmoney.com/report/"
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -135,7 +136,10 @@ def _row_to_report(row: dict) -> Report | None:
         published=published,
         rating=str(row.get("emRatingName", "") or "").strip(),
         rating_change=_RATING_CHANGE.get(row.get("ratingChange"), ""),
-        industry=str(row.get("industryName", "") or "").strip(),
+        # 行业研报给 industryName；个股研报那一栏是空的，行业名在
+        # indvInduName（个股所属行业）。两边用的是同一套名称。
+        industry=str(row.get("industryName") or row.get("indvInduName")
+                     or "").strip(),
         eps=eps, pe=pe)
 
 
@@ -262,3 +266,41 @@ def consensus(reports: list[Report], as_of: date,
         if prev:
             out.drift[y] = (prev, est)
     return out
+
+
+# ── 行业代码 ─────────────────────────────────────────────────
+
+_BK_CACHE: dict[str, str] = {}
+
+
+def industry_map() -> dict[str, str]:
+    """行业名 → 研报接口的 industryCode（497 个）。进程内缓存。
+
+    实测 report/bk 的 bkCode 与列表接口的 industryCode 是同一套:
+    白酒Ⅱ→1277、煤炭开采→1250、白色家电→1239、保险Ⅱ→474，双向对得上。
+    """
+    if _BK_CACHE:
+        return _BK_CACHE
+    try:
+        payload = json.loads(_get(_BK))
+    except Exception:
+        return {}
+    for row in payload.get("data") or []:
+        name, code = row.get("bkName"), row.get("bkCode")
+        if name and code:
+            _BK_CACHE[str(name)] = str(code)
+    return _BK_CACHE
+
+
+def industry_code_of(reports: list[Report]) -> tuple[str, str]:
+    """从公司自己的研报里读出它属于哪个行业，返回 (代码, 行业名)。
+
+    **这是东财研报口径的行业，与本项目用于选同业的申万分类是两套东西。**
+    它只用来决定「去读哪个行业的研报」，不参与同业集合的构建 —— 两套
+    分类混着用来算行业聚合数会是实打实的错误，用来挑阅读材料则无妨。
+    """
+    names = [r.industry for r in reports if r.industry]
+    if not names:
+        return "", ""
+    name = max(set(names), key=names.count)
+    return industry_map().get(name, ""), name
