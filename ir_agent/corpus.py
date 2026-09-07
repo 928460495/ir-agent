@@ -29,6 +29,13 @@ _DEEP = re.compile(r"深度|专题|框架|年度策略|投资策略|行业报告
 _THIN = re.compile(r"周报|日报|晨报|月报|快报|数据点评|跟踪")
 # 宏观报告里，境外主题对 A 股单个标的的分析帮助有限，排在后面。
 _OFFSHORE = re.compile(r"美国|美联储|海外|欧洲|日本|全球")
+# 区域研究属于宏观类，但要的是全国层面的政策取向 —— 实测《海南省经济
+# 发展研究》会因标题含「研究」而排到前面，对判断茅台的宏观环境没有用。
+_REGIONAL = re.compile(r"[省市区]经济|区域经济|自贸|地方债|"
+                       r"(?:广东|江苏|浙江|山东|河南|四川|湖北|湖南|"
+                       r"福建|安徽|河北|陕西|江西|辽宁|云南|广西|山西|"
+                       r"贵州|海南|甘肃|新疆|内蒙|西藏|青海|宁夏|吉林|"
+                       r"黑龙江|重庆|天津|北京|上海)省?市?")
 
 
 def _rank(r: R.Report) -> tuple[int, date]:
@@ -41,9 +48,13 @@ def _rank(r: R.Report) -> tuple[int, date]:
 
 
 def _rank_macro(r: R.Report) -> tuple[int, date]:
+    """宏观报告的排序。**这是启发式，不是分析结论** —— 它只决定读哪几篇，
+    读错了最坏情况是浪费提示词长度，不会污染任何判断。"""
     score, _ = _rank(r)
     if _OFFSHORE.search(r.title):
         score -= 1
+    if _REGIONAL.search(r.title):
+        score -= 2
     return (score, r.published)
 
 
