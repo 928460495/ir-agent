@@ -141,7 +141,80 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, str]:
     agg = aggregate(peers, r.period, prior, as_of, fetch)
     for f in industry_facts(agg):
         r.ledger.put(f)
-    return (f"{peers.summary()}\n{agg.summary()}", agg.for_prompt(), "")
+
+    # ── 行业画像 ──────────────────────────────────────────
+    # 逐家同业的完整报表在上面已经取过一次，cache 里躺着全部字段而只用了
+    # revenue。这里复用同一批数据算集中度、生命周期与周期敏感度，
+    # **不发起任何新的网络请求**。
+    prof_md = ""
+    try:
+        prof_md = _industry_profile(peers, agg, cache, r, as_of)
+    except Exception as e:                                  # noqa: BLE001
+        prof_md = f"（行业画像未生成：{e.__class__.__name__}）"
+
+    return (f"{peers.summary()}\n{agg.summary()}\n{prof_md}",
+            agg.for_prompt(), "")
+
+
+def _fact_value(ledger, key: str, period: str, as_of: date):
+    from ir_agent.ledger import LookAheadError
+    try:
+        return ledger.get(key, period, as_of=as_of).value
+    except (KeyError, LookAheadError):
+        return None
+
+
+def _industry_profile(peers, agg, cache, r, as_of: date) -> str:
+    """由已缓存的同业事实组装行业画像。"""
+    from ir_agent import industry_profile as ip
+    from ir_agent.ledger import FactLedger
+    from ir_agent.operators import ratios
+    from ir_agent.sources.eastmoney import CompanyType
+
+    # cache 是 {code: {(key, period): Fact}}，转成账本以便算比率
+    ledgers: dict[str, FactLedger] = {}
+    for code, facts in cache.items():
+        led = FactLedger()
+        for f in facts.values():
+            led.put(f)
+        try:
+            ratios.compute(led, r.period, as_of, CompanyType.GENERAL)
+        except Exception:                                   # noqa: BLE001
+            pass
+        ledgers[code] = led
+
+    # 行业营收的历史序列 —— 生命周期判据。同一组公司口径，
+    # 否则成分变化会被误读成行业增长。
+    history: dict[str, Decimal] = {}
+    consistent = sorted(set(agg.revenues) & set(agg.prior))
+    for per in ratios.annual_periods(r.ledger, as_of, years=6):
+        vals = [v for c in consistent
+                if (fs := cache.get(c)) and (f := fs.get(("revenue", per)))
+                and f.as_of <= as_of and (v := f.value) is not None]
+        if len(vals) == len(consistent) and vals:
+            history[per] = sum(vals, Decimal(0))
+
+    # 行业增速与名义 GDP 增速的历史序列 —— 弹性的输入。
+    # 宏观事实在 run_full 里先于行业加载，此刻已在账本中。
+    ind_yoy: dict[str, Decimal] = {}
+    pers = sorted(history)
+    for a, b in zip(pers, pers[1:]):
+        if history[a]:
+            ind_yoy[b] = history[b] / history[a] - 1
+    gdp_yoy: dict[str, Decimal] = {}
+    for per in ind_yoy:
+        v = _fact_value(r.ledger, "macro.gdp_nominal_yoy", per, as_of)
+        if v is not None:
+            gdp_yoy[per] = v
+
+    prof = ip.build(
+        industry=peers.classification.used_path, period=r.period, as_of=as_of,
+        revenues=agg.revenues, ledgers=ledgers,
+        revenue_history=history, cr5=agg.cr5,
+        industry_yoy=ind_yoy, gdp_yoy=gdp_yoy)
+    for f in ip.profile_facts(prof):
+        r.ledger.put(f)
+    return prof.summary()
 
 
 def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]:
