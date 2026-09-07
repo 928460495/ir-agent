@@ -31,7 +31,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
-from ir_agent.lineparse import keyed
+from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import Fact, FactLedger, LookAheadError, Method
 from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -164,18 +164,23 @@ def parse(text: str) -> ChainView:
 
     for m in _LINK.finditer(text):
         p = _split(m.group(1), 4, "环节")
-        try:
-            role = Role(p[0])
-        except ValueError as e:
-            raise ChainFailed(f"未知的环节位置 {p[0]!r}（须为 上游/本环节/下游）") from e
-        view.links.append(Link(role, p[1], p[2], _basis(p[3], "环节")))
+        got = pick(p[0], [x.value for x in Role])
+        if got is None:
+            raise ChainFailed(
+                f"未知的环节位置 {p[0]!r}（须为 "
+                + "/".join(x.value for x in Role) + "）")
+        view.links.append(Link(Role(got), p[1], p[2], _basis(p[3], "环节")))
 
     for m in _POWER.finditer(text):
         p = _split(m.group(1), 2, "议价")
-        try:
-            role, power = Role(p[0]), Power(p[1])
-        except ValueError as e:
-            raise ChainFailed(f"议价一行取值不合法：{m.group(1)}") from e
+        r_, p_ = (pick(p[0], [x.value for x in Role]),
+                  pick(p[1], [x.value for x in Power]))
+        if r_ is None or p_ is None:
+            raise ChainFailed(
+                f"议价一行取值不合法：{m.group(1)} —— 位置须为 "
+                + "/".join(x.value for x in Role) + "，强弱须为 "
+                + "/".join(x.value for x in Power))
+        role, power = Role(r_), Power(p_)
         if role is Role.FOCAL:
             raise ChainFailed("议价只对上游与下游而言，本环节无议价对象")
         view.power[role] = power

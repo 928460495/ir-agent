@@ -315,6 +315,14 @@ import re as _re
 _NUM_CORE = _re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
 
+# 无法指认时的标记与统一说明。分开是为了让说明只出现一次。
+_NO_MATCH = "（账本中无对应事实）"
+_NO_MATCH_NOTE = (
+    "　其中标注「账本中无对应事实」的，若是**定义上的基准值**"
+    "（β 的基准 1、PMI 的荣枯线、章节序号等），请改用文字表述或中文数字；"
+    "若确是数据，请改用清单里的占位符。")
+
+
 def _hint(literal: str, catalog: FactCatalog) -> str:
     """能对上账本的数字，直接把占位符告诉模型。
 
@@ -342,10 +350,9 @@ def _hint(literal: str, catalog: FactCatalog) -> str:
     # 因此: 光秃秃的个位整数不给指认（多半是序数或定义基准），
     # 有单位的必须单位也对得上。
     if _NUM_CORE.fullmatch(literal.strip()) and len(want) < 2:
-        return (f"{literal}（账本中没有能对应它的事实。若它是**定义上的基准值**"
-                "，如 β 的基准 1、PMI 的荣枯线，请改用文字表述"
-                "，例如「β 明显高于市场平均水平」；若是数据，"
-                "请改用清单里的占位符）")
+        # 只做标记，说明文字由调用方汇总后附一次 —— 每个数字后面都跟一段
+        # 同样的长解释，驳回信息会变成一堵墙，反而看不清要改什么。
+        return f"{literal}{_NO_MATCH}"
     lit_unit = literal.strip()[len(want):].strip().lstrip("0123456789., ")
     for e in catalog.entries:
         if core(e.display) != want:
@@ -378,8 +385,11 @@ def _violations(body: str, catalog: FactCatalog) -> list[str]:
 
     bare = audit_bare_numbers(body)
     if bare:
-        out.append("以下数字是字面值，必须改写为占位符："
-                   + "、".join(_hint(b, catalog) for b in bare[:10]))
+        hints = [_hint(b, catalog) for b in bare[:10]]
+        msg = "以下数字是字面值，必须改写为占位符：" + "、".join(hints)
+        if any(_NO_MATCH in h for h in hints):
+            msg += _NO_MATCH_NOTE
+        out.append(msg)
 
     if catalog.ledger is not None and catalog.as_of is not None:
         try:

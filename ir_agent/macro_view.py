@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
-from ir_agent.lineparse import keyed
+from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import FactLedger
 from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -116,20 +116,22 @@ def parse(text: str) -> MacroView:
     m = _STANCE.search(text)
     if m:
         p = _split(m.group(1), 2, "政策取向")
-        try:
-            view.stance = Stance(p[0])
-        except ValueError as e:
+        got = pick(p[0], [x.value for x in Stance])
+        if got is None:
             raise MacroViewFailed(
-                f"政策取向须为 宽松/中性/收紧，得到 {p[0]!r}") from e
+                "政策取向须为 " + "/".join(x.value for x in Stance)
+                + f"，得到 {p[0]!r}")
+        view.stance = Stance(got)
         view.stance_bases = _basis(p[1], "政策取向")
 
     for m in _CHANNEL.finditer(text):
         p = _split(m.group(1), 4, "传导")
-        try:
-            impact = Impact(p[2])
-        except ValueError as e:
+        got = pick(p[2], [x.value for x in Impact])
+        if got is None:
             raise MacroViewFailed(
-                f"传导影响须为 利好/中性/利空，得到 {p[2]!r}") from e
+                "传导影响须为 " + "/".join(x.value for x in Impact)
+                + f"，得到 {p[2]!r}")
+        impact = Impact(got)
         view.channels.append(Channel(p[0], p[1], impact, _basis(p[3], "传导")))
     return view
 

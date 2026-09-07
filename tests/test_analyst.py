@@ -319,10 +319,20 @@ class TestHintMustNotMisdirect:
         return FactCatalog.from_ledger(led, "2025FY", date(2026, 9, 7))
 
     def test_光秃秃的个位整数不给指认(self):
-        from ir_agent.analyst import _hint
+        from ir_agent.analyst import _NO_MATCH, _hint
         out = _hint("1", self._cat())
         assert "industry_rank" not in out
-        assert "定义上的基准值" in out and "改用文字表述" in out
+        assert _NO_MATCH in out
+
+    def test_长说明只汇总一次(self):
+        """每个数字后面都跟一段同样的长解释，驳回信息会变成一堵墙 ——
+        实测四个裸数字后面跟了四遍同一段话，反而看不清要改什么。"""
+        from ir_agent.analyst import _NO_MATCH_NOTE, FactCatalog, _violations
+        from ir_agent.ledger import FactLedger
+        cat = FactCatalog(ledger=FactLedger(), as_of=date(2026, 9, 7))
+        msgs = _violations("参见 4 与 6 与 8。[[a#b@c]]", cat)
+        joined = "\n".join(msgs)
+        assert joined.count(_NO_MATCH_NOTE) == 1
 
     def test_带单位的仍然给出正确指认(self):
         from ir_agent.analyst import _hint

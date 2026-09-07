@@ -34,3 +34,20 @@ def keyed(name: str) -> re.Pattern[str]:
     """匹配 `关键词: 其余内容` 的一行，容忍列表前缀与加粗标记。"""
     return re.compile(rf"^\s*{_PREFIX}{name}[*＊]{{0,2}}\s*[:：]\s*(.+)$",
                       re.MULTILINE)
+
+
+def pick(field: str, allowed) -> str | None:
+    """从一个字段里取出它属于哪个合法取值；取不到返回 None。
+
+    **对格式宽容，对实质严格。** 实测模型写的是「低（证据强度弱）」——
+    强度确实是「低」，后面那个括号是它主动补的说明。严格相等把整条判为
+    非法，于是战略分析连挂三次、整节没能产出，而它给的判断本身没有问题。
+
+    只认**开头**的合法取值，因此「低（…）」通过、「不低」不通过 ——
+    宽容的是修饰与噪声，不是取值本身。
+    """
+    txt = field.strip().lstrip("*＊ ").strip()
+    for a in sorted(allowed, key=len, reverse=True):
+        if txt.startswith(a):
+            return a
+    return None

@@ -28,7 +28,7 @@ from datetime import date
 from decimal import Decimal
 from enum import Enum
 
-from ir_agent.lineparse import keyed
+from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
@@ -314,9 +314,12 @@ def parse(text: str) -> StrategyView:
             raise StrategyFailed(
                 f"未知的护城河类型 {p[0]!r}，必须逐字使用以下之一："
                 + "、".join(k.value for k in MoatKind)) from e
-        if kind is not MoatKind.NONE and p[1] not in STRENGTH:
-            raise StrategyFailed(f"护城河强度须为 宽/窄/无，得到 {p[1]!r}")
-        view.moats.append(MoatView(kind, p[1], _basis(p[2], "护城河")))
+        strength = pick(p[1], STRENGTH)
+        if kind is not MoatKind.NONE and strength is None:
+            raise StrategyFailed(
+                f"护城河强度须为 {'/'.join(STRENGTH)}，得到 {p[1]!r}")
+        view.moats.append(MoatView(kind, strength or p[1],
+                                   _basis(p[2], "护城河")))
 
     for m in _FORCE.finditer(text):
         p = _split(m.group(1), 4, "五力")
@@ -331,9 +334,12 @@ def parse(text: str) -> StrategyView:
             raise StrategyFailed(
                 f"未知的力 {p[0]!r}，必须逐字使用以下五个名称之一："
                 + "、".join(f.value for f in Force)) from e
-        if p[1] not in INTENSITY:
-            raise StrategyFailed(f"五力强度须为 高/中/低，得到 {p[1]!r}")
-        view.forces.append(ForceView(force, p[1], p[2], _basis(p[3], "五力")))
+        intensity = pick(p[1], INTENSITY)
+        if intensity is None:
+            raise StrategyFailed(
+                f"五力强度须为 {'/'.join(INTENSITY)}，得到 {p[1]!r}")
+        view.forces.append(ForceView(force, intensity, p[2],
+                                     _basis(p[3], "五力")))
 
     for m in _UNCERT.finditer(text):
         p = _split(m.group(1), 4, "不确定性")

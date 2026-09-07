@@ -68,3 +68,44 @@ def test_真实输出能解析出全部传导链():
     assert v.stance is MV.Stance.EASING
     assert len(v.channels) == 3
     assert v.channels[1].impact is MV.Impact.POSITIVE
+
+
+# ── 取值宽容 ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("raw,want", [
+    ("低（证据强度弱）", "低"),        # 模型实际写的就是这个
+    ("低", "低"),
+    ("**中**", "中"),
+    ("高 (有账本锚点)", "高"),
+    ("中性 —— 双向因素并存", "中性"),
+])
+def test_只认开头的合法取值(raw, want):
+    """**跑长电时战略分析连挂三次，整节没能产出。** 模型写「低（证据强度
+    弱）」—— 强度确实是「低」，括号是它主动补的说明。严格相等把整条判为
+    非法，而它给的判断本身没有问题。对格式宽容，对实质严格。"""
+    from ir_agent.lineparse import pick
+    assert pick(raw, ["高", "中", "低", "中性"]) == want
+
+
+@pytest.mark.parametrize("raw", ["不低", "偏高", "无法判断", ""])
+def test_宽容的是修饰不是取值本身(raw):
+    from ir_agent.lineparse import pick
+    assert pick(raw, ["高", "中", "低"]) is None
+
+
+def test_长取值优先():
+    """「中性」与「中」同时可选时，不能被「中」抢先匹配掉。"""
+    from ir_agent.lineparse import pick
+    assert pick("中性", ["中", "中性"]) == "中性"
+
+
+@pytest.mark.parametrize("mod,line,ok", [
+    ("strategy", "五力: 现有竞争强度 | 低（证据弱） | 中性 | 「Q」", True),
+    ("macro_view", "政策取向: 宽松（国内口径） | 「Q」", True),
+    ("value_chain", "议价: 上游 | 弱（上游为寡头） ", True),
+])
+def test_三个模块都接了宽容取值(mod, line, ok):
+    import importlib
+    m = importlib.import_module(f"ir_agent.{mod}")
+    src = __import__("inspect").getsource(m.parse)
+    assert "pick(" in src, f"{mod}.parse 仍在用严格相等"
