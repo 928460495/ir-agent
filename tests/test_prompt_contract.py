@@ -176,3 +176,25 @@ def test_守卫能抓到解析不了的占位符():
     _fact(led, "roe")
     with pytest.raises(AssertionError, match="解析不了"):
         assert_prompt_safe("PE 为 [[pe_ttm@2025FY]]", led)
+
+
+def test_周期定位口径():
+    from ir_agent.cycle import CycleView, Direction, Phase, Signal, cycle_facts
+
+    view = CycleView(
+        signals=[Signal("活动", D("49.2"), Direction.DOWN,
+                        "制造业 PMI 49.2（收缩区）",
+                        "制造业 PMI [[macro.pmi_manufacturing@2026-07]]（收缩区）")],
+        scores={Phase.LATE: D("0.88"), Phase.RECESSION: D("0.88"),
+                Phase.MID: D("0.5"), Phase.EARLY: D("0.2")},
+        as_of=AS_OF)
+    led = FactLedger()
+    for f in cycle_facts(view, "2026-07"):
+        led.put(f)
+    _fact(led, "macro.pmi_manufacturing", "49.2", period="2026-07", unit="index")
+    # 判据必须让模型看到读数，但读数要写成占位符 —— 账本里有 PMI，
+    # 没有理由给一个不可引用的字面值。
+    assert_prompt_safe(view.for_prompt(), led)
+    txt = view.for_prompt()
+    assert "阶段交界" in txt and "未覆盖" in txt
+    assert "[[macro.pmi_manufacturing@2026-07]]" in txt

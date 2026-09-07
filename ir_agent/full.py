@@ -53,7 +53,27 @@ def _load_macro(r, as_of: date) -> tuple[str, str, str]:
     for f in facts:
         r.ledger.put(f)
     snap = MacroSnapshot(facts, as_of=as_of)
+
+    # 周期定位需要利率曲线（期限利差是政策维度的信号），而利率在
+    # _load_capm 里加载 —— 那一步在本函数之后。因此这里只出指标，
+    # 周期定位交给 _load_cycle 在两者都就绪后再做。
     return snap.describe(), snap.for_prompt(), ""
+
+
+def _load_cycle(r, as_of: date) -> tuple[str, str, str]:
+    """商业周期定位。必须在宏观与利率都入账之后调用。"""
+    from ir_agent import cycle
+
+    try:
+        view = cycle.assess(r.ledger, as_of)
+    except Exception as e:                                  # noqa: BLE001
+        return "", "", f"周期定位（{e.__class__.__name__}: {e}）"
+    if not view.scores:
+        return "", "", "周期定位（无可用宏观信号）"
+    for f in cycle.cycle_facts(view, r.period):
+        r.ledger.put(f)
+    r.cycle_view = view                       # 供行业传导取用
+    return view.describe(), view.for_prompt(), ""
 
 
 def _load_capm(code: str, r, as_of: date) -> tuple[str, str, str]:
@@ -214,7 +234,21 @@ def _industry_profile(peers, agg, cache, r, as_of: date) -> tuple[str, str]:
         industry_yoy=ind_yoy, gdp_yoy=gdp_yoy)
     for f in ip.profile_facts(prof):
         r.ledger.put(f)
-    return prof.summary(), prof.for_prompt()
+
+    # ── 传导 ──────────────────────────────────────────────
+    # 课程的要求: 说清楚**行业结构将如何抑制或放大经济中的预期发展**。
+    # 知道处于后周期还不够，还要知道这个行业对周期有多敏感 ——
+    # 同样的宏观下行，DOL 9.5 的钢铁与 DOL 1.7 的白酒不是一回事。
+    trans = ""
+    view = getattr(r, "cycle_view", None)
+    if view is not None:
+        from ir_agent import cycle as cy
+
+        score = prof.sensitivity.score if prof.sensitivity else None
+        trans = cy.transmission(view, score, peers.classification.used_path)
+    human = prof.summary() + (f"\n  传导　{trans}" if trans else "")
+    model = prof.for_prompt() + (f"\n  宏观传导　{trans}" if trans else "")
+    return human, model
 
 
 def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]:
@@ -373,6 +407,11 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     capm_md, capm_pr, capm_err = _load_capm(code, r, as_of)
     if capm_err:
         skipped.append(capm_err)
+
+    # 周期定位放在宏观与利率之后 —— 政策维度用的是期限利差
+    cycle_md, cycle_pr, cycle_err = _load_cycle(r, as_of)
+    if cycle_err:
+        skipped.append(cycle_err)
     try:
         industry_md, industry_pr, industry_err = _load_industry(code, r, as_of)
     except Exception as e:                                  # noqa: BLE001
@@ -403,7 +442,7 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         (out / "report.md").write_text(r.audit.rendered, encoding="utf-8")
         arts["研究正文"] = str(out / "report.md")
 
-    ctx = {"宏观": macro_md, "折现率输入": capm_md,
+    ctx = {"宏观": macro_md, "商业周期": cycle_md, "折现率输入": capm_md,
            "行业": industry_md, "可比": comps_md}
 
     # ── 估值 ──────────────────────────────────────────────
