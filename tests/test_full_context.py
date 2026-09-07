@@ -186,3 +186,20 @@ def test_事实标签本身不含裸数字():
 
     bad = {k: v for k, v in LABELS.items() if audit_bare_numbers(v)}
     assert not bad, f"这些标签含裸数字，会诱导模型写出无法引用的数字: {bad}"
+
+
+def test_路由到PBROE时必须说明该方法尚未实现():
+    """**跑长电（强周期半导体）时发现。** 路由正确地判给 PB–ROE，但那个
+    方法只有枚举值没有实现，于是整轮不出估值 —— 而运行结果里只留下一个
+    stage=not_applicable，读起来像「本标的不适合估值」。
+
+    真相是「本标的适合 PB–ROE，是我们还没做」。静默地少做一块，与
+    「缺数据时跳过而非通过」是同一条原则: 缺什么必须显式说出来。
+    """
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_full)
+    assert "PB_ROE" in src, "PB–ROE 路由没有被显式处理"
+    assert "尚未实现" in src
+    assert "不是「本标的无法估值」" in src

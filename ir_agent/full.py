@@ -655,6 +655,19 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
                 skipped.append(r.scenario_err)
             if getattr(r, "scenario_md", ""):
                 ctx["情景"] = r.scenario_md
+    elif rt is not None and rt.method is ValuationMethod.PB_ROE:
+        # **路由判对了，另一条路没修。** 强周期标的（半导体、钢铁、化工、
+        # 有色、券商……）会被正确地判给 PB–ROE，但那个方法只有枚举值、
+        # 没有实现，于是整轮不出任何估值。
+        #
+        # 此前这种情况只留下一个 stage=not_applicable，读起来像「本标的
+        # 不适合估值」—— 而真相是「本标的适合 PB–ROE，是我们还没做」。
+        # 静默地少做一块，与 V0 的「缺数据时跳过而非通过」是同一条原则:
+        # 缺什么必须显式说出来。
+        skipped.append(
+            f"估值（路由判定应使用 PB–ROE：{rt.reason}；"
+            "该方法尚未实现，因此本轮不出估值。"
+            "这不是「本标的无法估值」，是本系统尚缺这条路径）")
 
     build_dashboard(r, path=out / "dashboard.html", route=rt, context=ctx,
                     assumptions=assumptions, valuation=valuation,
