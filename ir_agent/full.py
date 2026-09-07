@@ -723,7 +723,7 @@ def _load_scenarios(r, body, assumptions, as_of, client, spot):
             out = SC.build(assumptions, shifts, view.uncertainties,
                            fcf_base=fcf.value, net_debt=nd.value,
                            shares=sh.value, ledger=r.ledger, body=body,
-                           as_of=as_of)
+                           as_of=as_of, period=r.period)
         except SC.ScenarioFailed as e:
             last = str(e)
             prompt = (f"{prompt}\n\n---\n"

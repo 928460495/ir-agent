@@ -91,6 +91,10 @@ class Shift:
 
 @dataclass
 class ScenarioSet:
+    # 期间必须带上 —— 占位符没有 @period 就不是合法占位符，render() 不会
+    # 替换它，会把 [[valuation.per_share.bear]] 原样印进研报。
+    # 那比被驳回更糟: 驳回还能重试，这个是静默出错。
+    period: str = ""
     shifts: list[Shift] = field(default_factory=list)
     unmodellable: list[tuple[str, str]] = field(default_factory=list)
     values: dict[Case, Valuation] = field(default_factory=dict)
@@ -113,7 +117,8 @@ class ScenarioSet:
             v = self.values.get(case)
             if v is not None:
                 lines.append(f"  {case.value}　每股价值 "
-                             f"[[valuation.per_share.{case.name.lower()}]]")
+                             f"[[valuation.per_share.{case.name.lower()}"
+                             f"@{self.period}]]")
         if self.spread() is not None:
             lines.append("  牛熊区间见上 —— 区间宽度本身是结论的一部分，"
                          "不确定性大的标的不该给出精确到分的目标价")
@@ -220,7 +225,8 @@ def _apply(base: Assumptions, shifts: list[Shift], case: Case) -> Assumptions:
 
 def build(base: Assumptions, shifts: list[Shift], uncertainties,
           *, fcf_base: Decimal, net_debt: Decimal, shares: Decimal,
-          ledger: FactLedger, body: str, as_of: date) -> ScenarioSet:
+          ledger: FactLedger, body: str, as_of: date,
+          period: str = "") -> ScenarioSet:
     if not shifts:
         raise ScenarioFailed(
             "未给出任何情景取值 —— 战略分析识别了关键不确定性却不落到估值上，"
@@ -233,7 +239,7 @@ def build(base: Assumptions, shifts: list[Shift], uncertainties,
 
     check_directions(shifts, uncertainties, base)
 
-    out = ScenarioSet(shifts=shifts)
+    out = ScenarioSet(period=period, shifts=shifts)
     out.unmodellable = [(u.what, u.driver) for u in uncertainties
                         if u.driver not in MODELLABLE]
     for case in Case:

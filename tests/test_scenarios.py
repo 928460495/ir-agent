@@ -44,7 +44,7 @@ def _build(text, uncerts=None, base=None):
     return S.build(base or _base(), S.parse(text),
                    uncerts if uncerts is not None else [_unc()],
                    fcf_base=FCF, net_debt=ND, shares=SH,
-                   ledger=FactLedger(), body=BODY, as_of=AS_OF)
+                   ledger=FactLedger(), body=BODY, as_of=AS_OF, period=P)
 
 
 # ── 解析 ─────────────────────────────────────────────────────
@@ -261,7 +261,7 @@ def test_接线_情景落账本并进摘要():
     out, md, err = _load_scenarios(r, BODY, _base(), AS_OF,
                                    _Client(_shift()), "2026-09-04")
     assert err == "" and out is not None
-    assert "[[valuation.per_share.bear]]" in md
+    assert "[[valuation.per_share.bear@2025FY]]" in md
     assert r.ledger.get("valuation.per_share.bull", P, as_of=AS_OF)
 
 
@@ -301,3 +301,16 @@ def test_接线_估值输入缺失时说清原因():
     out, _, err = _load_scenarios(r, BODY, _base(), AS_OF,
                                   _Client(_shift()), "2026-09-04")
     assert out is None and "估值输入缺失" in err
+
+
+def test_情景占位符必须带期间():
+    """`[[valuation.per_share.bear]]` 缺 @period 就不是合法占位符 ——
+    render() 不会替换它，会把这段坏文本原样印进研报。**比被驳回更糟**:
+    驳回还能重试，这个是静默出错。写这个模块时我自己踩到了。"""
+    from ir_agent.citation import REF_RE
+    md = _build(_shift()).summary()
+    refs = [m.group(0) for m in REF_RE.finditer(md)]
+    assert refs, "摘要里应有合法占位符"
+    assert "[[valuation.per_share.bear]]" not in md
+    for r in refs:
+        assert REF_RE.fullmatch(r)
