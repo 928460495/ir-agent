@@ -29,6 +29,7 @@ from decimal import Decimal
 from enum import Enum
 
 from ir_agent.ledger import FactLedger, LookAheadError
+from ir_agent.sources.external import attribute
 from ir_agent.valuation.basis import Basis, InvalidBasis, validate
 
 
@@ -336,28 +337,6 @@ def parse(text: str) -> StrategyView:
     return view
 
 
-def _reattribute(view: StrategyView, annual: str, corpus) -> None:
-    """引文的出处由**代码**判定，不由模型声明。
-
-    模型只写「引文」，代码先在年报里找，找不到再去外部语料库找，找到了
-    就改标为 EXTERNAL 并把 URL 补上。这样模型没有机会张冠李戴 —— 与
-    「模型只写占位符、代码填数字」是同一条思路。
-    """
-    if corpus is None:
-        return
-    from ir_agent.sources.external import norm
-    from ir_agent.valuation.basis import Basis, BasisKind
-
-    body = norm(annual)
-    for item in (*view.moats, *view.forces, *view.uncertainties):
-        for i, b in enumerate(item.bases):
-            if b.kind is not BasisKind.REPORT or norm(b.quote) in body:
-                continue
-            d = corpus.find(b.quote)
-            if d is not None:
-                item.bases[i] = Basis.external(d.url, b.quote, d.retrieved)
-
-
 def check(view: StrategyView, ledger: FactLedger, evidence: str,
           as_of: date, corpus=None) -> None:
     """依据必须可核验。REPORT 引文要逐字出现在年报摘录里，
@@ -374,7 +353,8 @@ def check(view: StrategyView, ledger: FactLedger, evidence: str,
             "关键不确定性至少两条 —— 少于两条，Bear/Base/Bull 三情景就没有"
             "定性依据，只能靠调参数")
 
-    _reattribute(view, evidence, corpus)
+    attribute((*view.moats, *view.forces, *view.uncertainties),
+              evidence, corpus)
     flat = [b for x in (*view.moats, *view.forces, *view.uncertainties)
             for b in x.bases]
     problems = validate(flat, ledger=ledger, body=evidence, as_of=as_of,

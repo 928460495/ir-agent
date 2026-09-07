@@ -167,3 +167,27 @@ class Corpus:
             lines.append(f"  – 因发布日晚于 {self.as_of} 而排除 "
                          f"{len(self.skipped)} 篇")
         return "\n".join(lines)
+
+
+def attribute(items, annual: str, corpus: "Corpus | None") -> None:
+    """引文的出处由**代码**判定，不由模型声明。就地改写 items 的 bases。
+
+    模型只写「引文」。代码先在年报摘录里找，找不到再去外部语料库找，
+    找到了就改标为 EXTERNAL 并补上真实 URL。模型因此没有机会张冠李戴 ——
+    与「模型只写占位符、代码填数字」是同一条思路。
+
+    反过来也要成立: 年报里找得到的引文**不得**被改标为外部。出处错了，
+    读者按图索骥会查不到，比引文造假更难发现。
+    """
+    if corpus is None:
+        return
+    from ir_agent.valuation.basis import Basis, BasisKind
+
+    body = norm(annual)
+    for item in items:
+        for i, b in enumerate(item.bases):
+            if b.kind is not BasisKind.REPORT or norm(b.quote) in body:
+                continue
+            d = corpus.find(b.quote)
+            if d is not None:
+                item.bases[i] = Basis.external(d.url, b.quote, d.retrieved)
