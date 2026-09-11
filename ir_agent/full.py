@@ -704,12 +704,10 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts) -> str:
     (out / ASSUMPTIONS_MD).write_text(
         a.describe() + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
         encoding="utf-8")
-    (out / ASSUMPTIONS_JSON).write_text(json.dumps({
-        "code": code, "labels": labels, "approved_by": "", "approved_at": "",
-        "rows": [{"driver": x.driver, "year": x.year,
-                  "bear": str(x.bear), "base": str(x.base), "bull": str(x.bull)}
-                 for x in a.rows]}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
+    (out / ASSUMPTIONS_JSON).write_text(
+        json.dumps(assume.to_json(a, code=code, approved_by="",
+                                  approved_at=""),
+                   ensure_ascii=False, indent=2), encoding="utf-8")
     arts["DCF 判断项（待核实）"] = str(out / ASSUMPTIONS_MD)
     return ""
 
@@ -746,17 +744,17 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     if not approved_by.strip():
         raise SystemExit("必须署名批准人 —— 假设要有人负责才谈得上「已核实」。")
 
+    arts: dict[str, str] = {}
+    skipped: list[str] = []
     body = brief.read_text(encoding="utf-8")
     saved = json.loads(js.read_text(encoding="utf-8"))
     state = json.loads((out / STATE).read_text(encoding="utf-8")) \
         if (out / STATE).exists() else {"md": {}, "pr": {}}
 
-    a = assume.AssumptionSet(code=code, labels=saved.get("labels") or [])
-    for x in saved.get("rows") or []:
-        a.rows.append(assume.Row(
-            driver=x["driver"], year=int(x["year"]),
-            bear=Decimal(x["bear"]), base=Decimal(x["base"]),
-            bull=Decimal(x["bull"])))
+    a, edits = assume.from_json(saved, code=code)
+    if not a.rows:
+        raise SystemExit(
+            f"{js} 里没有判断项 —— 请先跑完第一阶段。")
     try:
         # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
         # 漏掉某一年，都会让模型算出一个看起来正常的错数。
@@ -764,8 +762,11 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     except assume.AssumeFailed as e:
         raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")
 
-    arts: dict[str, str] = {}
-    skipped: list[str] = []
+    # **人改过的数字要说出来。** 依据是为模型原来那个数写的，改了之后
+    # 它未必还支撑新数字 —— 这件事代码判断不了，但必须让读者看见。
+    for x in edits:
+        skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
+
     md = state.get("md") or {}
     pr = state.get("pr") or {}
 

@@ -204,3 +204,48 @@ def test_提示词说清可引用的是简报正文():
                               "摘要内容", brief="简报正文")
     assert "简报正文" in txt and "引文只能逐字出自" in txt
     assert "不是可引用的正文" in txt
+
+
+# ── 跨阶段往返：依据必须活下来 ───────────────────────────────
+
+def test_依据跨阶段存活():
+    """**实测踩到，第二阶段被自己的门挡住。** 原来只存数值不存依据，
+    读回来的假设一律「未提供任何依据」而拒绝建模 —— 门是对的，
+    是我没把依据带过去。"""
+    a = assume.parse(_full(1), 1)
+    a.labels = ["2026E"]
+    back, edits = assume.from_json(assume.to_json(a), code="600584")
+    assert edits == []
+    assert len(back.rows) == len(a.rows)
+    assert back.rows[0].bases and back.rows[0].bases[0].quote == Q
+    _ok(back, 1)                      # 读回来的能过校验
+
+
+def test_读回后仍要过全部校验():
+    """批准不等于豁免。"""
+    a = assume.parse(_full(1), 1)
+    a.labels = ["2026E"]
+    d = assume.to_json(a)
+    d["rows"][0]["bull"] = d["rows"][0]["base"]      # 人手改坏：三档不再拉开
+    back, _ = assume.from_json(d)
+    with pytest.raises(AssumeFailed, match="三档未拉开"):
+        _ok(back, 1)
+
+
+def test_人改过的数值要被报出来():
+    """依据是为模型原来那个数写的，改了之后它未必还支撑新数字 ——
+    代码判断不了，但必须让读者看见。"""
+    a = assume.parse(_full(1), 1)
+    a.labels = ["2026E"]
+    d = assume.to_json(a)
+    d["rows"][0]["base"] = "0.30"                    # 人手上调
+    _, edits = assume.from_json(d)
+    assert len(edits) == 1
+    assert "营收增速" in edits[0] and "0.30" in edits[0]
+
+
+def test_理由也跨阶段存活():
+    a = assume.parse(
+        f"假设: 营收增速 | 第1年 | 1% | 2% | 3% | 份额在丢 「{Q}」", 1)
+    back, _ = assume.from_json(assume.to_json(a))
+    assert "份额在丢" in back.rows[0].note

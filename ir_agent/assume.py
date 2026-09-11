@@ -82,6 +82,45 @@ class Row:
     note: str = ""
 
 
+def to_json(a: "AssumptionSet", **extra) -> dict:
+    """待核实清单落盘。**连依据一起存** —— 只存数值的话，第二阶段读回来
+    的假设一律「未提供任何依据」，会被自己的门挡住。
+
+    同时记下 AI 的原始取值: 人改过之后，原来的依据未必还支撑新数字，
+    那件事必须被看见而不是悄悄放行。
+    """
+    return {"labels": a.labels,
+            "rows": [{"driver": r.driver, "year": r.year,
+                      "bear": str(r.bear), "base": str(r.base),
+                      "bull": str(r.bull), "note": r.note,
+                      "bases": [b.to_dict() for b in r.bases],
+                      "proposed": {"bear": str(r.bear), "base": str(r.base),
+                                   "bull": str(r.bull)}}
+                     for r in a.rows],
+            **extra}
+
+
+def from_json(d: dict, code: str = "") -> tuple["AssumptionSet", list[str]]:
+    """读回，并报出人改过哪些值。"""
+    a = AssumptionSet(code=code or d.get("code", ""),
+                      labels=d.get("labels") or [])
+    edits: list[str] = []
+    for x in d.get("rows") or []:
+        r = Row(driver=x["driver"], year=int(x["year"]),
+                bear=Decimal(x["bear"]), base=Decimal(x["base"]),
+                bull=Decimal(x["bull"]), note=x.get("note", ""),
+                bases=[Basis.from_dict(b) for b in (x.get("bases") or [])])
+        a.rows.append(r)
+        p = x.get("proposed") or {}
+        for case in ("bear", "base", "bull"):
+            if case in p and Decimal(p[case]) != getattr(r, case):
+                cn = "营收增速" if r.driver == "growth" else "毛利率"
+                edits.append(
+                    f"{cn} 第{r.year}年 {case}：模型给 {p[case]}，"
+                    f"核实后改为 {getattr(r, case)}")
+    return a, edits
+
+
 @dataclass
 class AssumptionSet:
     code: str

@@ -79,6 +79,23 @@ class Basis:
         return cls(BasisKind.EXTERNAL, ref=url.strip(),
                    quote=quote.strip(), retrieved=retrieved)
 
+    def to_dict(self) -> dict:
+        """落盘用。**依据必须能跨阶段存活** —— 两阶段流程里第一阶段写出、
+        第二阶段读回，此前只存了数值不存依据，读回来的假设一律被判
+        「未提供任何依据」而拒绝建模。实测踩到。"""
+        d = {"kind": self.kind.value, "ref": self.ref, "quote": self.quote}
+        if self.retrieved:
+            d["retrieved"] = self.retrieved.isoformat()
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Basis":
+        from datetime import date as _date
+        rt = d.get("retrieved")
+        return cls(kind=BasisKind(d["kind"]), ref=d.get("ref", ""),
+                   quote=d.get("quote", ""),
+                   retrieved=_date.fromisoformat(rt) if rt else None)
+
     def describe(self) -> str:
         if self.kind is BasisKind.FACT:
             return f"事实 {self.ref}"
