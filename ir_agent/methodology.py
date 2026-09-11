@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
-from ir_agent.drivers import (Decomposition, DecompositionInvalid, Factor, Op,
-                              check_closure)
+from ir_agent.drivers import (TARGET_LABEL, Decomposition,
+                              DecompositionInvalid, Factor, Op, check_closure)
 from ir_agent.lineparse import keyed, pick
 
 _DECOMP = keyed("分解")
@@ -49,9 +51,14 @@ def parse(text: str) -> Methodology:
     m = Methodology()
     for hit in _DECOMP.finditer(text):
         parts = [p.strip() for p in hit.group(1).split("|")]
-        if len(parts) < 4:
+        # 这里只防「连目标、运算两段都凑不出来」——因子数够不够（下界
+        # MIN_FACTORS、上界 MAX_FACTORS）一律交给下面的 check_closure。
+        # 之前这里还硬编码过一道 `len(parts) < 4` 只管下界不管上界，
+        # 与 MIN_FACTORS 语义重复却不联动、也没有测试覆盖，一半自己查
+        # 一半转发的写法本身就说明它该整个删掉，而不是改成引用常量。
+        if len(parts) < 2:
             raise MethodologyFailed(
-                f"分解一行字段不足（需 目标|运算|因子…，至少两个因子）：{hit.group(1)}")
+                f"分解一行字段不足（至少要有 目标|运算 两段）：{hit.group(1)}")
         tgt = pick(parts[0], list(_TARGETS))
         if tgt is None:
             raise MethodologyFailed(
@@ -86,19 +93,66 @@ def parse(text: str) -> Methodology:
             f"缺少 {'、'.join(missing)} 的分解式 —— 两个目标都要给，"
             "只给一半会让读者以为两项都分解了")
 
+    # 跨分解式的 key 唯一性校验。`check_closure` 的 seen 只在单条
+    # Decomposition 内查重，但下游会把两条分解式的因子拍平进同一个
+    # 命名空间（target_of = {f.key: d.target for d in decomps for f in
+    # d.factors}）——营收链与毛利率链里如果各有一个因子 slug 后撞了 key，
+    # 拍平时后写入的那个会悄悄覆盖前一个，把它错误地记到另一个目标下，
+    # 而且不报任何错。这道校验必须放在两条分解式都解析完之后才做得了。
+    seen_keys: dict[str, tuple[str, str]] = {}
+    for d in m.decompositions:
+        tgt_label = TARGET_LABEL.get(d.target, d.target)
+        for f in d.factors:
+            if f.key in seen_keys:
+                other_tgt_label, other_label = seen_keys[f.key]
+                raise MethodologyFailed(
+                    f"「{other_tgt_label}」的因子「{other_label}」与"
+                    f"「{tgt_label}」的因子「{f.label}」slug 后都是 "
+                    f"{f.key!r} —— 下游会把两条分解式的因子拍平进同一个"
+                    "命名空间，撞车的那个会被错误地记到另一个目标下且不"
+                    "报错。换一个更有区分度的因子名称（例如给其中一个加"
+                    "上「（收入端）/（成本端）」这类后缀）。")
+            seen_keys[f.key] = (tgt_label, f.label)
+
     m.pitfalls = [h.group(1).strip() for h in _PITFALL.finditer(text)]
     return m
 
 
 def _slug(label: str) -> str:
-    """中文标签 → 稳定的 key。用于账本字段名与工作簿行匹配。"""
+    """中文标签 → 稳定的 key。用于账本字段名与工作簿行匹配。
+
+    **这张表只是捷径，不是主路径——真正要保证质量的是下面的 fallback。**
+    实测联网跑出来的八个真实因子标签「有效产能变化率」「稼动率变化率」
+    「良率变化率」「ASP变化率」「稼动率贡献」「先进封装收入占比提升贡献」
+    「原材料及折旧成本变化贡献」「汇率贡献」——一个都不在表里，全部走了
+    fallback。后来人别以为「表里没有就往表里加一条」能解决 key 冲突之类
+    的问题，表命中只是极少数巧合，绝大多数标签从一开始就是 fallback 在兜。
+    """
     table = {"产能": "capacity", "稼动率": "utilization", "单价": "asp",
              "销量": "volume", "吨价": "unit_price",
              "稼动率摊薄": "util_leverage", "折旧变动": "depreciation",
              "上游成本": "input_cost", "产品结构": "mix"}
     if label in table:
         return table[label]
-    return "f_" + re.sub(r"\W+", "_", label).strip("_").lower()
+
+    # 逐字符按 Unicode 类别判断，不用 `\W` 做正则替换：Python 默认
+    # Unicode 模式下 `\w` 对「留不留」的判断口径比我们想要的更宽，稳妥
+    # 的做法是显式只留「字母」「数字」两类（中文字符本身不清——下游
+    # 账本 key / JSON / 工作簿行标都吃得下中文，要清的是标点与空白，
+    # 中英文标点、全角括号、顿号、斜杠一律替换成下划线），其余全部
+    # 替换成下划线再折叠。
+    cleaned = "".join(
+        ch if unicodedata.category(ch)[0] in ("L", "N") else "_"
+        for ch in label)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_").lower()
+    if not cleaned:
+        # 纯符号标签（如「→」）清完标点后什么都不剩。不能就此返回裸的
+        # "f_"——那样所有纯符号标签都会撞成同一个 key，等于把「跨分解式
+        # key 冲突」这个坑自己挖了一个最容易踩中的版本。用标签内容算一
+        # 段稳定摘要兜底：同一标签每次结果相同（确定性），不同标签几乎
+        # 不会撞车。
+        cleaned = "sym" + hashlib.sha1(label.encode("utf-8")).hexdigest()[:8]
+    return "f_" + cleaned
 
 
 PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。

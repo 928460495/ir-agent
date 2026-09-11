@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from ir_agent.drivers import Op
-from ir_agent.methodology import (Methodology, MethodologyFailed, parse,
-                                  research, to_markdown)
+from ir_agent.methodology import (Methodology, MethodologyFailed, _slug,
+                                  parse, research, to_markdown)
 
 OUT = """分解: 营收 | 乘 | 产能:变化率:年报产能与在建工程 | 稼动率:变化率:研报行业稼动率测算 | 单价:变化率:研报封测价格跟踪
 分解: 毛利率 | 加 | 稼动率摊薄:pp:固定成本占比 | 折旧变动:pp:在建工程转固节奏 | 上游成本:pp:基板与金线报价
@@ -99,3 +99,63 @@ def test_落盘的markdown给人看得懂():
     assert "年报产能与在建工程" in md          # 因子线索要留下
     assert "最常见的误用" in md                # 陷阱要留下
     assert "改这个文件后重跑" in md            # 可覆盖的说明
+
+
+def test_单因子交给check_closure统一报因子数():
+    """`parse()` 里不该再有一道硬编码「至少 4 段」的死分支——因子数
+    该由谁来管、报多少个，只有 `check_closure`（联动 MIN_FACTORS）
+    说了算，不是两处各管一半。"""
+    bad = "分解: 营收 | 乘 | 产能:变化率:年报\n"
+    with pytest.raises(MethodologyFailed, match="一个因子不叫分解"):
+        parse(bad)
+
+
+def test_字段太少无法提取目标和运算时报可读错误():
+    """因子数校验交给 check_closure 之后，parse() 仍要防住连
+    「目标」「运算」两段都凑不出来的极端输入——这不是因子数问题，
+    是这一行连起步的两个字段都没有。"""
+    with pytest.raises(MethodologyFailed):
+        parse("分解: 营收\n")
+
+
+def test_跨分解式的key冲突被拦截():
+    """`check_closure` 的 seen 只在单条 Decomposition 内查重，但下游会把
+    两条分解式的因子拍平进同一个命名空间（target_of = {f.key: d.target
+    for d in decomps for f in d.factors}）。营收链与毛利率链里如果有一个
+    因子标签撞了 slug，target_of 会把其中一个错误地指向另一个目标，而且
+    不报任何错——这条测试在修复前必须失败（当前 parse() 对此毫无防备）。
+    """
+    dup = ("分解: 营收 | 乘 | 汇率贡献:变化率:年报汇率敏感度测算 "
+           "| 稼动率:变化率:研报稼动率测算\n"
+           "分解: 毛利率 | 加 | 汇率贡献:pp:年报外币负债敞口 "
+           "| 折旧变动:pp:在建工程转固节奏\n")
+    with pytest.raises(MethodologyFailed, match="汇率贡献"):
+        parse(dup)
+
+
+def test_slug对纯符号标签不再互相撞车():
+    """`_slug` 的 fallback 用 `re.sub(r"\\W+", "_", label)` 清完标点后
+    如果什么都不剩，会直接返回裸的 "f_"——「→」「←」「、、、」这类纯符号
+    标签因此全部撞成同一个 key，比中文标点本身更容易被忽略。这条测试在
+    修复前必须失败：当前实现下这三者 slug 后完全相同。
+    """
+    keys = {_slug("→"), _slug("←"), _slug("、、、")}
+    assert len(keys) == 3, f"纯符号标签不应互相撞车，实际得到 {keys}"
+
+
+def test_slug对同一标签保持确定性():
+    """兜底不能引入随机性——同一个标签任何时候 slug 都必须是同一个 key，
+    否则账本字段名和工作簿行标会对不上。"""
+    assert _slug("→") == _slug("→")
+    assert _slug("先进封装收入占比提升贡献") == _slug("先进封装收入占比提升贡献")
+
+
+def test_slug清理中英文标点含全角括号顿号斜杠():
+    """真实标签几乎都不在映射表里（见 _slug 注释），fallback 必须真的能
+    清掉标点——包括全角括号、顿号、斜杠这类中文里常见但英文标点集里
+    没有对应的符号，不能只处理 ASCII。"""
+    assert "（" not in _slug("净利率（调整）")
+    assert "）" not in _slug("净利率（调整）")
+    assert "、" not in _slug("原材料、折旧")
+    assert "/" not in _slug("ASP/良率")
+    assert _slug("净利率（调整）") != ""
