@@ -120,3 +120,35 @@ class TestNextActionsGiveRunnableCommands:
         assert self._commands(Stage.AWAITING_REVIEW)
         assert self._commands(Stage.NOT_APPLICABLE)
 
+
+
+class TestSkippedListDistinguishesKinds:
+    """产物清单里混着三种东西，标成同一个词会误导读者。
+
+    **实测踩到**: 健全性警告「终值占 EV 78%（>75%）：估值高度依赖终值
+    假设」被标成「未生成：…」—— 读者会去找什么东西没生成，而那分明是
+    一条算出来了、且必须被看见的警告。
+    """
+
+    def _render(self, *items):
+        from datetime import date
+
+        from ir_agent.research import ResearchOutcome, Stage
+        return ResearchOutcome(
+            code="600584", period="2025FY", as_of=date(2026, 9, 7),
+            stage=Stage.VALUED, skipped=list(items)).summary()
+
+    def test_健全性警告标为警告(self):
+        out = self._render("估值健全性：终值占 EV 78%（>75%）")
+        assert "⚠" in out and "未生成" not in out
+
+    def test_口径不一致标为警告(self):
+        out = self._render("估值口径与账本不一致：营业收入差 3%")
+        assert "⚠" in out and "未生成" not in out
+
+    def test_人工调整标为改动(self):
+        out = self._render("判断项经人工调整：营收增速 第1年 base 改为 0.30")
+        assert "✎" in out and "未生成" not in out
+
+    def test_真正的缺失仍标为未生成(self):
+        assert "未生成" in self._render("战略分析（连续 3 次失败）")

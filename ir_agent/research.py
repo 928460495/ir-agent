@@ -62,8 +62,25 @@ class ResearchOutcome:
         elif self.stage is Stage.NOT_APPLICABLE:
             lines.append("  ⚠ 估值未建模 —— 本标的不适用 DCF")
         for s in self.skipped:
-            lines.append(f"  – 未生成：{s}")
+            lines.append(f"  {_mark(s)}{s}")
         return "\n".join(lines)
+
+
+# 产物清单里混着三种东西，标成同一个词会误导读者。实测: 健全性警告
+# 「终值占 EV 78%（>75%）」被标成「未生成」—— 读者会去找什么东西没生成，
+# 而那分明是一条算出来了、且必须被看见的警告。
+_PREFIX = (
+    ("估值健全性：", "  ⚠ "),
+    ("估值口径与账本不一致：", "  ⚠ "),
+    ("判断项经人工调整：", "  ✎ "),
+)
+
+
+def _mark(s: str) -> str:
+    for key, mark in _PREFIX:
+        if s.startswith(key):
+            return mark
+    return "  – 未生成："
 
 
 def next_actions(stage: Stage, code: str,
