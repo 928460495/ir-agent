@@ -501,7 +501,8 @@ def _build_evidence(r, code: str):
 def _write_and_debate(r, code: str, model: str | None,
                       macro_summary: str = "", industry_summary: str = "",
                       comps_summary: str = "", strategy_summary: str = "",
-                      chain_summary: str = "", consensus_summary: str = ""):
+                      chain_summary: str = "", consensus_summary: str = "",
+                      valuation_summary: str = ""):
     """撰写 → 辩论 → 回写。返回 (正文, 成立挑战数, 辩论摘要, 开销, 失败说明)。"""
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
@@ -518,7 +519,8 @@ def _write_and_debate(r, code: str, model: str | None,
                              industry_summary=industry_summary or None,
                              strategy_summary=strategy_summary or None,
                              chain_summary=chain_summary or None,
-                             consensus_summary=consensus_summary or None)
+                             consensus_summary=consensus_summary or None,
+                             valuation_summary=valuation_summary or None)
 
         print("多空辩论…", file=sys.stderr)
         try:
@@ -618,32 +620,6 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     chain_md, chain_pr, chain_err = _load_value_chain(r, as_of, qual_client)
     if chain_err:
         skipped.append(chain_err)
-
-    body, upheld, debate_md, cost, err = _write_and_debate(
-        code=code, r=r, model=model, comps_summary=comps_pr,
-        macro_summary=(macro_pr + ("\n\n" + mview_pr if mview_pr else "")),
-        industry_summary=industry_pr,
-        strategy_summary=strat_pr, chain_summary=chain_pr,
-        consensus_summary=ext_pr)
-    cost += getattr(qual_client, "total_cost_usd", 0.0)
-    if err and body is None:
-        print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
-        skipped.append("研究正文")
-    elif err:
-        skipped.append(err)          # 正文仍在，只是带着未落实的挑战
-    if debate_md:
-        (out / "debate.md").write_text(debate_md, encoding="utf-8")
-        arts["辩论记录"] = str(out / "debate.md")
-    if body:
-        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
-        (out / "report.md").write_text(r.audit.with_sources(),
-                                       encoding="utf-8")
-        arts["研究正文"] = str(out / "report.md")
-
-    ctx = {"宏观": macro_md, "宏观定性": mview_md, "商业周期": cycle_md, "折现率输入": capm_md,
-           "行业": industry_md, "产业链": chain_md, "可比": comps_md,
-           "战略": strat_md, "外部资料": ext_md}
-
     # ── 估值 ──────────────────────────────────────────────
     # 交给 ashare-dcf 的三表模型（见 ir_agent/dcf.py 的接通说明）。
     # 本项目不再自己算 DCF: 那套只有四个旋钮的实现接不住战略分析识别出的
@@ -669,6 +645,33 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         # 部分之一，藏起来等于把「看起来算出来了」当成「算对了」。
         for x in dcf_res.crosscheck:
             skipped.append(f"估值口径与账本不一致：{x}")
+
+
+    body, upheld, debate_md, cost, err = _write_and_debate(
+        code=code, r=r, model=model, comps_summary=comps_pr,
+        macro_summary=(macro_pr + ("\n\n" + mview_pr if mview_pr else "")),
+        industry_summary=industry_pr,
+        strategy_summary=strat_pr, chain_summary=chain_pr,
+        consensus_summary=ext_pr,
+        valuation_summary=(dcf_res.summary() if dcf_res is not None else ""))
+    cost += getattr(qual_client, "total_cost_usd", 0.0)
+    if err and body is None:
+        print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
+        skipped.append("研究正文")
+    elif err:
+        skipped.append(err)          # 正文仍在，只是带着未落实的挑战
+    if debate_md:
+        (out / "debate.md").write_text(debate_md, encoding="utf-8")
+        arts["辩论记录"] = str(out / "debate.md")
+    if body:
+        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
+        (out / "report.md").write_text(r.audit.with_sources(),
+                                       encoding="utf-8")
+        arts["研究正文"] = str(out / "report.md")
+
+    ctx = {"宏观": macro_md, "宏观定性": mview_md, "商业周期": cycle_md, "折现率输入": capm_md,
+           "行业": industry_md, "产业链": chain_md, "可比": comps_md,
+           "战略": strat_md, "外部资料": ext_md}
 
     build_dashboard(r, path=out / "dashboard.html", context=ctx,
                     dcf=dcf_res)

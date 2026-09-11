@@ -45,12 +45,15 @@ YI = Decimal("100000000")          # ashare-dcf 以亿元计，账本以元计
 # 不会来自舍入 —— 因此门槛设得很紧，宁可多报也不放过。
 XCHECK_TOL = Decimal("0.005")
 
-# 账本字段 → ashare-dcf 报表科目（利润表/资产负债表原始名）
+# 账本字段 → (报表, 新浪报表里的科目名)。
+# 科目名取自 ashare_calibrate 实际使用的那几个 —— 不同公司列名略有出入，
+# 因此给出候选并逐个试，取不到就跳过而非误报。
 XCHECK_ITEMS = (
-    ("revenue", "income", "营业收入"),
-    ("net_profit", "income", "净利润"),
-    ("total_assets", "balance", "资产总计"),
-    ("total_liabilities", "balance", "负债合计"),
+    ("revenue", "income", ("营业总收入", "营业收入")),
+    ("net_profit", "income", ("净利润",)),
+    ("net_profit_attr_parent", "income", ("归属于母公司所有者的净利润",)),
+    ("total_assets", "balance", ("资产总计",)),
+    ("total_liabilities", "balance", ("负债合计",)),
 )
 
 
@@ -127,7 +130,23 @@ def _asof_note(as_of: date) -> list[str]:
             f"估值口径因此比正文更新，两者不是同一时点上的判断。"]
 
 
-def cross_check(cal: dict, ledger: FactLedger, as_of: date) -> list[str]:
+def _stmt_value(D, stmts: dict, table: str, items, period: str):
+    """按候选科目名逐个试。**返回值已是亿元** —— ashare_data.val() 读出
+    原始值后除以 1e8，这一点必须与账本的元对齐，换算错了要么把每一项都
+    报成天文数字的差异，要么把真实差异淹掉。
+    """
+    df = stmts.get(table)
+    if df is None:
+        return None
+    for name in items:
+        v = D.val(df, name, period)
+        if v is not None:
+            return v, name
+    return None
+
+
+def cross_check(cal: dict, ledger: FactLedger, as_of: date,
+                D=None) -> list[str]:
     """把 ashare-dcf 取到的报表数与账本逐项对一遍。
 
     对不上不代表哪一边错了 —— 可能是口径差异（合并范围、追溯调整），
@@ -140,12 +159,14 @@ def cross_check(cal: dict, ledger: FactLedger, as_of: date) -> list[str]:
     if not last:
         return ["ashare-dcf 未给出最近年报期间，无法交叉核对"]
     period = f"{last[:4]}FY"
+    if D is None:
+        D = _load(Path(os.environ.get(ENV_DIR) or DEFAULT_DIR))[0]
 
-    for key, table, item in XCHECK_ITEMS:
-        rows = (stmts.get(table) or {}).get(last) or {}
-        theirs = rows.get(item)
-        if theirs is None:
+    for key, table, items in XCHECK_ITEMS:
+        got = _stmt_value(D, stmts, table, items, last)
+        if got is None:
             continue
+        theirs, item = got
         try:
             ours = ledger.get(key, period, as_of=as_of).value / YI
         except (KeyError, LookAheadError):
@@ -236,5 +257,5 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         res.warnings.insert(0, f"公式引擎验算失败 {len(fails)} 处，"
                                "本结果不可采信")
     if ledger is not None:
-        res.crosscheck = cross_check(cal, ledger, as_of)
+        res.crosscheck = cross_check(cal, ledger, as_of, D)
     return res
