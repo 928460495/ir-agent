@@ -54,6 +54,17 @@ _QUOTE = re.compile(r"[「\"'“](.+?)[」\"'”]", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 
 
+
+def _tail(raw: str, n: int = 400) -> str:
+    """失败信息里带上模型最后写了什么。
+
+    **只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。** 前几轮
+    排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的根因
+    （列表前缀、括号补注、写「无据」）看一眼原文就清楚了。
+    """
+    raw = (raw or "").strip()
+    return raw[-n:] if len(raw) > n else raw
+
 @dataclass
 class Channel:
     driver: str          # 政策或宏观事件
@@ -223,9 +234,9 @@ def assess(client, corpus, ledger: FactLedger, as_of: date,
            macro_prompt: str = "", max_attempts: int = 3):
     evidence = for_prompt(corpus, macro_prompt)
     prompt = PROMPT.format(evidence=evidence)
-    last = ""
+    last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
-        out = client(prompt)
+        out = raw = client(prompt)
         try:
             view = parse(out)
             check(view, ledger, "", as_of, corpus)
@@ -237,4 +248,6 @@ def assess(client, corpus, ledger: FactLedger, as_of: date,
             continue
         view.conflicts = cross_check(view, ledger, as_of)
         return view, evidence
-    raise MacroViewFailed(f"连续 {max_attempts} 次给不出可核验的宏观定性判断：{last}")
+    raise MacroViewFailed(
+            f"连续 {max_attempts} 次给不出可核验的宏观定性判断：{last}"
+            f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")

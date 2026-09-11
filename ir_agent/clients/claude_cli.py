@@ -18,7 +18,10 @@ import json
 import subprocess
 from typing import Callable
 
-DEFAULT_TIMEOUT = 300
+# 撰写一篇九节研报的提示词已有两万余字（可引用事实清单 + 宏观/行业/
+# 产业链/战略/可比/一致预期六段摘要 + 年报摘录），实测 300s 不够用 ——
+# 长电那一轮就死在这里，而它不是逻辑问题，纯粹是没给够时间。
+DEFAULT_TIMEOUT = 900
 Runner = Callable[[list[str], str, int], str]
 
 

@@ -320,3 +320,15 @@ def test_提示词逐字列出五力名称():
     for f in Force:
         assert f.value in c.prompts[0]
     assert "逐字照抄" in c.prompts[0]
+
+
+def test_失败信息带上模型最后写了什么():
+    """**只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。**
+    前几轮排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的
+    根因（列表前缀、括号补注）看一眼原文就清楚了。"""
+    bad = "五力: 替代品威胁 | 低 | 中性 | 年报未提及替代品，属定性判断"
+    with pytest.raises(StrategyFailed) as e:
+        strategy.assess(_Client(bad, bad, bad), _led(), P, AS_OF, _sections())
+    msg = str(e.value)
+    assert "最后一次的原始输出" in msg
+    assert "年报未提及替代品" in msg

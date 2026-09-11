@@ -74,6 +74,17 @@ _REF = re.compile(r"\[\[[^\]]+\]\]")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
 
 
+
+def _tail(raw: str, n: int = 400) -> str:
+    """失败信息里带上模型最后写了什么。
+
+    **只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。** 前几轮
+    排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的根因
+    （列表前缀、括号补注、写「无据」）看一眼原文就清楚了。
+    """
+    raw = (raw or "").strip()
+    return raw[-n:] if len(raw) > n else raw
+
 @dataclass
 class Link:
     role: Role
@@ -318,9 +329,9 @@ def analyse(client, corpus, ledger: FactLedger, period: str, as_of: date,
     body = "\n".join(
         [s.text for s in (sections.sections.values() if sections else [])])
     prompt = PROMPT.format(evidence=evidence)
-    last = ""
+    last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
-        out = client(prompt)
+        out = raw = client(prompt)
         try:
             view = parse(out)
             check(view, ledger, body, as_of, corpus)
@@ -332,4 +343,6 @@ def analyse(client, corpus, ledger: FactLedger, period: str, as_of: date,
             continue
         view.conflicts = cross_check(view, ledger, period, as_of)
         return view, evidence
-    raise ChainFailed(f"连续 {max_attempts} 次给不出可核验的产业链分析：{last}")
+    raise ChainFailed(
+            f"连续 {max_attempts} 次给不出可核验的产业链分析：{last}"
+            f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")

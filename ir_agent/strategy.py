@@ -79,6 +79,17 @@ INTENSITY = ("高", "中", "低")
 STRENGTH = ("宽", "窄", "无")
 
 
+
+def _tail(raw: str, n: int = 400) -> str:
+    """失败信息里带上模型最后写了什么。
+
+    **只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。** 前几轮
+    排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的根因
+    （列表前缀、括号补注、写「无据」）看一眼原文就清楚了。
+    """
+    raw = (raw or "").strip()
+    return raw[-n:] if len(raw) > n else raw
+
 @dataclass(frozen=True)
 class MoatView:
     kind: MoatKind
@@ -399,9 +410,9 @@ def assess(client, ledger: FactLedger, period: str, as_of: date,
     prompt = PROMPT.format(drivers="、".join(MAPPABLE_DRIVERS),
                            forces="|".join(f.value for f in Force),
                            evidence=evidence)
-    last = ""
+    last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
-        out = client(prompt)
+        out = raw = client(prompt)
         try:
             view = parse(out)
             check(view, ledger, annual, as_of, corpus)
@@ -414,4 +425,6 @@ def assess(client, ledger: FactLedger, period: str, as_of: date,
         view.unquantified = [f for f in Force
                              if f not in anchors(ledger, period, as_of, spot)]
         return view, evidence
-    raise StrategyFailed(f"连续 {max_attempts} 次给不出可核验的战略判断：{last}")
+    raise StrategyFailed(
+            f"连续 {max_attempts} 次给不出可核验的战略判断：{last}"
+            f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")
