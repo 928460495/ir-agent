@@ -41,13 +41,12 @@ def test_不吃内容只吃噪声(line):
     assert keyed("传导").search(line) is None
 
 
-def test_四个模块共用同一份实现():
+def test_三个定性模块共用同一份实现():
     """一处修不如一处定义 —— 与 aggregates.ebit()、parent_first() 同理。"""
     import inspect
 
     from ir_agent import macro_view, strategy, value_chain
-    from ir_agent.valuation import scenarios
-    for m in (macro_view, strategy, value_chain, scenarios):
+    for m in (macro_view, strategy, value_chain):
         assert "keyed" in inspect.getsource(m), m.__name__
 
 

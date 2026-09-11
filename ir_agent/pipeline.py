@@ -429,7 +429,7 @@ def run(
 
     # 5) 校验 + 草稿 + 审计
     try:
-        from ir_agent.valuation.inputs import cash_gap_warning
+        from ir_agent.operators.quality import cash_gap_warning
         cw = cash_gap_warning(led, period, as_of=as_of)
         if cw:
             warnings.append(cw)

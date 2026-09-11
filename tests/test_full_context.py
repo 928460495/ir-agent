@@ -8,7 +8,6 @@ from decimal import Decimal
 from ir_agent.full import _macro_periods, _prior_period
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.research import assumption_template
-from ir_agent.valuation.derive import derive
 
 
 class _R:
@@ -82,28 +81,6 @@ def test_模板不带推导时保持原样():
     t = assumption_template(5)
     assert "wacc: null" in t and "建议" not in t
 
-
-def test_推导建议以注释形式出现不落到值上():
-    """预填数字会让人直接点通过，人工审核门就退化成一个回车。"""
-    led = _led(("revenue.yoy", "2025FY"), ("macro.gdp_nominal_yoy", "2026H1"))
-    t = assumption_template(5, derived=derive(led, "2025FY", date(2026, 9, 7)))
-
-    head = [ln for ln in t.split("\n") if "建议" in ln]
-    assert head and all(ln.startswith("#") for ln in head)
-    # 值本身仍是 null，必须人工填
-    assert "wacc: null" in t and "terminal_growth: null" in t
-    assert "rate: null" in t
-
-
-def test_模板注释含永续上限与依据():
-    led = _led(("revenue.yoy", "2025FY"), ("macro.gdp_nominal_yoy", "2026H1"))
-    t = assumption_template(5, derived=derive(led, "2025FY", date(2026, 9, 7)))
-    assert "永续增长率上限" in t
-    assert "[[macro.gdp_nominal_yoy@2026H1]]" in t
-    assert "仅供参考" in t
-
-
-# ── 提示词口径不得含账本外的裸数字 ────────────────────────────
 
 def test_行业口径给模型时写成占位符():
     """往 prompt 里塞裸数字再惩罚模型引用它，是自相矛盾的契约。"""
@@ -179,31 +156,26 @@ def test_折现率口径给模型时不含裸数字():
     assert audit_bare_numbers(line) == []
 
 
-def test_事实标签本身不含裸数字():
-    """标签会原样进提示词。标签里写「10 年期国债」，模型照抄就被驳回。"""
-    from ir_agent.analyst import LABELS
-    from ir_agent.citation import audit_bare_numbers
 
-    bad = {k: v for k, v in LABELS.items() if audit_bare_numbers(v)}
-    assert not bad, f"这些标签含裸数字，会诱导模型写出无法引用的数字: {bad}"
+def test_估值改由ashare_dcf承担且不吞警告():
+    """**估值模块整体换掉了。** 原先那套只有 fcf_base、增速、WACC、永续四个
+    旋钮，三张表压成几个汇总项 —— 战略分析识别出的六条驱动因子里有三条根本
+    没有落脚处。现在交给 ashare-dcf 的三表联动模型。
 
+    随之消失的是「强周期标的判给 PB–ROE」这道硬闸。**周期性判断本身没有
+    消失** —— DOL/DFL/DTL 与收入弹性仍在行业画像里，只是不再拦住估值；
+    结果可信度改由 ashare-dcf 自己的健全性警告承担（终值占比过高、再投资率
+    失真、科目被抽干等）。
 
-def test_路由到PBROE时必须说明该方法尚未实现():
-    """**跑长电（强周期半导体）时发现。** 路由正确地判给 PB–ROE，但那个
-    方法只有枚举值没有实现，于是整轮不出估值 —— 而运行结果里只留下一个
-    stage=not_applicable，读起来像「本标的不适合估值」。
-
-    真相是「本标的适合 PB–ROE，是我们还没做」。静默地少做一块，与
-    「缺数据时跳过而非通过」是同一条原则: 缺什么必须显式说出来。
+    因此这里要守住的是: 那些警告一条都不能被吞掉。
     """
     import inspect
 
     from ir_agent import full
     src = inspect.getsource(full.run_full)
-    assert "PB_ROE" in src, "PB–ROE 路由没有被显式处理"
-    assert "尚未实现" in src
-    assert "不是「本标的无法估值」" in src
-
+    assert "dcf.run(" in src
+    assert "dcf_res.crosscheck" in src, "交叉核对结果被吞掉了"
+    assert "验算未通过" in src, "公式引擎验算失败没有被报出来"
 
 def test_回写失败不丢弃正文():
     """**跑长电第五轮时踩到。** 撰写通过了全部闸门、辩论也跑完并留痕

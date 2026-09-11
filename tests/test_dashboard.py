@@ -84,49 +84,11 @@ class TestProvenanceIsTheInteraction:
         assert "100" in html(tmp_path, run_obj)
 
 
-class TestValuationGateIsVisible:
-    def _assumptions(self, approved: bool):
-        from ir_agent.valuation.assumptions import Assumptions
-        from ir_agent.basis import Basis
-        ext = lambda u, q: Basis.external(u, q, date(2026, 6, 1))
-        a = Assumptions(wacc=D("0.09"), terminal_growth=D("0.025"),
-                        growth_rates=[D("0.05")] * 5,
-                        basis={"wacc": [ext("https://x.cn/gz", "无风险利率 2.5%")],
-                               "terminal_growth": [ext("https://x.cn/g", "名义 GDP 5%")],
-                               "growth_rates": [ext("https://x.cn/i", "行业增速 4%")]})
-        if not approved:
-            return a
-        from ir_agent.ledger import FactLedger
-        return a.approve("谢海量", date(2026, 6, 1), ledger=FactLedger(),
-                         body="", as_of=date(2026, 6, 1))
-
-    def test_unreviewed_assumptions_are_flagged_prominently(self, tmp_path, run_obj):
-        """措辞随「审核门取消」改成「未定案」—— 无论谁定的，没定就不能出结论。"""
-        h = html(tmp_path, run_obj, assumptions=self._assumptions(False))
-        assert "未定案" in h and "不得据此出具" in h
-
-    def test_reviewed_assumptions_name_the_reviewer(self, tmp_path, run_obj):
-        h = html(tmp_path, run_obj, assumptions=self._assumptions(True))
-        assert "谢海量" in h
-
-    def test_assumption_basis_is_shown_not_just_the_number(self, tmp_path, run_obj):
-        """只给数字不给依据，读者无从判断假设是否合理。"""
-        h = html(tmp_path, run_obj, assumptions=self._assumptions(True))
-        assert "无风险利率" in h      # 外部依据的原文片段
-
-    def test_no_valuation_section_when_absent(self, tmp_path, run_obj):
-        assert "每股价值" not in html(tmp_path, run_obj)
-
 
 class TestNothingIsSilentlyOmitted:
     def test_skipped_reconciliation_checks_are_listed(self, tmp_path, run_obj):
         h = html(tmp_path, run_obj)
         assert "毛利" in h            # 该标的无 gross_profit，勾稽跳过
-
-    def test_routing_reason_is_shown_when_given(self, tmp_path, run_obj):
-        from ir_agent.valuation.route import Route, ValuationMethod
-        rt = Route(ValuationMethod.PB_ROE, "金融业没有传统自由现金流", D("0.2"))
-        assert "金融业没有传统自由现金流" in html(tmp_path, run_obj, route=rt)
 
     def test_warnings_surface(self, tmp_path, run_obj):
         run_obj.warnings = ["公告分页被截断"]
@@ -142,68 +104,6 @@ class TestEscaping:
         assert "<script>alert(1)</script>" not in h
         assert "&lt;script&gt;" in h
 
-
-class TestBasisRendersReadably:
-    """basis 从字符串改为结构化对象后，看板那处忘了跟着改，
-    页面上直接印出 Basis(kind=<BasisKind.EXTERNAL: 'external'>, ref=...) ——
-    技术上没错，但对读者毫无意义，而依据恰恰是审核者最该看的东西。"""
-
-    @staticmethod
-    def _led():
-        """审核会真的核验依据 —— 引用的事实必须存在于账本中。"""
-        from ir_agent.ledger import Fact, FactLedger, Method
-        l = FactLedger()
-        l.put(Fact(key="revenue.yoy", value=D("-0.0121"), unit="ratio",
-                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
-                   source_id="calc_x", method=Method.COMPUTED))
-        return l
-
-    def _a(self):
-        from ir_agent.ledger import FactLedger
-        from ir_agent.valuation.assumptions import Assumptions
-        from ir_agent.basis import Basis
-        a = Assumptions(
-            wacc=D("0.09"), terminal_growth=D("0.025"),
-            growth_rates=[D("0.04")] * 5,
-            basis={"wacc": [Basis.external("https://yield.chinabond.com.cn/",
-                                           "十年期国债 2.50%", date(2026, 9, 7))],
-                   "terminal_growth": [Basis.external("https://stats.gov.cn/",
-                                                      "GDP 约 5%", date(2026, 9, 7))],
-                   "growth_rates": [Basis.fact("[[revenue.yoy@2025FY]]")]})
-        return a.approve("谢海量", date(2026, 9, 7), ledger=self._led(),
-                         body="", as_of=date(2026, 9, 7))
-
-    def test_no_python_repr_leaks(self, tmp_path, run_obj):
-        h = html(tmp_path, run_obj, assumptions=self._a())
-        assert "BasisKind" not in h and "Basis(" not in h
-
-    def test_external_source_url_is_shown(self, tmp_path, run_obj):
-        h = html(tmp_path, run_obj, assumptions=self._a())
-        assert "yield.chinabond.com.cn" in h
-
-    def test_quoted_evidence_is_shown(self, tmp_path, run_obj):
-        h = html(tmp_path, run_obj, assumptions=self._a())
-        assert "十年期国债" in h
-
-    def test_retrieval_date_is_shown(self, tmp_path, run_obj):
-        """外部资料会变，抓取日期是复核的前提。"""
-        assert "2026-09-07" in html(tmp_path, run_obj, assumptions=self._a())
-
-    def test_fact_reference_is_shown(self, tmp_path, run_obj):
-        h = html(tmp_path, run_obj, assumptions=self._a())
-        assert "revenue.yoy@2025FY" in h
-
-    def test_multiple_bases_all_render(self, tmp_path, run_obj):
-        from ir_agent.basis import Basis
-        a = self._a()
-        a = type(a)(wacc=a.wacc, terminal_growth=a.terminal_growth,
-                    growth_rates=a.growth_rates,
-                    basis={**a.basis,
-                           "wacc": [*a.basis["wacc"],
-                                    Basis.report("公司几乎不依赖财务杠杆")]},
-                    reviewed_by=a.reviewed_by, reviewed_at=a.reviewed_at)
-        h = html(tmp_path, run_obj, assumptions=a)
-        assert "yield.chinabond" in h and "几乎不依赖财务杠杆" in h
 
 
 def test_分析口径进看板且在正文之前(tmp_path, run_obj):
@@ -225,34 +125,53 @@ def test_无口径参数时行为不变(tmp_path, run_obj):
     assert "分析口径" not in html(tmp_path, run_obj)
 
 
-def _assump(by):
-    from decimal import Decimal as Dc
-    from ir_agent.valuation.assumptions import Assumptions
-    from ir_agent.basis import Basis
-    return Assumptions(
-        wacc=Dc("0.09"), terminal_growth=Dc("0.025"),
-        growth_rates=[Dc("0.03")],
-        basis={k: [Basis.report("理由")] for k in
-               ("wacc", "terminal_growth", "growth_rates")},
-        reviewed_by=by, reviewed_at=date(2026, 9, 7))
 
 
-def test_模型自主决定不得显示成已审核(tmp_path, run_obj):
-    """显示成人工审核，读者会以为有人看过并负责 —— 比没有审核更糟。"""
-    from ir_agent.valuation.autodecide import MODEL_MARK
-    out = html(tmp_path, run_obj, assumptions=_assump(MODEL_MARK))
-    assert "由模型自主决定" in out and "未经人工复核" in out
-    assert "已由" not in out
-    assert "light warn" in out          # 不是绿灯
+# ── 估值改由 ashare-dcf 承担 ─────────────────────────────────
+
+class _Dcf:
+    """最小 DcfResult 替身。"""
+    code = "600584"; workbook = "/tmp/x.xlsx"
+    price = D("38.00"); value_per_share = D("45.60")
+    wacc = D("0.0912"); terminal_roic = D("0.11")
+    reinvest_rate = D("0.42"); terminal_share = D("0.68")
+
+    def __init__(self, verified=True, crosscheck=(), warnings=(), notes=()):
+        self.verified = verified
+        self.crosscheck = list(crosscheck)
+        self.warnings = list(warnings)
+        self.notes = list(notes)
+
+    @property
+    def upside(self):
+        return self.value_per_share / self.price - 1
 
 
-def test_人工审核仍显示署名(tmp_path, run_obj):
-    out = html(tmp_path, run_obj, assumptions=_assump("谢海量"))
-    assert "谢海量" in out and "已审核" in out
-    assert "模型自主决定" not in out
+def test_估值卡片给出价值现价与空间(tmp_path, run_obj):
+    out = html(tmp_path, run_obj, dcf=_Dcf())
+    assert "45.60" in out and "38.00" in out and "+20.0%" in out
+    assert "终值占企业价值 68.0%" in out
 
 
-def test_模型决定时列出通过了哪些机器校验(tmp_path, run_obj):
-    from ir_agent.valuation.autodecide import MODEL_MARK
-    out = html(tmp_path, run_obj, assumptions=_assump(MODEL_MARK))
-    assert "宏观事实算出的上限" in out and "依据可核验" in out
+def test_验算未通过要醒目(tmp_path, run_obj):
+    """**一份没通过公式引擎验算的工作簿看起来和通过的一模一样** ——
+    数字都在格子里。因此必须在指示灯上一眼可辨。"""
+    out = html(tmp_path, run_obj, dcf=_Dcf(verified=False))
+    assert "验算未通过" in out and "不可采信" in out
+
+
+def test_与账本对不上不折叠(tmp_path, run_obj):
+    """交叉核对与健全性警告正是「看起来算出来了」与「算对了」的差别。"""
+    out = html(tmp_path, run_obj,
+               dcf=_Dcf(crosscheck=["营业收入@2025FY 账本 979 亿 vs 模型 950 亿"]))
+    assert "与账本对不上" in out and "979" in out
+    assert "对不上" in out.split("<details")[0], "不该藏在折叠区里"
+
+
+def test_健全性警告原样呈现(tmp_path, run_obj):
+    out = html(tmp_path, run_obj, dcf=_Dcf(warnings=["终值占 EV 过高"]))
+    assert "终值占 EV 过高" in out
+
+
+def test_没有估值时不出空的估值区(tmp_path, run_obj):
+    assert "ashare-dcf" not in html(tmp_path, run_obj)

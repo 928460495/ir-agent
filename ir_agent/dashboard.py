@@ -89,10 +89,7 @@ def build_dashboard(
     run,
     path: Path | str,
     comps=None,
-    route=None,
-    assumptions=None,
-    valuation=None,
-    sensitivity=None,
+    dcf=None,
     context=None,
 ) -> Path:
     """context: {标题: 摘要文本}，用于呈现宏观/行业/可比的**口径**。
@@ -112,17 +109,15 @@ def build_dashboard(
     lights.append(("ok" if tr == 1 else "bad", f"数字可溯源率 {tr:.0%}"))
     if a.bare_numbers:
         lights.append(("bad", f"裸数字 {len(a.bare_numbers)} 处"))
-    if assumptions is not None:
-        # 「模型自主决定」和「人工审核」必须一眼可辨。把前者显示成后者，
-        # 读者会以为有人看过并负责 —— 那比没有审核更糟。
-        from ir_agent.valuation.autodecide import MODEL_MARK
-        by_model = assumptions.reviewed_by == MODEL_MARK
-        if not assumptions.approved:
-            lights.append(("bad", "估值假设未定案 —— 不得据此出具结论"))
-        elif by_model:
-            lights.append(("warn", "估值假设由模型自主决定 —— 未经人工复核"))
+    if dcf is not None:
+        # **验算是否实跑通过必须一眼可辨。** 一份没通过公式引擎验算的
+        # 工作簿看起来和通过的一模一样 —— 数字都在格子里。
+        if not dcf.verified:
+            lights.append(("bad", "DCF 公式引擎验算未通过 —— 结果不可采信"))
+        elif dcf.crosscheck:
+            lights.append(("warn", f"DCF 取数与账本有 {len(dcf.crosscheck)} 处对不上"))
         else:
-            lights.append(("ok", f"估值假设已由 {assumptions.reviewed_by} 审核"))
+            lights.append(("ok", "DCF 公式引擎验算通过"))
     parts.append('<div class="lights">' + "".join(
         f'<span class="light {c}">{_e(t)}</span>' for c, t in lights) + "</div>")
 
@@ -146,47 +141,26 @@ def build_dashboard(
     parts.append('<p class="mono">悬停正文中的数字可查看其来源与披露日。</p>')
 
     # ── 估值 ──────────────────────────────────────────────
-    if route is not None or assumptions is not None or valuation is not None:
-        parts.append("<h2>估值</h2>")
-        if route is not None:
-            parts.append(f'<div class="card">估值方法：<b>{_e(route.method.value)}</b>'
-                         f'<br><span class="mono">{_e(route.reason)}</span></div>')
-        if assumptions is not None:
-            def _bases(bk: str) -> str:
-                # basis 是 Basis 对象列表 —— 直接 _e() 会把 Python repr
-                # 印到页面上。依据恰恰是审核者最该看清的东西。
-                items = assumptions.basis.get(bk, [])
-                if not items:
-                    return "—"
-                return "<br>".join(_e(b.describe()) for b in items)
-
-            rows = "".join(
-                f"<tr><td>{_e(k)}</td><td class='n'>{_e(v)}</td>"
-                f"<td class='mono'>{_bases(bk)}</td></tr>"
-                for k, v, bk in [
-                    ("WACC", _pct(assumptions.wacc), "wacc"),
-                    ("永续增长率", _pct(assumptions.terminal_growth), "terminal_growth"),
-                    ("预测期", f"{len(assumptions.growth_rates)} 年", "growth_rates")])
-            if not assumptions.approved:
-                state = "<b>未定案 —— 不得据此出具估值结论</b>"
-            elif by_model:
-                state = ("<b>由模型自主决定，未经人工复核</b> · "
-                         f"{assumptions.reviewed_at}<br>"
-                         "已通过的机器校验：永续增长率 ≤ 宏观事实算出的上限、"
-                         "永续 &lt; WACC、各项依据可核验、"
-                         "WACC 的论证出自本报告正文")
-            else:
-                state = (f"已审核：{_e(assumptions.reviewed_by)} · "
-                         f"{assumptions.reviewed_at}")
-            parts.append(f'<div class="card"><div class="note">{state}</div>'
-                         f"<table><tr><th>假设</th><th>取值</th><th>依据</th></tr>"
-                         f"{rows}</table></div>")
-        if valuation is not None:
-            parts.append(
-                f'<div class="card">每股价值 <b>{valuation.value_per_share:,.2f}</b> 元'
-                f'　终值占企业价值 {valuation.terminal_share:.1%}</div>')
-        if sensitivity is not None:
-            parts.append(_sens_table(sensitivity))
+    if dcf is not None:
+        parts.append("<h2>估值（ashare-dcf 三表模型）</h2>")
+        up = dcf.upside
+        parts.append(
+            f'<div class="card">每股内在价值 '
+            f'<b>{dcf.value_per_share:,.2f}</b> 元　现价 {dcf.price:,.2f} 元'
+            + (f'　空间 <b>{up:+.1%}</b>' if up is not None else "")
+            + f'<br><span class="mono">WACC {dcf.wacc:.2%}　'
+            f'终值 ROIC {dcf.terminal_roic:.1%}　'
+            f'稳态再投资率 {dcf.reinvest_rate:.1%}　'
+            f'终值占企业价值 {dcf.terminal_share:.1%}</span>'
+            f'<br><span class="mono">工作簿：{_e(dcf.workbook)}</span></div>')
+        for x in dcf.notes:
+            parts.append(f'<div class="note">{_e(x)}</div>')
+        # 交叉核对与健全性警告**不折叠**: 它们正是「看起来算出来了」与
+        # 「算对了」之间的差别。
+        for x in dcf.crosscheck:
+            parts.append(f'<div class="note bad">⚠ 与账本对不上：{_e(x)}</div>')
+        for x in dcf.warnings:
+            parts.append(f'<div class="note bad">⚠ {_e(x)}</div>')
 
     # ── 可比 ──────────────────────────────────────────────
     if comps is not None:
@@ -227,18 +201,3 @@ def build_dashboard(
     return p
 
 
-def _sens_table(sens: dict) -> str:
-    """敏感性矩阵。当前假设所在格高亮 —— 让读者一眼看到结论有多脆弱。"""
-    waccs, growths, grid = sens["waccs"], sens["growths"], sens["grid"]
-    hit = sens.get("current")
-    head = "".join(f"<th class='n'>{_pct(g)}</th>" for g in growths)
-    rows = ""
-    for i, w in enumerate(waccs):
-        cells = ""
-        for j, v in enumerate(grid[i]):
-            cls = "n hit" if hit == (i, j) else "n"
-            cells += f"<td class='{cls}'>{v:,.0f}</td>"
-        rows += f"<tr><th class='n'>{_pct(w)}</th>{cells}</tr>"
-    return (f"<div class='card'><table class='grid'>"
-            f"<tr><th>WACC ＼ 永续增长</th>{head}</tr>{rows}</table>"
-            f"<p class='mono'>每股价值（元）。高亮格为当前假设。</p></div>")

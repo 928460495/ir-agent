@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from ir_agent.ledger import Fact, FactLedger, Method
-from ir_agent.operators import dcf, dupont, growth, margins, multiples
+from ir_agent.operators import dupont, growth, margins, multiples
 
 D = Decimal
 
@@ -111,48 +111,6 @@ class TestMultiples:
         assert "pe_ttm" not in out
         assert out["pb"].value == D("4")
 
-
-class TestDCF:
-    def test_known_case_reproduces_hand_calculation(self):
-        r = dcf.value(
-            fcf_base=D("100"),
-            growth_rates=[D("0.10")] * 3,
-            terminal_growth=D("0.03"),
-            wacc=D("0.10"),
-            net_debt=D("271.428571428571428571428571"),
-            shares=D("100"),
-        )
-        assert r.pv_explicit == pytest.approx(D("300"), abs=D("0.01"))
-        assert r.enterprise_value == pytest.approx(D("1771.43"), abs=D("0.01"))
-        assert r.value_per_share == pytest.approx(D("15"), abs=D("0.01"))
-
-    def test_terminal_value_dominates_and_is_reported_separately(self):
-        """终值占比是 DCF 最重要的诊断指标，必须单独可见。"""
-        r = dcf.value(
-            fcf_base=D("100"), growth_rates=[D("0.10")] * 3,
-            terminal_growth=D("0.03"), wacc=D("0.10"),
-            net_debt=D("0"), shares=D("100"),
-        )
-        assert r.terminal_share > D("0.8")
-
-    def test_wacc_not_above_terminal_growth_is_rejected(self):
-        with pytest.raises(ValueError, match="WACC"):
-            dcf.value(
-                fcf_base=D("100"), growth_rates=[D("0.10")],
-                terminal_growth=D("0.10"), wacc=D("0.10"),
-                net_debt=D("0"), shares=D("100"),
-            )
-
-    def test_sensitivity_grid_spans_wacc_and_terminal_growth(self):
-        grid = dcf.sensitivity(
-            fcf_base=D("100"), growth_rates=[D("0.10")] * 3,
-            waccs=[D("0.09"), D("0.10"), D("0.11")],
-            terminal_growths=[D("0.02"), D("0.03")],
-            net_debt=D("0"), shares=D("100"),
-        )
-        assert len(grid) == 3 and len(grid[0]) == 2
-        # 折现率越高估值越低
-        assert grid[0][0] > grid[2][0]
 
 
 class TestDuPontSingleSource:

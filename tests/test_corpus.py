@@ -151,28 +151,25 @@ def test_一致预期的as_of是分析时点():
     assert all(f.as_of == AS_OF for f in R.consensus_facts(c))
 
 
-def test_修正幅度也落账本():
-    c = R.Consensus(as_of=AS_OF, window_days=180,
-                    eps={2026: R.Estimate(2026, 2, D("68"), D("66"), D("70"))},
-                    drift={2026: (R.Estimate(2026, 5, D("85"), D("80"), D("90")),
-                                  R.Estimate(2026, 2, D("68"), D("66"), D("70")))})
-    rev = next(f for f in R.consensus_facts(c)
-               if f.key == "consensus.eps_revision")
-    assert rev.value == (D("68") - D("85")) / D("85")
 
+def test_一致预期洗稿的风险已从结构上消失():
+    """原先这条风险靠 autodecide 里的一道闸挡着: 模型自己从正文挑依据定
+    WACC 与永续增速，因此可能拿券商的 EPS 预测去论证自己的预测。
 
-def test_一致预期不得作为估值假设的依据():
-    """拿券商的 EPS 预测论证自己的增长率，结论绕一圈回到起点。"""
-    from ir_agent.ledger import FactLedger
-    from ir_agent.valuation.autodecide import AutoDecideFailed, check
-    from ir_agent.basis import Basis
+    换成 ashare-dcf 之后，**假设不再由模型从报告里挑** —— 它们由
+    calibrate() 从历史财务数据算出（费用率、周转天数、折旧率、β、Kd 等），
+    卖方一致预期根本不是它的输入。闸门因此可以随估值模块一起删掉，
+    而不是把风险漏掉。
 
-    with pytest.raises(AutoDecideFailed, match="一致预期"):
-        check({"terminal_growth": D("0.02"), "wacc": D("0.09")},
-              {"wacc": [Basis.report("原话")],
-               "terminal_growth": [Basis.fact("[[consensus.eps@2026FY]]")]},
-              ledger=FactLedger(), body="原话", as_of=AS_OF, ceiling=None)
+    一致预期仍然入账本、仍然只作对照 —— 这一点不变。
+    """
+    import inspect
 
+    from ir_agent import dcf
+    from ir_agent.sources.reports import CONSENSUS_PREFIX
+    assert CONSENSUS_PREFIX == "consensus."
+    # 桥接层不读一致预期，也不把它交给 ashare-dcf
+    assert "consensus" not in inspect.getsource(dcf)
 
 def test_给模型的一致预期只有占位符():
     from ir_agent.citation import audit_bare_numbers

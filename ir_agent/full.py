@@ -17,6 +17,7 @@ from ir_agent.clients.claude_cli import ClaudeCliError, make_client
 from ir_agent.dashboard import build_dashboard
 from ir_agent.debate import DebateRefused, run_debate
 from ir_agent.market import market_of
+from ir_agent import dcf
 from ir_agent.research import (
     ResearchOutcome,
     Stage,
@@ -24,9 +25,7 @@ from ir_agent.research import (
     next_actions,
 )
 from ir_agent.revision import RevisionFailed, revise_from_verdicts
-from ir_agent.valuation.scenarios import Case as SCase
 from ir_agent.sources import eastmoney
-from ir_agent.valuation.route import ValuationMethod, annual_series, route
 from ir_agent.xlsx import build_workbook
 
 FORECAST_YEARS = 5
@@ -443,18 +442,6 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]
             + table.for_prompt(ledger=r.ledger, as_of=as_of, spot=spot), "")
 
 
-def _route(code: str):
-    """估值方法路由。失败不阻断流程 —— 其余产物仍然有价值。"""
-    try:
-        em, _ = eastmoney.fetch_statements_em(code, market=market_of(code))
-        hist = annual_series(em, "net_profit")
-        if not hist:
-            return None, "无年度盈利序列，无法判定估值方法"
-        ct = eastmoney.detect_company_type(code, market_of(code))
-        return route(ct, hist, hist[-1]), ""
-    except Exception as e:                                  # noqa: BLE001
-        return None, f"估值方法路由（{e.__class__.__name__}）"
-
 
 # 挂在自己期间上（而非公司报告期）的事实前缀
 _CONTEXT_PREFIXES = ("macro.", "rate.", "beta")
@@ -580,9 +567,6 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
     arts: dict[str, str] = {}
     skipped: list[str] = []
 
-    rt, route_err = _route(code)
-    if route_err:
-        skipped.append(route_err)
 
     # 宏观与行业必须在撰写之前入账本 —— 正文的第 2、3 节要引用它们，
     # 而假设推导也要靠它们。顺序错了，两边都拿不到。
@@ -661,66 +645,46 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
            "战略": strat_md, "外部资料": ext_md}
 
     # ── 估值 ──────────────────────────────────────────────
-    # 人工审核门已取消，假设改由模型自主决定。代码仍然把能查的都查一遍
-    # （永续 ≤ 宏观上限、永续 < WACC、依据可核验、WACC 必须有正文论证），
-    # 但「有人看过并负责」这件事不再存在 —— 产物一律标注为模型决定。
-    assumptions = valuation = sensitivity = None
+    # 交给 ashare-dcf 的三表模型（见 ir_agent/dcf.py 的接通说明）。
+    # 本项目不再自己算 DCF: 那套只有四个旋钮的实现接不住战略分析识别出的
+    # 驱动因子，也没有资产负债表平衡与公式引擎验算。
+    dcf_res = None
     stage = Stage.NOT_APPLICABLE
-    if rt is not None and rt.method is ValuationMethod.DCF:
-        # DCF 适用但没定出假设，与「本标的不适用 DCF」是两回事。混为一谈
-        # 会让摘要报出「不适用 DCF」，而真实情况是模型没给出合法假设 ——
-        # 前者无解，后者人工接手就能继续。
-        stage = Stage.AWAITING_REVIEW
-        if not body:
-            skipped.append("估值（无正文，模型无从给出假设的正文依据）")
-        else:
-            assumptions, valuation, sensitivity, verr, cost = _autovalue(
-                code=code, r=r, body=body, as_of=as_of, model=model,
-                out=out, cost=cost)
-            if verr:
-                skipped.append(verr)
-            else:
-                stage = Stage.VALUED
-            if getattr(r, "scenario_err", ""):
-                skipped.append(r.scenario_err)
-            if getattr(r, "scenario_md", ""):
-                ctx["情景"] = r.scenario_md
-    elif rt is not None and rt.method is ValuationMethod.PB_ROE:
-        # **路由判对了，另一条路没修。** 强周期标的（半导体、钢铁、化工、
-        # 有色、券商……）会被正确地判给 PB–ROE，但那个方法只有枚举值、
-        # 没有实现，于是整轮不出任何估值。
-        #
-        # 此前这种情况只留下一个 stage=not_applicable，读起来像「本标的
-        # 不适合估值」—— 而真相是「本标的适合 PB–ROE，是我们还没做」。
-        # 静默地少做一块，与 V0 的「缺数据时跳过而非通过」是同一条原则:
-        # 缺什么必须显式说出来。
-        skipped.append(
-            f"估值（路由判定应使用 PB–ROE：{rt.reason}；"
-            "该方法尚未实现，因此本轮不出估值。"
-            "这不是「本标的无法估值」，是本系统尚缺这条路径）")
+    try:
+        print("三表 DCF 建模（ashare-dcf）…", file=sys.stderr)
+        dcf_res = dcf.run(code, out, as_of=as_of, ledger=r.ledger)
+    except dcf.DcfUnavailable as e:
+        skipped.append(f"估值（{e}）")
+    except Exception as e:                                  # noqa: BLE001
+        skipped.append(f"估值（{e.__class__.__name__}: {str(e)[:160]}）")
+    else:
+        arts["DCF 模型"] = dcf_res.workbook
+        ctx["估值"] = dcf_res.summary()
+        for f in dcf.to_facts(dcf_res, as_of):
+            r.ledger.put(f)
+        stage = Stage.VALUED if dcf_res.verified else Stage.AWAITING_REVIEW
+        if not dcf_res.verified:
+            skipped.append("估值（公式引擎验算未通过，结果不可采信）")
+        # **交叉核对与健全性警告一条都不吞。** 它们是这套模型最有价值的
+        # 部分之一，藏起来等于把「看起来算出来了」当成「算对了」。
+        for x in dcf_res.crosscheck:
+            skipped.append(f"估值口径与账本不一致：{x}")
 
-    build_dashboard(r, path=out / "dashboard.html", route=rt, context=ctx,
-                    assumptions=assumptions, valuation=valuation,
-                    sensitivity=sensitivity)
+    build_dashboard(r, path=out / "dashboard.html", context=ctx,
+                    dcf=dcf_res)
     arts["看板"] = str(out / "dashboard.html")
     build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
                    path=out / "model.xlsx", verdicts=r.verdicts)
     arts["工作簿"] = str(out / "model.xlsx")
-    if assumptions is not None:
-        arts["假设（模型自主决定）"] = str(out / "assumptions.yaml")
 
-    reason = rt.reason if rt else ""
-    if valuation is not None:
-        reason = (f"每股价值 {valuation.value_per_share:,.2f} 元"
-                  f"（终值占比 {valuation.terminal_share:.1%}，"
-                  f"假设由模型自主决定，未经人工复核）")
-        scen = getattr(r, "scenarios", None)
-        if scen is not None:
-            # **区间比点估计更有信息量。** 只报一个数会让读者以为它精确，
-            # 而这个数完全取决于几条本就不确定的假设。
-            lo = scen.values[SCase.BEAR].value_per_share
-            hi = scen.values[SCase.BULL].value_per_share
-            reason += f"；情景区间 {lo:,.2f}~{hi:,.2f} 元"
+    reason = ""
+    if dcf_res is not None:
+        up = dcf_res.upside
+        reason = (f"每股内在价值 {dcf_res.value_per_share:,.2f} 元 vs 现价 "
+                  f"{dcf_res.price:,.2f} 元"
+                  + (f"，空间 {up:+.1%}" if up is not None else "")
+                  + f"（WACC {dcf_res.wacc:.2%}，终值占企业价值 "
+                  f"{dcf_res.terminal_share:.1%}；假设由模型校准，未经人工复核）")
 
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=stage,
@@ -728,196 +692,6 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         cost_usd=Decimal(str(cost)), route_reason=reason)
 
 
-def _load_scenarios(r, body, assumptions, as_of, client, spot):
-    """把战略分析识别的不确定性落成 Bear/Base/Bull。
-
-    与 stage2 那张 5×5 网格是两回事: 网格回答「假设错了多少，估值差多少」，
-    换成任何一家公司长得都一样；情景回答「战略分析识别出的那几条不确定性
-    一旦兑现，这家公司值多少钱」。
-    """
-    from ir_agent.valuation import scenarios as SC
-    from ir_agent.valuation.inputs import (MissingInput, free_cash_flow,
-                                           net_debt, shares_outstanding)
-
-    view = getattr(r, "strategy_view", None)
-    if view is None or not view.uncertainties:
-        return None, "", "情景分析（无战略分析产出的关键不确定性）"
-    try:
-        fcf = free_cash_flow(r.ledger, r.period, as_of=as_of)
-        nd = net_debt(r.ledger, r.period, as_of=as_of)
-        sh = shares_outstanding(r.ledger, spot or r.period, as_of=as_of)
-    except MissingInput as e:
-        return None, "", f"情景分析（估值输入缺失：{e}）"
-
-    unc = "\n".join(f"  · {u.what} → {u.driver}（不利时{u.direction}）"
-                     for u in view.uncertainties)
-    base_txt = (f"  收入增速逐年 {'、'.join(str(g) for g in assumptions.growth_rates)}"
-                f"\n  WACC {assumptions.wacc}"
-                f"\n  永续增速 {assumptions.terminal_growth}")
-    prompt = SC.PROMPT.format(
-        uncertainties=unc, base=base_txt,
-        anchors="　".join(SC.anchors(r.ledger, as_of)) or "（无）",
-        drivers="、".join(SC.MODELLABLE))
-
-    last = ""
-    for attempt in range(1, 4):
-        try:
-            shifts = SC.parse(client(prompt))
-            out = SC.build(assumptions, shifts, view.uncertainties,
-                           fcf_base=fcf.value, net_debt=nd.value,
-                           shares=sh.value, ledger=r.ledger, body=body,
-                           as_of=as_of, period=r.period)
-        except SC.ScenarioFailed as e:
-            last = str(e)
-            prompt = (f"{prompt}\n\n---\n"
-                      f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
-                      "请修正后重新输出全部情景行。\n")
-            continue
-        for f in SC.scenario_facts(out, r.period, as_of):
-            r.ledger.put(f)
-        return out, out.summary(), ""
-    return None, "", f"情景分析（连续三次不可核验：{last[:100]}）"
-
-
-def _autovalue(*, code, r, body, as_of, model, out, cost):
-    """模型自主定假设并建模。返回 (假设, 估值, 敏感性, 失败说明, 累计开销)。"""
-    from ir_agent.clients.claude_cli import ClaudeCliError, make_client
-    from ir_agent.review import to_yaml
-    from ir_agent.stage2 import ValuationBlocked, value_from_assumptions
-    from ir_agent.valuation.autodecide import AutoDecideFailed, decide
-    from ir_agent.valuation.derive import derive
-
-    try:
-        proposals = derive(r.ledger, r.period, as_of, years=FORECAST_YEARS)
-    except Exception:                                       # noqa: BLE001
-        proposals = None
-
-    client = make_client(model=model)
-    try:
-        print("模型自主确定估值假设…", file=sys.stderr)
-        d = decide(body, client, ledger=r.ledger, as_of=as_of,
-                   derived=proposals, years=FORECAST_YEARS)
-    except (AutoDecideFailed, ClaudeCliError) as e:
-        return None, None, None, f"估值（{e.__class__.__name__}: {e}）", \
-            cost + client.total_cost_usd
-
-    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
-                 if f.key == "market_cap"), None)
-    try:
-        res = value_from_assumptions(
-            assumptions=d.assumptions, ledger=r.ledger, body=body,
-            period=r.period, spot_period=spot or r.period, as_of=as_of)
-    except ValuationBlocked as e:
-        return None, None, None, f"估值（{e}）", cost
-
-    (out / "assumptions.yaml").write_text(
-        to_yaml(d.assumptions, header=(
-            "# 估值假设 —— 由**模型自主决定**，未经人工审核。\n"
-            "# 已通过的机器校验: 永续 ≤ 宏观事实算出的上限、永续 < WACC、\n"
-            "# 各项依据可核验、WACC 的论证出自本报告正文。"))
-        + "\n# ── 模型给出的理由原文 ──\n"
-        + "\n".join("# " + ln for ln in d.rationale.split("\n")),
-        encoding="utf-8")
-
-    scen, scen_md, scen_err = _load_scenarios(
-        r, body, d.assumptions, as_of, client, spot)
-    r.scenarios, r.scenario_md, r.scenario_err = scen, scen_md, scen_err
-
-    # client 的 total_cost_usd 是**累计值** —— 中途加一次、末尾再加一次
-    # 会把前半段重复计入。整段用同一个 client，因此只在这里加一次。
-    return d.assumptions, res.valuation, res.sensitivity, "", \
-        cost + client.total_cost_usd
-
-
-def run_review(code: str, r, as_of: date, out_dir: str | Path,
-               reviewer: str) -> ResearchOutcome:
-    """交互式审核 → 写 yaml → 直接建模。一步走完人工那一关。"""
-    from ir_agent.ledger import LookAheadError
-    from ir_agent.review import ReviewAborted, interactive_review, to_yaml
-
-    out = Path(out_dir)
-    ctx = {}
-    for key, label in (("revenue.yoy", "上期营收同比"),
-                       ("net_profit.yoy", "上期净利同比"),
-                       ("roe", "本期 ROE")):
-        try:
-            f = r.ledger.get(key, r.period, as_of=r.as_of)
-            ctx[label] = f"{f.value * 100:.2f}%"
-        except (KeyError, LookAheadError):
-            continue
-
-    # 推导的建议与约束一并呈给审核者 —— 审核时看得见推导，比事后翻
-    # assumptions.yaml 的注释有用得多。推不出来也不阻断审核。
-    try:
-        from ir_agent.valuation.derive import derive
-        proposals = derive(r.ledger, r.period, as_of, years=FORECAST_YEARS)
-    except Exception:                                       # noqa: BLE001
-        proposals = None
-
-    try:
-        a = interactive_review(context=ctx, derived=proposals)
-    except ReviewAborted as e:
-        raise SystemExit(str(e))
-
-    path = out / "assumptions.yaml"
-    path.write_text(to_yaml(a), encoding="utf-8")
-    print(f"\n已写入 {path}")
-    return run_stage2(code, r, as_of, out_dir, str(path), reviewer)
-
-
-def run_stage2(code: str, r, as_of: date, out_dir: str | Path,
-               assumptions_path: str, reviewer: str) -> ResearchOutcome:
-    """第二阶段: 读入已审核的假设 → 建模 → 重建看板与工作簿。"""
-    from ir_agent.assumptions_io import AssumptionFileError, load_assumptions
-    from ir_agent.stage2 import ValuationBlocked, value_from_file
-
-    out = Path(out_dir)
-    report_md = out / "report.md"
-    if not report_md.exists():
-        raise SystemExit(
-            f"找不到 {report_md} —— 请先运行第一阶段：\n"
-            f"  python -m ir_agent {code} --year <年度> --full {out}")
-    body = report_md.read_text(encoding="utf-8")
-
-    try:
-        a = load_assumptions(assumptions_path)
-    except AssumptionFileError as e:
-        raise SystemExit(f"假设文件有误：{e}")
-
-    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
-                 if f.key == "market_cap"), None)
-    try:
-        res = value_from_file(assumptions=a, ledger=r.ledger, body=body,
-                              period=r.period, spot_period=spot or r.period,
-                              as_of=as_of, reviewer=reviewer)
-    except ValuationBlocked as e:
-        raise SystemExit(f"无法出具估值：\n{e}")
-
-    rt, _ = _route(code)
-    # 第二阶段重建看板时口径不能丢 —— 审核之后反而看不到样本覆盖，
-    # 恰好是最需要它的时候。宏观与行业事实此刻已在账本里，重算即可。
-    macro_md, _, _ = _load_macro(r, as_of)
-    capm_md, _, _ = _load_capm(code, r, as_of)
-    try:
-        industry_md, _, _ = _load_industry(code, r, as_of)
-    except Exception:                                       # noqa: BLE001
-        industry_md = ""
-    build_dashboard(r, path=out / "dashboard.html", route=rt,
-                    context={"宏观": macro_md, "折现率输入": capm_md,
-                             "行业": industry_md},
-                    assumptions=res.valuation.assumptions,
-                    valuation=res.valuation, sensitivity=res.sensitivity)
-    build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
-                   path=out / "model.xlsx", verdicts=r.verdicts)
-
-    return ResearchOutcome(
-        code=code, period=r.period, as_of=as_of, stage=Stage.VALUED,
-        artifacts={"研究正文": str(report_md),
-                   "看板（含估值）": str(out / "dashboard.html"),
-                   "工作簿": str(out / "model.xlsx")},
-        route_reason=(f"每股价值 {res.valuation.value_per_share:,.2f} 元"
-                      f"（终值占比 {res.valuation.terminal_share:.1%}，"
-                      f"审核 {reviewer}）"))
 
 
 def report(outcome: ResearchOutcome, out_dir: str | None = None,

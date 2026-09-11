@@ -28,12 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--xlsx", metavar="PATH", default=None,
                    help="导出 Excel 工作簿到指定路径")
     p.add_argument("--full", metavar="DIR", default=None,
-                   help="端到端：撰写+辩论+回写+看板+Excel+假设模板，产物写入该目录")
-    p.add_argument("--assumptions", metavar="PATH", default=None,
-                   help="已审核的假设文件（第二阶段，需配合 --full 与 --reviewer）")
-    p.add_argument("--reviewer", default=None, help="假设审核人署名")
-    p.add_argument("--review", action="store_true",
-                   help="交互式录入并审核假设，随后直接建模（需 --full 与 --reviewer）")
+                   help="端到端：撰写+辩论+回写+三表DCF+看板+Excel，产物写入该目录")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
     a = p.parse_args(argv)
@@ -46,28 +41,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                      # noqa: BLE001
         print(f"运行失败: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
-
-    if a.review:
-        if not (a.full and a.reviewer):
-            print("--review 需同时给出 --full <目录> 与 --reviewer <署名>",
-                  file=sys.stderr)
-            return 2
-        from ir_agent.full import report, run_review
-        print(r.summary())
-        report(run_review(a.code, r, as_of, a.full, a.reviewer),
-               out_dir=a.full, year=a.year)
-        return 0
-
-    if a.assumptions:
-        if not (a.full and a.reviewer):
-            print("--assumptions 需同时给出 --full <目录> 与 --reviewer <署名>",
-                  file=sys.stderr)
-            return 2
-        from ir_agent.full import report, run_stage2
-        print(r.summary())
-        report(run_stage2(a.code, r, as_of, a.full, a.assumptions,
-                          a.reviewer), out_dir=a.full, year=a.year)
-        return 0
 
     if a.full:
         from ir_agent.full import report, run_full
@@ -143,24 +116,9 @@ def main(argv: list[str] | None = None) -> int:
             except DebateRefused as e:
                 print(f"\n辩论中止：{e}", file=sys.stderr)
 
-    route_result = None
-    try:
-        from ir_agent.market import market_of
-        from ir_agent.sources import eastmoney
-        from ir_agent.valuation.route import annual_series, route as route_fn
-        em, _ = eastmoney.fetch_statements_em(a.code, market=market_of(a.code))
-        hist = annual_series(em, "net_profit")
-        if hist:
-            route_result = route_fn(
-                eastmoney.detect_company_type(a.code, market_of(a.code)),
-                hist, hist[-1])
-            print(f"\n估值方法：{route_result.describe()}")
-    except Exception as e:                          # noqa: BLE001
-        print(f"\n估值方法路由未完成：{e.__class__.__name__}", file=sys.stderr)
-
     if a.html:
         from ir_agent.dashboard import build_dashboard
-        out = build_dashboard(r, path=a.html, route=route_result)
+        out = build_dashboard(r, path=a.html)
         print(f"已生成看板: {out}")
 
     if a.xlsx:

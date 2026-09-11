@@ -95,50 +95,15 @@ class TestValidateAgainstEvidence:
         assert validate([], ledger(), BODY, AS_OF)
 
 
-class TestApprovalRequiresValidBasis:
-    def _a(self, basis):
-        from ir_agent.valuation.assumptions import Assumptions
-        return Assumptions(
-            wacc=D("0.09"), terminal_growth=D("0.025"),
-            growth_rates=[D("0.04")] * 5, basis=basis)
 
-    def _good(self):
-        return {"wacc": [Basis.external("https://x.cn/gz", "十年期国债 2.5%",
-                                        date(2026, 6, 1))],
-                "terminal_growth": [Basis.external("https://x.cn/gdp",
-                                                   "名义 GDP 增速 5%",
-                                                   date(2026, 6, 1))],
-                "growth_rates": [Basis.fact("[[revenue.yoy@2025FY]]")]}
 
-    def test_cannot_approve_with_an_unresolvable_fact_reference(self):
-        from ir_agent.valuation.assumptions import UnsupportedAssumption
-        b = self._good(); b["growth_rates"] = [Basis.fact("[[ebitda@2025FY]]")]
-        with pytest.raises(UnsupportedAssumption, match="ebitda"):
-            self._a(b).approve("谢海量", AS_OF, ledger=ledger(),
-                               body=BODY, as_of=AS_OF)
+def test_依据层不依赖估值模块():
+    """**换掉 DCF 实现时才发现它一直被放错了地方。** Basis 服务的是战略、
+    产业链、宏观定性、外部资料这些定性判断，估值只是使用者之一。它此前
+    放在 valuation/ 包里纯属历史原因 —— 删估值模块差点把它一起删掉。"""
+    import inspect
 
-    def test_cannot_approve_with_a_fabricated_report_quote(self):
-        from ir_agent.valuation.assumptions import UnsupportedAssumption
-        b = self._good(); b["wacc"] = [Basis.report("公司正在高速扩张")]
-        with pytest.raises(UnsupportedAssumption, match="正文"):
-            self._a(b).approve("谢海量", AS_OF, ledger=ledger(),
-                               body=BODY, as_of=AS_OF)
-
-    def test_valid_basis_approves(self):
-        a = self._a(self._good()).approve("谢海量", AS_OF, ledger=ledger(),
-                                          body=BODY, as_of=AS_OF)
-        assert a.approved
-
-    def test_approval_without_evidence_is_refused(self):
-        """不给证据就不能审核 —— 否则契约又退回成走过场。"""
-        from ir_agent.valuation.assumptions import UnsupportedAssumption
-        with pytest.raises(UnsupportedAssumption, match="证据"):
-            self._a(self._good()).approve("谢海量", AS_OF)
-
-    def test_revision_still_revokes_approval(self):
-        a = self._a(self._good()).approve("谢海量", AS_OF, ledger=ledger(),
-                                          body=BODY, as_of=AS_OF)
-        nb = {"wacc": [Basis.external("https://x.cn/b", "β 0.9",
-                                      date(2026, 6, 1))]}
-        assert a.revise(basis_note="下调 β", wacc=D("0.08"),
-                        basis=nb).approved is False
+    from ir_agent import basis
+    src = inspect.getsource(basis)
+    assert "valuation" not in src.replace("不在 valuation 包里", "")
+    assert basis.__name__ == "ir_agent.basis"
