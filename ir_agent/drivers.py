@@ -126,6 +126,13 @@ def compose(d: Decomposition, values: dict[str, Decimal],
     ADD_PP   → 返回**绝对水平**（基期 + Σpp/100），因此必须给 base
 
     取值缺失一律报错而不当零: 当零会让一个漏填悄悄变成「该因子无影响」。
+
+    **契约：`d` 必须已经过 `check_closure` 校验，本函数不重复校验闭合性。**
+    这是分层设计，不是疏漏 —— 闭合性（op 与 target 匹配、单位在白名单内、
+    pp 不得进乘法链等）是 `Decomposition` **构造期**该确认一次的事；如果
+    每次 compose（尤其是 reconcile 里对每个历史期间循环调用）都重新跑一遍
+    闭合校验，就是把一次性的检查摊进了热路径。调用方若绕过构造流程手拼一个
+    Decomposition 直接传进来，责任在调用方——先 check_closure，再 compose。
     """
     missing = [f.key for f in d.factors if f.key not in values]
     if missing:
@@ -167,16 +174,21 @@ def reconcile(d: Decomposition,
     残差**大或跳动** → 有重要因子没被纳入，这件事要让人看见。
 
     数据不全的期间**跳过而非用零补齐** —— 补出来的残差是假的。
+
+    base 缺失是与「因子缺失」同一类事: ADD_PP 链没有基期就算不出绝对水平，
+    这里用显式前置检查跳过该期间，而不是指望 compose 抛 DecompositionInvalid
+    再拿 except 吞掉 —— 拿异常做预期内的正常分支控制，会把「base 缺失」和
+    「真正的闭合性错误」混进同一个 except；compose 的校验逻辑将来一变，
+    没有测试能发现这里悄悄吞掉了新的错误。
     """
     out: list[Residual] = []
     for period in sorted(history):
         vals = history[period]
         if any(f.key not in vals for f in d.factors) or period not in actual:
             continue
-        try:
-            c = compose(d, vals, (base or {}).get(period))
-        except DecompositionInvalid:
+        if d.op is Op.ADD_PP and (base is None or period not in base):
             continue
+        c = compose(d, vals, (base or {}).get(period))
         a = actual[period]
         out.append(Residual(period=period, composed=c, actual=a, gap=a - c))
     return out

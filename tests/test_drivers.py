@@ -183,9 +183,10 @@ def test_加法链缺基期就报错():
 
 
 def test_因子取值缺失就报错而非当零():
-    """当零会让一个漏填悄悄变成「该因子无影响」。"""
+    """当零会让一个漏填悄悄变成「该因子无影响」。断言要点名 capacity ——
+    实现精确点名了缺失的因子，测试的强度不该低于实现（发现二）。"""
     d = _rev(_f("capacity"), _f("asp", "单价"))
-    with pytest.raises(DecompositionInvalid, match="capacity|缺"):
+    with pytest.raises(DecompositionInvalid, match="capacity"):
         compose(d, {"asp": D("0.01")})
 
 
@@ -222,3 +223,72 @@ def test_pp提示仅在基期已知时给出():
     """基期未知就只显示变化率，**绝不倒推** —— 倒推出来的 pp 是个凭空的数。"""
     assert pp_hint(D("-0.035"), D("0.85")) == "-3.50%（约 -2.98pp）"
     assert pp_hint(D("-0.035"), None) == "-3.50%"
+
+
+# ============================================================================
+# 发现一: reconcile 的 ADD_PP（加法）链路径 —— base 参数只在这条链上有意义，
+# 之前 8 条新测试全部走 MULTIPLY 链，这条实现了但从未被跑到过。
+# ============================================================================
+
+def _gm_decomp():
+    return Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="util", label="稼动率摊薄", unit="pp"),
+        Factor(key="dep", label="折旧变动", unit="pp")])
+
+
+def test_加法链回算给出基期能算出残差():
+    """给了 base 的期间：正常合成、报残差 —— 和 MULTIPLY 链的语义一致，
+    只是公式换成 base + Σpp/100。"""
+    d = _gm_decomp()
+    hist = {"2024FY": {"util": D("-1.5"), "dep": D("-0.8")}}
+    actual = {"2024FY": D("0.12")}
+    base = {"2024FY": D("0.1415")}
+    got = reconcile(d, hist, actual, base=base)
+    assert [r.period for r in got] == ["2024FY"]
+    # 0.1415 − 1.5pp − 0.8pp = 0.1185；残差 = 0.12 − 0.1185
+    assert abs(got[0].composed - D("0.1185")) < D("1e-9")
+    assert abs(got[0].gap - D("0.0015")) < D("1e-9")
+
+
+def test_加法链缺基期的期间被跳过不影响其他期间():
+    """base 是按期间给的字典：某一期没有 base 就只跳过那一期，
+    不拖累其他期间的回算。"""
+    d = _gm_decomp()
+    hist = {"2024FY": {"util": D("-1.5"), "dep": D("-0.8")},
+            "2025FY": {"util": D("1.0"), "dep": D("0.5")}}
+    actual = {"2024FY": D("0.12"), "2025FY": D("0.13")}
+    base = {"2024FY": D("0.1415")}          # 2025FY 没有基期
+    got = reconcile(d, hist, actual, base=base)
+    assert [r.period for r in got] == ["2024FY"]
+
+
+def test_加法链base缺失不该speculatively调用compose(monkeypatch):
+    """发现一的核心：base 缺失必须是**显式前置检查**挡住的期间，不能是
+    「先调用 compose、指望它抛 DecompositionInvalid、再拿 except 吞掉」。
+    后一种写法把「base 缺失」和「真正的闭合性错误」混进了同一个 except，
+    compose 的校验逻辑将来一变，这里不会有任何测试报警。
+
+    用 monkeypatch 换一个「在 base=None 时抛出非 DecompositionInvalid
+    异常」的 compose：如果 reconcile 仍然会在 base 缺失时把这期传给
+    compose，这个替身异常就会一路冒出来，测试立刻失败；只有 reconcile
+    在调用 compose 之前就用显式检查跳过该期间，这个测试才会通过。"""
+    import ir_agent.drivers as drivers_mod
+
+    d = _gm_decomp()
+    hist = {"2024FY": {"util": D("-1.5"), "dep": D("-0.8")}}
+    actual = {"2024FY": D("0.12")}
+
+    calls: list[Decimal | None] = []
+
+    def fake_compose(dd, vals, base=None):
+        calls.append(base)
+        if base is None:
+            raise AssertionError(
+                "reconcile 不该在 base 缺失时仍把该期间传给 compose —— "
+                "base 缺失必须在调用 compose 之前被显式前置检查挡住")
+        return drivers_mod.Decimal("0")
+
+    monkeypatch.setattr(drivers_mod, "compose", fake_compose)
+    got = drivers_mod.reconcile(d, hist, actual)  # 完全不给 base
+    assert calls == [], "compose 根本不该在 base 缺失时被调用"
+    assert got == []
