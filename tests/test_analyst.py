@@ -349,3 +349,35 @@ class TestHintMustNotMisdirect:
         from ir_agent.analyst import _RULES
         assert "定义上的基准值用文字表述" in _RULES
         assert "β 明显高于市场平均水平" in _RULES
+
+
+class TestStripPreamble:
+    """研报不该以「我将直接修订…」开篇。
+
+    提示词已明说「只输出正文 Markdown，不要说明你改了什么」，模型仍会写
+    一句交代 —— 实测长电回写后的稿子就是这样开头的（「我」还被写成「I」）。
+    """
+
+    def test_丢掉标题之前的交代话(self):
+        from ir_agent.analyst import strip_preamble
+        out = strip_preamble("I将直接修订两处问题。\n\n## 投资要点\n正文")
+        assert out.startswith("## 投资要点")
+
+    def test_本来就以标题开头则不动(self):
+        from ir_agent.analyst import strip_preamble
+        body = "# 投资要点\n正文"
+        assert strip_preamble(body) is body or strip_preamble(body) == body
+
+    def test_没有标题时原样返回(self):
+        """宁可留着一句多余的话，也不能把整篇清空。"""
+        from ir_agent.analyst import strip_preamble
+        body = "一段没有任何标题的正文"
+        assert strip_preamble(body) == body
+
+    def test_撰写与回写两条路径都接了(self):
+        import inspect
+        from ir_agent import analyst, revision
+        assert "strip_preamble(client(prompt))" in inspect.getsource(
+            analyst.write_body)
+        assert "strip_preamble(client(prompt))" in inspect.getsource(
+            revision.revise_from_verdicts)

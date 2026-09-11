@@ -376,6 +376,24 @@ def is_cosmetic(v: str) -> bool:
     return any(k in v for k in COSMETIC)
 
 
+def strip_preamble(body: str) -> str:
+    """去掉正文开头的交代话，让报告从第一个标题开始。
+
+    提示词已明说「只输出正文 Markdown，不要说明你改了什么」，模型仍会写
+    一句交代 —— 实测回写后的稿子以「我将直接修订正文中两处被裁定成立的
+    问题，其余分析保持不变。」开头（「我」还被写成了「I」）。研报不该以
+    这句话开篇。
+
+    **只丢第一个标题之前的内容，且没有标题时原样返回** —— 宁可留着一句
+    多余的话，也不能把整篇清空。
+    """
+    lines = body.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("#"):
+            return "\n".join(lines[i:]).strip() if i else body.strip()
+    return body
+
+
 def _violations(body: str, catalog: FactCatalog) -> list[str]:
     """返回违规说明列表；空列表表示通过。"""
     out: list[str] = []
@@ -442,7 +460,7 @@ def write_body(
     last: list[str] = []
 
     for attempt in range(1, max_attempts + 1):
-        body = client(prompt)
+        body = strip_preamble(client(prompt))
         last = _violations(body, catalog)
         if not last:
             return body, attempt

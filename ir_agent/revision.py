@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from ir_agent.analyst import FactCatalog, _violations
+from ir_agent.analyst import FactCatalog, _violations, strip_preamble
 from ir_agent.debate import Challenge
 
 Client = Callable[[str], str]
@@ -77,7 +77,7 @@ def revise_from_verdicts(
 
     prompt, last_open, last_bad = base, [], []
     for _ in range(max_attempts):
-        out = client(prompt)
+        out = strip_preamble(client(prompt))
         last_bad = _violations(out, catalog)
         last_open = unaddressed(upheld, out) if not last_bad else []
         if not last_bad and not last_open:
