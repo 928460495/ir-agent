@@ -224,3 +224,22 @@ def test_回写失败不丢弃正文():
 
     run = inspect.getsource(full.run_full)
     assert "err and body is None" in run, "有正文时不应报「研究正文」缺失"
+
+
+def test_辩论失败不丢弃正文():
+    """**跑长电第八轮时踩到。** 撰写通过全部闸门、战略分析也过了，辩论的
+    挑战者写了派生数字（投资现金流与资本开支的差额 27.6 亿、占比 44%）——
+    账本里没有「差额」这条事实，禁止派生算术等于禁止它提出有力的质疑。
+    整篇报告因此归零。
+
+    正文有独立的验收审计，辩论里的裸数字进不了正文（修订稿仍要过
+    _violations）。保留正文并说明「未经证伪环节」，比连正文一起丢掉诚实。
+    """
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full._write_and_debate)
+    assert "except DebateRefused" in src, "辩论失败仍会连正文一起丢掉"
+    assert "未经证伪环节" in src
+    fatal = src.split("except (")[-1].split(")")[0]
+    assert "DebateRefused" not in fatal

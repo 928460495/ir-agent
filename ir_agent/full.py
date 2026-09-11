@@ -534,7 +534,20 @@ def _write_and_debate(r, code: str, model: str | None,
                              consensus_summary=consensus_summary or None)
 
         print("多空辩论…", file=sys.stderr)
-        d = run_debate(cat, draft=body, client=client, period=r.period)
+        try:
+            d = run_debate(cat, draft=body, client=client, period=r.period)
+        except DebateRefused as e:
+            # **辩论失败不该毙掉整篇报告。** 挑战者要算账才能质疑
+            # （投资现金流与资本开支的差额、占比），而账本里没有「差额」
+            # 这条事实 —— 禁止派生算术等于禁止它提出有力的质疑。
+            #
+            # 而且正文有独立的验收审计，辩论里的裸数字进不了正文: 修订稿
+            # 仍要过 _violations。因此这一步失败时保留正文并说明辩论未完成，
+            # 比连正文一起丢掉诚实得多。
+            print(f"辩论未完成，保留正文：{str(e)[:80]}", file=sys.stderr)
+            return body, 0, "", client.total_cost_usd, (
+                f"多空辩论未完成（{str(e)[:160]}）—— "
+                "正文**未经证伪环节**，其结论未被交叉质疑过，阅读时请留意")
 
         note = ""
         if d.upheld_count:
@@ -555,7 +568,7 @@ def _write_and_debate(r, code: str, model: str | None,
                 print(f"回写失败，保留未修订稿：{str(e)[:80]}", file=sys.stderr)
 
         return body, d.upheld_count, d.summary(), client.total_cost_usd, note
-    except (AnalystRefused, DebateRefused, ClaudeCliError) as e:
+    except (AnalystRefused, ClaudeCliError) as e:
         return None, 0, "", client.total_cost_usd, f"{e.__class__.__name__}: {e}"
 
 
