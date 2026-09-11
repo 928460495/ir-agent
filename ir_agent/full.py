@@ -572,11 +572,17 @@ ASSUMPTIONS_JSON = "assumptions.json"
 STATE = "state.json"
 
 
-def _analyse(code: str, r, as_of: date, snapshot_dir, model):
-    """把宏观/周期/行业/可比/外部/战略/产业链全跑一遍。
+def _analyse_facts(code: str, r, as_of: date, snapshot_dir):
+    """确定性分析层：宏观 / 折现率 / 周期 / 行业 / 可比 / 外部资料。
 
-    两个阶段共用: 第一阶段用它撰写简报，第二阶段用它重建看板 ——
-    但第二阶段从 state.json 读回摘要，不重跑，否则模型开销要翻一倍。
+    **不调模型，因此两个阶段都要跑。** 第二阶段跑它不是为了摘要（摘要从
+    state.json 读回），是为了**把派生事实重新放回账本** —— industry.*、
+    macro.*、comps.* 这些 key 只存在于内存账本里，不重建的话，喂给撰写的
+    摘要里那些 [[industry.xxx]] 占位符一个都解析不了，模型照抄就被判伪造。
+
+    实测踩到: 第二阶段写完整研报时连挂三次，
+    「账本中没有 industry.revenue_yoy@2025FY，但正文引用了它」。
+    这是「我往提示词里放了模型用不了的东西」的又一次。
     """
     skipped: list[str] = []
     md: dict[str, str] = {}
@@ -601,6 +607,23 @@ def _analyse(code: str, r, as_of: date, snapshot_dir, model):
     take("行业", lambda: _load_industry(code, r, as_of))
     take("可比", lambda: _load_comps(code, r, as_of, snapshot_dir))
     take("外部资料", lambda: _load_external(code, r, as_of))
+    return md, pr, skipped
+
+
+def _analyse(code: str, r, as_of: date, snapshot_dir, model):
+    """确定性层 + 需要模型的定性层（宏观定性 / 战略 / 产业链）。"""
+    md, pr, skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+
+    def take(name, fn):
+        try:
+            a, b, err = fn()
+        except Exception as e:                              # noqa: BLE001
+            md[name] = pr[name] = ""
+            skipped.append(f"{name}（{e.__class__.__name__}: {str(e)[:120]}）")
+            return
+        md[name], pr[name] = a, b
+        if err:
+            skipped.append(err)
 
     qual_client = make_client(model=model)
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
@@ -745,7 +768,6 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         raise SystemExit("必须署名批准人 —— 假设要有人负责才谈得上「已核实」。")
 
     arts: dict[str, str] = {}
-    skipped: list[str] = []
     body = brief.read_text(encoding="utf-8")
     saved = json.loads(js.read_text(encoding="utf-8"))
     state = json.loads((out / STATE).read_text(encoding="utf-8")) \
@@ -767,6 +789,10 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     for x in edits:
         skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
 
+    # **必须重建派生事实**，否则摘要里的 [[industry.xxx]] 一个都解析不了。
+    # 这一层不调模型，代价只是几次网络抓取。
+    print("重建分析层事实（不调模型）…", file=sys.stderr)
+    _, _, skipped = _analyse_facts(code, r, as_of, snapshot_dir)
     md = state.get("md") or {}
     pr = state.get("pr") or {}
 
@@ -790,6 +816,11 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
             skipped.append("估值（公式引擎验算未通过，结果不可采信）")
         for x in dcf_res.crosscheck:
             skipped.append(f"估值口径与账本不一致：{x}")
+        # **健全性警告同样一条都不吞。** 它们此前只进了看板，没进终端
+        # 产物清单 —— 而终端是读者第一眼看到的地方。实测: 终值占 EV
+        # 77.7%（>75%）的警告算出来了却没交付。
+        for x in dcf_res.warnings:
+            skipped.append(f"估值健全性：{x}")
 
     cost = 0.0
     if dcf_res is not None:

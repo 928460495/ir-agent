@@ -175,6 +175,10 @@ def test_估值改由ashare_dcf承担且不吞警告():
     src = inspect.getsource(full.run_valuation)
     assert "dcf.run(" in src
     assert "dcf_res.crosscheck" in src, "交叉核对结果被吞掉了"
+    # **这条此前只查了 crosscheck，于是 warnings 被吞了三个月没人发现。**
+    # 实测: 终值占 EV 77.7%（>75%）的健全性警告算出来了，只进了看板，
+    # 没进终端产物清单 —— 而终端是读者第一眼看到的地方。
+    assert "dcf_res.warnings" in src, "健全性警告被吞掉了"
     assert "验算未通过" in src, "公式引擎验算失败没有被报出来"
 
 def test_回写失败不丢弃正文():
@@ -215,3 +219,22 @@ def test_辩论失败不丢弃正文():
     assert "未经证伪环节" in src
     fatal = src.split("except (")[-1].split(")")[0]
     assert "DebateRefused" not in fatal
+
+
+def test_第二阶段必须重建派生事实():
+    """**实测踩到，完整研报连挂三次。** 第二阶段不重跑分析层，账本里就没有
+    industry.* / macro.* / comps.* 这些派生事实；而喂给撰写的摘要里全是
+    [[industry.xxx]] 占位符 —— 一个都解析不了，模型照抄就被判伪造。
+
+    又一次「我往提示词里放了模型用不了的东西」。重建这一层不调模型，
+    代价只是几次网络抓取。
+    """
+    import inspect
+
+    from ir_agent import full
+    v = inspect.getsource(full.run_valuation)
+    assert "_analyse_facts(" in v, "第二阶段没有重建账本事实"
+    assert v.index("_analyse_facts(") < v.index("_write_full_report("), \
+        "必须在撰写之前重建，否则占位符仍然解析不了"
+    # 确定性层不该调模型 —— 否则第二阶段开销会凭空多一倍
+    assert "make_client" not in inspect.getsource(full._analyse_facts)
