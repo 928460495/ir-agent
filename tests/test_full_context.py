@@ -172,7 +172,7 @@ def test_估值改由ashare_dcf承担且不吞警告():
     import inspect
 
     from ir_agent import full
-    src = inspect.getsource(full.run_full)
+    src = inspect.getsource(full.run_valuation)
     assert "dcf.run(" in src
     assert "dcf_res.crosscheck" in src, "交叉核对结果被吞掉了"
     assert "验算未通过" in src, "公式引擎验算失败没有被报出来"
@@ -194,8 +194,8 @@ def test_回写失败不丢弃正文():
     fatal = src.split("except (")[-1].split(")")[0]
     assert "RevisionFailed" not in fatal
 
-    run = inspect.getsource(full.run_full)
-    assert "err and body is None" in run, "有正文时不应报「研究正文」缺失"
+    run = inspect.getsource(full.run_analysis)
+    assert "err and body is None" in run, "有正文时不应报「研究简报」缺失"
 
 
 def test_辩论失败不丢弃正文():

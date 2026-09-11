@@ -203,9 +203,45 @@ def to_facts(res: DcfResult, as_of: date,
     ]
 
 
+def _calibrate(D, C, code: str, as_of: date, ledger, years: int):
+    """取数 + 校准，不建模。返回 (cal, notes)。
+
+    第一阶段只需要它: 校准值是 AI 填判断项的参照（历史均值、标准差、
+    区间），而建模要等人工核实之后。
+    """
+    notes: list[str] = []
+    stmts = None
+    if ledger is not None:
+        from ir_agent import dcf_data
+        try:
+            stmts = dcf_data.to_frames(ledger, as_of)
+            cov = dcf_data.coverage(stmts)
+            notes.append("报表由事实账本供数（已过双源交叉验证、带披露日）："
+                         + "、".join(f"{t} {a}/{b} 项" for t, (a, b)
+                                     in cov.items()))
+        except dcf_data.MappingIncomplete as e:
+            notes.append(f"⚠ 账本铺不出报表（{e}），已退回 DCF 自行取数 —— "
+                         "此时分析层与估值层用的不是同一套数字")
+    try:
+        code = D.validate_code(code)
+        cal = C.calibrate(code, years, stmts=stmts)
+    except getattr(D, "DataError", Exception) as e:
+        raise DcfUnavailable(f"{code} 无法建模：{e}") from e
+    return cal, notes, stmts
+
+
+def calibrate_only(code: str, *, as_of: date, ledger=None, years: int = 5,
+                   dirpath: Path | None = None) -> dict:
+    """只校准不建模 —— 第一阶段用它拿到历史参照与预测期标签。"""
+    dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
+    D, C, _, _ = _load(dirpath)
+    return _calibrate(D, C, code, as_of, ledger, years)[0]
+
+
 def run(code: str, out_dir: str | Path, *, as_of: date,
         ledger: FactLedger | None = None, years: int = 5,
-        dirpath: Path | None = None) -> DcfResult:
+        dirpath: Path | None = None, assumptions=None,
+        approved_by: str = "") -> DcfResult:
     """跑一遍 ashare-dcf，返回结果与全部警告。
 
     **账本给定时由它供数**，DCF 不再自行取数 —— 分析层与估值层用同一套
@@ -218,27 +254,21 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
     D, C, B, V = _load(dirpath)
 
-    notes: list[str] = []
-    stmts = None
-    if ledger is not None:
-        from ir_agent import dcf_data
-        try:
-            stmts = dcf_data.to_frames(ledger, as_of)
-            cov = dcf_data.coverage(stmts)
-            notes.append("报表由事实账本供数（已过双源交叉验证、带披露日）："
-                         + "、".join(f"{t} {a}/{b} 项" for t, (a, b)
-                                     in cov.items()))
-        except dcf_data.MappingIncomplete as e:
-            # **退回自行取数是降级，必须说出来。** 悄悄换一套数据源，
-            # 正是这次统一要消灭的事。
-            notes.append(f"⚠ 账本铺不出报表（{e}），已退回 DCF 自行取数 —— "
-                         "此时分析层与估值层用的不是同一套数字")
+    cal, notes, stmts = _calibrate(D, C, code, as_of, ledger, years)
 
-    try:
-        code = D.validate_code(code)
-        cal = C.calibrate(code, years, stmts=stmts)
-    except getattr(D, "DataError", Exception) as e:
-        raise DcfUnavailable(f"{code} 无法建模：{e}") from e
+    if assumptions is not None:
+        from ir_agent import assume
+        cal = assume.apply_to(cal, assumptions)
+        notes.append(
+            "营收增速与毛利率三档由分析结论填入"
+            + (f"，经 {approved_by} 核实" if approved_by else
+               "，**未经人工核实**")
+            + "；其余假设（费用率、周转天数、折旧率、税率、β、Kd）"
+            "由历史财务数据校准。")
+    else:
+        # 模板默认三档同值。不说出来，读者会以为那是三个不同的情景。
+        notes.append("⚠ 判断项未填：营收增速与毛利率沿用模板默认值且"
+                     "三档同值 —— 此时的「情景分析」只是把同一个数抄三遍")
 
     meta = cal["meta"]
     out = Path(out_dir)

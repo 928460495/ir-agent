@@ -209,18 +209,31 @@ def test_科目名给候选而非写死():
 
 # ── 估值要先算，正文才谈得上「解释这个结果」 ─────────────────
 
-def test_估值排在撰写之前():
-    """原先估值跑在撰写之后，因为假设要从正文里挑（autodecide 读 body）。
-    换成 ashare-dcf 后这个依赖没了 —— 假设由 calibrate() 从历史财务数据
-    算出。**顺序因此可以倒过来，而且必须倒过来**: 一篇引用不到估值结果的
-    研报，第 8 节只能空谈假设。"""
+def test_建模前必须有人批准():
+    """**这是两阶段存在的理由。** 判断项（营收增速、毛利率）模型推不出来，
+    只能靠分析得出 —— 也正因此必须有人看一眼再建模。第二阶段没有署名
+    直接拒绝。"""
     import inspect
 
     from ir_agent import full
-    src = inspect.getsource(full.run_full)
-    assert src.index("dcf.run(") < src.index("_write_and_debate("), \
-        "估值仍排在撰写之后，正文引用不到它"
-    assert "valuation_summary=" in src
+    src = inspect.getsource(full.run_valuation)
+    assert "approved_by" in src
+    assert "必须署名批准人" in src
+    # 人改过的值要重新校验 —— 批准不等于豁免
+    assert "assume.check(" in src
+
+
+def test_完整研报只在建模之后产出():
+    """建模之前就产出一份读起来像结论的完整研报，读者会把未经核实的假设
+    当成定论。"""
+    import inspect
+
+    from ir_agent import full
+    a = inspect.getsource(full.run_analysis)
+    v = inspect.getsource(full.run_valuation)
+    assert "BRIEF" in a and "REPORT" not in a.replace("REPORT = ", "")
+    assert "REPORT" in v and "dcf.run(" in v
+    assert v.index("dcf.run(") < v.index("_write_full_report(")
 
 
 def test_第八节要求解释结果而非重推假设():

@@ -421,7 +421,8 @@ class TestReportCarriesItsSources:
         a = AuditResult(rendered="正文")
         assert a.with_sources() == "正文"
 
-    def test_管线写的是带来源的版本(self):
+    def test_两个阶段写的都是带来源的版本(self):
         import inspect
         from ir_agent import full
-        assert "with_sources()" in inspect.getsource(full.run_full)
+        for fn in (full.run_analysis, full.run_valuation):
+            assert "with_sources()" in inspect.getsource(fn), fn.__name__

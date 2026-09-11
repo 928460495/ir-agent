@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import date
 from decimal import Decimal
@@ -502,7 +503,7 @@ def _write_and_debate(r, code: str, model: str | None,
                       macro_summary: str = "", industry_summary: str = "",
                       comps_summary: str = "", strategy_summary: str = "",
                       chain_summary: str = "", consensus_summary: str = "",
-                      valuation_summary: str = ""):
+                      valuation_summary: str = "", brief: bool = False):
     """撰写 → 辩论 → 回写。返回 (正文, 成立挑战数, 辩论摘要, 开销, 失败说明)。"""
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
@@ -520,7 +521,8 @@ def _write_and_debate(r, code: str, model: str | None,
                              strategy_summary=strategy_summary or None,
                              chain_summary=chain_summary or None,
                              consensus_summary=consensus_summary or None,
-                             valuation_summary=valuation_summary or None)
+                             valuation_summary=valuation_summary or None,
+                             brief=brief)
 
         print("多空辩论…", file=sys.stderr)
         try:
@@ -561,124 +563,248 @@ def _write_and_debate(r, code: str, model: str | None,
         return None, 0, "", client.total_cost_usd, f"{e.__class__.__name__}: {e}"
 
 
-def run_full(code: str, r, as_of: date, out_dir: str | Path,
-             model: str | None = None,
-             snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    arts: dict[str, str] = {}
+# 两阶段的产物名。**简报与完整研报是两个文件，不是同一个文件的两稿** ——
+# 建模之前不该存在一份读起来像结论的完整研报。
+BRIEF = "brief.md"
+REPORT = "report.md"
+ASSUMPTIONS_MD = "assumptions.md"
+ASSUMPTIONS_JSON = "assumptions.json"
+STATE = "state.json"
+
+
+def _analyse(code: str, r, as_of: date, snapshot_dir, model):
+    """把宏观/周期/行业/可比/外部/战略/产业链全跑一遍。
+
+    两个阶段共用: 第一阶段用它撰写简报，第二阶段用它重建看板 ——
+    但第二阶段从 state.json 读回摘要，不重跑，否则模型开销要翻一倍。
+    """
     skipped: list[str] = []
+    md: dict[str, str] = {}
+    pr: dict[str, str] = {}
 
+    def take(name, fn):
+        try:
+            a, b, err = fn()
+        except Exception as e:                              # noqa: BLE001
+            md[name] = pr[name] = ""
+            skipped.append(f"{name}（{e.__class__.__name__}: {str(e)[:120]}）")
+            return
+        md[name], pr[name] = a, b
+        if err:
+            skipped.append(err)
 
-    # 宏观与行业必须在撰写之前入账本 —— 正文的第 2、3 节要引用它们，
-    # 而假设推导也要靠它们。顺序错了，两边都拿不到。
-    # 每层都产出两份摘要: _md 给看板与人看（读数），_pr 给模型看（占位符）
-    macro_md, macro_pr, macro_err = _load_macro(r, as_of)
-    if macro_err:
-        skipped.append(macro_err)
+    # 顺序有讲究: 宏观 → 利率 → 周期（政策维度用期限利差）→ 行业 → 可比；
+    # 外部资料必须在战略与产业链之前，它们的定性判断要引用其中的原文。
+    take("宏观", lambda: _load_macro(r, as_of))
+    take("折现率输入", lambda: _load_capm(code, r, as_of))
+    take("商业周期", lambda: _load_cycle(r, as_of))
+    take("行业", lambda: _load_industry(code, r, as_of))
+    take("可比", lambda: _load_comps(code, r, as_of, snapshot_dir))
+    take("外部资料", lambda: _load_external(code, r, as_of))
 
-    capm_md, capm_pr, capm_err = _load_capm(code, r, as_of)
-    if capm_err:
-        skipped.append(capm_err)
-
-    # 周期定位放在宏观与利率之后 —— 政策维度用的是期限利差
-    cycle_md, cycle_pr, cycle_err = _load_cycle(r, as_of)
-    if cycle_err:
-        skipped.append(cycle_err)
-    try:
-        industry_md, industry_pr, industry_err = _load_industry(code, r, as_of)
-    except Exception as e:                                  # noqa: BLE001
-        industry_md = industry_pr = ""
-        industry_err = f"行业聚合（{e.__class__.__name__}: {e}）"
-    if industry_err:
-        skipped.append(industry_err)
-
-    try:
-        comps_md, comps_pr, comps_err = _load_comps(code, r, as_of, snapshot_dir)
-    except Exception as e:                                  # noqa: BLE001
-        comps_md = comps_pr = ""
-        comps_err = f"可比分析（{e.__class__.__name__}: {e}）"
-    if comps_err:
-        skipped.append(comps_err)
-
-    # 外部资料必须在战略与产业链之前 —— 它们的定性判断要引用其中的原文。
-    ext_md, ext_pr, ext_err = _load_external(code, r, as_of)
-    if ext_err:
-        skipped.append(ext_err)
-
-    # 战略与产业链要调模型，因此共用一个 client 以便统计开销。
     qual_client = make_client(model=model)
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
-    mview_md, mview_pr, mview_err = _load_macro_view(
-        r, as_of, qual_client, macro_pr)
-    if mview_err:
-        skipped.append(mview_err)
-    strat_md, strat_pr, strat_err = _load_strategy(r, as_of, qual_client, spot)
-    if strat_err:
-        skipped.append(strat_err)
-    chain_md, chain_pr, chain_err = _load_value_chain(r, as_of, qual_client)
-    if chain_err:
-        skipped.append(chain_err)
-    # ── 估值 ──────────────────────────────────────────────
-    # 交给 ashare-dcf 的三表模型（见 ir_agent/dcf.py 的接通说明）。
-    # 本项目不再自己算 DCF: 那套只有四个旋钮的实现接不住战略分析识别出的
-    # 驱动因子，也没有资产负债表平衡与公式引擎验算。
+    take("宏观定性", lambda: _load_macro_view(r, as_of, qual_client, pr["宏观"]))
+    take("战略", lambda: _load_strategy(r, as_of, qual_client, spot))
+    take("产业链", lambda: _load_value_chain(r, as_of, qual_client))
+    return md, pr, skipped, qual_client
+
+
+def _prompt_bundle(pr: dict) -> dict:
+    """分析结论 → 撰写用的各段摘要。"""
+    return dict(
+        comps_summary=pr.get("可比", ""),
+        macro_summary=(pr.get("宏观", "")
+                       + ("\n\n" + pr["宏观定性"] if pr.get("宏观定性") else "")),
+        industry_summary=pr.get("行业", ""),
+        strategy_summary=pr.get("战略", ""),
+        chain_summary=pr.get("产业链", ""),
+        consensus_summary=pr.get("外部资料", ""))
+
+
+def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
+                 model: str | None = None,
+                 snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
+    """第一阶段：分析 → 简报 → 辩论 → 回写 → AI 填 DCF 判断项 → 待人工核实。
+
+    **这一阶段不建模，也不出完整研报。** 建模之前就产出一份读起来像结论的
+    完整报告，读者会把未经核实的假设当成定论 —— 而那些假设恰恰是整份估值
+    里最该被人看一眼的东西。
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    arts: dict[str, str] = {}
+
+    md, pr, skipped, qual_client = _analyse(code, r, as_of, snapshot_dir, model)
+
+    body, upheld, debate_md, cost, err = _write_and_debate(
+        code=code, r=r, model=model, brief=True, **_prompt_bundle(pr))
+    cost += getattr(qual_client, "total_cost_usd", 0.0)
+    if err and body is None:
+        print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
+        skipped.append("研究简报")
+    elif err:
+        skipped.append(err)
+    if debate_md:
+        (out / "debate.md").write_text(debate_md, encoding="utf-8")
+        arts["辩论记录"] = str(out / "debate.md")
+    if body:
+        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
+        (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
+        arts["研究简报"] = str(out / BRIEF)
+
+    # ── AI 填写 DCF 判断项 ────────────────────────────────
+    stage = Stage.AWAITING_REVIEW
+    if body:
+        aerr = _propose_assumptions(code, r, body, md, as_of, out,
+                                    qual_client, arts)
+        if aerr:
+            skipped.append(aerr)
+    else:
+        skipped.append("DCF 判断项（无简报正文，假设无从追溯到分析结论）")
+
+    build_dashboard(r, path=out / "dashboard.html", context=md)
+    arts["看板"] = str(out / "dashboard.html")
+    build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
+                   path=out / "model.xlsx", verdicts=r.verdicts)
+    arts["工作簿"] = str(out / "model.xlsx")
+
+    (out / STATE).write_text(json.dumps(
+        {"code": code, "period": r.period, "as_of": as_of.isoformat(),
+         "md": md, "pr": pr, "upheld": upheld}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of, stage=stage,
+        artifacts=arts, skipped=skipped, upheld=upheld,
+        cost_usd=Decimal(str(cost)),
+        route_reason=("分析完成，DCF 判断项待人工核实。"
+                      f"核实 {out / ASSUMPTIONS_MD}（需改数值就改 "
+                      f"{ASSUMPTIONS_JSON}），确认后运行第二阶段建模"))
+
+
+def _propose_assumptions(code, r, body, md, as_of, out, client, arts) -> str:
+    """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。"""
+    from ir_agent import assume
+
+    try:
+        cal = dcf.calibrate_only(code, as_of=as_of, ledger=r.ledger)
+    except dcf.DcfUnavailable as e:
+        return f"DCF 判断项（校准失败：{e}）"
+
+    labels = (cal.get("periods") or {}).get("proj") or []
+    ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
+    try:
+        a = assume.decide(client, cal["judg"], labels, ctx,
+                          ledger=r.ledger, body=body, as_of=as_of, code=code)
+    except assume.AssumeFailed as e:
+        return f"DCF 判断项（{str(e)[:200]}）"
+
+    (out / ASSUMPTIONS_MD).write_text(
+        a.describe() + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
+        encoding="utf-8")
+    (out / ASSUMPTIONS_JSON).write_text(json.dumps({
+        "code": code, "labels": labels, "approved_by": "", "approved_at": "",
+        "rows": [{"driver": x.driver, "year": x.year,
+                  "bear": str(x.bear), "base": str(x.base), "bull": str(x.bull)}
+                 for x in a.rows]}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+    arts["DCF 判断项（待核实）"] = str(out / ASSUMPTIONS_MD)
+    return ""
+
+
+_APPROVE_NOTE = """
+---
+
+## 如何批准
+
+这些是**判断项**，模型无法从历史数据推出来，只能靠分析得出 —— 也正因此
+必须有人看一眼再建模。费用率、周转天数、折旧率、税率、β 等由历史校准，
+不在此列，也不需要你确认。
+
+- 认可就直接进入第二阶段建模。
+- 要改数值，改 `{js}` 里的 `rows`，再进入第二阶段；改完仍会重新校验
+  （三档必须严格拉开、每年都要有值），改坏了会被挡下来而不是算出个错数。
+"""
+
+
+def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
+                  approved_by: str, model: str | None = None,
+                  snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
+    """第二阶段：人工批准的假设 → 三表 DCF 建模 → 完整研报。"""
+    from ir_agent import assume
+
+    out = Path(out_dir)
+    brief = out / BRIEF
+    js = out / ASSUMPTIONS_JSON
+    for f in (brief, js):
+        if not f.exists():
+            raise SystemExit(
+                f"找不到 {f} —— 请先运行第一阶段：\n"
+                f"  python -m ir_agent {code} --year <年度> --analyse {out}")
+    if not approved_by.strip():
+        raise SystemExit("必须署名批准人 —— 假设要有人负责才谈得上「已核实」。")
+
+    body = brief.read_text(encoding="utf-8")
+    saved = json.loads(js.read_text(encoding="utf-8"))
+    state = json.loads((out / STATE).read_text(encoding="utf-8")) \
+        if (out / STATE).exists() else {"md": {}, "pr": {}}
+
+    a = assume.AssumptionSet(code=code, labels=saved.get("labels") or [])
+    for x in saved.get("rows") or []:
+        a.rows.append(assume.Row(
+            driver=x["driver"], year=int(x["year"]),
+            bear=Decimal(x["bear"]), base=Decimal(x["base"]),
+            bull=Decimal(x["bull"])))
+    try:
+        # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
+        # 漏掉某一年，都会让模型算出一个看起来正常的错数。
+        assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of)
+    except assume.AssumeFailed as e:
+        raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")
+
+    arts: dict[str, str] = {}
+    skipped: list[str] = []
+    md = state.get("md") or {}
+    pr = state.get("pr") or {}
+
     dcf_res = None
     stage = Stage.NOT_APPLICABLE
     try:
         print("三表 DCF 建模（ashare-dcf）…", file=sys.stderr)
-        dcf_res = dcf.run(code, out, as_of=as_of, ledger=r.ledger)
+        dcf_res = dcf.run(code, out, as_of=as_of, ledger=r.ledger,
+                          assumptions=a, approved_by=approved_by)
     except dcf.DcfUnavailable as e:
         skipped.append(f"估值（{e}）")
     except Exception as e:                                  # noqa: BLE001
         skipped.append(f"估值（{e.__class__.__name__}: {str(e)[:160]}）")
     else:
         arts["DCF 模型"] = dcf_res.workbook
-        ctx["估值"] = dcf_res.summary()
+        md["估值"] = dcf_res.summary()
         for f in dcf.to_facts(dcf_res, as_of):
             r.ledger.put(f)
         stage = Stage.VALUED if dcf_res.verified else Stage.AWAITING_REVIEW
         if not dcf_res.verified:
             skipped.append("估值（公式引擎验算未通过，结果不可采信）")
-        # **交叉核对与健全性警告一条都不吞。** 它们是这套模型最有价值的
-        # 部分之一，藏起来等于把「看起来算出来了」当成「算对了」。
         for x in dcf_res.crosscheck:
             skipped.append(f"估值口径与账本不一致：{x}")
 
+    cost = 0.0
+    if dcf_res is not None:
+        full, cost, ferr = _write_full_report(
+            code, r, body, model, dcf_res, _prompt_bundle(pr))
+        if ferr:
+            skipped.append(ferr)
+        if full:
+            r.audit = audit(full, r.ledger, r.store, as_of=r.as_of)
+            (out / REPORT).write_text(r.audit.with_sources(), encoding="utf-8")
+            arts["完整研报"] = str(out / REPORT)
+    else:
+        skipped.append("完整研报（无估值结果，第 8 节无从写起）")
 
-    body, upheld, debate_md, cost, err = _write_and_debate(
-        code=code, r=r, model=model, comps_summary=comps_pr,
-        macro_summary=(macro_pr + ("\n\n" + mview_pr if mview_pr else "")),
-        industry_summary=industry_pr,
-        strategy_summary=strat_pr, chain_summary=chain_pr,
-        consensus_summary=ext_pr,
-        valuation_summary=(dcf_res.summary() if dcf_res is not None else ""))
-    cost += getattr(qual_client, "total_cost_usd", 0.0)
-    if err and body is None:
-        print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
-        skipped.append("研究正文")
-    elif err:
-        skipped.append(err)          # 正文仍在，只是带着未落实的挑战
-    if debate_md:
-        (out / "debate.md").write_text(debate_md, encoding="utf-8")
-        arts["辩论记录"] = str(out / "debate.md")
-    if body:
-        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
-        (out / "report.md").write_text(r.audit.with_sources(),
-                                       encoding="utf-8")
-        arts["研究正文"] = str(out / "report.md")
-
-    ctx = {"宏观": macro_md, "宏观定性": mview_md, "商业周期": cycle_md, "折现率输入": capm_md,
-           "行业": industry_md, "产业链": chain_md, "可比": comps_md,
-           "战略": strat_md, "外部资料": ext_md}
-
-    build_dashboard(r, path=out / "dashboard.html", context=ctx,
-                    dcf=dcf_res)
+    build_dashboard(r, path=out / "dashboard.html", context=md, dcf=dcf_res)
     arts["看板"] = str(out / "dashboard.html")
-    build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
-                   path=out / "model.xlsx", verdicts=r.verdicts)
-    arts["工作簿"] = str(out / "model.xlsx")
 
     reason = ""
     if dcf_res is not None:
@@ -687,14 +813,35 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
                   f"{dcf_res.price:,.2f} 元"
                   + (f"，空间 {up:+.1%}" if up is not None else "")
                   + f"（WACC {dcf_res.wacc:.2%}，终值占企业价值 "
-                  f"{dcf_res.terminal_share:.1%}；假设由模型校准，未经人工复核）")
+                  f"{dcf_res.terminal_share:.1%}；判断项经 {approved_by} 核实）")
 
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=stage,
-        artifacts=arts, skipped=skipped, upheld=upheld,
+        artifacts=arts, skipped=skipped, upheld=0,
         cost_usd=Decimal(str(cost)), route_reason=reason)
 
 
+def _write_full_report(code, r, brief, model, dcf_res, bundle):
+    """在简报之上补出完整研报 —— 第 8 节要拿估值结果与前面各节对账。"""
+    from ir_agent.analyst import FactCatalog, write_body
+
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    extra = _macro_periods(r) + ((spot,) if spot else ())
+    cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
+                                  extra_periods=extra)
+    cat.evidence = _build_evidence(r, code)
+    client = make_client(model=model)
+    try:
+        print("撰写完整研报（含估值一节）…", file=sys.stderr)
+        full, _ = write_body(cat, client, code=code, period=r.period,
+                             valuation_summary=dcf_res.summary(),
+                             context=f"**已完成的分析简报**\n\n{brief}",
+                             **{k: v or None for k, v in bundle.items()})
+        return full, client.total_cost_usd, ""
+    except (AnalystRefused, ClaudeCliError) as e:
+        return None, client.total_cost_usd, \
+            f"完整研报（{e.__class__.__name__}: {str(e)[:160]}）"
 
 
 def report(outcome: ResearchOutcome, out_dir: str | None = None,

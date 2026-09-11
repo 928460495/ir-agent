@@ -27,8 +27,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="生成可交互 HTML 看板")
     p.add_argument("--xlsx", metavar="PATH", default=None,
                    help="导出 Excel 工作簿到指定路径")
-    p.add_argument("--full", metavar="DIR", default=None,
-                   help="端到端：撰写+辩论+回写+三表DCF+看板+Excel，产物写入该目录")
+    p.add_argument("--analyse", metavar="DIR", default=None,
+                   help="第一阶段：分析+简报+辩论+回写+AI 填 DCF 判断项，"
+                        "产物写入该目录（不建模、不出完整研报）")
+    p.add_argument("--value", metavar="DIR", default=None,
+                   help="第二阶段：读回已核实的判断项 → 三表 DCF 建模 → 完整研报")
+    p.add_argument("--approved-by", default=None,
+                   help="判断项核实人署名（--value 必需）")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
     a = p.parse_args(argv)
@@ -42,12 +47,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"运行失败: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
 
-    if a.full:
-        from ir_agent.full import report, run_full
+    if a.analyse:
+        from ir_agent.full import report, run_analysis
         print(r.summary())
-        report(run_full(a.code, r, as_of, a.full, model=a.model,
-                        snapshot_dir=a.snapshots),
-               out_dir=a.full, year=a.year)
+        report(run_analysis(a.code, r, as_of, a.analyse, model=a.model,
+                            snapshot_dir=a.snapshots),
+               out_dir=a.analyse, year=a.year)
+        return 0
+
+    if a.value:
+        if not a.approved_by:
+            print("--value 需同时给出 --approved-by <署名> —— "
+                  "假设要有人负责才谈得上「已核实」。", file=sys.stderr)
+            return 2
+        from ir_agent.full import report, run_valuation
+        print(r.summary())
+        report(run_valuation(a.code, r, as_of, a.value, a.approved_by,
+                             model=a.model, snapshot_dir=a.snapshots),
+               out_dir=a.value, year=a.year)
         return 0
 
     print(r.summary())
