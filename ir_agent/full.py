@@ -652,7 +652,8 @@ def run_full(code: str, r, as_of: date, out_dir: str | Path,
         arts["辩论记录"] = str(out / "debate.md")
     if body:
         r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
-        (out / "report.md").write_text(r.audit.rendered, encoding="utf-8")
+        (out / "report.md").write_text(r.audit.with_sources(),
+                                       encoding="utf-8")
         arts["研究正文"] = str(out / "report.md")
 
     ctx = {"宏观": macro_md, "宏观定性": mview_md, "商业周期": cycle_md, "折现率输入": capm_md,

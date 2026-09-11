@@ -381,3 +381,47 @@ class TestStripPreamble:
             analyst.write_body)
         assert "strip_preamble(client(prompt))" in inspect.getsource(
             revision.revise_from_verdicts)
+
+
+class TestReportCarriesItsSources:
+    """交付的 report.md 要能自证每个数字的出处。
+
+    脚注一直算得出来，却只出现在 dashboard.html 里 —— 而对外传阅的通常是
+    report.md。这套系统的核心承诺是「每个数字都可反查到账本条目与原始接口
+    响应」，算了不交付等于没兑现。
+    """
+
+    def _audit(self, missing=()):
+        from ir_agent.audit import AuditResult
+        from ir_agent.citation import Footnote
+        return AuditResult(
+            rendered="## 投资要点\n毛利率 14.15%。",
+            footnotes=[Footnote(marker=1, key="gross_margin", period="2025FY",
+                                source_id="em_x", as_of=date(2026, 4, 10),
+                                method="computed", display="14.15%")],
+            missing_snapshots=list(missing))
+
+    def test_附上数据来源表(self):
+        out = self._audit().with_sources()
+        assert "## 数据来源" in out
+        assert "gross_margin@2025FY" in out and "em_x" in out
+        assert "2026-04-10" in out and "14.15%" in out
+
+    def test_不插行内标记(self):
+        """行内插 [1][2] 会把中文研报的阅读节奏切碎。"""
+        out = self._audit().with_sources()
+        assert "毛利率 14.15%。" in out and "[1]" not in out
+
+    def test_缺快照要说出来(self):
+        out = self._audit(missing=["gross_margin@2025FY"]).with_sources()
+        assert "缺少原始接口快照" in out
+
+    def test_没有引用时不加空表(self):
+        from ir_agent.audit import AuditResult
+        a = AuditResult(rendered="正文")
+        assert a.with_sources() == "正文"
+
+    def test_管线写的是带来源的版本(self):
+        import inspect
+        from ir_agent import full
+        assert "with_sources()" in inspect.getsource(full.run_full)
