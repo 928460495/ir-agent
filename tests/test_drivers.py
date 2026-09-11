@@ -141,3 +141,84 @@ def test_describe加法链产出可读表达式带基期前缀():
 
 def test_TARGET_LABEL覆盖所有分解目标():
     assert TARGET_LABEL == {"revenue": "营收", "gross_margin": "毛利率"}
+
+
+# ============================================================================
+# 新增: 合成与历史回算
+# ============================================================================
+
+from decimal import Decimal
+
+from ir_agent.drivers import Residual, compose, pp_hint, reconcile
+
+D = Decimal
+
+
+def test_乘法链合成增速():
+    """营收增速 = Π(1+r) − 1。"""
+    d = _rev(_f("capacity"), _f("utilization", "稼动率"), _f("asp", "单价"))
+    got = compose(d, {"capacity": D("0.12"), "utilization": D("-0.035"),
+                      "asp": D("-0.02")})
+    # 1.12 × 0.965 × 0.98 − 1 = 0.059184
+    assert abs(got - D("0.059184")) < D("1e-6")
+
+
+def test_加法链需要基期():
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="util", label="稼动率摊薄", unit="pp"),
+        Factor(key="dep", label="折旧变动", unit="pp")])
+    got = compose(d, {"util": D("-1.5"), "dep": D("-0.8")}, base=D("0.1415"))
+    # 14.15% − 1.5pp − 0.8pp = 11.85%
+    assert abs(got - D("0.1185")) < D("1e-9")
+
+
+def test_加法链缺基期就报错():
+    """毛利率是绝对水平，没有基期算不出来 —— 默认成 0 会得到一个
+    看起来正常的错数。"""
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="a", label="甲", unit="pp"),
+        Factor(key="b", label="乙", unit="pp")])
+    with pytest.raises(DecompositionInvalid, match="基期"):
+        compose(d, {"a": D("1"), "b": D("1")})
+
+
+def test_因子取值缺失就报错而非当零():
+    """当零会让一个漏填悄悄变成「该因子无影响」。"""
+    d = _rev(_f("capacity"), _f("asp", "单价"))
+    with pytest.raises(DecompositionInvalid, match="capacity|缺"):
+        compose(d, {"asp": D("0.01")})
+
+
+def test_历史回算报残差():
+    """Π(1+r) 几乎永远不等于实际增速 —— 产品结构、汇率、并表都会留下残差。
+    要求严格相等等于禁用所有分解式，所以这里**报残差不判对错**。"""
+    d = _rev(_f("capacity"), _f("asp", "单价"))
+    hist = {"2024FY": {"capacity": D("0.10"), "asp": D("0.05")},
+            "2025FY": {"capacity": D("0.08"), "asp": D("0.02")}}
+    actual = {"2024FY": D("0.16"), "2025FY": D("0.11")}
+    got = reconcile(d, hist, actual)
+    assert [r.period for r in got] == ["2024FY", "2025FY"]
+    # 1.10×1.05−1 = 0.155 → 残差 0.16−0.155 = +0.005
+    assert abs(got[0].gap - D("0.005")) < D("1e-9")
+    assert abs(got[1].gap - D("0.0084")) < D("1e-9")
+
+
+def test_回算跳过数据不全的期间():
+    """标「无历史校验」由调用方负责；这里只做能算的，绝不用零补齐。"""
+    d = _rev(_f("capacity"), _f("asp", "单价"))
+    hist = {"2024FY": {"capacity": D("0.10")},          # 缺 asp
+            "2025FY": {"capacity": D("0.08"), "asp": D("0.02")}}
+    got = reconcile(d, hist, {"2024FY": D("0.16"), "2025FY": D("0.11")})
+    assert [r.period for r in got] == ["2025FY"]
+
+
+def test_回算缺实际值也跳过():
+    d = _rev(_f("capacity"), _f("asp", "单价"))
+    hist = {"2025FY": {"capacity": D("0.08"), "asp": D("0.02")}}
+    assert reconcile(d, hist, {}) == []
+
+
+def test_pp提示仅在基期已知时给出():
+    """基期未知就只显示变化率，**绝不倒推** —— 倒推出来的 pp 是个凭空的数。"""
+    assert pp_hint(D("-0.035"), D("0.85")) == "-3.50%（约 -2.98pp）"
+    assert pp_hint(D("-0.035"), None) == "-3.50%"

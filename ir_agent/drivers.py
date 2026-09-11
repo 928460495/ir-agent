@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 
 
@@ -111,3 +112,82 @@ def check_closure(d: Decomposition) -> None:
         if f.key in seen:
             raise DecompositionInvalid(f"因子 key 重复：{f.key}")
         seen.add(f.key)
+
+
+# ============================================================================
+# 合成与历史回算
+# ============================================================================
+
+def compose(d: Decomposition, values: dict[str, Decimal],
+            base: Decimal | None = None) -> Decimal:
+    """按 op 把因子合成回目标。
+
+    MULTIPLY → 返回**增速**（Π(1+r) − 1）
+    ADD_PP   → 返回**绝对水平**（基期 + Σpp/100），因此必须给 base
+
+    取值缺失一律报错而不当零: 当零会让一个漏填悄悄变成「该因子无影响」。
+    """
+    missing = [f.key for f in d.factors if f.key not in values]
+    if missing:
+        raise DecompositionInvalid(
+            f"因子取值缺失：{'、'.join(missing)} —— 缺项当零会让漏填"
+            "悄悄变成「该因子无影响」")
+
+    if d.op is Op.MULTIPLY:
+        out = Decimal(1)
+        for f in d.factors:
+            out *= (Decimal(1) + values[f.key])
+        return out - Decimal(1)
+
+    if base is None:
+        raise DecompositionInvalid(
+            "加法链需要基期水平 —— 毛利率是绝对值，没有基期算不出来，"
+            "默认成 0 会得到一个看起来正常的错数")
+    return base + sum(values[f.key] for f in d.factors) / Decimal(100)
+
+
+@dataclass(frozen=True)
+class Residual:
+    period: str
+    composed: Decimal
+    actual: Decimal
+    gap: Decimal          # actual − composed
+
+
+def reconcile(d: Decomposition,
+              history: dict[str, dict[str, Decimal]],
+              actual: dict[str, Decimal],
+              base: dict[str, Decimal] | None = None) -> list[Residual]:
+    """历史回算 —— **报残差，不判对错**。
+
+    Π(1+r_i) 几乎永远不会精确等于实际营收增速: 产品结构、汇率、并表范围都
+    会留下残差。若要求严格相等，没有一个分解式能通过。
+
+    残差**小且稳定** → 分解抓住了主要矛盾。
+    残差**大或跳动** → 有重要因子没被纳入，这件事要让人看见。
+
+    数据不全的期间**跳过而非用零补齐** —— 补出来的残差是假的。
+    """
+    out: list[Residual] = []
+    for period in sorted(history):
+        vals = history[period]
+        if any(f.key not in vals for f in d.factors) or period not in actual:
+            continue
+        try:
+            c = compose(d, vals, (base or {}).get(period))
+        except DecompositionInvalid:
+            continue
+        a = actual[period]
+        out.append(Residual(period=period, composed=c, actual=a, gap=a - c))
+    return out
+
+
+def pp_hint(rate: Decimal, base_level: Decimal | None) -> str:
+    """变化率 → 便于阅读的 pp 换算。**基期未知就不换算。**
+
+    倒推出来的 pp 是个凭空的数 —— 显示它会让读者以为我们知道基期水平。
+    """
+    txt = f"{rate:.2%}"
+    if base_level is None:
+        return txt
+    return f"{txt}（约 {base_level * rate * 100:+.2f}pp）"
