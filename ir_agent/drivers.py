@@ -86,13 +86,28 @@ def check_closure(d: Decomposition) -> None:
     seen: set[str] = set()
     for f in d.factors:
         if f.unit != want_unit:
+            # 补充说明必须按「实际传入的 unit 到底错在哪」分支，不能按
+            # 「目标链是什么」分支 —— 否则「定性」这种压根不是 pp 的单位
+            # 也会被套上「pp 不能进乘法链」的解释，把人导向一个不存在的
+            # 问题。误导性的提示比没有提示更糟：用户会去检查一个不存在的
+            # 问题，真正的原因（写不出单位的因子本就不该出现）反而被掩盖。
+            if f.unit == "pp" and want_unit == "变化率":
+                detail = ("pp 不能进乘法链 —— 稼动率 85%→82% 是 −3pp，"
+                          "但乘法因子的变化率是 −3.5%。")
+            elif f.unit == "变化率" and want_unit == "pp":
+                detail = "比率的变化只能加减，不能相乘。"
+            else:
+                # 传入的单位既不是「变化率」也不是「pp」，两条链都不认——
+                # 这不是选错了链，是这个因子从一开始就写不出可量化的单位，
+                # 而写不出单位的因子本就不该出现在分解式里，这正是这道
+                # 校验存在的理由。
+                detail = (
+                    f"{f.unit!r} 不在单位白名单里，可用的只有 '变化率' 与 "
+                    "'pp'；写不出单位的因子（比如定性描述）本就不该出现在"
+                    "分解式里。")
             raise DecompositionInvalid(
                 f"因子「{f.label}」的单位是 {f.unit!r}，"
-                f"而 {d.op.value} 法链只接受 {want_unit!r}。"
-                + ("pp 不能进乘法链 —— 稼动率 85%→82% 是 −3pp，"
-                   "但乘法因子的变化率是 −3.5%。"
-                   if want_unit == "变化率" else
-                   "比率的变化只能加减，不能相乘。"))
+                f"而 {d.op.value} 法链只接受 {want_unit!r}。" + detail)
         if f.key in seen:
             raise DecompositionInvalid(f"因子 key 重复：{f.key}")
         seen.add(f.key)
