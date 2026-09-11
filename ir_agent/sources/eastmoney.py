@@ -134,6 +134,13 @@ _COMMON_CASHFLOW = {
 # 工商业专有 —— 流动/非流动划分、存货、应收应付、三费
 _GENERAL_BALANCE = {
     **_COMMON_BALANCE,
+    # 下面四项是接 ashare-dcf 时补的: 三表模型要算非经营性资产与类现金，
+    # 缺了就只能当 0，净负债会系统性偏高。**字段名实测过** ——
+    # TRADE_FINASSET 恒为 None，真正有值的是 TRADE_FINASSET_NOTFVTPL。
+    "TRADE_FINASSET_NOTFVTPL": "trading_finasset",
+    "LONG_EQUITY_INVEST": "long_equity_invest",
+    "OTHER_NONCURRENT_FINASSET": "other_noncurrent_finasset",
+    "OTHER_NONCURRENT_ASSET": "other_noncurrent_asset",
     "MONETARYFUNDS": "cash_and_equivalents",
     "TOTAL_CURRENT_ASSETS": "current_assets",
     "TOTAL_CURRENT_LIAB": "current_liabilities",
@@ -155,6 +162,12 @@ _GENERAL_BALANCE = {
 
 _GENERAL_INCOME = {
     **_COMMON_INCOME,
+    # 同上: 其他收益/公允价值变动/资产处置/资产减值是营业利润的组成项，
+    # 三表模型要逐项预测，缺了会让营业利润对不上。
+    "OTHER_INCOME": "other_income",
+    "FAIRVALUE_CHANGE_INCOME": "fairvalue_change_income",
+    "ASSET_DISPOSAL_INCOME": "asset_disposal_income",
+    "ASSET_IMPAIRMENT_INCOME": "asset_impairment",
     "OPERATE_COST": "cost_of_revenue",
     "TOTAL_OPERATE_COST": "cost_total",
     "SALE_EXPENSE": "selling_expense",

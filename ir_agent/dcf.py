@@ -208,15 +208,35 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         dirpath: Path | None = None) -> DcfResult:
     """跑一遍 ashare-dcf，返回结果与全部警告。
 
+    **账本给定时由它供数**，DCF 不再自行取数 —— 分析层与估值层用同一套
+    数字，不会悄悄分叉。账本的数已经过东财 × 新浪双源交叉验证、带披露日，
+    比各取一套再事后比对更彻底。
+
     **不吞掉任何警告。** ashare-dcf 自己会报健全性问题（终值占比过高、
     再投资率失真、科目被抽干等），那些是它最有价值的部分之一。
     """
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
     D, C, B, V = _load(dirpath)
 
+    notes: list[str] = []
+    stmts = None
+    if ledger is not None:
+        from ir_agent import dcf_data
+        try:
+            stmts = dcf_data.to_frames(ledger, as_of)
+            cov = dcf_data.coverage(stmts)
+            notes.append("报表由事实账本供数（已过双源交叉验证、带披露日）："
+                         + "、".join(f"{t} {a}/{b} 项" for t, (a, b)
+                                     in cov.items()))
+        except dcf_data.MappingIncomplete as e:
+            # **退回自行取数是降级，必须说出来。** 悄悄换一套数据源，
+            # 正是这次统一要消灭的事。
+            notes.append(f"⚠ 账本铺不出报表（{e}），已退回 DCF 自行取数 —— "
+                         "此时分析层与估值层用的不是同一套数字")
+
     try:
         code = D.validate_code(code)
-        cal = C.calibrate(code, years)
+        cal = C.calibrate(code, years, stmts=stmts)
     except getattr(D, "DataError", Exception) as e:
         raise DcfUnavailable(f"{code} 无法建模：{e}") from e
 
@@ -248,7 +268,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         terminal_share=(Decimal(str(dv["pvtv"])) / ev0 if ev0 else Decimal(0)),
         verified=not fails,
         warnings=[str(w) for w in warns],
-        notes=_asof_note(as_of) + [
+        notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"
             f"（原始 {meta.get('beta_raw')}，{meta.get('beta_n')} 期）",
         ] + [f"校准被截断：{x}" for x in (cal.get("clamps") or [])],
@@ -256,6 +276,9 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     if not res.verified:
         res.warnings.insert(0, f"公式引擎验算失败 {len(fails)} 处，"
                                "本结果不可采信")
-    if ledger is not None:
+    if ledger is not None and stmts is None:
+        # 只在**退回自行取数**时才需要事后比对。账本供数时两边同源，
+        # 比对必然一致，跑它只是浪费 —— 真正的验证在 dcf_data 的映射
+        # 核验里（账本铺的表 vs 原生接口，逐格比对）。
         res.crosscheck = cross_check(cal, ledger, as_of, D)
     return res
