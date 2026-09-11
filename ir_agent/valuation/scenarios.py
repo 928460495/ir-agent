@@ -36,7 +36,7 @@ from enum import Enum
 from ir_agent.lineparse import keyed
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.valuation.assumptions import Assumptions
-from ir_agent.valuation.basis import Basis, InvalidBasis, validate
+from ir_agent.basis import Basis, InvalidBasis, validate
 from ir_agent.valuation.model import Valuation, value_company
 
 

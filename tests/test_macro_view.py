@@ -106,7 +106,7 @@ def test_引文必须出自资料():
 
 
 def test_出处由代码判定():
-    from ir_agent.valuation.basis import BasisKind
+    from ir_agent.basis import BasisKind
 
     v = MV.parse(_out())
     MV.check(v, FactLedger(), "", AS_OF, corpus=_corpus())

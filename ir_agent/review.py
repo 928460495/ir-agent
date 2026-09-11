@@ -20,7 +20,7 @@ from ir_agent.valuation.assumptions import (
     MAX_TERMINAL_GROWTH,
     Assumptions,
 )
-from ir_agent.valuation.basis import Basis, InvalidBasis
+from ir_agent.basis import Basis, InvalidBasis
 
 Prompt = Callable[[str], str]
 Show = Callable[[str], None]
@@ -141,7 +141,7 @@ def interactive_review(
 
 
 def _basis_yaml(bases: list[Basis]) -> str:
-    from ir_agent.valuation.basis import BasisKind
+    from ir_agent.basis import BasisKind
 
     out = []
     for b in bases:

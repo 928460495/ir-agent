@@ -14,7 +14,7 @@ import pytest
 
 from ir_agent.ledger import FactLedger, Method
 from ir_agent.valuation.assumptions import Assumptions
-from ir_agent.valuation.basis import Basis
+from ir_agent.basis import Basis
 from ir_agent.valuation.facts import assumption_facts
 
 D = Decimal

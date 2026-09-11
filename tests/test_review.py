@@ -48,13 +48,13 @@ class TestCollectsValues:
                                   D("0.04"), D("0.04")]
 
     def test_external_basis_captured(self):
-        from ir_agent.valuation.basis import BasisKind
+        from ir_agent.basis import BasisKind
         a = interactive_review(prompt=scripted(*FULL), show=lambda *_: None)
         b = a.basis["wacc"][0]
         assert b.kind is BasisKind.EXTERNAL and b.retrieved == date(2026, 9, 6)
 
     def test_fact_basis_captured(self):
-        from ir_agent.valuation.basis import BasisKind
+        from ir_agent.basis import BasisKind
         a = interactive_review(prompt=scripted(*FULL), show=lambda *_: None)
         assert a.basis["growth_rates"][0].kind is BasisKind.FACT
 
@@ -187,7 +187,7 @@ def test_yaml抬头随来源变化():
     from decimal import Decimal as Dc
     from ir_agent.review import to_yaml
     from ir_agent.valuation.assumptions import Assumptions
-    from ir_agent.valuation.basis import Basis
+    from ir_agent.basis import Basis
 
     a = Assumptions(wacc=Dc("0.09"), terminal_growth=Dc("0.025"),
                     growth_rates=[Dc("0.03")],

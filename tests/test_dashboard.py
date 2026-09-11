@@ -87,7 +87,7 @@ class TestProvenanceIsTheInteraction:
 class TestValuationGateIsVisible:
     def _assumptions(self, approved: bool):
         from ir_agent.valuation.assumptions import Assumptions
-        from ir_agent.valuation.basis import Basis
+        from ir_agent.basis import Basis
         ext = lambda u, q: Basis.external(u, q, date(2026, 6, 1))
         a = Assumptions(wacc=D("0.09"), terminal_growth=D("0.025"),
                         growth_rates=[D("0.05")] * 5,
@@ -161,7 +161,7 @@ class TestBasisRendersReadably:
     def _a(self):
         from ir_agent.ledger import FactLedger
         from ir_agent.valuation.assumptions import Assumptions
-        from ir_agent.valuation.basis import Basis
+        from ir_agent.basis import Basis
         a = Assumptions(
             wacc=D("0.09"), terminal_growth=D("0.025"),
             growth_rates=[D("0.04")] * 5,
@@ -194,7 +194,7 @@ class TestBasisRendersReadably:
         assert "revenue.yoy@2025FY" in h
 
     def test_multiple_bases_all_render(self, tmp_path, run_obj):
-        from ir_agent.valuation.basis import Basis
+        from ir_agent.basis import Basis
         a = self._a()
         a = type(a)(wacc=a.wacc, terminal_growth=a.terminal_growth,
                     growth_rates=a.growth_rates,
@@ -228,7 +228,7 @@ def test_无口径参数时行为不变(tmp_path, run_obj):
 def _assump(by):
     from decimal import Decimal as Dc
     from ir_agent.valuation.assumptions import Assumptions
-    from ir_agent.valuation.basis import Basis
+    from ir_agent.basis import Basis
     return Assumptions(
         wacc=Dc("0.09"), terminal_growth=Dc("0.025"),
         growth_rates=[Dc("0.03")],

@@ -16,7 +16,7 @@ from pathlib import Path
 import yaml
 
 from ir_agent.valuation.assumptions import Assumptions
-from ir_agent.valuation.basis import Basis, InvalidBasis
+from ir_agent.basis import Basis, InvalidBasis
 
 
 class AssumptionFileError(Exception):

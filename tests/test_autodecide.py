@@ -15,7 +15,7 @@ from ir_agent.valuation.autodecide import (
     decide,
     parse,
 )
-from ir_agent.valuation.basis import Basis, BasisKind
+from ir_agent.basis import Basis, BasisKind
 
 D = Decimal
 AS_OF = date(2026, 9, 7)

@@ -194,7 +194,7 @@ def test_外部依据现在对语料库核验():
     """把 basis.validate 的 EXTERNAL 分支与语料库接上 —— 三类依据
     一视同仁: FACT 对账本、REPORT 对正文、EXTERNAL 对语料库。"""
     from ir_agent.ledger import FactLedger
-    from ir_agent.valuation.basis import Basis, validate
+    from ir_agent.basis import Basis, validate
 
     c = Corpus(as_of=AS_OF)
     c.add(_doc())

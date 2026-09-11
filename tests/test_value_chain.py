@@ -107,7 +107,7 @@ def test_议价须对上下游都给():
 # ── 依据核验与出处判定 ───────────────────────────────────────
 
 def test_引文出自外部资料时自动标为外部():
-    from ir_agent.valuation.basis import BasisKind
+    from ir_agent.basis import BasisKind
 
     v = VC.parse(_out())
     VC.check(v, _led(), "", AS_OF, corpus=_corpus())

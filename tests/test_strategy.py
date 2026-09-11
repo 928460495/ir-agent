@@ -252,7 +252,7 @@ def test_可引用年报之外的资料():
 def test_出处由代码判定而非模型声明():
     """模型只写引文。代码先在年报里找，找不到再去语料库找，找到了改标
     为 EXTERNAL 并补上 URL —— 模型没有机会张冠李戴。"""
-    from ir_agent.valuation.basis import BasisKind
+    from ir_agent.basis import BasisKind
 
     v = strategy.parse(_out(moats=[f"护城河: 无形资产 | 宽 | 「{EXT}」"]))
     strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
@@ -262,7 +262,7 @@ def test_出处由代码判定而非模型声明():
 
 
 def test_年报引文不会被改标为外部():
-    from ir_agent.valuation.basis import BasisKind
+    from ir_agent.basis import BasisKind
 
     v = strategy.parse(_out())
     strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())

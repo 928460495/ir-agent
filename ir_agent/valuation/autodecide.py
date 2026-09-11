@@ -26,7 +26,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from ir_agent.valuation.assumptions import Assumptions
-from ir_agent.valuation.basis import Basis, BasisKind, InvalidBasis, validate
+from ir_agent.basis import Basis, BasisKind, InvalidBasis, validate
 
 MODEL_MARK = "模型自主决定"
 

@@ -181,7 +181,7 @@ def attribute(items, annual: str, corpus: "Corpus | None") -> None:
     """
     if corpus is None:
         return
-    from ir_agent.valuation.basis import Basis, BasisKind
+    from ir_agent.basis import Basis, BasisKind
 
     body = norm(annual)
     for item in items:

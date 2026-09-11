@@ -60,13 +60,13 @@ class TestLoad:
         assert isinstance(a.wacc, D)
 
     def test_external_basis_is_reconstructed(self, tmp_path):
-        from ir_agent.valuation.basis import BasisKind
+        from ir_agent.basis import BasisKind
         a = load_assumptions(write(tmp_path, FILLED))
         b = a.basis["wacc"][0]
         assert b.kind is BasisKind.EXTERNAL and b.retrieved == date(2026, 6, 1)
 
     def test_fact_basis_is_reconstructed(self, tmp_path):
-        from ir_agent.valuation.basis import BasisKind
+        from ir_agent.basis import BasisKind
         a = load_assumptions(write(tmp_path, FILLED))
         assert a.basis["growth_rates"][0].kind is BasisKind.FACT
 

@@ -20,7 +20,7 @@ from ir_agent.valuation.assumptions import (
     NotReviewed,
     UnsupportedAssumption,
 )
-from ir_agent.valuation.basis import Basis
+from ir_agent.basis import Basis
 
 BODY = "## 盈利质量\n公司几乎不依赖财务杠杆。\n"
 

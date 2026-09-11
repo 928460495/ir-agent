@@ -17,7 +17,7 @@ from decimal import Decimal
 
 import pytest
 
-from ir_agent.valuation.basis import Basis, BasisKind, InvalidBasis, validate
+from ir_agent.basis import Basis, BasisKind, InvalidBasis, validate
 
 D = Decimal
 AS_OF = date(2026, 6, 1)

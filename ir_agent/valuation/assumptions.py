@@ -74,7 +74,7 @@ class Assumptions:
         必须同时给出账本与正文作为证据: 不给证据就不能审核，
         否则契约又退回成走过场。
         """
-        from ir_agent.valuation.basis import validate
+        from ir_agent.basis import validate
 
         if not reviewer.strip():
             raise ValueError("审核人不能为空。")

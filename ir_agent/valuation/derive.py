@@ -42,7 +42,7 @@ from datetime import date
 from decimal import Decimal
 
 from ir_agent.ledger import FactLedger, LookAheadError
-from ir_agent.valuation.basis import Basis
+from ir_agent.basis import Basis
 
 # 兜底上限。宏观事实缺失时退回这个值 —— 与 assumptions.MAX_TERMINAL_GROWTH
 # 保持一致，那里是最终的硬校验。

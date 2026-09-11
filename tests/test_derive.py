@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 from ir_agent.ledger import Fact, FactLedger, Method
-from ir_agent.valuation.basis import BasisKind
+from ir_agent.basis import BasisKind
 from ir_agent.valuation.derive import (
     FALLBACK_CEILING,
     Proposal,

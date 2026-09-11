@@ -15,7 +15,7 @@ D = Decimal
 
 def _assumptions():
     from ir_agent.valuation.assumptions import Assumptions
-    from ir_agent.valuation.basis import Basis
+    from ir_agent.basis import Basis
     return Assumptions(
         wacc=D("0.09"), terminal_growth=D("0.025"),
         growth_rates=[D("0.03")] * 5,
@@ -77,7 +77,7 @@ class TestHappyPath:
 
 class TestBlockedPaths:
     def test_unverifiable_basis_blocks_with_the_reason(self):
-        from ir_agent.valuation.basis import Basis
+        from ir_agent.basis import Basis
         a = _assumptions()
         a = type(a)(wacc=a.wacc, terminal_growth=a.terminal_growth,
                     growth_rates=a.growth_rates,

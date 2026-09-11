@@ -27,7 +27,7 @@ from enum import Enum
 from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import FactLedger
 from ir_agent.sources.external import attribute
-from ir_agent.valuation.basis import Basis, InvalidBasis, validate
+from ir_agent.basis import Basis, InvalidBasis, validate
 
 
 class MacroViewFailed(Exception):

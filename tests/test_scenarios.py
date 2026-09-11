@@ -11,7 +11,7 @@ from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.strategy import Uncertainty
 from ir_agent.valuation import scenarios as S
 from ir_agent.valuation.assumptions import Assumptions
-from ir_agent.valuation.basis import Basis
+from ir_agent.basis import Basis
 from ir_agent.valuation.scenarios import Case, ScenarioFailed
 
 D = Decimal

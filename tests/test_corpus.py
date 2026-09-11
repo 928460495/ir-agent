@@ -165,7 +165,7 @@ def test_一致预期不得作为估值假设的依据():
     """拿券商的 EPS 预测论证自己的增长率，结论绕一圈回到起点。"""
     from ir_agent.ledger import FactLedger
     from ir_agent.valuation.autodecide import AutoDecideFailed, check
-    from ir_agent.valuation.basis import Basis
+    from ir_agent.basis import Basis
 
     with pytest.raises(AutoDecideFailed, match="一致预期"):
         check({"terminal_growth": D("0.02"), "wacc": D("0.09")},
