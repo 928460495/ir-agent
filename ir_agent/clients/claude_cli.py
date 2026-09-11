@@ -70,16 +70,32 @@ def make_client(
     model: str | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     runner: Runner | None = None,
+    tools: list[str] | None = None,
 ):
     """返回一个 `str -> str` 的 client，可直接交给 analyst.write_body。
 
     prompt 走 stdin 而非 argv —— 研报 prompt 有数千字符，
     走命令行参数会撞上系统的参数长度上限。
+
+    `tools` 默认 `None`——不开任何工具，此时命令行为与不传该参数前
+    完全一致。这是有意的默认值：绝大多数调用（撰写研报正文、摘要、
+    打分）是纯推理，开着工具只会让模型分心去决定要不要用、并拖慢
+    响应；只有明确要联网搜索（例如 sources/web.py 的开放网络采集）
+    时才该显式传 `tools=["WebSearch", "WebFetch"]` 之类的列表打开。
+
+    `--allowedTools` 在 claude CLI 里是变长参数：如果把工具名和后面
+    的提示词分别作为独立 argv 项传给它，提示词会被当成额外的工具名
+    吃掉（实测报错 `Input must be provided either through stdin or
+    as a prompt argument`）。所以这里把工具名用逗号拼成*一个*字符串，
+    作为 `--allowedTools` 后唯一的一个 argv 元素——同时本来 prompt
+    也不经过 argv（见上），双重保险不会撞上这个坑。
     """
     run = runner or _subprocess_runner
     cmd = ["claude", "-p", "--output-format", "json"]
     if model:
         cmd += ["--model", model]
+    if tools:
+        cmd += ["--allowedTools", ",".join(tools)]
 
     def client(prompt: str) -> str:
         text, cost = parse_result(run(list(cmd), prompt, timeout))

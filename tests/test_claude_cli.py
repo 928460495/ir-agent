@@ -95,3 +95,43 @@ class TestMakeClient:
         c = make_client(runner=self._runner(payload()))
         c("a"); c("b"); c("c")
         assert c.calls == 3
+
+    def test_no_tools_by_default(self):
+        """默认不开任何工具 —— 绝大多数调用是纯推理，开着工具只会让模型
+        分心并拖慢，联网只应在明确要搜索时开启。这条测试钉住「不传
+        tools 时命令行为完全不变」这个向后兼容承诺。"""
+        rec = {}
+        make_client(runner=self._runner(payload(), rec))("q")
+        assert "--allowedTools" not in rec["cmd"]
+
+    def test_tools_are_comma_joined_not_separate_argv_items(self):
+        """实测踩过的坑：`--allowedTools` 是变长参数，若把多个工具名和
+        提示词分别作为独立 argv 项传给它（`--allowedTools WebSearch
+        WebFetch "提示词"`），提示词会被当成第三个工具名吃掉，claude
+        CLI 报 `Input must be provided either through stdin or as a
+        prompt argument`。必须把工具名逗号拼成一个字符串传一个 argv
+        位置：`--allowedTools "WebSearch,WebFetch"`。"""
+        rec = {}
+        make_client(
+            tools=["WebSearch", "WebFetch"],
+            runner=self._runner(payload(), rec),
+        )("q")
+        cmd = rec["cmd"]
+        assert "--allowedTools" in cmd
+        i = cmd.index("--allowedTools")
+        # 工具名必须是紧跟在 --allowedTools 后面的单个 argv 元素，
+        # 而不是被拆成 "WebSearch", "WebFetch" 两个独立元素
+        # （拆开就会把后面无意中拼上的内容一起吃掉）。
+        assert cmd[i + 1] == "WebSearch,WebFetch"
+
+    def test_prompt_still_goes_via_stdin_when_tools_are_enabled(self):
+        """开工具不应该改变 prompt 的传递方式 —— prompt 依旧只通过
+        runner 的 prompt 参数走 stdin，不出现在 cmd（argv）里，这样
+        才不会撞上「陷阱」里提示词被当成工具名吃掉的问题。"""
+        rec = {}
+        make_client(
+            tools=["WebSearch"],
+            runner=self._runner(payload(), rec),
+        )("搜索这个关键词")
+        assert rec["prompt"] == "搜索这个关键词"
+        assert "搜索这个关键词" not in " ".join(rec["cmd"])
