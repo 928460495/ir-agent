@@ -133,15 +133,15 @@ def test_覆盖不足时口径明确禁止下结论():
     assert "market_share" not in txt          # 不给不成立的占位符
 
 
-def test_假设定不出与不适用DCF是两回事():
-    """混为一谈会让摘要报「不适用 DCF」，而真实情况是模型没给出合法假设 ——
-    前者无解，后者人工接手就能继续。"""
+def test_待核实与未出估值是两回事():
+    """「AI 填好了判断项等人核实」与「这一轮压根没出估值」要给不同的指引：
+    前者下一步是核实并建模，后者下一步是重跑第一阶段。"""
     from ir_agent.research import Stage, next_actions
-    acts = next_actions(Stage.AWAITING_REVIEW, "600519", out_dir="out/x", year=2025)
-    assert acts and "模型未能给出" in acts[0]
-    assert "--full out/x" in acts[0] and "--review" in acts[0]
-    assert next_actions(Stage.NOT_APPLICABLE, "600519") != acts
-    assert "不适用 DCF" in next_actions(Stage.NOT_APPLICABLE, "600519")[0]
+    a = next_actions(Stage.AWAITING_REVIEW, "600519", out_dir="out/x", year=2025)
+    b = next_actions(Stage.NOT_APPLICABLE, "600519", out_dir="out/x", year=2025)
+    assert a and "核实" in a[0] and "--value out/x" in "\n".join(a)
+    assert b and "--analyse out/x" in b[0]
+    assert a != b
 
 
 def test_折现率口径给模型时不含裸数字():

@@ -73,25 +73,30 @@ def next_actions(stage: Stage, code: str,
     """下一步该做什么。空列表 = 无阻塞。
 
     命令必须**能直接粘贴运行** —— 给一条跑不通的命令比不给指引更糟。
+    实测踩到: 估值模块换成 ashare-dcf、两阶段重构之后，这里仍在教用户跑
+    已被删除的 --review / --assumptions，用户照做只会撞上
+    「unrecognized arguments」。**过时的指引是会主动误导人的那种错。**
     """
+    out = out_dir or f"out/{code}"
+    y = f"--year {year}" if year else "--year <年度>"
     if stage is Stage.AWAITING_REVIEW:
-        out = out_dir or f"out/{code}"
-        path = assumptions_path or f"{out}/assumptions.yaml"
-        y = f"--year {year}" if year else "--year <年度>"
         return [
-            "模型未能给出通过校验的假设。可人工接手 —— 推荐交互式录入，"
-            "逐项问答、当场校验，不必手写 YAML：\n"
-            f"     python -m ir_agent {code} {y} --full {out} "
-            f"--review --reviewer <你的名字>",
-            f"或手工编辑 {path} 后：\n"
-            f"     python -m ir_agent {code} {y} --full {out} "
-            f"--assumptions {path} --reviewer <你的名字>",
-            "依据须为三类之一：账本占位符 / 已辩论正文的引文 / "
-            "外部来源（URL + 原文片段 + 抓取日期）。",
+            f"核实 DCF 判断项（营收增速与毛利率三档）：{out}/assumptions.md\n"
+            "     这两项模型推不出来，只能靠分析判断 —— 其余假设"
+            "（费用率、周转天数、折旧率、税率、β、Kd）由历史数据校准，"
+            "不需要你确认。",
+            f"要改数值就改 {out}/assumptions.json 的 rows，"
+            "改完仍会重新校验（三档须严格拉开、每年都要有值）。",
+            "确认后进入第二阶段 —— 建模并产出完整研报：\n"
+            f"     python -m ir_agent {code} {y} --value {out} "
+            f"--approved-by <你的名字>",
         ]
     if stage is Stage.NOT_APPLICABLE:
-        return ["本标的经路由判定不适用 DCF，应改用 PB–ROE 或情景法；"
-                "现有产物中的基本面分析与可比对照仍然有效。"]
+        return [
+            "本轮未产出估值。若因分析步骤失败（模型额度、网络等），"
+            f"重跑第一阶段即可：\n"
+            f"     python -m ir_agent {code} {y} --analyse {out}",
+        ]
     return []
 
 

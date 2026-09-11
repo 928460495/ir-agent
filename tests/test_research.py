@@ -50,82 +50,73 @@ class TestOutcomeReportsWhatIsMissing:
 
 
 class TestNextActions:
-    def test_awaiting_review_tells_the_user_to_review(self):
-        """审核门取消后，这个 stage 的含义变了: 不再是「等人来审」，
-        而是「模型没定出合法假设，人工可以接手」。指引要说清是哪一种。"""
+    def test_待核实说清要核实什么(self):
+        """这个 stage 的含义是「AI 填好了判断项，等人看一眼」——
+        不是「等人来写假设」。指引要说清是哪一种。"""
         acts = next_actions(Stage.AWAITING_REVIEW, code="600519")
-        assert acts and "模型未能给出" in acts[0] and "人工接手" in acts[0]
+        assert acts and "核实" in acts[0] and "判断项" in acts[0]
 
-    def test_awaiting_review_names_the_assumptions_file(self):
+    def test_说清哪些不需要人确认(self):
+        """费用率、周转天数、折旧率由历史校准 —— 把它们一起推给人核实，
+        等于让人去复核一堆不需要判断的东西，真正该看的两项反而被淹没。"""
+        acts = next_actions(Stage.AWAITING_REVIEW, code="600519")
+        txt = "\n".join(acts)
+        assert "不需要你确认" in txt and "校准" in txt
+
+    def test_指名待核实的文件(self):
         acts = next_actions(Stage.AWAITING_REVIEW, code="600519",
-                            assumptions_path="out/a.yaml")
-        assert any("out/a.yaml" in a for a in acts)
+                            out_dir="out/x")
+        txt = "\n".join(acts)
+        assert "out/x/assumptions.md" in txt
+        assert "out/x/assumptions.json" in txt
 
-    def test_valued_stage_has_no_blocking_action(self):
+    def test_未出估值时给出重跑第一阶段的路(self):
+        acts = next_actions(Stage.NOT_APPLICABLE, code="600519",
+                            out_dir="out/x", year=2025)
+        assert acts and "--analyse" in acts[0]
+
+    def test_已建模则无阻塞(self):
         assert next_actions(Stage.VALUED, code="600519") == []
-
-    def test_route_excludes_dcf_says_so(self):
-        """路由判定不适用 DCF 时，「去审核假设」是错误的指引。"""
-        acts = next_actions(Stage.NOT_APPLICABLE, code="600519")
-        assert acts and ("不适用" in acts[0] or "PB" in acts[0])
-
-
-class TestAssumptionTemplate:
-    def test_template_lists_every_required_key(self):
-        from ir_agent.research import assumption_template
-        t = assumption_template(years=5)
-        for k in ("wacc", "terminal_growth", "growth_rates"):
-            assert k in t
-
-    def test_template_leaves_values_blank(self):
-        """预填一个数字会让人直接点通过 —— 模板要逼人填。"""
-        from ir_agent.research import assumption_template
-        t = assumption_template(years=5)
-        assert "null" in t or "TODO" in t or "待填" in t
-
-    def test_template_has_a_basis_slot_per_key(self):
-        from ir_agent.research import assumption_template
-        t = assumption_template(years=5)
-        assert t.count("basis") >= 1 and "url" in t
-
-    def test_template_states_the_basis_requirement(self):
-        from ir_agent.research import assumption_template
-        assert "抓取日期" in assumption_template(years=5)
-
-    def test_growth_path_matches_the_year_count(self):
-        from ir_agent.research import assumption_template
-        assert assumption_template(years=3).count("- year:") == 3
 
 
 class TestNextActionsGiveRunnableCommands:
     """指引里的命令必须能直接跑。
 
-    实测第一版打出的是
-        python -m ir_agent 600519 --year <年度> --assumptions ... --reviewer ...
-    缺了必需的 --full，粘贴即失败 —— 指引给一条跑不通的命令，
-    比不给指引更糟。
+    **这条规则救过一次，又被绕过一次。** 第一次是打出的命令缺了必需的
+    --full，粘贴即失败。第二次是估值模块换成 ashare-dcf、两阶段重构之后，
+    这里仍在教用户跑已被删除的 --review / --assumptions —— 而当时的测试
+    断言的是「命令里含 --review」，删掉那个 flag 它照样通过。
+
+    所以现在**不比对字符串，直接拿真实的 argparse 解析器去解**:
+    删掉一个 flag，这里立刻红。
     """
 
-    def _acts(self):
-        return next_actions(Stage.AWAITING_REVIEW, code="600519",
-                            assumptions_path="out/600519/assumptions.yaml",
-                            out_dir="out/600519", year=2025)
+    def _commands(self, stage):
+        out = []
+        for act in next_actions(stage, code="600519", out_dir="out/x",
+                                year=2025):
+            for line in act.split("\n"):
+                line = line.strip()
+                if line.startswith("python -m ir_agent"):
+                    out.append(line)
+        return out
 
-    def test_interactive_path_is_offered_first(self):
-        """交互式录入不必手写 YAML，应作为首选给出。"""
-        assert "--review" in self._acts()[0]
+    def test_每条命令都能被真实解析器解开(self):
+        from ir_agent.__main__ import build_parser
+        for stage in (Stage.AWAITING_REVIEW, Stage.NOT_APPLICABLE):
+            for cmd in self._commands(stage):
+                argv = cmd.split()[3:]          # 去掉 python -m ir_agent
+                # **占位符要替换成实际值，不是删掉** —— 用户照做时填的是
+                # 名字，不是把那一段整个抹掉。删掉会让 --approved-by 失去
+                # 取值，测出来的是我造的假故障。
+                argv = ["张三" if x.startswith("<") else x for x in argv]
+                try:
+                    build_parser().parse_args(argv)
+                except SystemExit as e:          # argparse 用 SystemExit 报错
+                    raise AssertionError(
+                        f"指引给出的命令解析不了：{cmd}") from e
 
-    def test_every_command_includes_the_required_full_flag(self):
-        cmds = [a for a in self._acts() if "python -m ir_agent" in a]
-        assert cmds and all("--full" in c for c in cmds)
+    def test_至少给出一条可跑的命令(self):
+        assert self._commands(Stage.AWAITING_REVIEW)
+        assert self._commands(Stage.NOT_APPLICABLE)
 
-    def test_commands_carry_a_concrete_year_not_a_placeholder(self):
-        cmds = [a for a in self._acts() if "python -m ir_agent" in a]
-        assert all("<年度>" not in c and "--year 2025" in c for c in cmds)
-
-    def test_manual_yaml_path_is_still_offered(self):
-        assert any("--assumptions" in a for a in self._acts())
-
-    def test_reviewer_flag_is_present_in_both(self):
-        cmds = [a for a in self._acts() if "python -m ir_agent" in a]
-        assert all("--reviewer" in c for c in cmds)

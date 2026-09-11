@@ -9,7 +9,12 @@ from datetime import date
 from ir_agent.pipeline import run, unresolved_disagreements
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """单独成函数，好让测试拿真实解析器去校验「指引里的命令能不能跑」。
+
+    此前那条规则靠比对字符串（「命令里含 --review」）来守，于是删掉
+    --review 之后测试照样通过，而打给用户的命令已经跑不动了。
+    """
     p = argparse.ArgumentParser(
         prog="ir_agent", description="V0 投研流水线：事实账本 + 三表勾稽 + 可溯源成稿")
     p.add_argument("code", help="股票代码，如 600519")
@@ -36,7 +41,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="判断项核实人署名（--value 必需）")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
-    a = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
 
     as_of = date.fromisoformat(a.as_of) if a.as_of else date.today()
 
