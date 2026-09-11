@@ -2134,9 +2134,39 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 from __future__ import annotations
 
+import json
+import pickle
 import sys
+from datetime import date
+from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, "/Users/ariasleo/Desktop/谢海量作品集/ashare-dcf")
+
+# 建表需要一份真实的 calibrate 输出 —— 它有六十多个键，手写夹具既繁琐又会
+# 与真实结构漂移（本项目已因「固件编码我想象的结构」栽过一次: stmts 被写成
+# 字典嵌套，实跑才发现是 DataFrame）。因此**取一次真的缓存起来**。
+_CACHE = Path("/tmp/cj/cal_600584.pkl")
+
+
+def _minimal_cal():
+    if _CACHE.exists():
+        with _CACHE.open("rb") as f:
+            return pickle.loads(f.read())
+    try:
+        from ir_agent import dcf
+        from ir_agent.pipeline import run
+        r = run("600584", 2025, date(2026, 9, 7))
+        cal = dcf.calibrate_only("600584", as_of=date(2026, 9, 7),
+                                 ledger=r.ledger)
+    except Exception as e:                                  # noqa: BLE001
+        pytest.skip(f"取不到真实 calibrate 输出（{e.__class__.__name__}），"
+                    "跳过建表测试")
+    _CACHE.parent.mkdir(parents=True, exist_ok=True)
+    with _CACHE.open("wb") as f:
+        f.write(pickle.dumps(cal))
+    return cal
 
 
 def _drivers():
@@ -2390,9 +2420,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: Task 4 的 `research`/`to_markdown`；Task 6 的 `collect`/`summary`；Task 7 的 `decide`/`synthesize`；Task 9 的 `cal["judg"]["drivers"]`
 - Produces:
-  - `DRIVERS_MD = "drivers.md"` 常量
+  - `full.DRIVERS_MD = "drivers.md"` 常量
+  - `full._research_methodology(code, r, out: Path, client) -> tuple[Methodology | None, str]`
   - `run_analysis` 在 `_analyse_facts` 之前跑预研并落盘 `drivers.md`
-  - `_propose_assumptions` 传入 `decomps` / `factor_data`
+  - `full._propose_assumptions(..., decomps=None, factor_data=None) -> str`
+  - `assume.to_driver_block(a: AssumptionSet, cal: dict) -> dict` —— 产出
+    Task 9 所需的 `drivers` 结构（键 `revenue` / `gross_margin`，各含
+    `op` / `factors` / `values`，毛利率块另含 `base_level`）
   - `dcf.run` 接受 `assumptions` 时把因子写进 `cal["judg"]["drivers"]`
 
 - [ ] **Step 1: 写失败的测试**
