@@ -76,6 +76,10 @@ class Row:
     base: Decimal
     bear: Decimal
     bases: list[Basis] = field(default_factory=list)
+    # 第 6 字段里除引文/占位符之外的那段话 —— **这才是理由本身**。
+    # 此前只抽占位符、把散文丢掉，于是待核实清单上只剩一串数字和一串
+    # key，人要判断「这个增速为什么是 3%」却无从判起。
+    note: str = ""
 
 
 @dataclass
@@ -101,25 +105,15 @@ class AssumptionSet:
                 continue
             lines.append(f"## {cn}")
             lines.append("")
-            lines.append("| 年 | 悲观 | 中性 | 乐观 |")
-            lines.append("| --- | --- | --- | --- |")
+            lines.append("| 年 | 悲观 | 中性 | 乐观 | 理由 | 依据 |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
             for r in got:
                 lab = self.labels[r.year - 1] if r.year <= len(self.labels) \
                     else f"第{r.year}年"
+                ref = "；".join(b.describe() for b in r.bases)
                 lines.append(f"| {lab} | {r.bear:.2%} | {r.base:.2%} "
-                             f"| {r.bull:.2%} |")
+                             f"| {r.bull:.2%} | {r.note or '—'} | {ref} |")
             lines.append("")
-            seen = []
-            for r in got:
-                for b in r.bases:
-                    d = b.describe()
-                    if d not in seen:
-                        seen.append(d)
-            lines.append("依据：")
-            lines += [f"  · {d}" for d in seen]
-            lines.append("")
-        if self.rationale:
-            lines += ["## 模型给出的理由原文", "", self.rationale, ""]
         return "\n".join(lines)
 
 
@@ -145,8 +139,15 @@ def parse(text: str, years: int) -> AssumptionSet:
         out.rows.append(Row(
             driver=DRIVERS[cn], year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
-            bases=_basis(parts[5], cn)))
+            bases=_basis(parts[5], cn), note=_note(parts[5])))
     return out
+
+
+def _note(raw: str) -> str:
+    """第 6 字段里的散文部分 —— 去掉引文与占位符后剩下的理由。"""
+    t = _REF.sub("", raw)
+    t = _QUOTE.sub("", t)
+    return re.sub(r"\s+", " ", t).strip(" ，,。;；")
 
 
 def _basis(raw: str, what: str) -> list[Basis]:
@@ -203,7 +204,10 @@ PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 **模型给出的历史参考**（仅供你判断，不要照抄）
 {history}
 
-**你的分析结论**（第 2–7 节）
+**你的分析简报**（引文依据只能逐字出自这里）
+{brief}
+
+**各层分析口径摘要**（供你判断，**不是可引用的正文**）
 {context}
 
 对每一项、每一年给出一行：
@@ -212,17 +216,23 @@ PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 **硬性要求**
 - 三档必须**严格拉开**（悲观 < 中性 < 乐观）。模板默认三档同值，
   那等于没有情景 —— 拉不开的情景分析只是把同一个数抄三遍。
-- 每一行都要有依据，且依据要**指向你的分析结论**。「取近三年 CAGR」
-  不是理由 —— 模型已经这么算过了，你若只是复述它，这一步就没有发生。
-  有价值的是「行业增速 X 而本司份额在丢，因此基准取低于行业」这类
-  能追溯到具体某一节的链条。
+- 每一行的第 6 段要写两样东西: **理由**（为什么是这个数）+ **依据**
+  （`[[账本占位符]]` 或「简报原文逐字引用」）。理由会原样出现在待核实
+  清单上，是人判断这个数合不合理的唯一线索 —— 只给依据不给理由，
+  清单上就只剩一串数字和一串 key。
+- 依据要**指向你的分析结论**。「取近三年 CAGR」不是理由 —— 模型已经
+  这么算过了，你若只是复述它，这一步就没有发生。有价值的是「行业增速 X
+  而本司份额在丢，因此基准取低于行业」这类能追溯到具体某一节的链条。
+- **引文只能逐字出自上面的「分析简报」**，摘要那几段不能引（它们不是正文）。
+  拿不准就用账本占位符，那个一定核验得过。
 - 预测期每一年都要给，漏掉的年份会沿用模板默认值，而那不是你的判断。
 - 增速路径要讲得通：若你认为拐点在中后段，就让前段贴近当前现实，
   不要直接外推行业中枢。
 """
 
 
-def build_prompt(judg: dict, labels: list[str], context: str) -> str:
+def build_prompt(judg: dict, labels: list[str], context: str,
+                 brief: str = "") -> str:
     g, gm = judg.get("g_stats") or (), judg.get("gm_stats") or ()
     hist = []
     if g:
@@ -236,13 +246,13 @@ def build_prompt(judg: dict, labels: list[str], context: str) -> str:
                     f"区间 {gm[2] * 100:.1f}%~{gm[3] * 100:.1f}%")
     return PROMPT.format(years=len(labels), labels="、".join(labels),
                          history="\n".join(hist) or "  （无）",
-                         context=context)
+                         context=context, brief=brief or "（无）")
 
 
 def decide(client, judg: dict, labels: list[str], context: str, *,
            ledger: FactLedger, body: str, as_of: date, code: str = "",
            max_attempts: int = 3) -> AssumptionSet:
-    prompt = build_prompt(judg, labels, context)
+    prompt = build_prompt(judg, labels, context, brief=body)
     last = ""
     for attempt in range(1, max_attempts + 1):
         raw = client(prompt)
@@ -255,7 +265,7 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
                       f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
                       "请修正后重新输出全部行。\n")
             continue
-        a.code, a.labels, a.rationale = code, labels, raw.strip()
+        a.code, a.labels = code, labels
         return a
     raise AssumeFailed(f"连续 {max_attempts} 次给不出可核验的假设：{last}")
 

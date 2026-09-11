@@ -161,3 +161,46 @@ def test_连续失败则拒绝():
     with pytest.raises(AssumeFailed, match="连续"):
         assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
                       ledger=FactLedger(), body=BODY, as_of=AS_OF)
+
+
+# ── 理由必须进清单 ───────────────────────────────────────────
+
+def test_理由被抽出来而不是丢掉():
+    """**实测踩到。** 模型在第 6 字段写了真正有用的推理（「跑输行业且份额
+    流失…基准显著低于行业中枢」），但原来只抽占位符、把散文丢掉 ——
+    待核实清单上只剩一串数字和一串 key，人要判断「这个增速为什么是 3%」
+    却无从判起。"""
+    a = assume.parse(
+        "假设: 营收增速 | 第1年 | -2% | 3% | 8% | "
+        "跑输行业且份额流失，基准显著低于行业中枢 "
+        "[[company.market_share_delta@2025FY]]", 1)
+    assert "份额流失" in a.rows[0].note
+    assert "[[" not in a.rows[0].note, "占位符不该混在理由里"
+
+
+def test_理由出现在待核实清单的表格里():
+    a = assume.parse(
+        "假设: 营收增速 | 第1年 | -2% | 3% | 8% | "
+        "份额在丢 [[company.market_share_delta@2025FY]]", 1)
+    a.code, a.labels = "600584", ["2026E"]
+    txt = a.describe()
+    assert "理由" in txt and "份额在丢" in txt
+    assert "company.market_share_delta" in txt
+
+
+def test_不再倾倒模型的原始回复():
+    """实测那一版把模型对**本项目源码**的元评论（「我看了一下
+    assume.py 的校验逻辑…」）原样印进了待核实清单 —— 一份股票研究文档
+    里讨论 Python 内部实现，对核实的人只是噪音。"""
+    a = assume.parse("假设: 营收增速 | 第1年 | 1% | 2% | 3% | 「x」", 1)
+    a.code, a.labels = "600584", ["2026E"]
+    assert "理由原文" not in a.describe()
+
+
+def test_提示词说清可引用的是简报正文():
+    """摘要与简报是两段不同的文字，而 REPORT 依据只对简报校验 ——
+    实测模型被驳回一次才摸索出来。"""
+    txt = assume.build_prompt({"g_stats": (), "gm_stats": ()}, ["2026E"],
+                              "摘要内容", brief="简报正文")
+    assert "简报正文" in txt and "引文只能逐字出自" in txt
+    assert "不是可引用的正文" in txt
