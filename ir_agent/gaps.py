@@ -94,14 +94,29 @@ class FactorData:
     status: str = MISSING
     findings: list[Finding] = field(default_factory=list)
     note: str = ""
-    # ANNUAL/REPORT 命中时的真实出处——供 assume.py 在模型引用 note 里
-    # 摘出的原文片段时，代码自动补上可核验的 URL/抓取日期（模型自己
-    # 不接触这两样，同一条"模型写引用，代码填事实"的契约）。
+    # ANNUAL/REPORT 命中时的真实出处——供 assume.py 在模型引用摘出的
+    # 原文片段时，代码自动补上可核验的 URL/抓取日期（模型自己不接触
+    # 这两样，同一条"模型写引用，代码填事实"的契约）。
     # EXTERNAL 状态不用这两个字段：那种情况下 findings 里可能有好几条，
     # 各自带自己的 url/日期，模型引的是哪条要看它引了哪条 claim，
     # 没有一个"唯一"来源可以预先填在这里。
     source_url: str = ""
     source_retrieved: date | None = None
+    # fix-excerpt-match：命中②③时摘出的原文片段本身，独立于 `note`。
+    #
+    # `note` 是拼给人看的展示文本——「「摘录」——出处（说明）」这个格式
+    # 是为了在待核实清单/提示词表格里读着顺眼，不是为了让机器从里面
+    # 反解。600584 实测：`note` 里的年报原文恰好嵌着一对中文弯引号
+    # （"…“创新提效、行深致远”…"），`assume._match_excerpt` 曾经用
+    # 非贪婪正则从 `note` 里把摘录抠出来，一遇到年报原文内部的收尾
+    # 引号就把摘录腰斩，模型逐字引用的证据（恰恰是我们自己采集给它
+    # 的那一段）因此被判定"匹配不到"，连续 3 次驳回后拖累整轮降级成
+    # 两标量模式。教训是：**给人看的展示文本不该同时承担"可被机器
+    # 精确取回"的职责**——年报正文里出现引号是常态，把结构化数据塞进
+    # 格式化字符串、再指望正则把它原样抠回来，迟早会被这类边缘情况
+    # 击穿。机器要用的原文必须是独立字段，跟着数据走，`_match_excerpt`
+    # 只认这个字段，不再碰 `note` 一个字符。
+    source_excerpt: str = ""
 
 
 def identify(d: Decomposition, ledger: FactLedger, as_of: date) -> list[Factor]:
@@ -221,7 +236,11 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     factor=f, status=ANNUAL,
                     note=f"「{excerpt}」——{src}"
                          "（文字依据，是否给出具体数值待人工确认）",
-                    source_url=annual_url, source_retrieved=as_of)
+                    source_url=annual_url, source_retrieved=as_of,
+                    # 与 note 里包在「」中的那段是同一份文字——note 是
+                    # 拼给人看的，这里是给 assume._match_excerpt 用的，
+                    # 两者必须来自同一个 excerpt 变量，不能事后各改各的。
+                    source_excerpt=excerpt)
                 continue
 
             hit = _match_report(corpus, f.label)
@@ -231,7 +250,8 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     factor=f, status=REPORT,
                     note=f"「{excerpt}」——{doc.cite()}"
                          "（文字依据，是否给出具体数值待人工确认）",
-                    source_url=doc.url, source_retrieved=doc.retrieved)
+                    source_url=doc.url, source_retrieved=doc.retrieved,
+                    source_excerpt=excerpt)
                 continue
 
             try:

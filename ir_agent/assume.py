@@ -666,19 +666,31 @@ def _match_finding(fd: FactorData | None, quote: str):
 
 
 def _match_excerpt(fd: FactorData | None, quote: str) -> bool:
-    """在②年报/③研报命中时摘出的原文片段（fd.note 里用「」包起来的
-    那一段，见 gaps.collect）里找这段引文。
+    """在②年报/③研报命中时摘出的原文片段里找这段引文。
 
-    只对 ANNUAL/REPORT 两种状态生效——DISCLOSED/MISSING/EXTERNAL 的
-    note 要么不是这个格式，要么该走别的出口（findings 或"无数据"）。
+    **只认 `fd.source_excerpt`，绝不从 `fd.note` 正则反解。**
+    此前这里用非贪婪正则 `_QUOTE` 从 `fd.note`（拼给人看的展示文本，
+    格式是「「摘录」——出处（说明）」）里把摘录抠出来——600584 实测
+    直接击穿了这个做法：年报原文恰好嵌着一对中文弯引号（"…“创新提效、
+    行深致远”…"），非贪婪匹配一遇到年报原文内部的收尾引号就把摘录
+    腰斩，模型逐字引用「高端先进制造产能规模化创收」（我们自己采集
+    给它的证据）因此判定"匹配不到"，连续 3 次驳回后拖累整轮降级成
+    两标量模式。年报正文里出现引号是常态，不是需要额外兼容的边缘
+    情况——真正的问题是把机器要精确取回的数据，塞进了一段专门为
+    "给人读着顺眼"设计的格式化字符串里，再指望正则把它原样抠回来。
+    `note` 的格式以后可以随便改（换措辞、调整出处写法），只要没人
+    想起这里还在拿正则啃它，匹配就会静默失效。所以 `gaps.collect`
+    命中②③时把摘出的原文片段额外存成独立字段 `source_excerpt`，
+    这里直接用它，不再看 `note` 一眼——展示文本与机器取值的数据源
+    彻底分开，才不会再被 note 格式的任何改动连累。
+
+    只对 ANNUAL/REPORT 两种状态生效——DISCLOSED/MISSING/EXTERNAL 没有
+    这个字段（默认空串），该走别的出口（findings 或"无数据"）。
     """
     if fd is None or fd.status not in (gaps.ANNUAL, gaps.REPORT):
         return False
-    m = _QUOTE.search(fd.note)
-    if not m:
-        return False
     qn = _norm(quote)
-    return bool(qn) and qn in _norm(m.group(1))
+    return bool(qn) and bool(fd.source_excerpt) and qn in _norm(fd.source_excerpt)
 
 
 def _factor_basis(raw: str, label: str, fd: FactorData | None,
@@ -697,11 +709,12 @@ def _factor_basis(raw: str, label: str, fd: FactorData | None,
 
       ① 引用该因子自己采集到的证据——命中 `fd.findings` 里某条
          `Finding.claim` 就用 `Basis.external`，出处（url、抓取日期）
-         直接用那条 Finding 自带的；命中②③摘出的原文片段（`fd.note`
-         里的引文）同样用 `Basis.external`，出处是 `gaps.collect` 早已
-         经代码之手记下的 `fd.source_url`/`source_retrieved`（②是年报
-         公告本身的下载地址，③是研报文档的真实 URL——都是货真价实的
-         网络地址，不是编出来的）。
+         直接用那条 Finding 自带的；命中②③摘出的原文片段（`fd.
+         source_excerpt`——独立字段，**不是**从 `fd.note` 里正则反解，
+         见 `_match_excerpt` 文档字符串）同样用 `Basis.external`，
+         出处是 `gaps.collect` 早已经代码之手记下的 `fd.source_url`/
+         `source_retrieved`（②是年报公告本身的下载地址，③是研报文档
+         的真实 URL——都是货真价实的网络地址，不是编出来的）。
 
          年报片段没有直接被归到 `Basis.report`：`Basis.report` 的核验
          (`basis.validate`) 拿的是 `check()` 当时传入的 `body`——本模块
@@ -995,6 +1008,20 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
               "逐年走低到 13.15%/12.15%/11.15%，三年应分别填 "
               "−1、−2、−3（相对基期累计），而不是 −1、−1、−1"
               "（那样合成出来三年会是同一个数 13.15%，不会继续下滑）。",
+              "",
+              "**引文只能出自三处**：你的分析简报正文、账本占位符 "
+              "[[key@period]]、或下表「数据」列里这个因子自己采集到的"
+              "原文片段/发现。下面各节（宏观、行业、可比公司、外部资料、"
+              "产业链……）、本表的因子名和单位这些表头，都只是给你判断"
+              "用的上下文，**不是**可引用的正文——从里面摘一句当引文"
+              "（哪怕摘的是某节小标题）会被直接驳回。",
+              "**引文必须逐字连续摘录**：不要用省略号（…/...）缩写，"
+              "也不要把原文里不相邻的句子拼起来当一句引文。理由那部分"
+              "可以照常总结复述，但引文这部分要能被代码原样在来源里"
+              "逐字反查到——用省略号跳过中间几个字，或者拼接两处不相邻"
+              "的话，都会让这段引文在来源里找不到连续对应的片段，"
+              "代码分不清这是真引用还是你自己编的，只会被当作编造直接"
+              "驳回。",
               "",
               "**依据除了「正文原话」「[[占位符]]」，还有两条路——"
               "很多因子正文根本没提过，也不在账本里，这两条路才是它们"

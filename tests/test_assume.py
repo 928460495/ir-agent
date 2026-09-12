@@ -1445,12 +1445,13 @@ def test_引用年报摘录片段代码自动补上年报出处():
     时只验格式不验内容，恰好符合"年报只在预研当轮验一次、以后不再回头
     复查"的实际情况（第二阶段不会重新下载解析年报 PDF）。"""
     d = _one_factor_decomp()
+    excerpt = "稼动率维持在行业前列，具体测算详见内部管理报表"
     fd = {"utilization": gaps.FactorData(
         factor=d.factors[0], status=gaps.ANNUAL,
-        note="「稼动率维持在行业前列，具体测算详见内部管理报表」"
+        note=f"「{excerpt}」"
             "——《核心竞争力分析》（文字依据，是否给出具体数值待人工确认）",
         source_url="https://static.cninfo.com.cn/annual.pdf",
-        source_retrieved=AS_OF)}
+        source_retrieved=AS_OF, source_excerpt=excerpt)}
     body = "公司持续推进降本增效。"
     raw = ("假设: 稼动率 | 第1年 | -2% | 0% | 2% | "
           "「稼动率维持在行业前列」，年报未给具体数值，取中性估计")
@@ -1466,13 +1467,14 @@ def test_引用研报摘录片段代码自动补上研报文档的真实url():
     """③研报语料库命中同理，出处是那篇 Document 自己的 url/retrieved
     （由 `gaps._match_report` 带回给 `collect`），不是年报的。"""
     d = _one_factor_decomp()
+    excerpt = "我们测算行业稼动率将于下半年回升"
     fd = {"utilization": gaps.FactorData(
         factor=d.factors[0], status=gaps.REPORT,
-        note="「我们测算行业稼动率将于下半年回升」——某券商研究所"
+        note=f"「{excerpt}」——某券商研究所"
             "《行业深度报告》（2026-06-01，卖方研究）"
             "（文字依据，是否给出具体数值待人工确认）",
         source_url="https://research.example/x",
-        source_retrieved=date(2026, 6, 1))}
+        source_retrieved=date(2026, 6, 1), source_excerpt=excerpt)}
     body = "公司持续推进降本增效。"
     raw = ("假设: 稼动率 | 第1年 | 1% | 3% | 5% | "
           "「我们测算行业稼动率将于下半年回升」，参照研报测算的回升节奏")
@@ -1485,21 +1487,86 @@ def test_引用研报摘录片段代码自动补上研报文档的真实url():
 
 
 def test_年报摘录引文对不上原文片段时掉回正文核验并被驳回():
-    """模型引的话跟 fd.note 里摘出的原文片段对不上（比如编了数字或改了
+    """模型引的话跟 `fd.source_excerpt` 对不上（比如编了数字或改了
     表述）——不能被 _match_excerpt 放过，应当掉回"当作正文引用"、
     然后因为不在正文里而被驳回，不能被这条新出口意外放行。"""
     d = _one_factor_decomp()
+    excerpt = "稼动率维持在行业前列"
     fd = {"utilization": gaps.FactorData(
         factor=d.factors[0], status=gaps.ANNUAL,
-        note="「稼动率维持在行业前列」——《核心竞争力分析》（文字依据，"
+        note=f"「{excerpt}」——《核心竞争力分析》（文字依据，"
             "是否给出具体数值待人工确认）",
         source_url="https://static.cninfo.com.cn/annual.pdf",
-        source_retrieved=AS_OF)}
+        source_retrieved=AS_OF, source_excerpt=excerpt)}
     body = "公司持续推进降本增效。"
     raw = "假设: 稼动率 | 第1年 | -2% | 0% | 2% | 「稼动率已提升至95%」"
     a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
     with pytest.raises(AssumeFailed, match="不可核验"):
         assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+
+
+def test_年报摘录含嵌套弯引号仍可核验依据_600584实测复现():
+    """600584 实跑复现的真实 bug：产能规模因子命中年报，`gaps.collect`
+    摘出的原文片段里恰好嵌着一对中文弯引号（“…“创新提效、行深致远”
+    …”）。修复前 `_match_excerpt` 用非贪婪正则 `_QUOTE` 从 `fd.note`
+    （拼给人看的展示文本）里把摘录抠出来，一遇到年报原文内部这对
+    弯引号的收尾引号就把摘录腰斩——本人已实测复现：
+
+        >>> m = _QUOTE.search(note); m.group(1)
+        '…公司将围绕“创新提效、行深致远'
+        >>> "高端先进制造产能规模化创收" in m.group(1)
+        False
+
+    模型引用的「高端先进制造产能规模化创收」落在截断点之后，而这
+    正是我们自己采集给它的证据（不是编造），却被判定"匹配不到"，
+    掉回正文核验、因为不在研究简报正文里而被驳回——连续 3 次失败后
+    拖累整轮研究降级成两标量模式。
+
+    修复后 `_match_excerpt` 只认独立字段 `fd.source_excerpt`，不再碰
+    `fd.note` 一个字符，这里用同一段真实原文（含嵌套弯引号）应当能
+    顺利核验，且构造出的 Basis 带着真实出处（年报公告的下载地址）。"""
+    d = _one_factor_decomp(key="capacity", label="产能规模")
+    excerpt = ("…公司将围绕“创新提效、行深致远”的主题，立足先进技术研发"
+               "成果转化、高端先进制造产能规模化创收、生态体系系统建设"
+               "以及主流封测业务先进化转型，稳妥统筹国内国际双循环，坚…")
+    note = (f"「{excerpt}」——《未来发展的讨论与分析》"
+            "（文字依据，是否给出具体数值待人工确认）")
+    fd = {"capacity": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNUAL, note=note,
+        source_url="https://static.cninfo.com.cn/600584_2025_annual.pdf",
+        source_retrieved=AS_OF, source_excerpt=excerpt)}
+    body = "公司持续推进降本增效，聚焦主业发展。"
+    raw = ("假设: 产能规模 | 第1年 | 3% | 6% | 9% | "
+          "「高端先进制造产能规模化创收」，公司明确将扩大高端产能，"
+          "带动营收增长")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    basis = a.rows[0].bases[0]
+    assert basis.kind.value == "external"
+    assert basis.ref == "https://static.cninfo.com.cn/600584_2025_annual.pdf"
+    assert basis.quote == "高端先进制造产能规模化创收"
+
+
+def test_摘录含ASCII引号同样可匹配():
+    """摘录原文里若嵌着 ASCII 双引号（同样会让旧的 `_QUOTE` 正则腰斩：
+    ASCII `"` 既在开引号字符集也在收引号字符集里），改用独立字段后
+    不应受影响——`_match_excerpt` 现在直接对 `source_excerpt` 做子串
+    比对，不再用正则去解析任何带引号的文本。"""
+    d = _one_factor_decomp()
+    excerpt = "公司在报告期内表示\"降本增效\"成效显著，产能利用率保持高位运行"
+    note = (f"「{excerpt}」——《管理层讨论与分析》"
+            "（文字依据，是否给出具体数值待人工确认）")
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNUAL, note=note,
+        source_url="https://static.cninfo.com.cn/annual.pdf",
+        source_retrieved=AS_OF, source_excerpt=excerpt)}
+    body = "公司持续推进降本增效。"
+    raw = "假设: 稼动率 | 第1年 | -1% | 1% | 3% | 「产能利用率保持高位运行」"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    basis = a.rows[0].bases[0]
+    assert basis.kind.value == "external"
+    assert basis.quote == "产能利用率保持高位运行"
 
 
 def test_依据跨阶段存活_因子证据引用():
