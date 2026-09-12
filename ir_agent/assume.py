@@ -187,6 +187,11 @@ class AssumptionSet:
     # base_margin）——describe() 展示「合成结果」要用同一个数，
     # 不能自己另算一个，否则清单上显示的数和实际建模用的数就会分叉。
     base_margin: Decimal | None = None
+    # I4：因子模式连续填不出合格判断项时，decide() 回落到两标量模式，
+    # 这里记下降级原因。**不进 to_json/from_json**——降级是这一轮研究
+    # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
+    # 「降级但继续」不能悄悄发生，人必须一眼看到这轮其实是降级产出的。
+    degraded: str = ""
 
     def path(self, driver: str, case: Case) -> list[Decimal]:
         got = sorted((r for r in self.rows if r.driver == driver),
@@ -203,6 +208,10 @@ class AssumptionSet:
         让清单整页空白（C1：人工批准的核心关卡变成一张只有标题的空页）。
         """
         lines = [f"DCF 判断项（{self.code}）—— 需人工核实后方可建模", ""]
+        if self.degraded:
+            # 「降级但继续」不能悄悄发生——清单顶部就要让人看到这轮
+            # 判断项其实是降级产出的，损失的是精度，不是担保。
+            lines += [f"⚠ **降级说明**：{self.degraded}", ""]
         if self.decomps:
             lines += self._describe_factors()
         else:
@@ -233,9 +242,6 @@ class AssumptionSet:
         """因子模式下的清单：按目标分组，每个因子一张表 + 该目标的
         **合成结果**（代码算出来的，不是模型自己填的那个数）。"""
         lines: list[str] = []
-        lo = self._synthesized(Case.BEAR)
-        mid = self._synthesized(Case.BASE)
-        hi = self._synthesized(Case.BULL)
         for d in self.decomps:
             lines.append(f"## {TARGET_LABEL.get(d.target, d.target)}"
                         f" —— {d.describe()}")
@@ -261,29 +267,48 @@ class AssumptionSet:
                         f"| {_fmt_factor(r.bull, f.unit)} "
                         f"| {r.note or '—'} | {ref} |")
                 lines.append("")
-            lines += self._describe_composed(d, lo, mid, hi)
+            lines += self._describe_composed(d)
             lines += self._describe_residuals(d)
         return lines
 
-    def _synthesized(self, case: Case
-                     ) -> tuple[list[Decimal], list[Decimal]] | None:
-        """展示用的合成结果。基期未知却硬要合成毛利率，会显示一个用
-        假基期算出来、看起来正常的错数——比不显示更糟，所以返回 None
-        让调用方改显示说明文字。"""
-        needs_base = any(dd.target != "revenue" for dd in self.decomps)
-        if needs_base and self.base_margin is None:
-            return None
-        return synthesize(self, case, self.base_margin or Decimal(0))
+    def _synthesized_for(self, d: Decomposition, case: Case
+                         ) -> list[Decimal] | None:
+        """展示用的合成结果，**按目标单独判断能不能算**，不是「任一
+        分解式缺基期就全部显示不出来」（I7）。
 
-    def _describe_composed(self, d: Decomposition, lo, mid, hi) -> list[str]:
+        营收是乘法链 Π(1+r)−1，永远算得出来，不需要基期；毛利率是加法
+        链，缺基期却硬要合成，会显示一个用假基期算出来、看起来正常的
+        错数——比不显示更糟，所以只有这一条线才返回 None 让调用方改
+        显示说明文字，而不会连坐到营收那一节。
+        """
+        if d.op is not Op.MULTIPLY and self.base_margin is None:
+            return None
+        attr = {Case.BULL: "bull", Case.BASE: "base",
+                Case.BEAR: "bear"}[case]
+        keys = {f.key for f in d.factors}
+        years = max((r.year for r in self.rows if r.factor_key in keys),
+                    default=0)
+        out: list[Decimal] = []
+        for y in range(1, years + 1):
+            vals = {r.factor_key: getattr(r, attr) for r in self.rows
+                    if r.year == y and r.factor_key in keys}
+            if d.op is Op.MULTIPLY:
+                out.append(compose(d, vals))
+            else:
+                out.append(compose(d, vals, base=self.base_margin))
+        return out
+
+    def _describe_composed(self, d: Decomposition) -> list[str]:
         lines = ["**合成结果**（代码按分解式算出，不是模型直接填的数）", ""]
-        if lo is None or mid is None or hi is None:
-            lines.append("基期毛利率未知，暂无法显示合成后的毛利率——"
+        lo_s = self._synthesized_for(d, Case.BEAR)
+        mid_s = self._synthesized_for(d, Case.BASE)
+        hi_s = self._synthesized_for(d, Case.BULL)
+        if lo_s is None or mid_s is None or hi_s is None:
+            tgt = TARGET_LABEL.get(d.target, d.target)
+            lines.append(f"基期{tgt}未知，暂无法显示合成后的{tgt}——"
                         "因子取值仍已生效，只是这里算不出用于展示的数。")
             lines.append("")
             return lines
-        idx = 0 if d.target == "revenue" else 1
-        lo_s, mid_s, hi_s = lo[idx], mid[idx], hi[idx]
         lines.append("| 年 | 悲观 | 中性 | 乐观 |")
         lines.append("| --- | --- | --- | --- |")
         for y in range(len(mid_s)):
@@ -632,11 +657,18 @@ def build_prompt(judg: dict, labels: list[str], context: str,
                          context=context, brief=brief or "（无）")
 
 
-def decide(client, judg: dict, labels: list[str], context: str, *,
-           ledger: FactLedger, body: str, as_of: date, code: str = "",
-           max_attempts: int = 3, decomps: list[Decomposition] | None = None,
-           factor_data: dict | None = None,
-           base_margin: Decimal | None = None) -> AssumptionSet:
+def _decide_once(client, judg: dict, labels: list[str], context: str, *,
+                 ledger: FactLedger, body: str, as_of: date, code: str,
+                 max_attempts: int, decomps: list[Decomposition] | None,
+                 factor_data: dict | None,
+                 base_margin: Decimal | None) -> AssumptionSet:
+    """单一模式（因子或两标量）内的重试循环。
+
+    只管一种模式，失败就抛 `AssumeFailed`——**模式之间要不要降级，是
+    `decide()` 的职责，不是这里的**：因子模式连续失败后可以退回两标量
+    模式再试一次，但两标量模式本身连续失败没有更低的台阶可退，必须
+    原样拒绝。两件事分开才不会在这里意外递归。
+    """
     prompt = build_prompt(judg, labels, context, brief=body, decomps=decomps,
                           factor_data=factor_data)
     last, raw = "", ""
@@ -666,6 +698,41 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
     raise AssumeFailed(
         f"连续 {max_attempts} 次给不出可核验的假设：{last}"
         f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}")
+
+
+def decide(client, judg: dict, labels: list[str], context: str, *,
+           ledger: FactLedger, body: str, as_of: date, code: str = "",
+           max_attempts: int = 3, decomps: list[Decomposition] | None = None,
+           factor_data: dict | None = None,
+           base_margin: Decimal | None = None) -> AssumptionSet:
+    """AI 填判断项，因子模式连续失败时回落到两标量路径（I4）。
+
+    因子模式要填 N 因子 × Y 年 × 3 档，比两标量模式的 2×5×3 重数倍，
+    失败概率明显更高。一旦连续 `max_attempts` 次都填不出合格的因子，
+    直接向上抛错会让**整个 DCF 判断项都没有**——能力边界不是故障，
+    整轮研究不该因此停摆，这里改为退回两标量模式再试一次，并把降级
+    原因记在 `AssumptionSet.degraded` 上（`describe()` 会把它印在清单
+    顶部）：**降级但继续、如实说明降级原因，不能假装成功，也不能中断。**
+
+    两标量模式（`decomps` 为空）本身连续失败没有更低的台阶可退，原样
+    向上抛出。
+    """
+    try:
+        return _decide_once(client, judg, labels, context, ledger=ledger,
+                            body=body, as_of=as_of, code=code,
+                            max_attempts=max_attempts, decomps=decomps,
+                            factor_data=factor_data, base_margin=base_margin)
+    except AssumeFailed as e:
+        if not decomps:
+            raise
+        a = _decide_once(client, judg, labels, context, ledger=ledger,
+                         body=body, as_of=as_of, code=code,
+                         max_attempts=max_attempts, decomps=None,
+                         factor_data=None, base_margin=None)
+        a.degraded = (f"因子模式连续 {max_attempts} 次填不出合格的判断项"
+                      f"（{str(e)[:160]}）—— 已退回两标量模式（营收增速/"
+                      "毛利率），损失的是因子层面的精度，不是担保")
+        return a
 
 
 def _historical_series(ledger: FactLedger, key: str, periods: list[str],

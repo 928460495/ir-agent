@@ -652,12 +652,28 @@ def _research_methodology(code: str, r, out: Path, client):
     看一次多。改用「立刻落盘 + 可中断 + 可覆盖」换取早期干预 —— 落盘为
     drivers.md，看不对就改这个文件后重跑第一阶段。
 
+    **I2：这个「可覆盖」的承诺需要一条读回路径才成立。** drivers.md 若
+    已经存在（无论是不是被人改过），说明这不是第一次跑第一阶段——直接
+    读回它，不再重新联网预研，否则重跑会用新的预研结果把人的修改悄悄
+    覆盖掉。读不懂就**明确报错**：这里不吞掉异常改去调用 `research()`
+    静默重来一遍，那样人会以为自己的修改生效了，实际却被整个丢弃。
+
     **预研失败（MethodologyFailed）不中断整轮研究。** 联网拿不到闭合的
     分解式是常态而非故障（比如模型答非所问、行业太冷门搜不到方法论），
     此时退回不分解模式，判断项仍按营收增速/毛利率两项填写——降级但继续，
     损失的是精度，不是担保。
     """
     from ir_agent import methodology
+
+    path = out / DRIVERS_MD
+    if path.exists():
+        try:
+            m = methodology.from_markdown(path.read_text(encoding="utf-8"))
+        except methodology.MethodologyFailed as e:
+            return None, (f"方法论预研（{path} 已存在但读不回：{str(e)[:160]}）"
+                          "—— 未重新联网预研（避免悄悄覆盖你的修改），"
+                          "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+        return m, ""
 
     try:
         from ir_agent.sources.taxonomy import fetch_all
@@ -674,7 +690,7 @@ def _research_methodology(code: str, r, out: Path, client):
     except methodology.MethodologyFailed as e:
         return None, (f"方法论预研（{str(e)[:160]}）—— "
                       "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
-    (out / DRIVERS_MD).write_text(methodology.to_markdown(m), encoding="utf-8")
+    path.write_text(methodology.to_markdown(m), encoding="utf-8")
     return m, ""
 
 
@@ -828,7 +844,10 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                                   approved_at=""),
                    ensure_ascii=False, indent=2), encoding="utf-8")
     arts["DCF 判断项（待核实）"] = str(out / ASSUMPTIONS_MD)
-    return ""
+    # I4：因子模式连续失败后 assume.decide 会退回两标量模式，不是抛错——
+    # 判断项照常写出，但降级这件事不能只留在 assumptions.md 里，终端的
+    # skipped 清单是读者第一眼看到的地方，同一条原因要在这里再报一次。
+    return f"DCF 判断项（{a.degraded}）" if a.degraded else ""
 
 
 _APPROVE_NOTE = """

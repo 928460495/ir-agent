@@ -223,6 +223,28 @@ def research(client, industry: str, code: str,
         f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")
 
 
+_RAW_HEADING = "## 分解式原始定义（供人工编辑与重跑读回）"
+
+# to_markdown 反过来重建 DSL 行时要用的映射——与解析方向 _TARGETS/
+# _OPS 互为逆映射，取第一个匹配到的中文标签即可（两个映射表都不会有
+# 一个值对应多个键）。
+_TARGET_CN = {v: k for k, v in _TARGETS.items()}
+_OP_CN = {v: k for k, v in _OPS.items()}
+
+
+def _to_dsl(m: Methodology) -> str:
+    """把 Methodology 变回预研阶段那种 `分解: ... | ...` 的 DSL 文本——
+    与 `parse()` 互为逆操作，`from_markdown` 靠它把落盘文件读回来。"""
+    lines = []
+    for d in m.decompositions:
+        parts = [_TARGET_CN.get(d.target, d.target), _OP_CN.get(d.op, d.op.value)]
+        parts += [f"{f.label}:{f.unit}:{f.source_hint}" for f in d.factors]
+        lines.append("分解: " + " | ".join(parts))
+    for p in m.pitfalls:
+        lines.append(f"陷阱: {p}")
+    return "\n".join(lines)
+
+
 def to_markdown(m: Methodology) -> str:
     lines = [f"# 驱动因子分解（{m.industry}）", "",
              "本次研究采用的分解式。**它决定了后面去采集什么数据、"
@@ -242,5 +264,46 @@ def to_markdown(m: Methodology) -> str:
         lines.append("")
     lines += ["---", "",
               "分解式不另设人工确认门 —— 门加多了人会开始机械点「同意」。",
-              "若你看到分解不对，**改这个文件后重跑第一阶段**即可覆盖。", ""]
+              "若你看到分解不对，**改这个文件后重跑第一阶段**即可覆盖。",
+              "", _RAW_HEADING, "",
+              "重跑第一阶段时会先读这里的代码块，而不是重新联网预研——"
+              "**编辑下面这段文字再重跑即可覆盖**，语法与预研阶段完全一致："
+              "`分解: 目标 | 运算 | 因子名:单位:数据线索 | …`、"
+              "`陷阱: 一句话`。删掉这段代码块或改坏语法，重跑时会**明确"
+              "报错**而不是被静默忽略——不然你会以为自己的修改生效了，"
+              "实际却被悄悄丢弃、重新联网跑出一份新的分解式。", "",
+              "```text", _to_dsl(m), "```", ""]
     return "\n".join(lines)
+
+
+_CODE_BLOCK = re.compile(r"```(?:text)?\n(.*?)```", re.DOTALL)
+_TITLE = re.compile(r"^# 驱动因子分解（(.*?)）", re.MULTILINE)
+
+
+def from_markdown(text: str) -> Methodology:
+    """读回人工可能已经改过的 drivers.md（见 `to_markdown` 末尾的
+    `_RAW_HEADING` 代码块）。
+
+    **解析不出来就明确报错，绝不静默回退到重新预研。** 重跑第一阶段的
+    调用方（`full._research_methodology`）看到本函数抛出
+    `MethodologyFailed` 时，只应该把这件事如实报给人看，不能悄悄改去
+    调用 `research()` 联网重来一遍——那样人会以为自己的修改生效了，
+    实际上被整个丢掉，静默覆盖比不能覆盖更危险。
+    """
+    if _RAW_HEADING not in text:
+        raise MethodologyFailed(
+            f"drivers.md 里找不到「{_RAW_HEADING}」标记，无法读回原始"
+            "分解式定义——这份文件是不是本工具生成的，或者标记被"
+            "删掉了？")
+    tail = text.split(_RAW_HEADING, 1)[1]
+    hit = _CODE_BLOCK.search(tail)
+    if hit is None:
+        raise MethodologyFailed(
+            f"「{_RAW_HEADING}」标记之后找不到代码块，无法读回原始"
+            "分解式定义——是不是代码块被删掉或改坏了？")
+    m = parse(hit.group(1))
+    title = _TITLE.search(text)
+    if title:
+        m.industry = title.group(1)
+    m.rationale = "（读回自人工可能编辑过的 drivers.md，非模型原始输出）"
+    return m

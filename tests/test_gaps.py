@@ -212,3 +212,92 @@ def test_摘要区分文字依据与已核实数值():
     txt = summary(data)
     assert "年报披露" in txt
     assert "文字依据" in txt and "待人工确认" in txt
+
+
+# ── I3：真实因子标签带单位/运算后缀，逐字匹配在②③两级必然落空 ──
+#
+# 真实联网跑出来的因子标签形如「有效产能变化率」「稼动率贡献」——这些
+# 后缀是分解式的运算修饰（乘法链统一叫"变化率"，加法链统一叫"贡献"/
+# "占比提升贡献"），不会逐字出现在年报或研报原文里，年报只会写「有效
+# 产能」「稼动率」。不剥后缀，②③两级命中永远落空，四级阶梯退化成
+# 「④开放网络 或 无数据」两级，先近后远、先可核验后不可核验的设计
+# 形同虚设。
+
+def test_真实因子标签剥后缀才能命中年报():
+    """用报告里实测出现的真实标签复现：不剥后缀时，年报原文里的
+    「有效产能」「ASP」三个字不可能匹配上「有效产能变化率」
+    「ASP变化率」这种整串——这条测试在修复前必须失败。"""
+    factors = [_f("capacity", "有效产能变化率"), _f("asp", "ASP变化率")]
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=factors)
+    sections = _sections(("core_competency", "核心竞争力分析",
+                          "报告期内公司有效产能维持满载运行，ASP保持稳定。"))
+    data = collect(_ExplodingClient(), [d], _led(), Corpus(as_of=AS_OF),
+                   "封测", AS_OF, sections=sections)
+    assert data["capacity"].status == "年报披露"
+    assert data["asp"].status == "年报披露"
+
+
+def test_真实因子标签剥后缀才能命中研报():
+    factors = [_f("util", "稼动率贡献"), _f("mix", "先进封装收入占比提升贡献")]
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=factors)
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们测算稼动率将逐季回升，先进封装收入占比持续提升，"
+                    "带动毛利率修复。"))
+    data = collect(_ExplodingClient(), [d], _led(), corpus, "封测", AS_OF)
+    assert data["util"].status == "研报测算"
+    assert data["mix"].status == "研报测算"
+
+
+def test_原材料及折旧成本变化贡献剥后缀后仍能命中():
+    """后缀有多种组合（"变化贡献"与单独的"贡献"都要认），且要剥最长
+    的那个匹配，不能剥出「原材料及折旧成本变化」这种半吊子核心词。"""
+    f = _f("input_cost", "原材料及折旧成本变化贡献")
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[f])
+    sections = _sections(("md_a", "管理层讨论与分析",
+                          "原材料及折旧成本较上年有所上升，拖累毛利率。"))
+    data = collect(_ExplodingClient(), [d], _led(), Corpus(as_of=AS_OF),
+                   "封测", AS_OF, sections=sections)
+    assert data["input_cost"].status == "年报披露"
+
+
+def test_汇率贡献剥后缀后仍能命中():
+    f = _f("fx", "汇率贡献")
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[f])
+    sections = _sections(("md_a", "管理层讨论与分析", "受汇率波动影响，出口业务毛利率承压。"))
+    data = collect(_ExplodingClient(), [d], _led(), Corpus(as_of=AS_OF),
+                   "封测", AS_OF, sections=sections)
+    assert data["fx"].status == "年报披露"
+
+
+def test_剥后缀不引入过短核心词的误判():
+    """保守：剥完后核心词过短就不剥，宁可落到④也不要拿一两个字这种
+    到处能命中的片段冒充"命中"。构造一个剥完只剩 1 个字的极端标签，
+    确认它不会被剥短——用会炸的 client 钉住"根本没剥、也没命中，
+    落到④走了 search()"这件事本身不该发生在这条用例里，改为直接断言
+    _core_label 的行为。"""
+    from ir_agent.gaps import _core_label
+    assert _core_label("率贡献") == "率贡献"          # 剥完只剩1字，不剥
+    assert _core_label("有效产能变化率") == "有效产能"
+    assert _core_label("稼动率贡献") == "稼动率"
+    assert _core_label("先进封装收入占比提升贡献") == "先进封装收入"
+    assert _core_label("原材料及折旧成本变化贡献") == "原材料及折旧成本"
+    assert _core_label("汇率贡献") == "汇率"
+    assert _core_label("产能") == "产能"              # 无后缀，原样返回
+
+
+# ── M9：时点守卫是全系统最关键的防线之一，此前无测试守护 ──
+# （`test_已有该因子但披露时点晚于as_of仍算缺口` 已覆盖 LookAheadError
+# 分支，这里补一条 identify() 在 as_of 之前正常可见时不算缺口的对照，
+# 与之前那条构成一对「时点之前可见/之后不可见」的完整守卫测试。）
+
+def test_时点守卫对照_披露时点早于as_of时不算缺口():
+    """与 test_已有该因子但披露时点晚于as_of仍算缺口 相对照：同一个
+    因子，披露时点早于/等于 as_of 时应正常被判定为已披露，不是缺口。
+    两条测试合起来才是对时点守卫完整的锁定——只测"晚于不算"不能
+    排除"提前把整个 identify 都改成恒定返回缺口"这种退化实现。"""
+    led = FactLedger()
+    led.put(Fact(key="capacity", value=D("0.1"), unit="ratio",
+                 period="2025FY", as_of=date(2026, 8, 1),
+                 source_id="t", method=Method.COMPUTED))
+    gaps = identify(_rev(), led, AS_OF)
+    assert "capacity" not in [f.key for f in gaps]

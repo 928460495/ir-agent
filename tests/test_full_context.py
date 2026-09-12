@@ -301,6 +301,93 @@ def test_研究方法论解析失败时退回不分解(tmp_path, monkeypatch):
     assert not (tmp_path / full.DRIVERS_MD).exists()
 
 
+def test_drivers_md已存在时读回而不重新联网(tmp_path, monkeypatch):
+    """I2：drivers.md 末尾承诺「改这个文件后重跑第一阶段即可覆盖」，
+    但此前完全没有读回路径——重跑会重新调用 client 预研，把人的修改
+    直接盖掉。这条测试在修复前必须失败：drivers.md 已经存在时，
+    `fetch_all`/`client` 都不该再被调用。"""
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full, methodology
+
+    def _boom_tax():
+        raise AssertionError("drivers.md 已存在，不该再查询行业分类")
+    monkeypatch.setattr(tax, "fetch_all", _boom_tax)
+
+    lines = ("分解: 营收 | 乘 | 产能:变化率:年报产能数据 | "
+             "单价:变化率:研报测算\n"
+             "分解: 毛利率 | 加 | 稼动率摊薄:pp:年报 | 上游成本:pp:研报\n")
+    m0 = methodology.parse(lines)
+    m0.industry = "电子-半导体-封测"
+    (tmp_path / full.DRIVERS_MD).write_text(methodology.to_markdown(m0),
+                                            encoding="utf-8")
+
+    def _boom_client(prompt):
+        raise AssertionError("drivers.md 已存在，不该再联网预研")
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client)
+    assert err == ""
+    assert m is not None and len(m.decompositions) == 2
+    assert m.industry == "电子-半导体-封测"
+
+
+def test_drivers_md人工改过的内容读回后生效(tmp_path, monkeypatch):
+    """**这是「可覆盖」这句承诺真正要验证的地方。** 人打开 drivers.md
+    改了一处数据线索，重跑第一阶段读回来的必须是改过的那份，不是模型
+    原来给的。"""
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full, methodology
+
+    monkeypatch.setattr(tax, "fetch_all",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("不该查询行业分类")))
+
+    lines = ("分解: 营收 | 乘 | 产能:变化率:年报产能数据 | "
+             "单价:变化率:研报测算\n"
+             "分解: 毛利率 | 加 | 稼动率摊薄:pp:年报 | 上游成本:pp:研报\n")
+    m0 = methodology.parse(lines)
+    m0.industry = "电子-半导体-封测"
+    md = methodology.to_markdown(m0)
+    edited = md.replace("年报产能数据", "人工改过：管理层交流纪要")
+    (tmp_path / full.DRIVERS_MD).write_text(edited, encoding="utf-8")
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology(
+        "600584", _R(), tmp_path, lambda p: (_ for _ in ()).throw(
+            AssertionError("不该再联网预研")))
+    assert err == ""
+    assert m.decompositions[0].factors[0].source_hint == "人工改过：管理层交流纪要"
+
+
+def test_drivers_md读不回时明确报错且不重新联网(tmp_path, monkeypatch):
+    """无法解析时要明确报错，不能静默回退到重新预研——静默回退会让人
+    以为自己的修改生效了，实际被丢掉。"""
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full
+
+    monkeypatch.setattr(tax, "fetch_all",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("不该查询行业分类")))
+
+    (tmp_path / full.DRIVERS_MD).write_text("乱写的内容，不含任何标记\n",
+                                            encoding="utf-8")
+
+    def _boom_client(prompt):
+        raise AssertionError("不该重新联网预研")
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client)
+    assert m is None
+    assert "drivers.md" in err
+    assert "未重新联网" in err or "不重新" in err or "不会再联网" in err
+
+
 def test_研究方法论取不到行业分类时降级(tmp_path, monkeypatch):
     """没有申万行业路径就无从预研 —— 降级说明原因，不抛异常中断。"""
     import ir_agent.sources.taxonomy as tax
@@ -357,3 +444,51 @@ def test_第二阶段必须重建派生事实():
         "必须在撰写之前重建，否则占位符仍然解析不了"
     # 确定性层不该调模型 —— 否则第二阶段开销会凭空多一倍
     assert "make_client" not in inspect.getsource(full._analyse_facts)
+
+
+# ── I4：因子模式连续失败要回落两标量而非让整段判断项消失 ─────────
+
+def test_因子模式降级时判断项仍写出且降级原因入skipped(tmp_path, monkeypatch):
+    """I4 修复的落地验证：`assume.decide` 拿到 `AssumptionSet.degraded`
+    后，`_propose_assumptions` 仍要把判断项写出来（不是像
+    `assume.AssumeFailed` 那样整段消失），并把降级原因作为非致命说明
+    通过返回值交给调用方——`run_analysis` 会把它塞进 `skipped`，读者
+    在终端产物清单上就能看到这轮其实是降级产出的。"""
+    from datetime import date
+    from decimal import Decimal
+
+    from ir_agent import assume, dcf, full
+    from ir_agent.ledger import FactLedger
+
+    monkeypatch.setattr(
+        dcf, "calibrate_only",
+        lambda code, as_of, ledger: {
+            "judg": {"g_stats": (), "gm_stats": ()},
+            "periods": {"proj": ["2026E"]}})
+
+    degraded_msg = "因子模式连续 3 次填不出合格的判断项——已退回两标量模式"
+
+    def _fake_decide(client, judg, labels, ctx, **kw):
+        a = assume.AssumptionSet(code="600584", labels=labels)
+        a.degraded = degraded_msg
+        a.rows = [assume.Row(driver="growth", year=1, bear=Decimal("0.02"),
+                             base=Decimal("0.06"), bull=Decimal("0.10"),
+                             note="x", bases=[])]
+        return a
+    monkeypatch.setattr(assume, "decide", _fake_decide)
+
+    class _R:
+        ledger = FactLedger()
+        period = "2025FY"
+
+    arts: dict[str, str] = {}
+    err = full._propose_assumptions(
+        "600584", _R(), "body", {}, date(2026, 9, 7), tmp_path,
+        lambda p: "", arts)
+
+    assert degraded_msg in err, "降级原因必须作为非致命说明返回，供 skipped 使用"
+    assert (tmp_path / full.ASSUMPTIONS_MD).exists(), \
+        "判断项必须照常写出，不能因为降级就整段消失"
+    assert degraded_msg in (tmp_path / full.ASSUMPTIONS_MD).read_text(
+        encoding="utf-8"), "assumptions.md 里也要如实写明降级原因"
+    assert "DCF 判断项（待核实）" in arts

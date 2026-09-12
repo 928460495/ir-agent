@@ -6,7 +6,7 @@ import pytest
 
 from ir_agent.drivers import Op
 from ir_agent.methodology import (Methodology, MethodologyFailed, _slug,
-                                  parse, research, to_markdown)
+                                  from_markdown, parse, research, to_markdown)
 
 OUT = """分解: 营收 | 乘 | 产能:变化率:年报产能与在建工程 | 稼动率:变化率:研报行业稼动率测算 | 单价:变化率:研报封测价格跟踪
 分解: 毛利率 | 加 | 稼动率摊薄:pp:固定成本占比 | 折旧变动:pp:在建工程转固节奏 | 上游成本:pp:基板与金线报价
@@ -159,3 +159,72 @@ def test_slug清理中英文标点含全角括号顿号斜杠():
     assert "、" not in _slug("原材料、折旧")
     assert "/" not in _slug("ASP/良率")
     assert _slug("净利率（调整）") != ""
+
+
+# ── I2：drivers.md 是只写文件，文档承诺的人工覆盖入口不存在 ──────
+#
+# `to_markdown` 末尾写着「改这个文件后重跑第一阶段」即可覆盖，但此前
+# `parse()` 只认得预研阶段模型输出的 DSL 行（`分解: ... | ...`），
+# `to_markdown` 产出的却是给人看的 Markdown 表格——两种格式互不相通，
+# 落盘之后**没有任何路径能把这份文件读回来**。重跑第一阶段只会重新
+# 调用 `research()`，把人的修改直接覆盖掉。
+
+def test_落盘的markdown可以读回原始分解式():
+    """to_markdown 的产出必须带着一份可被 from_markdown 解析回去的
+    原始定义——这条测试在补上 from_markdown 之前必须失败（函数都
+    不存在）。"""
+    m = parse(OUT)
+    back = from_markdown(to_markdown(m))
+    assert len(back.decompositions) == 2
+    rev = back.decompositions[0]
+    assert rev.target == "revenue" and rev.op is Op.MULTIPLY
+    assert [f.label for f in rev.factors] == ["产能", "稼动率", "单价"]
+    gm = back.decompositions[1]
+    assert gm.target == "gross_margin" and gm.op is Op.ADD_PP
+    assert len(back.pitfalls) == 2
+
+
+def test_读回后行业信息也一并保留():
+    m = parse(OUT)
+    m.industry = "电子-半导体-封测"
+    back = from_markdown(to_markdown(m))
+    assert back.industry == "电子-半导体-封测"
+
+
+def test_人工改过因子后读回生效():
+    """**这是「可覆盖」这句承诺真正要成立的地方。** 人改了落盘文件里的
+    数据线索之后，重跑要读到改过的内容，不是模型原来给的那份。"""
+    md = to_markdown(parse(OUT))
+    edited = md.replace("年报产能与在建工程", "人工改过的线索：管理层交流纪要")
+    back = from_markdown(edited)
+    assert back.decompositions[0].factors[0].source_hint == \
+        "人工改过的线索：管理层交流纪要"
+
+
+def test_读不回时明确报错而不是返回空():
+    """**无法解析时要明确报错，不能静默回退**——静默回退会让人以为
+    自己的修改生效了，实际被丢掉。"""
+    with pytest.raises(MethodologyFailed, match="标记"):
+        from_markdown("# 驱动因子分解（某行业）\n\n随便写点什么，没有任何"
+                      "可读回的内容。\n")
+
+
+def test_代码块被删除时明确报错():
+    """标记还在，但代码块本身被删掉或改坏——同样要报错，不能安静地
+    解析出一个空的 Methodology 然后假装成功。"""
+    md = to_markdown(parse(OUT))
+    heading = "## 分解式原始定义（供人工编辑与重跑读回）"
+    broken = md.split(heading)[0] + heading + "\n\n（代码块被误删了）\n"
+    with pytest.raises(MethodologyFailed, match="代码块"):
+        from_markdown(broken)
+
+
+def test_代码块内容本身不合法时报出具体原因():
+    """读回复用的是同一套 parse()，因此人改坏了语法（比如把 pp 混进
+    乘法链）会得到与预研阶段完全一样的可读错误，不是一个笼统的
+    「读不回」。"""
+    md = to_markdown(parse(OUT))
+    broken = md.replace("产能:变化率:年报产能与在建工程",
+                        "产能:pp:年报产能与在建工程")
+    with pytest.raises(MethodologyFailed, match="变化率"):
+        from_markdown(broken)

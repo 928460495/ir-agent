@@ -38,6 +38,31 @@ MISSING = "无数据"
 # 让读者自己判断这段话到底有没有给出数字，比我们代为下结论更诚实。
 _EXCERPT_WINDOW = 40
 
+# I3：真实联网跑出来的因子标签形如「有效产能变化率」「稼动率贡献」
+# 「先进封装收入占比提升贡献」「原材料及折旧成本变化贡献」——这些
+# 后缀是分解式的运算修饰（乘法链统一叫"变化率"，加法链统一叫"贡献"/
+# "占比提升贡献"），根子是标签里带着单位/运算后缀，不是同义词问题：
+# 年报只会写「有效产能」「稼动率」，不会逐字写「有效产能变化率」。
+# 顺序按长度降序——「先进封装收入占比提升贡献」要整体剥掉「占比提升
+# 贡献」，不能先被短的「贡献」剥成半吊子的「先进封装收入占比提升」。
+_SUFFIXES = ("占比提升贡献", "变化贡献", "占比提升", "变化率", "贡献", "增速")
+
+
+def _core_label(label: str) -> str:
+    """剥掉因子标签里的单位/运算后缀，取核心词做文本匹配。
+
+    方向仍要保守：**宁可漏判落到④，不可误判成"已披露"**。剥完后核心词
+    过短（<2 字）就不剥，用原始标签去匹配——大概率落空退到④，但不会
+    拿一两个字这种几乎到处都能命中的片段冒充"命中"，把一个巧合伪装成
+    证据（这正是本模块要防的最严重失败模式）。
+    """
+    for suf in _SUFFIXES:
+        if label.endswith(suf) and len(label) > len(suf):
+            core = label[: -len(suf)]
+            if len(core) >= 2:
+                return core
+    return label
+
 
 @dataclass
 class FactorData:
@@ -84,12 +109,16 @@ def _match_annual(sections, label: str) -> tuple[str, str] | None:
 
     只做包含判断，不抽数字——命中「稼动率」三个字不等于拿到了稼动率的
     数值，抽错一个数比没抽更糟。返回值交给调用方判断，不在这里下结论。
+
+    **匹配用剥掉后缀的核心词，不是原始标签。** 原始标签「有效产能变化
+    率」这种带单位/运算后缀的整串不会逐字出现在年报里，见 `_core_label`。
     """
     if sections is None:
         return None
+    core = _core_label(label)
     for s in sections.sections.values():
-        if label in s.text:
-            return _excerpt(s.text, label), f"《{s.label}》"
+        if core in s.text:
+            return _excerpt(s.text, core), f"《{s.label}》"
     return None
 
 
@@ -97,9 +126,10 @@ def _match_report(corpus, label: str) -> tuple[str, str] | None:
     """③研报语料库里是否提到该因子，判据与 _match_annual 同理。"""
     if corpus is None:
         return None
+    core = _core_label(label)
     for d in corpus.docs:
-        if label in d.text:
-            return _excerpt(d.text, label), d.cite()
+        if core in d.text:
+            return _excerpt(d.text, core), d.cite()
     return None
 
 

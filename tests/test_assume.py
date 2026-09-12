@@ -523,6 +523,41 @@ def test_两标量模式describe行为不变():
     assert "2026E" in txt and "悲观" in txt and "依据" in txt
 
 
+# ── I7：营收一节被毛利率基期连坐 ─────────────────────────────
+#
+# `_synthesized()` 此前只要**任一**分解式缺基期就整体返回 None，于是
+# `_describe_composed` 对每一个目标都打印「基期毛利率未知」——包括
+# 营收。营收是乘法链 Π(1+r)−1，根本不需要毛利率基期，完全算得出来；
+# 在营收标题下说「基期毛利率未知」本身就是误导。降级路径恰恰是人想
+# 搞清楚出了什么事的时候，这时候该显示的东西更不该丢。
+
+def test_营收合成结果不受毛利率缺基期连坐():
+    """实测复现：base_margin 未知时，修复前营收一节下面也会打印
+    「基期毛利率未知，暂无法显示合成后的毛利率」——这条测试在修复前
+    必须失败。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.base_margin = None                     # 毛利率基期未知
+    a.code, a.labels = "600584", ["2026E"]
+    txt = a.describe()
+
+    rev_section, gm_section = txt.split("## 毛利率", 1)
+    # 营收永远算得出来：合成结果（1.10×0.98−1=7.80%）必须显示，
+    # 且不能出现「基期毛利率未知」这类文不对题的说明。
+    assert "7.80%" in rev_section
+    assert "基期毛利率未知" not in rev_section
+    # 毛利率一节：缺基期，只在这一节显示说明文字。
+    assert "基期毛利率未知" in gm_section
+
+
+def test_营收缺基期时仍能过check的合成校验():
+    """`_check_factors` 里 base_margin 缺失时用占位默认值合成校验——
+    这条只是确认 describe() 的展示层修复不影响这条既有的校验路径。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                decomps=_decomps(), base_margin=None)
+
+
 # ── C2：历史回算残差是死代码 ─────────────────────────────────
 
 from ir_agent.ledger import Fact, Method
@@ -703,3 +738,61 @@ def test_全角减号在标量模式下解析出正确符号():
     a = assume.parse(_line("营收增速", 1, bear="−2%", base="3%", bull="8%"), 1)
     assert a.rows[0].bear == D("-0.02")
     assert a.rows[0].bear < a.rows[0].base < a.rows[0].bull
+
+
+# ── I4：因子模式连续失败没有回落到两标量 ─────────────────────
+#
+# 因子模式要填 N 因子 × Y 年 × 3 档，比标量模式的 2×5×3 重数倍，失败
+# 概率明显更高。修复前 `decide()` 在因子模式下连续 `max_attempts` 次
+# 填不出合格的判断项就直接抛 `AssumeFailed`，调用方（`full._propose_
+# assumptions`）捕获后只返回一句错误串——整个 DCF 判断项直接没有，
+# 连 assumptions.md 都不写。硬约束「降级但继续、并如实说明降级原因」
+# 在这一层缺位：能力边界不是故障，整轮研究不该因此停摆。
+
+def test_因子模式连续失败后回落两标量模式():
+    """实测复现：因子模式怎么喂都给不出合格的行（写了个分解式里根本
+    不存在的因子名），修复前这里会直接抛 AssumeFailed，调用方拿到的
+    只有一句错误串，整段判断项凭空消失——这条测试在修复前必须失败。"""
+    class _C:
+        def __call__(self, p):
+            if "本次按驱动因子分解填写" in p:
+                # 因子模式无论怎么重试都给不出合法的因子名
+                return "假设: 不存在的因子 | 第1年 | 1% | 2% | 3% | 「x」"
+            return _full(1)     # 退回两标量模式后能正常给出
+
+    a = assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                      decomps=_decomps())
+    assert a.decomps == [], "应已退回两标量模式，不应再带着分解式"
+    assert {r.driver for r in a.rows} == {"growth", "gm"}
+    assert a.degraded, "必须如实写明降级原因，不能假装成功"
+    assert "因子" in a.degraded
+
+
+def test_因子模式降级原因出现在待核实清单里():
+    """降级但继续——损失的是精度，不是担保，读者必须在清单上看到这件事，
+    而不是打开 assumptions.md 却看不出这轮其实是降级产出的。"""
+    class _C:
+        def __call__(self, p):
+            if "本次按驱动因子分解填写" in p:
+                return "假设: 不存在的因子 | 第1年 | 1% | 2% | 3% | 「x」"
+            return _full(1)
+
+    a = assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                      decomps=_decomps())
+    a.code, a.labels = "600584", ["2026E"]
+    txt = a.describe()
+    assert a.degraded in txt
+
+
+def test_两标量模式本身连续失败仍照常拒绝():
+    """回归：没有 decomps（本来就是两标量模式）时，连续失败不该被当成
+    "因子模式失败"再退化一次——那样会造成无限递归或行为混乱，必须原样
+    拒绝。"""
+    class _C:
+        def __call__(self, p):
+            return "假设: 营收增速 | 第1年 | 5% | 5% | 5% | 「x」"
+    with pytest.raises(AssumeFailed, match="连续"):
+        assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      ledger=FactLedger(), body=BODY, as_of=AS_OF)
