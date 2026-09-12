@@ -1615,3 +1615,140 @@ def test_提示词说明两条新出口何时用哪条():
     txt = assume._factor_head([d], fd)
     assert "无数据（估计）" in txt
     assert "只对确实没有数据支撑的因子开放" in txt
+
+
+# ═══════════════════════════════════════════════════════════════
+# fix-basis-ditto：因子模式「依据」允许「同上」回指同一因子上一行
+#
+# 契约缺口：600584 真实联网跑分解式有 9 个因子、预测期 5 年，模型要填
+# 45 行，逐年重复同一段年报引文纯属浪费——依据在语义上是"每个因子
+# 一份"（证明这个因子的数据来源），逐年不同的是理由（判断）。第四次
+# 实跑模型试图用「同上引文」缩写重复的依据，被 `_factor_basis` 判
+# "缺少可核验的依据"直接驳回（既找不到 `[[key@period]]`，也找不到
+# `「…」`，也不是「无数据…估计」）。
+#
+# 修法：允许「同上」类回指，但把含义精确定为"同一因子（factor_key）
+# 上一行的依据"——不是"文本里紧邻的上一行"，那可能是别的因子，会有
+# 歧义。由代码复用那条已经核验过的 Basis 对象，审计链条不受损。
+# ═══════════════════════════════════════════════════════════════
+
+def test_同上引文复用同一因子上一年已核验的依据_600584实测复现():
+    """**这是本次要修的失败场景本身的最小复现**：产能规模因子第 1 年
+    给出完整的年报引文依据，第 2 年模型写「依据：同上引文」缩写——
+    修复前 `_factor_basis` 在这一行既找不到占位符也找不到「…」引号
+    引文，也不是「无数据…估计」，会被直接驳回（已实测复现，见
+    fix-basis-ditto-report.md）。修复后第 2 行应当拿到与第 1 行完全
+    相同的、带真实年报出处的 Basis，理由（note）仍然各自独立。"""
+    d = _one_factor_decomp(key="capacity", label="产能规模")
+    excerpt = "高端先进制造产能规模化创收"
+    fd = {"capacity": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNUAL,
+        note=f"「{excerpt}」——《未来发展的讨论与分析》"
+            "（文字依据，是否给出具体数值待人工确认）",
+        source_url="https://static.cninfo.com.cn/600584_2025_annual.pdf",
+        source_retrieved=AS_OF, source_excerpt=excerpt)}
+    body = "公司持续推进降本增效，聚焦主业发展。"
+    raw = "\n".join([
+        "假设: 产能规模 | 第1年 | 3% | 6% | 9% | "
+        f"「{excerpt}」，公司明确将扩大高端产能，带动营收增长",
+        "假设: 产能规模 | 第2年 | 4% | 7% | 10% | "
+        "理由：产能持续爬坡，带动营收进一步增长。依据：同上引文。",
+    ])
+    a = assume.parse(raw, 2, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 2, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    row1, row2 = a.rows[0], a.rows[1]
+    assert row2.bases == row1.bases, "「同上」应复用同一因子上一行已核验的 Basis"
+    basis2 = row2.bases[0]
+    assert basis2.kind.value == "external"
+    assert basis2.ref == "https://static.cninfo.com.cn/600584_2025_annual.pdf"
+    assert basis2.quote == excerpt
+    # 理由仍然各自独立，不能因为依据复用就把理由也搞混
+    assert row1.note != row2.note
+    assert "产能持续爬坡" in row2.note
+
+
+def test_同上写法变体_同前_见上_同该因子上一年():
+    """措辞不做固定短语死匹配——「同上」「同前」「见上」「同该因子
+    上一年」都应识别为回指，与 `_looks_like_estimate` 同一套只要求
+    关键词共现的思路。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING, note="未找到任何数据")}
+    variants = ["同前", "见上", "同该因子上一年"]
+    for variant in variants:
+        raw = "\n".join([
+            "假设: 稼动率 | 第1年 | 5% | 8% | 12% | "
+            "无数据（估计），参照同业平均稼动率下滑趋势判断",
+            f"假设: 稼动率 | 第2年 | 5% | 8% | 12% | {variant}，判断不变",
+        ])
+        a = assume.parse(raw, 2, decomps=[d], factor_data=fd, as_of=AS_OF)
+        assert a.rows[1].bases == a.rows[0].bases, variant
+
+
+def test_因子第一次出现就写同上被驳回():
+    """「同上」指的是同一因子上一行的依据——该因子第一次出现（没有
+    上一行可回指）时必须驳回，不能悄悄放行成"没有依据"。"""
+    d = _one_factor_decomp()
+    raw = "假设: 稼动率 | 第1年 | 5% | 8% | 12% | 同上，参照上次报告"
+    with pytest.raises(AssumeFailed, match="没有上一行"):
+        assume.parse(raw, 1, decomps=[d], factor_data={}, as_of=AS_OF)
+
+
+def test_同上不跨因子继承():
+    """歧义不能出现在一个负责"可核验"的机制里——「同上」必须精确指向
+    同一因子（factor_key）的上一行，不能因为文本里紧邻的上一行恰好
+    是别的因子、且那一行有合法依据，就被当成可以借用。"""
+    d = _two_factor_decomp()
+    finding = Finding(factor_key="utilization", claim="平均稼动率约78%",
+                      url="https://semi.org/x", publisher="SEMI",
+                      tier=Tier.OFFICIAL, published=date(2026, 7, 1))
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.EXTERNAL, findings=[finding])}
+    raw = "\n".join([
+        "假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「平均稼动率约78%」，参照采集数据",
+        "假设: 单价 | 第1年 | -1% | 1% | 3% | 同上，判断口径一致",
+    ])
+    with pytest.raises(AssumeFailed, match="没有上一行"):
+        assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+
+
+def test_同行真实引文优先于同上字样():
+    """注意不要误伤：一行里如果同时给了真实引文和「同上」字样，应以
+    真实引文为准——`_QUOTE` 在 `_looks_like_ditto` 之前被检查，真实
+    引文分支必然优先命中。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING, note="未找到任何数据")}
+    raw = "\n".join([
+        "假设: 稼动率 | 第1年 | 5% | 8% | 12% | "
+        "无数据（估计），参照同业平均稼动率下滑趋势判断",
+        "假设: 稼动率 | 第2年 | 5% | 8% | 12% | "
+        "「行业稼动率同上季度基本持平」，年报原话",
+    ])
+    a = assume.parse(raw, 2, decomps=[d], factor_data=fd, as_of=AS_OF)
+    # 第二行含有真实的「…」引文，即便引文正文本身出现了"同上"字样，
+    # 也必须走 `_basis`/`_factor_basis` 的正文引用出口，而不是被误判
+    # 成回指——这里正文没有这句话，应当在 check() 阶段因不可核验被拒。
+    with pytest.raises(AssumeFailed, match="不可核验"):
+        assume.check(a, 2, ledger=FactLedger(), body="公司持续推进降本增效。",
+                    as_of=AS_OF, decomps=[d])
+
+
+def _two_factor_decomp():
+    from ir_agent.drivers import Decomposition, Factor, Op
+    return Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="utilization", label="稼动率", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])
+
+
+def test_提示词说明同上的精确含义():
+    """`_factor_head` 要写明「同上」的合法写法与精确含义——同一因子
+    上一年的依据，且第一次出现该因子时必须给出完整依据。这是降低
+    45 行判断项失败率的关键，不能只在代码里悄悄支持而不告诉模型。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING, note="未找到任何数据")}
+    txt = assume._factor_head([d], fd)
+    assert "同上" in txt
+    assert "同一因子" in txt or "同一个因子" in txt
+    assert "第一次出现该因子时必须给出完整依据" in txt or "第一次出现" in txt
