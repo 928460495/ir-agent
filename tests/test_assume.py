@@ -7,9 +7,11 @@ from decimal import Decimal
 
 import pytest
 
-from ir_agent import assume
+from ir_agent import assume, gaps
 from ir_agent.assume import AssumeFailed, Case
 from ir_agent.ledger import FactLedger
+from ir_agent.sources.external import Tier
+from ir_agent.sources.web import Finding
 
 D = Decimal
 AS_OF = date(2026, 9, 7)
@@ -1244,3 +1246,305 @@ def test_两标量模式小数记法不受因子侧必须带百分号的约束()
     bp 这个真正跨单位、会被静默吞下的窄口径守卫。"""
     a = assume.parse(_line("营收增速", 1, "0.02", "0.06", "0.10"), 1)
     assert a.rows[0].bear == D("0.02")
+
+
+# ═══════════════════════════════════════════════════════════════
+# fix-factor-basis：因子模式「依据」补两条合法出口
+#
+# 契约缺口：正文允许「无数据的因子取值是估计」，但 `_basis`（两标量）
+# 与因子模式原来共用的同一套逐字核验只认账本占位符与正文逐字引用两种
+# 写法——对一个正文没提过、账本也没有的因子，根本不存在合法的依据
+# 写法。真实联网跑长电科技 600584 时，方法论预研分出的 9 个因子有 7
+# 个正文一次都没提过，模型连续 3 次被拒后只能整体退回两标量模式，
+# 把分解白白丢掉。这里验证的是 `assume._factor_basis`（`_basis` 本身
+# 两标量降级路径不动，见该函数）。
+# ═══════════════════════════════════════════════════════════════
+
+def _one_factor_decomp(key="utilization", label="稼动率", unit="变化率"):
+    from ir_agent.drivers import Decomposition, Factor, Op
+    return Decomposition(target="revenue", op=Op.MULTIPLY,
+                         factors=[Factor(key=key, label=label, unit=unit)])
+
+
+def test_无数据因子明说估计不再被驳回():
+    """**这是本次要修的失败场景本身的最小复现**：因子标签「稼动率」
+    在正文里一次都不出现，采集状态确实是 `gaps.MISSING`——修复前
+    `_basis` 只认占位符与正文逐字引用，这里两样都没有，会被
+    `AssumeFailed("缺少可核验的依据（需正文原话或占位符）")` 直接驳回
+    （已用 git worktree 跑过修复前的 `ir_agent/assume.py`，实测复现，
+    见 fix-factor-basis-report.md）。修复后允许「无数据（估计）」，
+    只要因子的采集状态真的是 MISSING，且理由里说明了估计依据。"""
+    d = _one_factor_decomp()
+    body = "境外收入敞口大小暂无法量化。"        # 「稼动率」一次都不出现
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING,
+        note="未找到任何数据 —— 取值为估计")}
+    raw = ("假设: 稼动率 | 第1年 | 5% | 8% | 12% | "
+          "无数据（估计），参照同业平均稼动率下滑趋势判断")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF,
+                decomps=[d])           # 不抛异常即为通过
+    assert a.rows[0].bases == [], "无数据估计应落地为空依据，不是编一个假依据"
+
+
+def test_对有数据的因子写无数据估计仍被驳回():
+    """「无数据」只对确实没有数据支撑的因子开放——否则会变成模型对任何
+    因子都想用的万能逃生口，防的正是这个。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNUAL, note="「稼动率保持稳定」——《核心竞争力分析》")}
+    raw = "假设: 稼动率 | 第1年 | -2% | 0% | 2% | 无数据（估计），图省事"
+    with pytest.raises(AssumeFailed, match="无数据"):
+        assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+
+
+def test_因子压根没被采集也能用无数据出口():
+    """`factor_data` 里都没有这个因子（比如 gaps.collect 整体失败、
+    factor_data={}）——同样属于"确实没有数据支撑"，不应该因为字典里
+    连键都没有就被当成异常拒绝。"""
+    d = _one_factor_decomp()
+    raw = "假设: 稼动率 | 第1年 | 5% | 8% | 12% | 无数据（估计），保守假设持平微降"
+    a = assume.parse(raw, 1, decomps=[d], factor_data={}, as_of=AS_OF)
+    assert a.rows[0].bases == []
+
+
+def test_无数据估计没给理由被check挡下():
+    """空依据 + 空理由 = 一个数字凭空出现在清单上，连"这是怎么估出来的"
+    都无从判断——`_factor_basis` 只在解析阶段判过一次"这个因子确实
+    MISSING"，理由是否给出要在 `check()` 里再挡一道，因为 `check()`
+    在第二阶段人工核实之后会脱离 `_parse_factors` 单独重跑，人手改
+    JSON 同样可能把 note 清空。"""
+    d = _one_factor_decomp()
+    a = assume.AssumptionSet(code="", labels=["2026E"], decomps=[d])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"),
+                         base=D("0.08"), bull=D("0.12"),
+                         factor_key="utilization", note="")]
+    with pytest.raises(AssumeFailed, match="没有给理由"):
+        assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
+                    decomps=[d])
+
+
+def test_全部因子都无数据时check仍能通过():
+    """极端场景：分解式里每个因子都没有数据支撑——这不是"没做功课"，
+    是真实可能发生的情形（比如整个行业都不披露稼动率），应当被允许，
+    不能因为 `validate([])` 原本是给"整批一条依据都没给"设的全局闸门
+    就被误伤。"""
+    from ir_agent.drivers import Decomposition, Factor, Op
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="utilization", label="稼动率", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])
+    raw = "\n".join([
+        "假设: 稼动率 | 第1年 | 3% | 5% | 8% | 无数据（估计），参照行业均值",
+        "假设: 单价 | 第1年 | -2% | 0% | 2% | 无数据（估计），参照历史波动区间"])
+    a = assume.parse(raw, 1, decomps=[d], factor_data={}, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
+                decomps=[d])
+
+
+def test_估计行在清单上被显著标出():
+    """遗漏必须可见——估计行不能跟"有依据"的行长得一样，读者要能一眼
+    分清哪些数是有据可查的，哪些是拍脑袋估的。"""
+    d = _one_factor_decomp()
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[d])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"),
+                         base=D("0.08"), bull=D("0.12"),
+                         factor_key="utilization", note="参照行业均值")]
+    txt = a.describe()
+    assert "⚠ 估计" in txt
+
+
+def test_估计因子在清单末尾被单独汇总():
+    """不能只淹没在各自因子的表格里，要单独汇总一段，让人一眼看出
+    「这几个数是估的，没有证据支撑」。"""
+    d = _one_factor_decomp()
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[d])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"),
+                         base=D("0.08"), bull=D("0.12"),
+                         factor_key="utilization", note="参照行业均值")]
+    txt = a.describe()
+    assert "没有证据支撑，是估计" in txt and "稼动率" in txt.split("估计")[-1]
+
+
+def test_决策层面因子模式一次就能给出合格判断项不再降级():
+    """**复现的是编排层实测踩到的真实后果**：因子模式若怎么填都给不出
+    合格的行，`decide()` 会在连续 `max_attempts` 次之后整体退回两标量
+    模式（`a.decomps == []`）——这正是 600584 真实联网那一轮发生的事。
+    这里用假 client 还原同样的分解式形状（一个因子正文完全没提、状态
+    MISSING），验证修复后**第一次**就能给出合格的因子行，根本不需要
+    走到降级分支。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING,
+        note="未找到任何数据 —— 取值为估计")}
+
+    class _C:
+        def __init__(self): self.calls = 0
+        def __call__(self, p):
+            self.calls += 1
+            return ("假设: 稼动率 | 第1年 | 5% | 8% | 12% | "
+                    "无数据（估计），参照同业平均稼动率下滑趋势判断")
+
+    client = _C()
+    body = "境外收入敞口大小暂无法量化。"
+    a = assume.decide(client, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      ledger=FactLedger(), body=body, as_of=AS_OF,
+                      decomps=[d], factor_data=fd)
+    assert client.calls == 1, "应当第一次就通过，不需要重试更不需要降级"
+    assert a.decomps == [d], "不应该退回两标量模式——因子分解本该被保留"
+    assert not a.degraded
+    assert a.rows[0].bases == []
+
+
+# ── 出口一：引用该因子自己采集到的证据 ────────────────────────
+
+def test_引用该因子采集到的Finding代码自动补上真实出处():
+    """模型只管逐字引用 Finding.claim，出处（URL、抓取日期）由代码
+    填——绝不让模型自己写网址，那等于给捏造开一扇门。"""
+    d = _one_factor_decomp()
+    finding = Finding(factor_key="utilization", claim="平均稼动率约78%",
+                      url="https://semi.org/x", publisher="SEMI",
+                      tier=Tier.OFFICIAL, published=date(2026, 7, 1))
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.EXTERNAL, findings=[finding])}
+    body = "公司积极扩产，产能持续释放。"       # 正文完全没提这句话
+    raw = ("假设: 稼动率 | 第1年 | 2% | 4% | 6% | "
+          "「平均稼动率约78%」，参照采集到的行业数据")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    basis = a.rows[0].bases[0]
+    assert basis.kind.value == "external"
+    assert basis.ref == "https://semi.org/x", "出处必须是代码从 Finding 里填的真实 URL"
+    assert basis.retrieved == AS_OF
+
+
+def test_引用不存在的发现会掉回正文核验并被驳回():
+    """模型编一句看起来像证据、但不在任何 Finding.claim 里的话——不能
+    因为"看起来像因子证据"就绕过核验，应当掉回"当作正文引用"这条老
+    路径，然后因为它确实不在正文里而被驳回，行为与修复前对普通正文
+    引用的处理一致，没有开新的口子。"""
+    d = _one_factor_decomp()
+    finding = Finding(factor_key="utilization", claim="平均稼动率约78%",
+                      url="https://semi.org/x", publisher="SEMI",
+                      tier=Tier.OFFICIAL, published=date(2026, 7, 1))
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.EXTERNAL, findings=[finding])}
+    body = "公司积极扩产，产能持续释放。"
+    raw = "假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「稼动率将大幅提升至95%」"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    with pytest.raises(AssumeFailed, match="不可核验"):
+        assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+
+
+def test_引用年报摘录片段代码自动补上年报出处():
+    """②年报叙述章节命中时，`gaps.collect` 已经把摘出的原文片段记进
+    `fd.note`、真实出处记进 `fd.source_url`——模型逐字引用这段原文，
+    代码把出处填进 EXTERNAL 依据。选 EXTERNAL 而不是 REPORT：REPORT
+    的核验（`basis.validate`）比对的是 `check()` 当时的 `body`，也就是
+    研究简报正文，年报原文根本不在这段正文里，标成 REPORT 会在紧接着
+    的 `check()` 里就被判"正文里找不到"而驳回；EXTERNAL 在没有 corpus
+    时只验格式不验内容，恰好符合"年报只在预研当轮验一次、以后不再回头
+    复查"的实际情况（第二阶段不会重新下载解析年报 PDF）。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNUAL,
+        note="「稼动率维持在行业前列，具体测算详见内部管理报表」"
+            "——《核心竞争力分析》（文字依据，是否给出具体数值待人工确认）",
+        source_url="https://static.cninfo.com.cn/annual.pdf",
+        source_retrieved=AS_OF)}
+    body = "公司持续推进降本增效。"
+    raw = ("假设: 稼动率 | 第1年 | -2% | 0% | 2% | "
+          "「稼动率维持在行业前列」，年报未给具体数值，取中性估计")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    basis = a.rows[0].bases[0]
+    assert basis.kind.value == "external"
+    assert basis.ref == "https://static.cninfo.com.cn/annual.pdf"
+    assert basis.quote == "稼动率维持在行业前列"
+
+
+def test_引用研报摘录片段代码自动补上研报文档的真实url():
+    """③研报语料库命中同理，出处是那篇 Document 自己的 url/retrieved
+    （由 `gaps._match_report` 带回给 `collect`），不是年报的。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.REPORT,
+        note="「我们测算行业稼动率将于下半年回升」——某券商研究所"
+            "《行业深度报告》（2026-06-01，卖方研究）"
+            "（文字依据，是否给出具体数值待人工确认）",
+        source_url="https://research.example/x",
+        source_retrieved=date(2026, 6, 1))}
+    body = "公司持续推进降本增效。"
+    raw = ("假设: 稼动率 | 第1年 | 1% | 3% | 5% | "
+          "「我们测算行业稼动率将于下半年回升」，参照研报测算的回升节奏")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    basis = a.rows[0].bases[0]
+    assert basis.ref == "https://research.example/x"
+    assert basis.retrieved == date(2026, 6, 1), \
+        "研报的抓取日期应是该 Document 自己的 retrieved，不是这一轮的 as_of"
+
+
+def test_年报摘录引文对不上原文片段时掉回正文核验并被驳回():
+    """模型引的话跟 fd.note 里摘出的原文片段对不上（比如编了数字或改了
+    表述）——不能被 _match_excerpt 放过，应当掉回"当作正文引用"、
+    然后因为不在正文里而被驳回，不能被这条新出口意外放行。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNUAL,
+        note="「稼动率维持在行业前列」——《核心竞争力分析》（文字依据，"
+            "是否给出具体数值待人工确认）",
+        source_url="https://static.cninfo.com.cn/annual.pdf",
+        source_retrieved=AS_OF)}
+    body = "公司持续推进降本增效。"
+    raw = "假设: 稼动率 | 第1年 | -2% | 0% | 2% | 「稼动率已提升至95%」"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    with pytest.raises(AssumeFailed, match="不可核验"):
+        assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+
+
+def test_依据跨阶段存活_因子证据引用():
+    """新出口构造出的 EXTERNAL 依据同样要能经过 to_json/from_json 往返，
+    第二阶段读回后仍能通过 check()——中间人工批准，第一阶段写出、
+    第二阶段读回，不能因为序列化漏了字段就被自己的门挡住。"""
+    d = _one_factor_decomp()
+    finding = Finding(factor_key="utilization", claim="平均稼动率约78%",
+                      url="https://semi.org/x", publisher="SEMI",
+                      tier=Tier.OFFICIAL, published=date(2026, 7, 1))
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.EXTERNAL, findings=[finding])}
+    body = "公司积极扩产，产能持续释放。"
+    raw = "假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「平均稼动率约78%」"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    a.code, a.labels = "600584", ["2026E"]
+    js = assume.to_json(a, code="600584")
+    back, _ = assume.from_json(js, code="600584")
+    assume.check(back, 1, ledger=FactLedger(), body=body, as_of=AS_OF,
+                decomps=back.decomps)
+    assert back.rows[0].bases[0].ref == "https://semi.org/x"
+
+
+def test_依据跨阶段存活_无数据估计():
+    """空依据（出口二）同样要能跨阶段存活——第二阶段没有 factor_data
+    可查，也不需要：这条出口的合法性只在解析当轮判一次。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING, note="未找到任何数据")}
+    raw = "假设: 稼动率 | 第1年 | 5% | 8% | 12% | 无数据（估计），保守假设"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    a.code, a.labels = "600584", ["2026E"]
+    js = assume.to_json(a, code="600584")
+    back, _ = assume.from_json(js, code="600584")
+    assume.check(back, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
+                decomps=back.decomps)
+    assert back.rows[0].bases == []
+
+
+def test_提示词说明两条新出口何时用哪条():
+    """提示词要把两条新出口讲清楚，且不能让模型误以为「无数据」可以
+    随便写——必须点出它只对确实没数据的因子开放。"""
+    d = _one_factor_decomp()
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.MISSING, note="未找到任何数据")}
+    txt = assume._factor_head([d], fd)
+    assert "无数据（估计）" in txt
+    assert "只对确实没有数据支撑的因子开放" in txt

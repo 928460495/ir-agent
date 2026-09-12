@@ -203,6 +203,60 @@ def test_sections与corpus为None时不崩溃():
     assert data["utilization"].status == "无数据"
 
 
+# ── fix-factor-basis：②③命中要连带记下真实出处 ───────────────────
+#
+# assume.py 那边需要在模型逐字引用 note 里摘出的原文片段时，把真实
+# 出处（而不是模型自己声称的）代码填回去——这是"模型写引用，代码填
+# 事实"契约在②③两级的落地，FactorData 新增的 source_url/
+# source_retrieved 就是给这件事用的。
+
+def test_年报命中记下年报公告本身的下载地址():
+    """②命中时 source_url 应该是调用方传入的 annual_url（年报公告的
+    真实下载地址），不是编出来的——不传时（默认空串）也不该崩，只是
+    这条因子将来引用不到"证据引用"这条出口。"""
+    sections = _sections(("core_competency", "核心竞争力分析",
+                          "公司持续推进良率提升，稼动率维持在行业前列。"))
+    data = collect(_ExplodingClient(), [_rev()], _led("capacity", "asp"),
+                   Corpus(as_of=AS_OF), "封测", AS_OF, sections=sections,
+                   annual_url="https://static.cninfo.com.cn/annual.pdf")
+    fd = data["utilization"]
+    assert fd.source_url == "https://static.cninfo.com.cn/annual.pdf"
+    assert fd.source_retrieved == AS_OF
+
+
+def test_不传annual_url时年报命中的source_url为空不崩溃():
+    sections = _sections(("core_competency", "核心竞争力分析", "稼动率维持在行业前列。"))
+    data = collect(_ExplodingClient(), [_rev()], _led("capacity", "asp"),
+                   Corpus(as_of=AS_OF), "封测", AS_OF, sections=sections)
+    assert data["utilization"].source_url == ""
+
+
+def test_研报命中记下该文档自己的真实url与抓取日期():
+    """③命中的 source_url/source_retrieved 应该是那篇 Document 自己的
+    url/retrieved，不是年报的，也不是这一轮的 as_of——不同研报可能是
+    不同时间抓取的不同文档。"""
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们测算行业稼动率将于下半年回升。"))
+    data = collect(_ExplodingClient(), [_rev()], _led("capacity", "asp"),
+                   corpus, "封测", AS_OF)
+    fd = data["utilization"]
+    assert fd.source_url == "https://research.example/x"
+    assert fd.source_retrieved == AS_OF          # _doc() 里 retrieved=AS_OF
+
+
+def test_外部来源状态不填source_url():
+    """EXTERNAL 状态下证据是 findings 列表，可能有好几条各自的 url，
+    没有一个"唯一"来源可以预先填在 source_url 上——这两个字段就该
+    保持默认空值，不能塞进某一条 Finding 的 url 造成误导。"""
+    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
+          "| SEMI | 2026-07-01\n")
+    data = collect(_Client(ok, ""), [_rev()], _led("capacity"),
+                   Corpus(as_of=AS_OF), "封测", AS_OF)
+    fd = data["utilization"]
+    assert fd.status == "外部来源"
+    assert fd.source_url == ""
+
+
 def test_摘要区分文字依据与已核实数值():
     """summary() 要把「年报披露/研报测算」标成文字依据待人工确认，
     与已核实的外部数值分开——不能让读者把两者混为一谈。"""

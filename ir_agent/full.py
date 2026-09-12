@@ -771,7 +771,8 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             factor_data = gaps.collect(
                 research_client, meth.decompositions, r.ledger,
                 r.corpus or Corpus(as_of=as_of), meth.industry, as_of,
-                sections=getattr(r, "sections", None))
+                sections=getattr(r, "sections", None),
+                annual_url=getattr(r, "annual_url", ""))
             md["因子数据"] = gaps.summary(factor_data)
         except Exception as e:                              # noqa: BLE001
             skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")

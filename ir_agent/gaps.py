@@ -94,6 +94,14 @@ class FactorData:
     status: str = MISSING
     findings: list[Finding] = field(default_factory=list)
     note: str = ""
+    # ANNUAL/REPORT 命中时的真实出处——供 assume.py 在模型引用 note 里
+    # 摘出的原文片段时，代码自动补上可核验的 URL/抓取日期（模型自己
+    # 不接触这两样，同一条"模型写引用，代码填事实"的契约）。
+    # EXTERNAL 状态不用这两个字段：那种情况下 findings 里可能有好几条，
+    # 各自带自己的 url/日期，模型引的是哪条要看它引了哪条 claim，
+    # 没有一个"唯一"来源可以预先填在这里。
+    source_url: str = ""
+    source_retrieved: date | None = None
 
 
 def identify(d: Decomposition, ledger: FactLedger, as_of: date) -> list[Factor]:
@@ -162,26 +170,39 @@ def _match_annual(sections, label: str) -> tuple[str, str] | None:
     return None
 
 
-def _match_report(corpus, label: str) -> tuple[str, str] | None:
-    """③研报语料库里是否提到该因子，判据与 _match_annual 同理。"""
+def _match_report(corpus, label: str) -> tuple[str, Document] | None:
+    """③研报语料库里是否提到该因子，判据与 _match_annual 同理。
+
+    **返回命中的原文片段与它所在的 Document 本身**，不只是格式化好的
+    引用字符串——调用方（collect）需要 Document 的 url/retrieved 去
+    构造 assume.py 那边可以直接核验的 EXTERNAL 依据：模型引用 note
+    里摘出的这段原文时，代码要能把真实出处（而不是模型自己声称的）
+    填回去，同一条"模型写引用，代码填事实"的契约。
+    """
     if corpus is None:
         return None
     core = _core_label(label)
     for d in corpus.docs:
         hit = _valid_hit(d.text, core)
         if hit is not None:
-            return hit, d.cite()
+            return hit, d
     return None
 
 
 def collect(client, decomps: list[Decomposition], ledger: FactLedger,
             corpus, industry: str, as_of: date,
-            sections=None) -> dict[str, FactorData]:
+            sections=None, annual_url: str = "") -> dict[str, FactorData]:
     """逐因子采集。已在账本的跳过；缺的依次尝试②年报、③研报、④外部网络。
 
     ②或③命中就不再往下走——先近后远，同时省一次联网调用。`sections`/
     `corpus` 都可能是 None（调用方没取到年报或语料库），两级匹配函数
     各自容错，None 时直接落空、继续试下一级。
+
+    `annual_url` 是年报公告本身的下载地址（`r.annual_url`）——②命中时
+    连同摘出的原文片段一起记进 `FactorData.source_url`，供 assume.py
+    在模型逐字引用这段原文时补上真实、可点开核验的出处。不传（默认
+    空串）时行为不变，只是②命中的因子将来引用不到这条出口，不影响
+    现有调用方。
     """
     out: dict[str, FactorData] = {}
     for d in decomps:
@@ -199,16 +220,18 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                 out[f.key] = FactorData(
                     factor=f, status=ANNUAL,
                     note=f"「{excerpt}」——{src}"
-                         "（文字依据，是否给出具体数值待人工确认）")
+                         "（文字依据，是否给出具体数值待人工确认）",
+                    source_url=annual_url, source_retrieved=as_of)
                 continue
 
             hit = _match_report(corpus, f.label)
             if hit is not None:
-                excerpt, src = hit
+                excerpt, doc = hit
                 out[f.key] = FactorData(
                     factor=f, status=REPORT,
-                    note=f"「{excerpt}」——{src}"
-                         "（文字依据，是否给出具体数值待人工确认）")
+                    note=f"「{excerpt}」——{doc.cite()}"
+                         "（文字依据，是否给出具体数值待人工确认）",
+                    source_url=doc.url, source_retrieved=doc.retrieved)
                 continue
 
             try:

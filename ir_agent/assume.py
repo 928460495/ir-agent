@@ -29,9 +29,11 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
+from ir_agent import gaps
 from ir_agent.basis import Basis, InvalidBasis, validate
 from ir_agent.drivers import (Decomposition, Factor, Op, TARGET_LABEL,
                               compose, reconcile)
+from ir_agent.gaps import FactorData
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.lineparse import keyed, pick
 from ir_agent.operators.ratios import annual_periods
@@ -290,7 +292,12 @@ class AssumptionSet:
                 for r in got:
                     lab = self.labels[r.year - 1] \
                         if r.year <= len(self.labels) else f"第{r.year}年"
-                    ref = "；".join(b.describe() for b in r.bases)
+                    # 出口二落地为空 `bases`——不能让这一格跟"有依据"的
+                    # 行看起来一样（一样都是拿 join 拼一遍，空列表拼出的
+                    # 是空字符串，读者会当成"依据列忘了填"而不是"这本来
+                    # 就是没有依据的估计"）。必须显式标出来，一眼分得清。
+                    ref = ("；".join(b.describe() for b in r.bases)
+                           if r.bases else "⚠ 估计（无数据支撑）")
                     lines.append(
                         f"| {lab} | {_fmt_factor(r.bear, f.unit)} "
                         f"| {_fmt_factor(r.base, f.unit)} "
@@ -299,7 +306,23 @@ class AssumptionSet:
                 lines.append("")
             lines += self._describe_composed(d)
             lines += self._describe_residuals(d)
+        lines += self._describe_estimated()
         return lines
+
+    def _describe_estimated(self) -> list[str]:
+        """**遗漏必须可见。** 因子取值若完全靠估计（出口二：无数据、
+        没有证据支撑），不能只淹没在各自因子的表格里等人逐行去发现——
+        单独汇总一段，让人一眼看出「这几个数是估的，没有证据支撑」，
+        这正是当初做因子分解要保留的东西：与其在两标量模式下笼统地填
+        一个营收增速，不如把"到底哪些因子有据、哪些是拍脑袋"摊开来看。
+        """
+        labels = sorted({_row_label(r, self.decomps)
+                         for r in self.rows if r.factor_key and not r.bases})
+        if not labels:
+            return []
+        return ["⚠ **以下因子的取值没有证据支撑，是估计**"
+                "（已如实标注，理由见各自表格的「理由」列，不是遗漏）："
+                + "、".join(labels), ""]
 
     def _synthesized_for(self, d: Decomposition, case: Case
                          ) -> list[Decimal] | None:
@@ -390,14 +413,21 @@ def _fmt_factor(v: Decimal, unit: str) -> str:
 
 
 def parse(text: str, years: int,
-          decomps: list[Decomposition] | None = None) -> AssumptionSet:
+          decomps: list[Decomposition] | None = None,
+          factor_data: dict | None = None,
+          as_of: date | None = None) -> AssumptionSet:
     """decomps 给定时按因子解析；否则沿用两标量模式（降级路径）。
 
     降级路径不删 —— 预研（拆分解式、采数据）失败不该让整轮研究停摆。
+
+    `factor_data`/`as_of` 只在因子模式下用得到——`_parse_factors` 要
+    靠它们判断模型引用的一段话是不是这个因子自己采集到的证据（见
+    `_factor_basis`）。两标量模式不需要，两者都留空即可；不传时因子
+    模式退回旧行为（只认账本占位符与正文逐字引用），不影响既有调用方。
     """
     if not decomps:
         return _parse_scalar(text, years)
-    return _parse_factors(text, years, decomps)
+    return _parse_factors(text, years, decomps, factor_data, as_of)
 
 
 def _parse_scalar(text: str, years: int) -> AssumptionSet:
@@ -457,9 +487,16 @@ def _parse_scalar(text: str, years: int) -> AssumptionSet:
 
 
 def _parse_factors(text: str, years: int,
-                   decomps: list[Decomposition]) -> AssumptionSet:
+                   decomps: list[Decomposition],
+                   factor_data: dict | None = None,
+                   as_of: date | None = None) -> AssumptionSet:
     """按因子解析。每一行对应分解式里的一个因子，而不是营收增速/毛利率
-    本身 —— 合成交给 `synthesize`，模型只负责填因子。"""
+    本身 —— 合成交给 `synthesize`，模型只负责填因子。
+
+    `factor_data`/`as_of` 传给 `_factor_basis` 判断依据是否合法——见
+    该函数文档，这里只负责把每个因子对应的 `FactorData` 找出来传过去。
+    """
+    factor_data = factor_data or {}
     by_label = {f.label: f for d in decomps for f in d.factors}
     target_of = {f.key: d.target for d in decomps for f in d.factors}
     out = AssumptionSet(code="", labels=[], decomps=list(decomps))
@@ -538,8 +575,9 @@ def _parse_factors(text: str, years: int,
         out.rows.append(Row(
             driver=target_of[f.key], year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
-            bases=_basis(parts[5], label), note=_note(parts[5]),
-            factor_key=f.key))
+            bases=_factor_basis(parts[5], label, factor_data.get(f.key),
+                               as_of),
+            note=_note(parts[5]), factor_key=f.key))
     return out
 
 
@@ -593,6 +631,148 @@ def _basis(raw: str, what: str) -> list[Basis]:
         raise AssumeFailed(f"{what} 的依据不合法: {e}") from e
 
 
+_WS = re.compile(r"\s+")
+
+
+def _norm(s: str) -> str:
+    """与 basis.py/external.py 同一套规范化——引文核验必须两边一致。"""
+    return _WS.sub("", s)
+
+
+# 「无数据（估计）」的识别不做成一个固定短语的死匹配——模型措辞会有
+# 「无数据，取值为估计」「暂无数据，只能估计」这类变体，本文件与
+# gaps.py 自己的提示词/note 里就已经这么写。只要求"无数据"与"估计"
+# 两个词同时出现，不要求相邻或顺序，比死匹配一个固定句式更贴近模型
+# 真实产出，同时仍然远比"随便一句散文"苛刻——两个词都不沾边的普通
+# 理由句不会被误判成这条出口。
+def _looks_like_estimate(raw: str) -> bool:
+    return "无数据" in raw and "估计" in raw
+
+
+def _match_finding(fd: FactorData | None, quote: str):
+    """在该因子④外部网络采集到的 Finding 里找逐字引用这段话的那一条。
+
+    找不到返回 None——调用方据此判断这条引文到底是不是这个因子自己
+    采集到的证据，而不是模型编出来、恰好看着像的一句话。"""
+    if fd is None:
+        return None
+    qn = _norm(quote)
+    if not qn:
+        return None
+    for finding in fd.findings:
+        if qn in _norm(finding.claim):
+            return finding
+    return None
+
+
+def _match_excerpt(fd: FactorData | None, quote: str) -> bool:
+    """在②年报/③研报命中时摘出的原文片段（fd.note 里用「」包起来的
+    那一段，见 gaps.collect）里找这段引文。
+
+    只对 ANNUAL/REPORT 两种状态生效——DISCLOSED/MISSING/EXTERNAL 的
+    note 要么不是这个格式，要么该走别的出口（findings 或"无数据"）。
+    """
+    if fd is None or fd.status not in (gaps.ANNUAL, gaps.REPORT):
+        return False
+    m = _QUOTE.search(fd.note)
+    if not m:
+        return False
+    qn = _norm(quote)
+    return bool(qn) and qn in _norm(m.group(1))
+
+
+def _factor_basis(raw: str, label: str, fd: FactorData | None,
+                  as_of: date | None) -> list[Basis]:
+    """因子模式下依据的合法写法——比两标量模式（`_basis`）多两条出口。
+
+    **这两条出口要修的契约缺口**：真实联网跑出的分解式常有一多半因子
+    正文一次都没提过（600584 实测：9 因子 7 个正文零命中），此前只认
+    账本占位符（`[[key@period]]`）与正文逐字引用两种写法——对这类因子
+    根本不存在合法的依据写法，模型连续 3 次被拒后只能把整个分解丢掉、
+    退回两标量模式。
+
+    新增的两条出口都遵循本仓库一贯的契约——**模型写引用，代码填
+    事实**，与占位符本身、`_basis` 的正文引用是同一个思路，绝不让
+    模型自己声明 URL/日期/来源，那等于给捏造开一扇门：
+
+      ① 引用该因子自己采集到的证据——命中 `fd.findings` 里某条
+         `Finding.claim` 就用 `Basis.external`，出处（url、抓取日期）
+         直接用那条 Finding 自带的；命中②③摘出的原文片段（`fd.note`
+         里的引文）同样用 `Basis.external`，出处是 `gaps.collect` 早已
+         经代码之手记下的 `fd.source_url`/`source_retrieved`（②是年报
+         公告本身的下载地址，③是研报文档的真实 URL——都是货真价实的
+         网络地址，不是编出来的）。
+
+         年报片段没有直接被归到 `Basis.report`：`Basis.report` 的核验
+         (`basis.validate`) 拿的是 `check()` 当时传入的 `body`——本模块
+         语境下 `body` 就是研究简报正文本身，而年报原文并不在这段正文
+         里，把它标成 REPORT 会在**紧接着的这次 `check()`** 就被判定
+         "在正文中找不到"而驳回，反而比不给出口更糟。EXTERNAL 的核验
+         在 `corpus=None` 时只查格式不查内容（`check()`/`validate()`
+         从未给这里传 corpus，与 WACC 的无风险利率是同一处先例）——
+         这恰恰是这里需要的性质：年报原文只在预研当轮、`sections`
+         对象还在内存里时能核验一次，两阶段之间人工批准、`assumptions.
+         json` 被重新读回时未必还有 `sections`（第二阶段不会重新下载
+         解析年报 PDF），若沿用 REPORT 的"每次 check() 都重新核验"，
+         人工批准过的年报引用会在第二阶段因为"年报没重新加载"这个纯
+         环境原因被错误打回，而不是因为引文本身有问题。EXTERNAL 的
+         "验一次、代码盖章后终身信任"正好避开了这个陷阱，这也是它比
+         REPORT 更诚实的地方：它如实反映了"这条依据的核验窗口只有
+         一次"这个事实，而不是假装每次都还能重新核验。
+
+      ② 「无数据（估计）」——但只对这个因子**确实**是 `MISSING`（或
+         干脆没被采集到，`factor_data` 里都没有它这一项）时才开放，
+         返回空的依据列表，不构造任何 Basis：没有证据就是没有证据，
+         硬凑一个看似合规的 Basis 反而是在掩盖"这里其实没有依据"这
+         件事。是否合法在这里（模型刚生成、`fd` 还是这一轮真实采集
+         结果时）判一次，之后不再回头复查——跟出口①的"验一次、之后
+         信任"是同一个道理，且第二阶段本来就没有 `factor_data` 可查。
+    """
+    raw = raw.strip()
+    ref = _REF.search(raw)
+    if ref:
+        try:
+            return [Basis.fact(ref.group(0))]
+        except InvalidBasis as e:
+            raise AssumeFailed(f"{label} 的占位符不合法: {e}") from e
+
+    q = _QUOTE.search(raw)
+    if q:
+        quote = q.group(1)
+        finding = _match_finding(fd, quote)
+        if finding is not None:
+            return [Basis.external(url=finding.url, quote=quote.strip(),
+                                   retrieved=as_of)]
+        if _match_excerpt(fd, quote):
+            if not fd.source_url:
+                # 内部一致性错误，不是模型的问题——gaps.collect 命中
+                # ②③时理应同时记下 source_url（见该函数），走到这里
+                # 说明采集与解析这两处对同一份 factor_data 的假设不一致。
+                raise AssumeFailed(
+                    f"{label} 引用的年报/研报片段缺失真实出处"
+                    "（factor_data 内部不一致：source_url 为空）——"
+                    "请检查 gaps.collect 是否遗漏了 source_url。")
+            return [Basis.external(url=fd.source_url, quote=quote.strip(),
+                                   retrieved=fd.source_retrieved or as_of)]
+        try:
+            return [Basis.report(quote)]
+        except InvalidBasis as e:
+            raise AssumeFailed(f"{label} 的依据不合法: {e}") from e
+
+    if _looks_like_estimate(raw):
+        if fd is None or fd.status == gaps.MISSING:
+            return []
+        raise AssumeFailed(
+            f"{label} 写了「无数据（估计）」，但该因子的采集状态是"
+            f"「{fd.status}」，不是「{gaps.MISSING}」——「无数据」只对"
+            "确实没有数据支撑的因子开放，不能图省事对有数据的因子也这么"
+            "写，那会让这条出口变成谁都能用的万能逃生口。")
+
+    raise AssumeFailed(
+        f"{label} 缺少可核验的依据（需正文原话、账本占位符、该因子自身"
+        "采集到的证据引文，或对确实无数据的因子明说「无数据（估计）」）")
+
+
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
           as_of: date, decomps: list[Decomposition] | None = None,
           base_margin: Decimal | None = None) -> None:
@@ -601,9 +781,20 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
     else:
         _check_scalar(a, years)
     flat = [b for r in a.rows for b in r.bases]
-    problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
-    if problems:
-        raise AssumeFailed("依据不可核验：" + "；".join(problems))
+    # 出口二（「无数据（估计）」）合法时 `Row.bases` 就是空列表——
+    # `basis.validate([])` 的原意是防"整批一条依据都没给"，但因子模式
+    # 下"每一行都被 `_factor_basis` 判定为合法的无数据估计"是一种真实
+    # 可能出现、且**应当被允许**的情形（分解式里的因子确实可能全部
+    # 缺数据），不是"没做功课"。这种情形已经在 `_factor_basis`/
+    # `_check_factors` 里逐行验过一遍（确实 MISSING、且有理由），不需要
+    # 再套用这条本来是给"完全没有产出"设的全局闸门；反过来，只要有任何
+    # 一行不是走这条出口（`flat` 非空），就仍然照常校验，不放过真正
+    # 缺依据的情形。
+    all_estimated = bool(a.rows) and decomps and all(not r.bases for r in a.rows)
+    if not all_estimated:
+        problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
+        if problems:
+            raise AssumeFailed("依据不可核验：" + "；".join(problems))
 
 
 def _check_scalar(a: AssumptionSet, years: int) -> None:
@@ -671,6 +862,19 @@ def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
                 f"第 {r.year} 年出现了不止一行——重复行会让清单显示的值"
                 "与实际参与合成的值不是同一行，必须只保留一行。")
         seen.add(key)
+        # 出口二（「无数据（估计）」）落地为空的 `bases`——`_factor_basis`
+        # 已经在解析阶段确认过这个因子确实是「无数据」才放行，但那不能
+        # 免除「说明依据什么估的」这一要求：空依据 + 空理由 = 一个数字
+        # 凭空出现在清单上，读者连"这是怎么估出来的"都无从判断。这里
+        # 再挡一次而不依赖解析阶段——`check()` 在第二阶段人工核实之后
+        # 会脱离 `_parse_factors` 单独重跑，人手改 JSON 同样可能把
+        # note 清空。
+        if not r.bases and not r.note.strip():
+            raise AssumeFailed(
+                f"因子「{label_of.get(r.factor_key, r.factor_key)}」"
+                f"第 {r.year} 年写了「无数据（估计）」却没有给理由——"
+                "理由要说明这个估计依据什么给出（参照哪个可比公司、"
+                "哪个行业惯例……），不能只留一句「无数据」。")
 
     for d in decomps:
         for f in d.factors:
@@ -791,12 +995,24 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
               "逐年走低到 13.15%/12.15%/11.15%，三年应分别填 "
               "−1、−2、−3（相对基期累计），而不是 −1、−1、−1"
               "（那样合成出来三年会是同一个数 13.15%，不会继续下滑）。",
-              "标「无数据」或「年报披露/研报测算」（文字依据，未必有具体数值，"
-              "待人工确认）的因子取值是**估计**，理由里要说明依据什么估的。",
+              "",
+              "**依据除了「正文原话」「[[占位符]]」，还有两条路——"
+              "很多因子正文根本没提过，也不在账本里，这两条路才是它们"
+              "唯一合法的依据写法**：",
+              "① 上表「数据」列若给出了具体的原文片段或「发现」，你可以"
+              "**逐字**引用那一段（仍然写成「引文」的样子），出处（网址/"
+              "抓取日期）由代码自动核对并填上——不要自己写网址或日期，"
+              "写了也不会被采信，一个字都对不上会被直接驳回。",
+              "② 上表「数据」列若是「无数据」（或整行都没有），可以直接"
+              "写「无数据（估计）」，但理由里**必须**说明这个估计是怎么"
+              "来的（参照哪个可比公司、哪个行业惯例、哪条常识……）——"
+              "「无数据」只对确实没有数据支撑的因子开放，对「已披露」"
+              "「年报披露」「研报测算」「外部来源」的因子这么写会被直接"
+              "驳回，不能图省事整表都写「无数据」。",
               "",
               "对每一个因子、每一年给出一行：",
               "`假设: <因子名> | 第N年 | <悲观> | <中性> | <乐观> | "
-              "「正文原话」或 [[占位符]]`"]
+              "「正文原话/证据原文」或 [[占位符]] 或 无数据（估计）`"]
     return "\n".join(lines)
 
 
@@ -838,7 +1054,8 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
     for attempt in range(1, max_attempts + 1):
         raw = client(prompt)
         try:
-            a = parse(raw, len(labels), decomps=decomps)
+            a = parse(raw, len(labels), decomps=decomps,
+                     factor_data=factor_data, as_of=as_of)
             check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
                   decomps=decomps, base_margin=base_margin)
         except AssumeFailed as e:
