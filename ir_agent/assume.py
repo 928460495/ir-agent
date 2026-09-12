@@ -30,9 +30,11 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from ir_agent.basis import Basis, InvalidBasis, validate
-from ir_agent.drivers import Decomposition, Factor, Op, compose
-from ir_agent.ledger import FactLedger
+from ir_agent.drivers import (Decomposition, Factor, Op, TARGET_LABEL,
+                              compose, reconcile)
+from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.lineparse import keyed, pick
+from ir_agent.operators.ratios import annual_periods
 
 
 class AssumeFailed(Exception):
@@ -56,7 +58,10 @@ _NUM = re.compile(r"-?\d+(?:\.\d+)?%?")
 
 
 def _pct(raw: str) -> Decimal:
-    m = _NUM.search(raw.replace(",", ""))
+    # M1：全角/数学减号 U+2212（−）不是 ASCII 连字符，_NUM 认不出来，
+    # 会把整个负号丢掉再匹配出一个正数——设计文档全文用的就是这个字符，
+    # 模型很可能照抄，符号被悄悄翻转。规范化之后再匹配。
+    m = _NUM.search(raw.replace(",", "").replace("−", "-"))
     if not m:
         raise AssumeFailed(f"取值不可解析：{raw!r}")
     t = m.group(0)
@@ -176,7 +181,12 @@ class AssumptionSet:
     factor_data: dict = field(default_factory=dict)      # 因子采集结果（Task 6）
     # 历史回算残差，报告用，**不是通过/不通过的判据** ——
     # Π(1+r) 永远不会正好等于实际增速，拿它做硬校验只会逼出假精度。
+    # {target: {"residuals": [Residual], "no_history": [因子标签,...]}}
     residuals: dict = field(default_factory=dict)
+    # 因子模式下合成毛利率要用的基期水平（决速于 decide() 传入的
+    # base_margin）——describe() 展示「合成结果」要用同一个数，
+    # 不能自己另算一个，否则清单上显示的数和实际建模用的数就会分叉。
+    base_margin: Decimal | None = None
 
     def path(self, driver: str, case: Case) -> list[Decimal]:
         got = sorted((r for r in self.rows if r.driver == driver),
@@ -185,8 +195,22 @@ class AssumptionSet:
                             Case.BEAR: "bear"}[case]) for r in got]
 
     def describe(self) -> str:
-        """给人看的核实清单。**这是人工批准的对象，必须一眼看全。**"""
+        """给人看的核实清单。**这是人工批准的对象，必须一眼看全。**
+
+        分解模式（`self.decomps` 非空）与两标量模式的渲染完全不同——
+        分解模式下 `Row.driver` 记的是分解目标（revenue/gross_margin），
+        永远匹配不上 `DRIVERS` 里的 growth/gm 两个旧键，按旧逻辑渲染会
+        让清单整页空白（C1：人工批准的核心关卡变成一张只有标题的空页）。
+        """
         lines = [f"DCF 判断项（{self.code}）—— 需人工核实后方可建模", ""]
+        if self.decomps:
+            lines += self._describe_factors()
+        else:
+            lines += self._describe_scalar()
+        return "\n".join(lines)
+
+    def _describe_scalar(self) -> list[str]:
+        lines: list[str] = []
         for cn, key in DRIVERS.items():
             got = sorted((r for r in self.rows if r.driver == key),
                          key=lambda r: r.year)
@@ -203,7 +227,104 @@ class AssumptionSet:
                 lines.append(f"| {lab} | {r.bear:.2%} | {r.base:.2%} "
                              f"| {r.bull:.2%} | {r.note or '—'} | {ref} |")
             lines.append("")
-        return "\n".join(lines)
+        return lines
+
+    def _describe_factors(self) -> list[str]:
+        """因子模式下的清单：按目标分组，每个因子一张表 + 该目标的
+        **合成结果**（代码算出来的，不是模型自己填的那个数）。"""
+        lines: list[str] = []
+        lo = self._synthesized(Case.BEAR)
+        mid = self._synthesized(Case.BASE)
+        hi = self._synthesized(Case.BULL)
+        for d in self.decomps:
+            lines.append(f"## {TARGET_LABEL.get(d.target, d.target)}"
+                        f" —— {d.describe()}")
+            lines.append("")
+            for f in d.factors:
+                got = sorted((r for r in self.rows if r.factor_key == f.key),
+                             key=lambda r: r.year)
+                lines.append(f"### {f.label}（{f.unit}）")
+                lines.append("")
+                lines.append("| 年 | 悲观 | 中性 | 乐观 | 理由 | 依据 |")
+                lines.append("| --- | --- | --- | --- | --- | --- |")
+                if not got:
+                    # **遗漏必须可见。** 因子在分解式里，却一行取值都
+                    # 没有——不能悄悄不显示，得让人一眼看出这里空着。
+                    lines.append("| — | — | — | — | **未填写** | — |")
+                for r in got:
+                    lab = self.labels[r.year - 1] \
+                        if r.year <= len(self.labels) else f"第{r.year}年"
+                    ref = "；".join(b.describe() for b in r.bases)
+                    lines.append(
+                        f"| {lab} | {_fmt_factor(r.bear, f.unit)} "
+                        f"| {_fmt_factor(r.base, f.unit)} "
+                        f"| {_fmt_factor(r.bull, f.unit)} "
+                        f"| {r.note or '—'} | {ref} |")
+                lines.append("")
+            lines += self._describe_composed(d, lo, mid, hi)
+            lines += self._describe_residuals(d)
+        return lines
+
+    def _synthesized(self, case: Case
+                     ) -> tuple[list[Decimal], list[Decimal]] | None:
+        """展示用的合成结果。基期未知却硬要合成毛利率，会显示一个用
+        假基期算出来、看起来正常的错数——比不显示更糟，所以返回 None
+        让调用方改显示说明文字。"""
+        needs_base = any(dd.target != "revenue" for dd in self.decomps)
+        if needs_base and self.base_margin is None:
+            return None
+        return synthesize(self, case, self.base_margin or Decimal(0))
+
+    def _describe_composed(self, d: Decomposition, lo, mid, hi) -> list[str]:
+        lines = ["**合成结果**（代码按分解式算出，不是模型直接填的数）", ""]
+        if lo is None or mid is None or hi is None:
+            lines.append("基期毛利率未知，暂无法显示合成后的毛利率——"
+                        "因子取值仍已生效，只是这里算不出用于展示的数。")
+            lines.append("")
+            return lines
+        idx = 0 if d.target == "revenue" else 1
+        lo_s, mid_s, hi_s = lo[idx], mid[idx], hi[idx]
+        lines.append("| 年 | 悲观 | 中性 | 乐观 |")
+        lines.append("| --- | --- | --- | --- |")
+        for y in range(len(mid_s)):
+            lab = self.labels[y] if y < len(self.labels) else f"第{y+1}年"
+            lines.append(f"| {lab} | {lo_s[y]:.2%} | {mid_s[y]:.2%} "
+                        f"| {hi_s[y]:.2%} |")
+        lines.append("")
+        return lines
+
+    def _describe_residuals(self, d: Decomposition) -> list[str]:
+        """历史回算残差（C2）。**只报告，不是通过/不通过的判据**——
+        Π(1+r) 永远不会正好等于实际增速。历史值取不到的因子要显式标
+        「无历史校验」，不能因为算不出残差就整段不提。"""
+        info = self.residuals.get(d.target)
+        if not info:
+            return []
+        lines = ["**历史回算残差**（仅供核对分解式抓没抓住主要矛盾，"
+                "不作为通过/不通过的判据）", ""]
+        res = info.get("residuals") or []
+        if res:
+            lines.append("| 期间 | 合成 | 实际 | 残差 |")
+            lines.append("| --- | --- | --- | --- |")
+            for r in res:
+                lines.append(f"| {r.period} | {r.composed:.2%} "
+                            f"| {r.actual:.2%} | {r.gap:+.2%} |")
+            lines.append("")
+        no_hist = info.get("no_history") or []
+        if no_hist:
+            lines.append(f"无历史校验：{'、'.join(no_hist)}"
+                        "（账本里取不到足够的历史序列，不是没有偏差，"
+                        "是这里没法核验）")
+            lines.append("")
+        return lines
+
+
+def _fmt_factor(v: Decimal, unit: str) -> str:
+    """因子取值按单位格式化。**pp 不能用 :.2% 显示**——C4 的字面量
+    百分号 bug 一旦漏网，`-0.03` 用 :.2% 会显示成 "-3.00%"，和正确的
+    `-3`（应显示 "-3.00pp"）看起来一模一样，人从清单上根本发现不了。
+    pp 按原始数字显示，才能让写错单位的字面量露出马脚。"""
+    return f"{v:+.2f}pp" if unit == "pp" else f"{v:.2%}"
 
 
 def parse(text: str, years: int,
@@ -268,6 +389,15 @@ def _parse_factors(text: str, years: int,
             raise AssumeFailed(f"年份不可解析：{parts[1]!r}") from e
         if not 1 <= year <= years:
             raise AssumeFailed(f"年份 {year} 超出预测期 1..{years}")
+        # C4：pp 与 % 不是一回事——85%→82% 是 −3pp，写成 −3% 会被 _pct
+        # 解析成 −0.03，缩小 100 倍。单调性/闭合校验都抓不住这个错，
+        # 只能在这里把字面量本身挡下来。
+        if f.unit == "pp" and any("%" in parts[i] for i in (2, 3, 4)):
+            raise AssumeFailed(
+                f"因子「{label}」按 pp 计，不按 %：{parts[2]} / {parts[3]} "
+                f"/ {parts[4]} 里带了 % —— pp 与 % 不是一回事，85%→82% "
+                "是 −3pp，写成 −3% 会被当成 −0.03pp，缩小 100 倍。"
+                "请直接填数字（如 −3），不要带 %。")
         out.rows.append(Row(
             driver=target_of[f.key], year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
@@ -464,7 +594,15 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
     lines += ["",
               "**pp 不能进乘法链**：营收链的因子一律填变化率（含稼动率）——"
               "稼动率 85%→82% 是 −3pp，但变化率是 −3.5%。",
-              "毛利率链的因子一律填 pp。",
+              "毛利率链的因子一律填 pp，且**pp 一律不带 %**——"
+              "写 −3，不要写 −3%（−3% 会被当成 −0.03pp，缩小 100 倍）。",
+              "**pp 的参照点是基期，且是累计值，不是逐年再变一次**："
+              "毛利率 = 基期 + Σpp，基期对预测期每一年都是同一个数，"
+              "所以第 N 年的 pp 要填「相对基期」累计的变动，不是「相对"
+              "第 N−1 年」又变了多少。例如基期 14.15%，你判断毛利率会"
+              "逐年走低到 13.15%/12.15%/11.15%，三年应分别填 "
+              "−1、−2、−3（相对基期累计），而不是 −1、−1、−1"
+              "（那样合成出来三年会是同一个数 13.15%，不会继续下滑）。",
               "标「无数据」或「年报披露/研报测算」（文字依据，未必有具体数值，"
               "待人工确认）的因子取值是**估计**，理由里要说明依据什么估的。",
               "",
@@ -517,24 +655,127 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
         a.code, a.labels = code, labels
         a.decomps = list(decomps or [])
         a.factor_data = dict(factor_data or {})
+        a.base_margin = base_margin
+        if a.decomps:
+            # C2：reconcile() 写得对、测试充分，缺的是「在真实流程里被
+            # 调用一次并把结果交给人看」这个动作——此前它只在
+            # drivers.py 自己的单测里被调用过。
+            a.residuals = {d.target: _reconcile_decomp(d, ledger, as_of)
+                          for d in a.decomps}
         return a
     raise AssumeFailed(
         f"连续 {max_attempts} 次给不出可核验的假设：{last}"
         f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}")
 
 
+def _historical_series(ledger: FactLedger, key: str, periods: list[str],
+                       as_of: date) -> dict[str, Decimal]:
+    """账本里某个 key 在给定期间序列上的取值。取不到就跳过——
+    不用零补齐，补出来的残差是假的。"""
+    out: dict[str, Decimal] = {}
+    for p in periods:
+        try:
+            out[p] = ledger.get(key, p, as_of=as_of).value
+        except (KeyError, LookAheadError):
+            continue
+    return out
+
+
+def _reconcile_decomp(d: Decomposition, ledger: FactLedger,
+                      as_of: date, years: int = 5) -> dict:
+    """对一个分解式做历史回算，报残差 + 标出取不到历史的因子。
+
+    账本里存的因子是**水平值**（产能、单价……的原始数字），而
+    `drivers.reconcile` 要的是**期间变化**（乘法链要变化率，加法链要
+    pp 变化）——按 `d.op` 把相邻两期的水平值换算成变化，换算规则与
+    提示词里对模型的单位要求（见 `_factor_head`）是同一套。
+
+    某个因子在账本里完全找不到历史序列，**不能因此把它从残差报告里
+    静默拿掉**——要在 `no_history` 里明说，人得知道这里没法核验，
+    而不是误以为「没提到就是没问题」。
+    """
+    periods = annual_periods(ledger, as_of, years=years + 1)
+    if len(periods) < 2:
+        return {"residuals": [], "no_history": [f.label for f in d.factors]}
+
+    levels = {f.key: _historical_series(ledger, f.key, periods, as_of)
+             for f in d.factors}
+    no_history = [f.label for f in d.factors if len(levels[f.key]) < 2]
+
+    history: dict[str, dict[str, Decimal]] = {}
+    for i in range(1, len(periods)):
+        cur, prev = periods[i], periods[i - 1]
+        row: dict[str, Decimal] = {}
+        for f in d.factors:
+            lv = levels[f.key]
+            if cur not in lv or prev not in lv or lv[prev] == 0:
+                continue
+            row[f.key] = (lv[cur] / lv[prev] - 1) if d.op is Op.MULTIPLY \
+                else (lv[cur] - lv[prev]) * 100
+        if row:
+            history[cur] = row
+
+    target_key = "revenue" if d.target == "revenue" else "gross_margin"
+    tgt = _historical_series(ledger, target_key, periods, as_of)
+    actual: dict[str, Decimal] = {}
+    base: dict[str, Decimal] | None = {} if d.op is Op.ADD_PP else None
+    for i in range(1, len(periods)):
+        cur, prev = periods[i], periods[i - 1]
+        if cur not in tgt:
+            continue
+        if d.op is Op.MULTIPLY:
+            if prev not in tgt or tgt[prev] == 0:
+                continue
+            actual[cur] = tgt[cur] / tgt[prev] - Decimal(1)
+        else:
+            actual[cur] = tgt[cur]
+            if prev in tgt:
+                base[cur] = tgt[prev]
+
+    res = reconcile(d, history, actual, base=base)
+    return {"residuals": res, "no_history": no_history}
+
+
+def _annual_gm_hist(judg: dict) -> list:
+    """`judg["gm_hist"]` 里去掉末尾中报、只留完整年度的那一段。
+
+    ashare_calibrate 的 `hp = ann + ([interim] if interim else [])`，
+    `gm_hist` 按 `hp` 的顺序算出来，中报（如果有）只可能出现在**最后
+    一项**。`judg` 本身不直接携带年度期数，但 `g_hist` 只用 `ann` 算
+    （`len(g_hist) == len(ann) - 1`），可以反推出年度期数；`gm_hist`
+    比反推出的年度期数多出来的那一项，就是中报，要去掉——C3 的实测：
+    不去掉会把中报当基期，在 600584 上造成约 32% 的估值误差。
+    """
+    gm_hist = judg.get("gm_hist") or []
+    if not gm_hist:
+        return []
+    g_hist = judg.get("g_hist") or []
+    n_annual = len(g_hist) + 1 if g_hist else len(gm_hist)
+    n_annual = min(max(n_annual, 1), len(gm_hist))
+    return gm_hist[:n_annual]
+
+
 def _base_margin_of(judg: dict) -> Decimal:
     """基期毛利率 —— 加法链的起点，**对全部预测年、全部三档都是同一个数**
     （见 drivers.compose 的文档: 「基期」是账本口径的最近一期实绩，不随
-    年份滚动）。取 `gm_hist` 的最后一项（calibrate 给的历史毛利率序列，
-    不受 apply_to 影响）；取不到才退回 `gm[0]`（calibrate 模板的默认
-    首年预测值，只是一个近似）。
+    年份滚动）。取**最近一个完整年度**的实际毛利率（`gm_hist` 掐掉末尾
+    可能有的中报之后的最后一项），不由 AI 给、也不能直接拿 `gm_hist[-1]`
+    ——那一项在中报期可能是中报数字，不是完整年度。
+
+    **没有 fallback。** 此前取不到 `gm_hist` 时会退回 `judg["gm"][0]`，
+    但 `apply_to` 先跑、`to_driver_block` 后跑时，`gm[0]` 早已经是
+    「基期 + 第一年 pp 增量」的合成结果——拿它当基期，会把第一年的
+    增量在 1b_驱动分解 的工作表公式里再加一遍（I6）。calibrate 正常
+    产出时 `gm_hist` 不会为空，为空说明上游已经出了问题，静默凑一个
+    近似值只会把错误往下游藏得更深，不如直接拒绝。
     """
-    gm_hist = judg.get("gm_hist") or []
-    if gm_hist:
-        return Decimal(str(gm_hist[-1]))
-    gm = judg.get("gm") or [0.0]
-    return Decimal(str(gm[0]))
+    annual = _annual_gm_hist(judg)
+    if not annual:
+        raise AssumeFailed(
+            "基期毛利率取不到（judg 里没有 gm_hist）—— 不能退回 "
+            "calibrate 模板给的默认预测值当基期，那本身是需要因子分解"
+            "合成出来的结果，拿它当基期会把第一年的增量重复计入一次。")
+    return Decimal(str(annual[-1]))
 
 
 def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:

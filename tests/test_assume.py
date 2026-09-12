@@ -465,3 +465,241 @@ def test_json往返后check仍能正确校验():
     back, _ = assume.from_json(assume.to_json(a), code="600584")
     assume.check(back, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
                  decomps=back.decomps, base_margin=D("0.1415"))
+
+
+# ── 终审 Critical 修复（final-fix-A）──────────────────────────
+#
+# 下面四组对应终审报告的 C1~C4，另加 I5/I6/M1。每组先给出「修复前会
+# 失败」的复现场景，再验证修复后的行为。
+
+
+# ── C1：因子模式下 describe() 曾是空白页 ────────────────────────
+
+def test_因子模式清单不再是空白页():
+    """C1 实测复现：`describe()` 按 `DRIVERS`（growth/gm）分组，但因子
+    模式下 `Row.driver` 记的是分解目标（revenue/gross_margin），两个 key
+    永不相等——`got` 恒空，除标题外整页空白。人工批准是这条流程的核心
+    关卡，清单空白等于这一关形同虚设。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.code, a.labels = "600584", ["2026E"]
+    txt = a.describe()
+    # 因子标签、单位、三档取值都要出现——不能只剩标题。
+    for label in ("产能", "单价", "稼动率摊薄", "上游成本"):
+        assert label in txt
+    assert "变化率" in txt and "pp" in txt
+    assert "新厂投产" in txt          # 理由
+    assert Q in txt                   # 依据
+
+
+def test_因子清单显示代码合成的结果():
+    """C1 要求：不仅列出因子，还要显式标出该目标的**合成结果**——
+    人批准的是合成后的营收增速/毛利率，不是一堆孤立的因子取值。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.base_margin = D("0.1415")
+    a.code, a.labels = "600584", ["2026E"]
+    txt = a.describe()
+    assert "合成结果" in txt
+    # 中性档：1.10×0.98−1=0.078；14.15%−1.0pp−0.5pp=12.65%
+    assert "7.80%" in txt
+    assert "12.65%" in txt
+
+
+def test_因子清单遗漏因子必须可见():
+    """硬约束「遗漏必须可见」：分解式里的因子没有任何一行取值，
+    不能悄悄不显示——必须让人一眼看出这里空着。"""
+    a = assume.AssumptionSet(code="600584", labels=["2026E"],
+                             decomps=_decomps())
+    txt = a.describe()
+    assert "稼动率摊薄" in txt and "未填写" in txt
+
+
+def test_两标量模式describe行为不变():
+    a = assume.parse(_full(2), 2)
+    a.code, a.labels = "600584", ["2026E", "2027E"]
+    txt = a.describe()
+    assert "需人工核实后方可建模" in txt
+    assert "2026E" in txt and "悲观" in txt and "依据" in txt
+
+
+# ── C2：历史回算残差是死代码 ─────────────────────────────────
+
+from ir_agent.ledger import Fact, Method
+
+
+def _put(led, key, period, value):
+    led.put(Fact(key=key, value=D(str(value)), unit="unit", period=period,
+                 as_of=AS_OF, source_id="t", method=Method.COMPUTED))
+
+
+def test_decide把reconcile的结果存进residuals():
+    """C2 实测复现：`reconcile()` 在 `drivers.py` 之外没有任何调用点，
+    `AssumptionSet.residuals` 声明后从未被赋值。这里验证 `decide()`
+    真的跑了历史回算，而不是只是把字段摆在那里。"""
+    led = FactLedger()
+    for k, p, v in [("capacity", "2023FY", 100), ("capacity", "2024FY", 112),
+                    ("asp", "2023FY", 10), ("asp", "2024FY", 9.8),
+                    ("revenue", "2023FY", 1000), ("revenue", "2024FY", 1097)]:
+        _put(led, k, p, v)
+    from ir_agent.drivers import Decomposition, Factor, Op as OpEnum
+    d = [Decomposition(target="revenue", op=OpEnum.MULTIPLY, factors=[
+        Factor(key="capacity", label="产能", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])]
+
+    def client(_prompt):
+        return "\n".join([
+            f"假设: 产能 | 第1年 | 5% | 10% | 14% | 新厂投产 「{Q}」",
+            f"假设: 单价 | 第1年 | -6% | -2% | 1% | 竞争压价 「{Q}」"])
+
+    a = assume.decide(client, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      ledger=led, body=BODY, as_of=AS_OF, code="600584",
+                      decomps=d)
+    assert "revenue" in a.residuals
+    res = a.residuals["revenue"]["residuals"]
+    assert [r.period for r in res] == ["2024FY"]
+    # 1.12×0.98−1=0.0976；实际 1097/1000−1=0.097；残差 = −0.0006
+    assert abs(res[0].composed - D("0.0976")) < D("1e-9")
+    assert abs(res[0].gap - D("-0.0006")) < D("1e-9")
+    assert a.residuals["revenue"]["no_history"] == []
+    assert "历史回算残差" in a.describe()
+    assert "不作为通过" in a.describe()
+
+
+def test_历史值取不到标为无历史校验而不是静默跳过():
+    """设计文档硬性要求：因子历史值取不到要标『无历史校验』，
+    绝不静默跳过。"""
+    from ir_agent.drivers import Decomposition, Factor, Op as OpEnum
+    led = FactLedger()
+    for k, p, v in [("capacity", "2023FY", 100), ("capacity", "2024FY", 112),
+                    ("revenue", "2023FY", 1000), ("revenue", "2024FY", 1097)]:
+        _put(led, k, p, v)
+    # 单价 asp 账本里完全没有历史。
+    d = [Decomposition(target="revenue", op=OpEnum.MULTIPLY, factors=[
+        Factor(key="capacity", label="产能", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])]
+
+    def client(_prompt):
+        return "\n".join([
+            f"假设: 产能 | 第1年 | 5% | 10% | 14% | 新厂投产 「{Q}」",
+            f"假设: 单价 | 第1年 | -6% | -2% | 1% | 竞争压价 「{Q}」"])
+
+    a = assume.decide(client, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      ledger=led, body=BODY, as_of=AS_OF, code="600584",
+                      decomps=d)
+    assert a.residuals["revenue"]["no_history"] == ["单价"]
+    txt = a.describe()
+    assert "无历史校验" in txt and "单价" in txt
+
+
+# ── C3：毛利率基期取到中报，约 32% 估值误差 ───────────────────
+
+def test_base_margin取最近完整年度不是中报():
+    """C3 实测复现（用真实缓存 /tmp/cj/cal_600584.pkl 同量级重建）：
+    `gm_hist` 末项是 2026H1 中报（15.15%），最近一个完整年度其实是
+    2025A（14.15%）。修复前 `_base_margin_of` 直接取 `gm_hist[-1]`，
+    取到中报，在该模型上约相当于 32% 的估值误差。"""
+    judg = {"g_hist": [0.1069, -0.1215, 0.2124, 0.0809],   # 4 → 5 个年度
+           "gm_hist": [0.1841, 0.1704, 0.1365, 0.1306, 0.1415, 0.1515]}
+    got = assume._base_margin_of(judg)
+    assert got == D("0.1415"), f"应取最近完整年度 0.1415，取到了 {got}"
+
+
+def test_base_margin无中报时仍取最后一项():
+    """回归：没有中报（gm_hist 长度与年度数一致）时行为不变。"""
+    judg = {"g_hist": [0.10, 0.08], "gm_hist": [0.18, 0.17, 0.14]}
+    assert assume._base_margin_of(judg) == D("0.14")
+
+
+def test_base_margin与full用的是同一个数():
+    """C3 要求：直接断言 `full.py` 与 `to_driver_block`/`apply_to` 用的
+    是同一个数——不能只测 assume 这一侧，两处各算各的才是这个 bug
+    真正的危害所在（full.py 用账本年度值，assume 曾经用 gm_hist 末项，
+    分歧只是因为这个值最终只喂进一个对基期免疫的单调性校验才没暴露）。
+    """
+    from ir_agent import full
+    judg = {"g_hist": [0.1069, -0.1215, 0.2124, 0.0809],
+           "gm_hist": [0.1841, 0.1704, 0.1365, 0.1306, 0.1415, 0.1515]}
+    led = FactLedger()
+    _put(led, "gross_margin", "2025FY", "0.1415")
+    got_full = full._fact_value(led, "gross_margin", "2025FY", AS_OF)
+    got_assume = assume._base_margin_of(judg)
+    assert got_full == D("0.1415")
+    assert D(str(got_full)) == got_assume, \
+        "full.py 与 assume._base_margin_of 必须用同一个数，否则第一" \
+        "阶段判断项与第二阶段建模的基期口径就各算各的"
+
+
+# ── I6：_base_margin_of 的 fallback 会重新引入 C3 修掉的双重计入 ──
+
+def test_gm_hist为空时报错而不是静默复用gm0():
+    """I6：fallback 到 `judg['gm'][0]` 危险在于 —— `apply_to` 先跑、
+    `to_driver_block` 后跑时，`gm[0]` 已经是「基期 + 第一年 pp 增量」
+    的合成结果，拿它当基期会把第一年的增量在工作表公式里再加一遍。
+    今天走不到这条路（calibrate 正常产出时 gm_hist 不会空），但这是
+    「以后有人改了 calibrate 就静默算错钱」的形状，fallback 必须改成
+    抛错。"""
+    with pytest.raises(AssumeFailed, match="gm_hist"):
+        assume._base_margin_of({"gm": [0.20]})
+    with pytest.raises(AssumeFailed):
+        assume._base_margin_of({})
+
+
+# ── C4：pp 因子写成百分号被静默缩小 100 倍 ───────────────────
+
+def test_pp因子写百分号被拒绝():
+    """C4 实测复现：`_pct('-3pp') == -3`（贡献 -3pp，正确），但
+    `_pct('-3%') == -0.03`（贡献 -0.03pp，缩小 100 倍）。单调性校验、
+    闭合校验都不会抓住这个错——因子各自的三档依旧严格拉开，只是
+    合成结果几乎不动。必须在解析时就把带 % 的字面量挡下来。"""
+    bad = f"假设: 稼动率摊薄 | 第1年 | -3% | -1 | 0.5 | 「{Q}」"
+    with pytest.raises(AssumeFailed, match="pp"):
+        assume.parse(bad, 1, decomps=_decomps())
+
+
+def test_pp因子不带百分号正常解析():
+    """回归：既有写法（纯数字、"-3pp" 后缀）不受影响。"""
+    ok = f"假设: 稼动率摊薄 | 第1年 | -3 | -1 | 0.5 | 「{Q}」"
+    a = assume.parse(ok, 1, decomps=_decomps())
+    assert a.rows[0].bear == D("-3")
+
+
+def test_c4修复后pp显示为pp不是百分号():
+    """C4 报告特别指出的陷阱：修好 C1 之后，`describe()` 若仍用 `:.2%`
+    格式化 pp 值，`-0.03` 会显示成 "-3.00%"，和正确的 `-3`（应显示
+    "-3.00pp"）看起来一模一样，人从清单上根本发现不了。pp 必须按原始
+    数字 + pp 后缀显示。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.code, a.labels = "600584", ["2026E"]
+    txt = a.describe()
+    assert "-1.00pp" in txt
+    assert "-2.50pp" in txt
+
+
+# ── I5：pp 的参照点在提示词里没定义 ───────────────────────────
+
+def test_提示词说明pp相对基期是累计值():
+    """I5 实测复现：`compose` 的 ADD_PP 是「基期 + Σpp」，基期对每个
+    预测年都是同一个数，所以第 3 年的 pp 必须是相对基期的**累计**变动，
+    不是相对上一年的变动——提示词此前只说「一律填 pp」，没定义参照点。
+    模型若按逐年变动理解，填「每年 −1」意在逐年下台阶，实际算出的却是
+    三年同一个 base−1pp，且不会报错。"""
+    txt = assume._factor_head(_decomps(), {})
+    assert "累计" in txt and "基期" in txt
+
+
+# ── M1：_NUM 不认 Unicode 减号，符号被悄悄翻转 ─────────────────
+
+def test_全角减号不会被吞掉导致符号翻转():
+    """M1：`'−3pp'`（Unicode 减号 U+2212，设计文档全文用的就是这个
+    字符）此前被解析成 `+3`——全负号那几档会被单调性校验抓住，但
+    「−2% | 3% | 8%」这类只有悲观档为负的写法仍然单调，会静默通过。"""
+    assert assume._pct("−3pp") == D("-3")
+    assert assume._pct("−3%") == D("-0.03")
+
+
+def test_全角减号在标量模式下解析出正确符号():
+    a = assume.parse(_line("营收增速", 1, bear="−2%", base="3%", bull="8%"), 1)
+    assert a.rows[0].bear == D("-0.02")
+    assert a.rows[0].bear < a.rows[0].base < a.rows[0].bull
