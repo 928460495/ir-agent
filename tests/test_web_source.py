@@ -39,54 +39,164 @@ def restore_web_capable():
         W.WEB_CAPABLE = old
 
 
-# 复审实跑发现：tier_of() 用裸子串匹配，两个方向都在漏 ——
-#   中文这边："证券"在"证券时报"里是前缀（报纸自称），在"中信证券"里是
-#     后缀（机构类型），裸子串分不出前缀后缀，把报纸误判成卖方研究。
-#   英文这边："semi"是"Semiconductor"的前缀、"idc"是"MidCap"的中段，
-#     裸子串一样会误命中，把媒体误判成官方一手来源。
-# 这张表覆盖复审点名的用例，也覆盖没点名但同类的用例，钉住判别机制
-# 本身，而不是钉住某几个具体名字。
+# ══════════════════════════════════════════════════════════════════════
+# tier_of() —— 第三次换设计后的测试，钉的是「白名单全称 + 允许修饰词」
+# 这一条机制本身，不是钉某几个具体名字。
+#
+# 前两轮的表驱动测试都只钉住了名字：复审发现，只要从 `_MEDIA_MARKERS`
+# 删掉 "网" 这一个词，50 项测试全绿，而 "凤凰网证券" 当场被判成 SELLSIDE。
+# 这次的核心是「危害方向穷举」——凡是不在白名单里的名字，不管长得多像
+# 官方/卖方，都必须落 MEDIA；以及一条「机制回归哨兵」，专门堵「改回子串
+# 匹配后测试还能全绿」这条退路。
+# ══════════════════════════════════════════════════════════════════════
+
+# 危害方向：把媒体错拔成 SELLSIDE/OFFICIAL 会让一篇文章单独决定因子取值，
+# 这些必须全部判 MEDIA，一个都不能拔高。
 MEDIA_NAMES = [
+    # 证券类报纸/门户——"证券"在这些名字里是前缀/频道名，不是机构类型后缀
     "证券时报", "证券时报网", "中国证券报", "中国证券报·中证网",
-    "证券日报", "证券日报网", "上海证券报", "证券时报（网页版）",
-    "第一财经", "新浪财经", "界面新闻",
-    "Semiconductor Engineering", "Semiconductor Digest",
-    "SemiAnalysis", "MidCap Research",
+    "证券日报", "证券日报网", "上海证券报", "中国证券报社",
+    "每日经济新闻", "第一财经", "新浪财经", "界面新闻", "中证网", "e公司",
+    "新浪证券", "腾讯证券", "搜狐证券", "同花顺证券", "雪球证券", "凤凰网证券",
+    # 英文同类陷阱
+    "Securities Daily", "China Securities Journal", "Shanghai Securities News",
+    "Securities Times", "Investment Weekly",
+    # SEMI / IDC / Gartner 词形陷阱——前缀撞上、中段撞上、词边界规则堵不住的
+    "Semiconductor Engineering", "SemiAnalysis", "Semiconductor Digest",
+    "MidCap Research", "中国 IDC 圈", "IDC Frontier", "SEMI-Insights",
+    "The SEMI Times", "Not-Gartner", "Gartner-like Research",
+    "Pseudo IDC Weekly", "Anti-IDC Blog",
+    # 白名单全称 + 非修饰词后缀的"前缀陷阱"——命中前缀不等于是那家机构
+    "Gartner 观点转载", "转引自 IDC", "央行观察", "协会视角",
+    "统计局数据搬运工", "赛迪观察", "中金公司观察",
+    "Goldman Sachs Rumors Blog", "Morgan Stanley Fanpage", "UBS Daily",
+]
+
+# 召回方向：真正的官方/协会/权威一手来源，以及卖方研究所，必须判对，
+# 否则实跑会频繁误报「证据不足」。
+OFFICIAL_NAMES = [
+    "国家统计局", "国家统计局官网", "统计局公报", "工信部", "工信部官网",
+    "上交所", "上海证券交易所官网", "中国人民银行", "证监会",
+    "中国半导体行业协会网站",
+    "SEMI", "SEMI 官网", "Gartner", "TrendForce", "IDC",
+    "集邦咨询", "赛迪顾问",
 ]
 
 SELLSIDE_NAMES = [
-    "中信证券", "国泰君安证券", "华泰证券研究所", "中金公司", "某某期货",
-    "Morgan Stanley", "Goldman Sachs",
-]
-
-OFFICIAL_NAMES = [
-    "国家统计局", "中国半导体行业协会", "工信部", "上交所", "深交所",
-    "中国人民银行", "SEMI", "Gartner", "TrendForce", "IDC",
+    "中信证券", "中信建投", "中金公司",
+    "国泰君安证券研究所", "华泰证券研究所", "招商证券股份有限公司",
+    "广发证券发展研究中心", "申万宏源研究", "中信证券研究部官网",
+    "Morgan Stanley", "Goldman Sachs", "J.P. Morgan", "JP Morgan",
 ]
 
 
 @pytest.mark.parametrize("name", MEDIA_NAMES)
-def test_表驱动_应判为媒体(name):
+def test_危害方向穷举_一律判为媒体(name):
     assert tier_of(name) is Tier.MEDIA
 
 
-@pytest.mark.parametrize("name", SELLSIDE_NAMES)
-def test_表驱动_应判为卖方(name):
-    assert tier_of(name) is Tier.SELLSIDE
-
-
 @pytest.mark.parametrize("name", OFFICIAL_NAMES)
-def test_表驱动_应判为官方(name):
+def test_召回方向_官方与权威一手来源判对(name):
     assert tier_of(name) is Tier.OFFICIAL
 
 
-def test_判不出来兜底为媒体_而非弱否定():
-    """兜底断言必须写 `is Tier.MEDIA`，不能写 `is not Tier.SELLSIDE`——
-    后者连 OFFICIAL 都能蒙混过关，钉不住"判不出来就该落在 MEDIA"这条
-    规则本身。"中国社科院工业经济研究所"是官方背景智库，不含"证券"
-    字样，不该被结构规则命中为卖方；判别机制认不出它是什么，就该按
-    MEDIA 兜底，而不是随便晋升成 OFFICIAL。"""
-    assert tier_of("中国社科院工业经济研究所") is Tier.MEDIA
+@pytest.mark.parametrize("name", SELLSIDE_NAMES)
+def test_召回方向_卖方判对(name):
+    assert tier_of(name) is Tier.SELLSIDE
+
+
+# 兜底：异常输入一律 MEDIA。断言必须写 `is Tier.MEDIA`，不能写
+# `is not Tier.SELLSIDE`——弱否定断言连 OFFICIAL 都能蒙混过关，钉不住
+# "判不出来就该落在 MEDIA" 这条规则本身。
+@pytest.mark.parametrize("name", [
+    "", "   ", "　　", "！＠＃￥%^&*", "@#$%^&*()", "x" * 5000,
+])
+def test_兜底_异常输入一律判为媒体(name):
+    assert tier_of(name) is Tier.MEDIA
+
+
+def test_兜底_None一律判为媒体():
+    assert tier_of(None) is Tier.MEDIA  # type: ignore[arg-type]
+
+
+# 繁体：只需覆盖白名单条目里实际出现的字，覆盖不到的繁体名落 MEDIA，
+# 方向安全。
+def test_繁体白名单命中():
+    assert tier_of("中信證券") is Tier.SELLSIDE
+    assert tier_of("國泰君安證券") is Tier.SELLSIDE
+    assert tier_of("證券時報") is Tier.MEDIA
+
+
+# 机制回归哨兵：任何不在白名单里的名字都不得被判为 SELLSIDE/OFFICIAL。
+# 构造方式是「白名单全称 + 一个不在『允许的修饰词』集合里的后缀」——
+# 例如 "中金公司观察"、"UBS Fanpage"。子串匹配、词尾规则、词边界正则
+# 都会因为命中了这个前缀就直接判定通过；只有"整名必须能被『全称+
+# 修饰词』完全解释"这一条机制会正确地把它们打回 MEDIA。如果有人把
+# tier_of 改回任何一种模糊匹配，这项参数化测试必须变红。
+_SENTINEL_ENTRIES_CN = [
+    "中信证券", "中金公司", "华泰证券", "招商证券", "国泰君安证券",
+    "国家统计局", "统计局", "工信部", "证监会", "上交所",
+    "中国人民银行", "中国半导体行业协会", "赛迪顾问", "集邦咨询",
+]
+_SENTINEL_SUFFIXES_CN = ["观察", "视角", "评论", "解读", "搬运工"]
+
+_SENTINEL_ENTRIES_ASCII = [
+    "SEMI", "GARTNER", "IDC", "TRENDFORCE", "Morgan Stanley",
+    "Goldman Sachs", "UBS",
+]
+_SENTINEL_SUFFIXES_ASCII = [" Blog", " Fanpage", " Rumors", "-Insights",
+                            " Weekly", " Frontier"]
+
+
+def _sentinel_names() -> list[str]:
+    names = []
+    for entry in _SENTINEL_ENTRIES_CN:
+        for suf in _SENTINEL_SUFFIXES_CN:
+            names.append(entry + suf)
+    for entry in _SENTINEL_ENTRIES_ASCII:
+        for suf in _SENTINEL_SUFFIXES_ASCII:
+            names.append(entry + suf)
+    return names
+
+
+@pytest.mark.parametrize("name", _sentinel_names())
+def test_机制回归哨兵_白名单外一律不得拔高(name):
+    assert tier_of(name) is Tier.MEDIA
+
+
+# 结构哨兵：白名单里不许出现「关键词」性质的短片段。
+#
+# 上面那条哨兵能挡住把实现改回子串匹配，却挡不住另一种更隐蔽的退化——
+# 实现原封不动，有人往白名单元组里塞一个裸片段（"证券""期货""协会"
+# "央行"），白名单就悄悄退化回子串匹配的效果。web.py 里对此只有一句
+# 注释警告，注释拦不住任何人，所以在这里变成可执行的守卫。
+#
+# 阈值取 3 是有实测依据的，不是拍脑袋：现有全部条目最短就是 3
+# （IDC / SIA / UBS / 上交所 / 北交所 / 发改委），而所有危险裸片段都
+# 恰好是 2。真要加一个 2 字符的合法机构全称，改的应该是这条测试并
+# 说明理由，而不是让它默默通过。
+def test_结构哨兵_白名单不得含短片段():
+    from ir_agent.sources import web as _web
+
+    entries = (_web._SELLSIDE_CN + _web._SELLSIDE_ASCII
+               + _web._OFFICIAL_CN + _web._OFFICIAL_ASCII)
+    短片段 = [e for e in entries if len(_web._normalize(e)) < 3]
+    assert 短片段 == [], (
+        f"白名单里混进了短片段 {短片段} —— 这会让白名单退化回子串匹配，"
+        "见 web.py 中 tier_of 的设计契约"
+    )
+
+
+# 端到端：单条来源为"证券时报网"的发现走完 search() 后，
+# supports_value() 必须判定不足以支撑取值——这是本模块存在的唯一理由，
+# 分级机制的任何退化最终都要在这一步露馅。
+def test_端到端_证券时报网单源不支撑取值(restore_web_capable):
+    restore_web_capable.WEB_CAPABLE = True
+    raw = ("发现: utilization | 稼动率约80% | https://example.com/x | "
+           "证券时报网 | 2026-07-01\n")
+    got = search(_Client(raw), "稼动率", "utilization", "封测", AS_OF)
+    ok, why = supports_value(got)
+    assert ok is False
 
 
 def test_解析发现():
@@ -100,38 +210,6 @@ def test_解析发现():
 def test_缺网址的发现被丢弃():
     """外部依据必须有 URL —— 没有网址就无从复核，与凭空捏造无异。"""
     assert parse_findings("发现: utilization | 稼动率很低 | 无 | 某处 | 2026-01-01") == []
-
-
-def test_来源分级():
-    assert tier_of("SEMI") is Tier.OFFICIAL
-    assert tier_of("中国半导体行业协会") is Tier.OFFICIAL
-    assert tier_of("中信证券") is Tier.SELLSIDE
-    assert tier_of("某财经网") is Tier.MEDIA
-
-
-def test_财经报纸不应被判为卖方研究():
-    """发现一：子串匹配把"证券时报"这类报纸误判成卖方研究所，
-    supports_value() 就会认为它能单独支撑因子取值 —— 直接绕过
-    「MEDIA 单源不得单独支撑」这条本模块存在的唯一理由。这三家是
-    A 股报道里最常被引用的报纸，不是边缘情形。"""
-    assert tier_of("证券时报") is Tier.MEDIA
-    assert tier_of("中国证券报") is Tier.MEDIA
-    assert tier_of("证券日报") is Tier.MEDIA
-
-
-def test_真正的卖方仍判为卖方研究():
-    """修法不能矫枉过正 —— 真正的券商/期货公司必须仍然是 SELLSIDE，
-    否则它们的行业转述会被错误地降级成不能单独支撑取值的 MEDIA。"""
-    assert tier_of("中信证券") is Tier.SELLSIDE
-    assert tier_of("国泰君安证券研究所") is Tier.SELLSIDE
-    assert tier_of("某某期货") is Tier.SELLSIDE
-
-
-def test_官方背景研究机构不被误判为卖方():
-    """"研究所"这个词本身不代表卖方 —— 官方背景智库（如中国社科院下属
-    研究所）更接近 OFFICIAL，至少不该被判成卖方研究。判不出来的一律按
-    MEDIA 处理（往高了猜等于凭空给来源加权），这条规则保持不变。"""
-    assert tier_of("中国社科院工业经济研究所") is not Tier.SELLSIDE
 
 
 def test_无日期的发现被丢弃():

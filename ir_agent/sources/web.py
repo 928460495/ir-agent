@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 
 from ir_agent.lineparse import keyed
 from ir_agent.sources.external import Tier
@@ -40,53 +41,134 @@ _DATE_PATTERNS = (
 )
 
 # 来源分级。官方与协会 > 卖方 > 媒体。判不出来的一律按媒体处理 ——
-# 往高了猜等于凭空给一个来源加权。
+# 往高了猜等于凭空给一个来源加权，这条原则本身没变过。变过三次的是
+# 「怎么判」。
 #
-# SEMI / Gartner / TrendForce / IDC / Yole / Omdia / IC Insights 严格说是
-# 付费市场研究商，不是本 docstring（官方定义见 external.py 的 TIER_LABEL）
-# 里说的统计局/协会/部委/交易所。放进 OFFICIAL 是有意的：封测的产能、
-# 出货这类数据，这几家就是该领域证明力最强的一手来源，官方统计反而
-# 覆盖不到、或滞后到失去时效。分级看的是「这句话的证明力有多强」，
-# 不是「这个机构算不算官方机构」。
+# SEMI / Gartner / TrendForce / IDC / Yole / Omdia / IC Insights / 集邦咨询 /
+# 赛迪顾问 严格说是付费市场研究商，不是 external.py 的 TIER_LABEL 里说的
+# 统计局/协会/部委/交易所。放进 OFFICIAL 是有意的：封测的产能、出货这类
+# 数据，这几家就是该领域证明力最强的一手来源，官方统计反而覆盖不到、
+# 或滞后到失去时效。**分级看的是这句话的证明力有多强，不是这个机构算
+# 不算官方机构**——集邦咨询是 TrendForce 的中文马甲，同一家公司没有
+# 理由分级不同，一并放进 OFFICIAL 白名单。
 #
-# 中文关键词用裸子串匹配是安全的——这些都是机构全称的独有片段
-# （"统计局""交易所""人民银行"……），不是"证券""semi""idc"这类会在
-# 别的名字中间冒出来的通用短词，因此不需要下面 ASCII 关键词那套
-# 词边界处理。
-_OFFICIAL_CN = ("统计局", "工信部", "发改委", "商务部", "财政部", "海关",
-                "协会", "交易所", "上交所", "深交所", "北交所", "证监会",
-                "人民银行", "央行", "集邦", "赛迪")
-_OFFICIAL_ASCII = ("SEMI", "GARTNER", "TRENDFORCE", "IDC", "YOLE", "OMDIA",
-                    "IC INSIGHTS")
+# ── 为什么换成白名单，而不是再修一条判别规则 ──────────────────────
+# 同一个词元在不同名字里角色不同：「证券」在「中信证券」是机构类型
+# 后缀，在「新浪证券」「腾讯证券」只是门户的频道名；「IDC」本身是市场
+# 研究公司，出现在「中国 IDC 圈」里指的是互联网数据中心；`\bSEMI\b`
+# 这样的词边界正则挡得住 Semiconductor，挡不住 SEMI-Insights / The SEMI
+# Times。三轮审查、三种判别机制——裸子串 → 以"报"收尾排除 → 媒体标识
+# 优先＋词尾结构——依次被真实来源名打穿，根因都是同一个：**词元本身不
+# 携带机构性质，位置和上下文才携带，而任何基于位置/结构的模糊规则都能
+# 被一个新来源名绕开。**
+#
+# 于是不再问"这个名字像不像官方/卖方"，只问"这个名字是不是白名单里那
+# 家机构本身（允许带一点无害的修饰词）"：
+#
+#     升级到 SELLSIDE/OFFICIAL 只有「白名单全称 + 允许的修饰词」这
+#     一条路。不要加子串匹配、词尾规则、词边界正则或"媒体标识"黑名单
+#     ——这三种都试过，都被真实来源名打穿（证券时报网 / 新浪证券 /
+#     Securities Daily / 中国 IDC 圈）。要支持新来源，往白名单加全称。
+#     判不出来落 MEDIA 是正确行为，不是缺陷。
+#
+# 这条路径安全，靠的是 tier_of 唯一下游用途 supports_value() 带来的
+# 代价不对称：把媒体错拔成 SELLSIDE/OFFICIAL，等于一篇博客单独决定了
+# DCF 里的因子取值，是危害；把真官方/卖方错压成 MEDIA，只是需要再凑
+# 一条来源互相印证，是召回损失。因此策略对"拔高"要极端保守，对"压低"
+# 可以从容——这正是白名单机制的方向，不是缺省地各打五十大板。
 
-# 结构化卖方判别，见 tier_of 顶部注释：以 证券/期货/资管 收尾才是机构
-# 类型后缀；"研究所/研究院/研究部"单独不算数，必须同时含"证券"字样。
-_SELLSIDE_SUFFIX = ("证券", "期货", "资管")
-_SELLSIDE_RESEARCH_SUFFIX = ("研究所", "研究院", "研究部")
-# 结构规则覆盖不到的具名卖方机构（"中金公司"不以"证券"收尾），
-# 用全称做裸子串匹配是安全的——全称足够长，不会在别的机构名里凑巧出现。
-_SELLSIDE_CN_EXPLICIT = ("中金公司",)
-_SELLSIDE_ASCII = ("INVESTMENT", "SECURITIES", "MORGAN STANLEY",
-                    "GOLDMAN SACHS", "UBS", "J.P. MORGAN", "NOMURA")
+# ── 归一化：让"国家统计局官网"和"国家统计局　官网"命中同一个前缀 ──
+# 只做三件事：去空白（含全角空格）、剔除常见全/半角标点、ASCII 转大写。
+# 不做任何语义层面的"聪明"处理——归一化越简单，越不会自己制造新漏洞。
+_WS_RE = re.compile(r"[\s　]+")
+_PUNCT_STRIP = "（）()·、，,．.-_「」《》：:；;'\""
 
-# 媒体标识优先级最高：命中任意一个直接判 MEDIA，不再往下试官方/卖方
-# 关键词。这是对付"证券时报网"这类前缀碰撞的正解——"证券"在这类报纸
-# 名字里是前缀，报纸的自我标识（报/网/新闻……）才是能定性的后缀。
-_MEDIA_MARKERS = ("报", "网", "周刊", "杂志", "传媒", "晚报", "商报", "新闻")
+# 繁→简：只覆盖白名单条目里实际出现的字，不引入第三方库、不做通用
+# 繁简转换。覆盖不到的繁体名落 MEDIA，方向安全（宁可少召回，不可错拔高）。
+_TRAD_TO_SIMP = {
+    "證": "证", "國": "国", "華": "华", "廣": "广", "發": "发", "萬": "万",
+    "興": "兴", "業": "业", "東": "东", "風": "风", "長": "长", "統": "统",
+    "計": "计", "財": "财", "關": "关", "總": "总", "監": "监", "員": "员",
+    "會": "会", "導": "导", "體": "体", "協": "协", "詢": "询", "顧": "顾",
+    "問": "问", "網": "网", "眾": "众", "號": "号", "報": "报", "數": "数",
+    "據": "据", "庫": "库", "聞": "闻", "際": "际", "銀": "银",
+}
 
-_ASCII_WORD_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+def _normalize(name: str) -> str:
+    """tier_of 匹配前的唯一预处理：去空白、剔标点、繁转简、ASCII 转大写。"""
+    if not name:
+        return ""
+    s = "".join(_TRAD_TO_SIMP.get(ch, ch) for ch in name)
+    s = _WS_RE.sub("", s)
+    s = "".join(ch for ch in s if ch not in _PUNCT_STRIP)
+    return s.upper()
 
 
-def _has_ascii_keyword(name: str, keywords: tuple[str, ...]) -> bool:
-    """英文关键词按词边界匹配，而不是裸子串——见 tier_of 顶部注释。"""
-    for kw in keywords:
-        pat = _ASCII_WORD_RE_CACHE.get(kw)
-        if pat is None:
-            pat = re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
-            _ASCII_WORD_RE_CACHE[kw] = pat
-        if pat.search(name):
-            return True
-    return False
+# 白名单——全称，不是片段。往这里加一条全称就能支持一个新来源；
+# 不要往这几个元组里塞任何"关键词"性质的短片段（比如裸的"证券"
+# "期货"），那等于把白名单退化回子串匹配。
+_SELLSIDE_CN = (
+    "中信证券", "中信建投", "中金公司", "国泰君安证券", "国泰海通",
+    "海通证券", "海通国际", "华泰证券", "招商证券", "广发证券",
+    "申万宏源", "兴业证券", "东吴证券", "国信证券", "光大证券",
+    "天风证券", "民生证券", "长江证券", "方正证券", "东方证券",
+    "中泰证券", "浙商证券",
+)
+_SELLSIDE_ASCII = (
+    "MORGAN STANLEY", "GOLDMAN SACHS", "UBS", "JP MORGAN", "J.P. MORGAN",
+    "NOMURA", "CITI", "CREDIT SUISSE", "JEFFERIES", "BERNSTEIN",
+)
+
+# 集邦咨询、赛迪顾问放在这里而不是另立名单：分级看的是证明力，这两家
+# 是封测/半导体产业链数据事实上的权威一手来源，理由与 SEMI/Gartner/
+# TrendForce/IDC 完全一致，见本节顶部注释。
+_OFFICIAL_CN = (
+    "国家统计局", "统计局", "工业和信息化部", "工信部", "国家发展改革委",
+    "发改委", "商务部", "财政部", "海关总署", "中国人民银行",
+    "中国证券监督管理委员会", "证监会", "上海证券交易所", "深圳证券交易所",
+    "北京证券交易所", "上交所", "深交所", "北交所", "中国半导体行业协会",
+    "中国电子专用设备工业协会", "集邦咨询", "赛迪顾问",
+)
+_OFFICIAL_ASCII = (
+    "SEMI", "GARTNER", "TRENDFORCE", "IDC", "YOLE", "OMDIA", "IC INSIGHTS",
+    "COUNTERPOINT", "WSTS", "SIA",
+)
+
+# 允许的修饰词——白名单全称命中后，剩余部分必须能被这张表里的词
+# **完整拼出**（可以是好几个词拼接，比如"研究部"+"官网"），拼不满就
+# 说明剩余部分里混进了白名单没解释到的东西（比如"中金公司观察"里的
+# "观察"），落 MEDIA。
+_MODIFIERS = (
+    "官网", "网站", "官方网站", "网", "公众号", "微信公众号",
+    "研究所", "研究院", "研究部", "研究中心", "发展研究中心", "研究",
+    "股份有限公司", "有限公司",
+    "公报", "月报", "季报", "年报", "快报",
+    "数据库", "新闻发言人", "发布会",
+    "中国", "国际",
+)
+
+_SELLSIDE_NORM = tuple(_normalize(x) for x in _SELLSIDE_CN + _SELLSIDE_ASCII)
+_OFFICIAL_NORM = tuple(_normalize(x) for x in _OFFICIAL_CN + _OFFICIAL_ASCII)
+_MODIFIERS_NORM = tuple(sorted({_normalize(x) for x in _MODIFIERS}, key=len,
+                                reverse=True))
+
+
+@lru_cache(maxsize=8192)
+def _fully_modifiers(remainder: str) -> bool:
+    """remainder 能否被 _MODIFIERS_NORM 里的词首尾相接、不多不少地拼满。
+
+    需要"拼接"而不是"单个词命中"，是因为真实的修饰组合会叠加——
+    比如"中信证券研究部官网"里，白名单全称"中信证券"之后剩下
+    "研究部官网"，是"研究部"+"官网"两个修饰词拼出来的，不是其中
+    任何一个单独能覆盖的。允许回溯尝试所有切法（而不是只贪心切最长的
+    那个），保证只要存在一种能拼满的切法就不会误判——组合数受修饰词表
+    很小、剩余串很短的限制，配合 lru_cache 不会有性能问题。
+    """
+    if remainder == "":
+        return True
+    return any(remainder.startswith(mod) and _fully_modifiers(remainder[len(mod):])
+               for mod in _MODIFIERS_NORM if mod)
 
 
 class WebUnavailable(Exception):
@@ -128,44 +210,41 @@ def _parse_date(raw: str) -> date | None:
 def tier_of(publisher: str) -> Tier:
     """来源分级。
 
-    **上一轮（2816197）的病根是裸子串匹配，这次要换判别机制，不是再加
-    一条 if。** 裸子串分不清一个词在名字里是前缀还是后缀：「证券」在
-    「证券时报」里是前缀（报纸拿它当报头用），在「中信证券」里是后缀
-    （机构类型）；「semi」是「Semiconductor」的前缀，「idc」是
-    「MidCap」的中段。逐个名字加排除只会一直漏，因为病根不在名单缺项，
-    在匹配机制本身允许关键词命中在名字的任何位置。这里换成两条不同的
-    判别方式，都不是裸子串：
-      - 英文关键词按**词边界**匹配（`_has_ascii_keyword`），
-        `\\bSEMI\\b` 不会命中 `Semiconductor` 或 `SemiAnalysis`；
-      - 中文关键词按**结构**判别（前缀/后缀/是否为媒体自我标识），
-        而不是看这个词出不出现。
-    往后再发现漏判，先问「这次踩的是不是同一个裸子串陷阱」，而不是
-    先加一条排除。
+    **设计契约——升级到 SELLSIDE/OFFICIAL 只有一条路：**
+
+        白名单全称 + 允许的修饰词。
+
+    不要加子串匹配、词尾规则、词边界正则或"媒体标识"黑名单——这三种
+    都试过（依次是 2816197 之前的裸子串、2816197、6d9cd4c），都被真实
+    来源名打穿（证券时报网 / 新浪证券 / Securities Daily / 中国 IDC
+    圈）。根因是同一个：**同一个词元在不同名字里角色不同，任何基于
+    位置或结构的模糊匹配都在赌"这次的反例还没出现"。**
+
+    要支持新来源，往 `_SELLSIDE_CN`/`_SELLSIDE_ASCII`/`_OFFICIAL_CN`/
+    `_OFFICIAL_ASCII` 加全称，或往 `_MODIFIERS` 加修饰词——不要碰这个
+    函数的判别逻辑本身。**判不出来落 MEDIA 是正确行为，不是缺陷**：
+    见本节顶部注释里 tier_of 唯一下游用途 supports_value() 的代价
+    不对称——拔高是危害，压低只是召回损失。
     """
-    p = (publisher or "").strip()
-    if not p:
+    name = _normalize(publisher or "")
+    if not name:
         return Tier.MEDIA
 
-    # 媒体标识优先级最高，见 _MEDIA_MARKERS 处注释：先把"以报/网/新闻
-    # 自称"的名字挑出去，就不会被这些名字里可能带的"证券"前缀带偏。
-    if any(marker in p for marker in _MEDIA_MARKERS):
-        return Tier.MEDIA
+    candidates: list[tuple[int, Tier]] = []
+    for entry in _SELLSIDE_NORM:
+        if entry and name.startswith(entry):
+            candidates.append((len(entry), Tier.SELLSIDE))
+    for entry in _OFFICIAL_NORM:
+        if entry and name.startswith(entry):
+            candidates.append((len(entry), Tier.OFFICIAL))
+    # 优先试最长的白名单前缀——多个全称都能作为前缀命中时（理论上
+    # 白名单条目之间不应互为前缀，这里只是防御性地选更具体的那个），
+    # 剩余部分更短，更可能被修饰词完全解释。
+    candidates.sort(key=lambda pair: -pair[0])
 
-    if any(k in p for k in _OFFICIAL_CN) or _has_ascii_keyword(p, _OFFICIAL_ASCII):
-        return Tier.OFFICIAL
-
-    # 卖方按结构判别：必须是"以证券/期货/资管收尾"这种机构类型后缀，
-    # 或者"含证券字样、且以研究所/研究院/研究部收尾"。「研究所」单独
-    # 不构成卖方——官方背景智库（中国社科院工业经济研究所）也常用这
-    # 三个字收尾，不含"证券"就不该被判进卖方。
-    if p.endswith(_SELLSIDE_SUFFIX):
-        return Tier.SELLSIDE
-    if "证券" in p and p.endswith(_SELLSIDE_RESEARCH_SUFFIX):
-        return Tier.SELLSIDE
-    if (any(k in p for k in _SELLSIDE_CN_EXPLICIT)
-            or _has_ascii_keyword(p, _SELLSIDE_ASCII)):
-        return Tier.SELLSIDE
-
+    for entry_len, tier in candidates:
+        if _fully_modifiers(name[entry_len:]):
+            return tier
     return Tier.MEDIA
 
 
