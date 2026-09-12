@@ -333,7 +333,90 @@ def build(cal: dict, path: str) -> dict:
     ws.freeze_panes="A5"
     cal["_rows"]=dict(SCEN=SCEN,G_ROW=G_ROW,M_ROW=M_ROW,CX_ROW=CX_ROW,GR=GR,OR_=OR_,DR=DR,FN=FN,DG=DG_ROW,DM=DM_ROW,IT=IT_ROWS,
                       HC=HC,CC=CC,BASE=BASE,NH=NH,NY=NY)
+
+    # 驱动因子分解：只有当上游（ir-agent 的方法论预研）给出 drivers 时才建表。
+    # 没有分解式是降级路径（预研失败），此时 1_假设 保持原样，工作簿形状
+    # 与从前完全一致 —— 见 _build_driver_sheet 的文档字符串。
+    DRV = JU.get("drivers")
+    if DRV:
+        _build_driver_sheet(wb, DRV, YE, ws, G_ROW, M_ROW)
+
     return _sheets(wb, cal, path)
+
+
+_SCEN_COLS = ("B", "C", "D")          # Bull / Base / Bear —— 与 1_假设 一致
+
+
+def _build_driver_sheet(wb, drv, YE, assum_ws, g_row, m_row):
+    """建「1b_驱动分解」，并把 1_假设 的增速/毛利率改为跨表引用。
+
+    **列序必须与 1_假设 一致（B=Bull C=Base D=Bear）**，它与
+    CHOOSE($B$SCEN,…) 绑定。写反不会让验算失败 —— 公式本身没错，
+    只是「选悲观」会选出乐观值。
+
+    单位不能混：`变化率` 只进乘法链（营收 = Π(1+因子变化率)−1），
+    `pp` 只进加法链（毛利率 = 基期 + Σ因子贡献(pp)/100）。表里对每个
+    因子都标出单位与所属运算列，避免两者被误用互换。
+    """
+    ds = wb.create_sheet("1b_驱动分解", 2)
+    ds.column_dimensions["A"].width=30
+    for c in "BCD": ds.column_dimensions[c].width=12
+    ds.column_dimensions["E"].width=10
+    r = 1
+    ds.cell(r, 1, "驱动因子分解").font = Font(bold=True, size=12); r += 2
+    for i, t in enumerate(["因子 / 年", "Bull", "Base", "Bear", "单位"]):
+        c = ds.cell(r, i + 1, t); c.font = F_COL; c.fill = P_B
+    r += 1
+
+    rows: dict[str, dict[str, int]] = {}
+    for target in ("revenue", "gross_margin"):
+        block = drv.get(target)
+        if not block:
+            continue
+        rows[target] = {}
+        # 覆盖年数以 values 实际给出的档数为准，不强行对齐 YE 全长 ——
+        # AI 逐因子填写可能只覆盖部分预测年（比如方法论预研只做到第一年），
+        # 未覆盖的年份 1_假设 保留原直接取值，不被本表覆盖。
+        n_cov = len(block["values"]["base"])
+        for yi, y in enumerate(YE[:n_cov]):
+            for fi, f in enumerate(block["factors"]):
+                ds.cell(r, 1, f"{y} {f['label']}").font = Font(size=10)
+                for ci, case in enumerate(("bull", "base", "bear")):
+                    cc = ds.cell(r, 2 + ci, block["values"][case][yi][fi])
+                    cc.font = F_IN
+                    cc.number_format = PCT if f["unit"] == "变化率" else "0.00"
+                    cc.fill = P_Y
+                ds.cell(r, 5, f["unit"]).font = Font(size=9, color="808080")
+                rows[target][f"{yi}:{fi}"] = r
+                r += 1
+
+            label = "营收增速（合成）" if target == "revenue" else "毛利率（合成）"
+            ds.cell(r, 1, f"{y} {label}").font = Font(size=10, bold=True)
+            for ci, col in enumerate(_SCEN_COLS):
+                refs = [f"{col}{rows[target][f'{yi}:{fi}']}"
+                        for fi in range(len(block["factors"]))]
+                if block["op"] == "乘":
+                    expr = "*".join(f"(1+{x})" for x in refs) + "-1"
+                else:
+                    base = block.get("base_level", 0.0)
+                    expr = f"{base}+(" + "+".join(refs) + ")/100"
+                cc = ds.cell(r, 2 + ci, f"={expr}")
+                cc.font = F_FX; cc.number_format = PCT
+            rows[target][f"synth:{yi}"] = r
+            r += 1
+        r += 1
+
+    # 1_假设 的判断项改为引用本表 —— 只覆盖本表实际分解到的年份
+    for target, start in (("revenue", g_row), ("gross_margin", m_row)):
+        if target not in rows:
+            continue
+        for key, r_ in rows[target].items():
+            if not key.startswith("synth:"):
+                continue
+            yi = int(key.split(":")[1])
+            for ci, col in enumerate(_SCEN_COLS):
+                assum_ws.cell(start + yi, 2 + ci,
+                              f"='1b_驱动分解'!{col}{r_}").font = F_FX
 
 def _sheets(wb, cal, path):
     M,PR,O,GEN,JU,DC = cal["meta"],cal["periods"],cal["open"],cal["gen"],cal["judg"],cal["dcf"]

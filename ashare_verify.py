@@ -30,6 +30,35 @@ _REF_RE = re.compile(
     r"^=\s*(?:'([^']+)'|([^!'\s]+))!\$?([A-Z]+)\$?(\d+)\s*$")
 _SELF_REF_RE = re.compile(r"^=\s*\$?([A-Z]+)\$?(\d+)\s*$")
 _MAX_REF_DEPTH = 5
+_ARITH_CELL_RE = re.compile(r"\$?([A-Z]{1,3})\$?(\d{1,7})")
+
+
+def _eval_arith(wb, sheet, expr, _depth):
+    """对『仅含本表单元格引用与四则运算』的简单算式求值。
+
+    驱动因子分解的『合成』行故意写成 Excel 公式（如 (1+C4)*(1+C5)-1 或
+    0.1415+(C10+C11)/100）而非常量——这样改一个因子能顺着公式一路传导到
+    2_利润表/5_DCF。但 read_inputs 的独立复算得先从这类公式里拿到一个
+    浮点数：_resolve_ref 只认『整格就是一个引用』（=B48 / =1b_驱动分解!B5），
+    对这种四则运算公式无能为力，会直接把公式字符串丢回去，下游 float()
+    立刻炸掉。这里把公式里出现的单元格逐个换成其（可能还要跨表/递归解析
+    出来的）数值，再对剩下的纯算式求值。只覆盖本项目自己生成的这类简单
+    算式——不支持函数调用等更复杂形式；解析不出来就返回 None，调用方按
+    老规矩原样返回公式字符串，不影响其余既有行为。
+    """
+    def repl(m):
+        v = _cell_value(wb, sheet, f"{m.group(1)}{m.group(2)}", _depth + 1)
+        return f"({float(v)})"
+    try:
+        text = _ARITH_CELL_RE.sub(repl, expr)
+    except (TypeError, ValueError):
+        return None
+    if not re.fullmatch(r"[0-9+\-*/().\s]+", text):
+        return None          # 残留非数字字符（如函数名）——不是我们支持的算式
+    try:
+        return float(eval(text, {"__builtins__": {}}, {}))       # noqa: S307
+    except Exception:
+        return None
 
 
 def _resolve_ref(v):
@@ -61,6 +90,10 @@ def _cell_value(wb, sheet, addr, _depth=0):
     v = sheet[addr].value
     ref = _resolve_ref(v)
     if ref is None:
+        if isinstance(v, str) and v.strip().startswith("="):
+            ev = _eval_arith(wb, sheet, v.strip()[1:], _depth)
+            if ev is not None:
+                return ev
         return v
     name, target = ref
     nxt = wb[name] if name else sheet
