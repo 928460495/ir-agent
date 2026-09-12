@@ -42,21 +42,51 @@ _DATE_PATTERNS = (
 # 来源分级。官方与协会 > 卖方 > 媒体。判不出来的一律按媒体处理 ——
 # 往高了猜等于凭空给一个来源加权。
 #
-# SEMI / Gartner / TrendForce / IDC 严格说是付费市场研究商，不是本 docstring
-# （见 tier_of 下方 TIER_LABEL 的官方定义）里说的统计局/协会/部委/交易所。
-# 放进 OFFICIAL 是有意的：封测的产能、出货这类数据，这几家就是该领域证明力
-# 最强的一手来源，官方统计反而覆盖不到、或滞后到失去时效。分级看的是
-# 「这句话的证明力有多强」，不是「这个机构算不算官方机构」。
-_OFFICIAL = ("SEMI", "统计局", "工信部", "发改委", "海关", "协会", "交易所",
-             "Gartner", "TrendForce", "IDC")
-_SELLSIDE = ("证券", "期货", "investment", "securities")
+# SEMI / Gartner / TrendForce / IDC / Yole / Omdia / IC Insights 严格说是
+# 付费市场研究商，不是本 docstring（官方定义见 external.py 的 TIER_LABEL）
+# 里说的统计局/协会/部委/交易所。放进 OFFICIAL 是有意的：封测的产能、
+# 出货这类数据，这几家就是该领域证明力最强的一手来源，官方统计反而
+# 覆盖不到、或滞后到失去时效。分级看的是「这句话的证明力有多强」，
+# 不是「这个机构算不算官方机构」。
+#
+# 中文关键词用裸子串匹配是安全的——这些都是机构全称的独有片段
+# （"统计局""交易所""人民银行"……），不是"证券""semi""idc"这类会在
+# 别的名字中间冒出来的通用短词，因此不需要下面 ASCII 关键词那套
+# 词边界处理。
+_OFFICIAL_CN = ("统计局", "工信部", "发改委", "商务部", "财政部", "海关",
+                "协会", "交易所", "上交所", "深交所", "北交所", "证监会",
+                "人民银行", "央行", "集邦", "赛迪")
+_OFFICIAL_ASCII = ("SEMI", "GARTNER", "TRENDFORCE", "IDC", "YOLE", "OMDIA",
+                    "IC INSIGHTS")
 
-# 中文财经报纸几乎都以"报"收尾（证券时报/中国证券报/证券日报/经济日报/
-# ……），但报纸的角色是新闻报道，不是出具研究的卖方机构 —— 即便报纸名字
-# 本身含有"证券"这样的字样。用命名习惯而不是逐一列举报纸名字来排除，
-# 是因为逐一列举永远补不完，而"以报纸自称"这件事本身就说明它是媒体。
-# 命中这条规则的名字直接判 MEDIA，不再往上试 OFFICIAL/SELLSIDE 关键词。
-_NEWSPAPER_SUFFIX = "报"
+# 结构化卖方判别，见 tier_of 顶部注释：以 证券/期货/资管 收尾才是机构
+# 类型后缀；"研究所/研究院/研究部"单独不算数，必须同时含"证券"字样。
+_SELLSIDE_SUFFIX = ("证券", "期货", "资管")
+_SELLSIDE_RESEARCH_SUFFIX = ("研究所", "研究院", "研究部")
+# 结构规则覆盖不到的具名卖方机构（"中金公司"不以"证券"收尾），
+# 用全称做裸子串匹配是安全的——全称足够长，不会在别的机构名里凑巧出现。
+_SELLSIDE_CN_EXPLICIT = ("中金公司",)
+_SELLSIDE_ASCII = ("INVESTMENT", "SECURITIES", "MORGAN STANLEY",
+                    "GOLDMAN SACHS", "UBS", "J.P. MORGAN", "NOMURA")
+
+# 媒体标识优先级最高：命中任意一个直接判 MEDIA，不再往下试官方/卖方
+# 关键词。这是对付"证券时报网"这类前缀碰撞的正解——"证券"在这类报纸
+# 名字里是前缀，报纸的自我标识（报/网/新闻……）才是能定性的后缀。
+_MEDIA_MARKERS = ("报", "网", "周刊", "杂志", "传媒", "晚报", "商报", "新闻")
+
+_ASCII_WORD_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _has_ascii_keyword(name: str, keywords: tuple[str, ...]) -> bool:
+    """英文关键词按词边界匹配，而不是裸子串——见 tier_of 顶部注释。"""
+    for kw in keywords:
+        pat = _ASCII_WORD_RE_CACHE.get(kw)
+        if pat is None:
+            pat = re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
+            _ASCII_WORD_RE_CACHE[kw] = pat
+        if pat.search(name):
+            return True
+    return False
 
 
 class WebUnavailable(Exception):
@@ -96,13 +126,46 @@ def _parse_date(raw: str) -> date | None:
 
 
 def tier_of(publisher: str) -> Tier:
+    """来源分级。
+
+    **上一轮（2816197）的病根是裸子串匹配，这次要换判别机制，不是再加
+    一条 if。** 裸子串分不清一个词在名字里是前缀还是后缀：「证券」在
+    「证券时报」里是前缀（报纸拿它当报头用），在「中信证券」里是后缀
+    （机构类型）；「semi」是「Semiconductor」的前缀，「idc」是
+    「MidCap」的中段。逐个名字加排除只会一直漏，因为病根不在名单缺项，
+    在匹配机制本身允许关键词命中在名字的任何位置。这里换成两条不同的
+    判别方式，都不是裸子串：
+      - 英文关键词按**词边界**匹配（`_has_ascii_keyword`），
+        `\\bSEMI\\b` 不会命中 `Semiconductor` 或 `SemiAnalysis`；
+      - 中文关键词按**结构**判别（前缀/后缀/是否为媒体自我标识），
+        而不是看这个词出不出现。
+    往后再发现漏判，先问「这次踩的是不是同一个裸子串陷阱」，而不是
+    先加一条排除。
+    """
     p = (publisher or "").strip()
-    if p.endswith(_NEWSPAPER_SUFFIX):
+    if not p:
         return Tier.MEDIA
-    if any(k.lower() in p.lower() for k in _OFFICIAL):
+
+    # 媒体标识优先级最高，见 _MEDIA_MARKERS 处注释：先把"以报/网/新闻
+    # 自称"的名字挑出去，就不会被这些名字里可能带的"证券"前缀带偏。
+    if any(marker in p for marker in _MEDIA_MARKERS):
+        return Tier.MEDIA
+
+    if any(k in p for k in _OFFICIAL_CN) or _has_ascii_keyword(p, _OFFICIAL_ASCII):
         return Tier.OFFICIAL
-    if any(k.lower() in p.lower() for k in _SELLSIDE):
+
+    # 卖方按结构判别：必须是"以证券/期货/资管收尾"这种机构类型后缀，
+    # 或者"含证券字样、且以研究所/研究院/研究部收尾"。「研究所」单独
+    # 不构成卖方——官方背景智库（中国社科院工业经济研究所）也常用这
+    # 三个字收尾，不含"证券"就不该被判进卖方。
+    if p.endswith(_SELLSIDE_SUFFIX):
         return Tier.SELLSIDE
+    if "证券" in p and p.endswith(_SELLSIDE_RESEARCH_SUFFIX):
+        return Tier.SELLSIDE
+    if (any(k in p for k in _SELLSIDE_CN_EXPLICIT)
+            or _has_ascii_keyword(p, _SELLSIDE_ASCII)):
+        return Tier.SELLSIDE
+
     return Tier.MEDIA
 
 
@@ -110,7 +173,12 @@ def parse_findings(text: str) -> list[Finding]:
     out: list[Finding] = []
     for hit in _LINE.finditer(text):
         parts = [p.strip() for p in hit.group(1).split("|")]
-        if len(parts) < 4:
+        # 一道守卫，卡在 5：一行要完整给出 因子|陈述|网址|机构|日期 五段，
+        # 少任何一段——包括日期——都不是「4 段也合法，日期可选」，而是
+        # 整条不合规。之前分两道守卫（先 < 4 再 < 5）会让人以为中间存在
+        # 「4 段合法」的分支，实际上那道 < 4 只是为了让下面取 parts[2]/
+        # parts[3] 不越界，本身并不代表 4 段是可接受的长度。
+        if len(parts) < 5:
             continue
         url_m = _URL.search(parts[2])
         if not url_m:
@@ -118,15 +186,13 @@ def parse_findings(text: str) -> list[Finding]:
             continue
         pub = parts[3]
         # 「必须给出网址」与「必须给出发布日期」在提示词里是并列的硬性
-        # 要求，此处也应对称处理：日期字段缺失（没写第 5 段）或解析不出
-        # 来（写了但认不出/不是合法日期），一律整条丢弃，绝不放行成
-        # published=None。原因见 Finding.published 字段上的注释——
-        # 一旦允许 None 流出本模块，编排层的兜底逻辑会把它悄悄变成
-        # 「发布日期=as_of」，让最不可信的证据获得最宽松的时点待遇，
-        # 静静滑过系统里最关键的一道防线（时点守卫）。这个隐患必须在
-        # 产生 Finding 的这一步就堵死，不能指望下游每个调用点都记得防。
-        if len(parts) < 5:
-            continue
+        # 要求，此处也应对称处理：日期解析不出来（写了但认不出/不是
+        # 合法日期），一律整条丢弃，绝不放行成 published=None。原因见
+        # Finding.published 字段上的注释——一旦允许 None 流出本模块，
+        # 编排层的兜底逻辑会把它悄悄变成「发布日期=as_of」，让最不可信
+        # 的证据获得最宽松的时点待遇，静静滑过系统里最关键的一道防线
+        # （时点守卫）。这个隐患必须在产生 Finding 的这一步就堵死，
+        # 不能指望下游每个调用点都记得防。
         when = _parse_date(parts[4])
         if when is None:
             continue
@@ -149,8 +215,11 @@ PROMPT = """为一份 A 股研究报告采集一个具体的数据点。
 **硬性要求**
 - **必须给出网址**。没有网址的条目会被直接丢弃 —— 无从复核的转述与凭空
   捏造无异。
-- **必须给出发布日期**。晚于 {as_of} 的会被剔除：拿未来的资料分析过去，
-  与账本的时点守卫是同一件事。
+- **必须给出发布日期（YYYY-MM-DD）**。没写日期、或日期写得不够精确以
+  致解析不出来（比如只写到"2026年7月"这样的月份粒度）的条目，同样会
+  被直接丢弃——跟没有网址一样，说不清时点的证据一样等同于凭空捏造。
+  晚于 {as_of} 的会被剔除：拿未来的资料分析过去，与账本的时点守卫是
+  同一件事。
 - 数据要具体（「稼动率约 78%」而非「稼动率偏低」）。
 - 找不到就一行都不要输出，**不要用推测填充**。
 
