@@ -358,7 +358,15 @@ def test_无分解式时退回两标量模式():
 # synthesize() 合成。
 
 def _cal_for_apply(gm_hist=("0.1415",)):
-    return {"judg": {"growth": [0.0], "gm": [0.0],
+    # C1（终审复核）后 _base_margin_of 从 cal["periods"]["annual"] 数
+    # 年度期数，不再从 g_hist 反推——这里给一个与 gm_hist 长度一致、
+    # 每期 rev/cogs 都有值的最小 periods，保证数出来的年度期数正好
+    # 等于 gm_hist 的长度（没有中报，也没有缺口）。
+    annual = [f"p{i}" for i in range(len(gm_hist))]
+    return {"periods": {"annual": annual},
+           "rev": {p: 1.0 for p in annual},
+           "cogs": {p: 1.0 for p in annual},
+           "judg": {"growth": [0.0], "gm": [0.0],
                      "gm_hist": [float(x) for x in gm_hist],
                      "cagr3": 0.1}}
 
@@ -628,22 +636,40 @@ def test_历史值取不到标为无历史校验而不是静默跳过():
 
 
 # ── C3：毛利率基期取到中报，约 32% 估值误差 ───────────────────
+#
+# C1（终审复核）：`_base_margin_of` 现在接收完整的 `cal`（不再只是
+# `judg`），因为年度期数改从 `cal["periods"]["annual"]` 数，不再从
+# `judg["g_hist"]` 的长度反推——见下面 C1 一节。这里补一个最小的
+# `cal` 构造器，`periods.annual` 给年度期间列表，`rev`/`cogs` 给每个
+# 期间是否有值（决定该期间会不会被 gm_hist 的过滤条件计入）。
+
+def _cal(annual, gm_hist, missing_rev=(), missing_cogs=(), g_hist=None):
+    rev = {p: 1.0 for p in annual if p not in missing_rev}
+    cogs = {p: 1.0 for p in annual if p not in missing_cogs}
+    judg = {"gm_hist": list(gm_hist)}
+    if g_hist is not None:
+        judg["g_hist"] = list(g_hist)
+    return {"periods": {"annual": list(annual)}, "rev": rev, "cogs": cogs,
+           "judg": judg}
+
 
 def test_base_margin取最近完整年度不是中报():
     """C3 实测复现（用真实缓存 /tmp/cj/cal_600584.pkl 同量级重建）：
     `gm_hist` 末项是 2026H1 中报（15.15%），最近一个完整年度其实是
     2025A（14.15%）。修复前 `_base_margin_of` 直接取 `gm_hist[-1]`，
     取到中报，在该模型上约相当于 32% 的估值误差。"""
-    judg = {"g_hist": [0.1069, -0.1215, 0.2124, 0.0809],   # 4 → 5 个年度
-           "gm_hist": [0.1841, 0.1704, 0.1365, 0.1306, 0.1415, 0.1515]}
-    got = assume._base_margin_of(judg)
+    annual = ["20211231", "20221231", "20231231", "20241231", "20251231"]
+    cal = _cal(annual, gm_hist=[0.1841, 0.1704, 0.1365, 0.1306, 0.1415, 0.1515],
+              g_hist=[0.1069, -0.1215, 0.2124, 0.0809])   # 4 → 5 个年度
+    got = assume._base_margin_of(cal)
     assert got == D("0.1415"), f"应取最近完整年度 0.1415，取到了 {got}"
 
 
 def test_base_margin无中报时仍取最后一项():
     """回归：没有中报（gm_hist 长度与年度数一致）时行为不变。"""
-    judg = {"g_hist": [0.10, 0.08], "gm_hist": [0.18, 0.17, 0.14]}
-    assert assume._base_margin_of(judg) == D("0.14")
+    cal = _cal(["p0", "p1", "p2"], gm_hist=[0.18, 0.17, 0.14],
+              g_hist=[0.10, 0.08])
+    assert assume._base_margin_of(cal) == D("0.14")
 
 
 def test_base_margin与full用的是同一个数():
@@ -653,16 +679,86 @@ def test_base_margin与full用的是同一个数():
     分歧只是因为这个值最终只喂进一个对基期免疫的单调性校验才没暴露）。
     """
     from ir_agent import full
-    judg = {"g_hist": [0.1069, -0.1215, 0.2124, 0.0809],
-           "gm_hist": [0.1841, 0.1704, 0.1365, 0.1306, 0.1415, 0.1515]}
+    annual = ["20211231", "20221231", "20231231", "20241231", "20251231"]
+    cal = _cal(annual, gm_hist=[0.1841, 0.1704, 0.1365, 0.1306, 0.1415, 0.1515],
+              g_hist=[0.1069, -0.1215, 0.2124, 0.0809])
     led = FactLedger()
     _put(led, "gross_margin", "2025FY", "0.1415")
     got_full = full._fact_value(led, "gross_margin", "2025FY", AS_OF)
-    got_assume = assume._base_margin_of(judg)
+    got_assume = assume._base_margin_of(cal)
     assert got_full == D("0.1415")
     assert D(str(got_full)) == got_assume, \
         "full.py 与 assume._base_margin_of 必须用同一个数，否则第一" \
         "阶段判断项与第二阶段建模的基期口径就各算各的"
+
+
+# ── I4（终审复核）：--period H1 时清单的基期又变回中报 ───────────
+
+def test_base_margin在periodH1下仍取最近完整年度():
+    """I4 实测复现：`full.py` 里 `r.period = f"{{year}}{{period_suffix}}"`
+    （`__main__.py` 允许 `--period H1/Q1-Q3/Q1`），`--period H1` 时
+    `r.period` 是「2025H1」。修复前 `_fact_value(r.ledger,
+    "gross_margin", r.period, as_of)` 直接把 `r.period` 传进去——
+    这里手工验证：账本里 2025H1 确实存在一个不同的（中报）毛利率
+    0.1515，若真传 "2025H1" 会取到它，与 `apply_to`/`to_driver_block`
+    走 `assume._base_margin_of`（从 calibrate 年度历史序列取）拿到的
+    0.1415 分叉——正是 C3 注释里「必须是同一个数，而实际不是」的
+    原话在 `--period H1` 这个入口的复现。修复后 `_latest_annual_period`
+    不跟着 `r.period` 走，无论 `r.period` 是不是 H1，都取最近一个
+    完整年度。"""
+    from ir_agent import full
+    led = FactLedger()
+    _put(led, "gross_margin", "2025FY", "0.1415")
+    _put(led, "gross_margin", "2025H1", "0.1515")   # 中报，不该被取到
+
+    latest = full._latest_annual_period(led, AS_OF)
+    assert latest == "2025FY"
+    got = full._fact_value(led, "gross_margin", latest, AS_OF)
+    assert got == D("0.1415")
+
+    # 确认账本里 "2025H1" 确实存在且是不同的值——不是因为账本里根本
+    # 没有这个期间才"侥幸"没取错，而是修复后的代码根本不会把
+    # r.period 传给 _fact_value。
+    wrong = full._fact_value(led, "gross_margin", "2025H1", AS_OF)
+    assert wrong == D("0.1515") and wrong != got
+
+
+# ── C1（终审复核）：反推年度期数在上游明文容忍的场景下失效 ──────
+#
+# `ashare_data.assert_modelable` 明文容忍近 5 年缺 1 年营业成本
+# （`have < len(annuals) - 1` 才拒绝），而 `gm_hist` 按「营收 *和*
+# 营业成本」过滤、`g_hist` 只按「营收」过滤——两者独立过滤，「差 1」
+# 这个前提被容忍缺口打破后，`len(g_hist) + 1` 反推出来的年度期数就
+# 不对了。改为直接从 `cal["periods"]["annual"]` 数满足同一过滤条件
+# 的期间个数，不再反推。
+
+def test_base_margin缺一年营业成本不会取到中报():
+    """C1 实测复现：`gm_hist` 因为缺 1 年营业成本而少一项（5 项，
+    原本 6 项少了中间那年），`g_hist` 只看营收、不受影响（仍是 4
+    项）。用 HEAD 版本的旧实现手算：`n_annual = len(g_hist) + 1 = 5`，
+    `gm_hist[:5]` 会把 5 项全取上——其中最后一项其实是中报（0.1515），
+    结果取到 0.1515 而不是最近完整年度 0.1415（与 C3 同量级的误差，
+    且完全静默）。"""
+    annual = ["20211231", "20221231", "20231231", "20241231", "20251231"]
+    cal = _cal(annual, gm_hist=[0.1841, 0.1365, 0.1306, 0.1415, 0.1515],
+              missing_cogs=["20221231"],
+              g_hist=[0.1069, -0.1215, 0.2124, 0.0809])
+    got = assume._base_margin_of(cal)
+    assert got == D("0.1415"), f"应取最近完整年度 0.1415，取到了 {got}"
+
+
+def test_base_margin营收缺失不会取到更早的年份():
+    """C1 反方向复现：某一年营收缺失时，`g_hist`（只按营收过滤）会
+    比这里手工构造的「正常情形」少掉更多项，而 `gm_hist` 只少了对应
+    这一年的那一项。旧实现按 `len(g_hist) + 1` 反推会把年度期数算小
+    （这里反推出 3），截断掉本该保留的最近年度，取到 `gm_hist[2]`
+    （0.1306，2023 年）而不是最近完整年度 0.1415（2025 年）——不是
+    「取到中报」，是取到了一个更早的年份，同样完全静默。"""
+    annual = ["p0", "p1", "p2", "p3", "p4"]
+    cal = _cal(annual, gm_hist=[0.1841, 0.1365, 0.1306, 0.1415, 0.1515],
+              missing_rev=["p1"], g_hist=[0.10, 0.08])
+    got = assume._base_margin_of(cal)
+    assert got == D("0.1415"), f"应取最近完整年度 0.1415，取到了 {got}"
 
 
 # ── I6：_base_margin_of 的 fallback 会重新引入 C3 修掉的双重计入 ──
@@ -675,7 +771,7 @@ def test_gm_hist为空时报错而不是静默复用gm0():
     「以后有人改了 calibrate 就静默算错钱」的形状，fallback 必须改成
     抛错。"""
     with pytest.raises(AssumeFailed, match="gm_hist"):
-        assume._base_margin_of({"gm": [0.20]})
+        assume._base_margin_of({"judg": {"gm": [0.20]}})
     with pytest.raises(AssumeFailed):
         assume._base_margin_of({})
 
@@ -712,6 +808,132 @@ def test_c4修复后pp显示为pp不是百分号():
     assert "-2.50pp" in txt
 
 
+# ── C2（终审复核）：同一因子同一年重复行，三处取值规则不一致 ─────
+#
+# 用 HEAD 版本（修复前）实测验证过的分叉：`产能` 第1年先给 1%，模型
+# 在同一次回复里又给出「修正后」的 30%——`parse()` 不查重，两行都留
+# 下来。`synthesize()`（清单合成、`apply_to`）用字典推导式，最后一行
+# 覆盖，取到 30%；`to_driver_block()`（驱动「1b_驱动分解」工作表，
+# 真正参与建模的地方）用 `next()`，取到第一行 1%。人在清单上批准的
+# 是 30%，工作簿实际驱动估值的却是 1%——`check()` 的三档单调、闭合
+# 校验全部通过，因为拉开/闭合看的是同一行的三档，不看重复行之间的
+# 分歧。
+
+def test_同一因子同一年重复行被驳回():
+    """C2 实测复现：重试提示词里的「请修正后重新输出全部行」很容易
+    诱发模型把修正前/修正后两版都留在同一次回复里。必须在解析阶段
+    就拒绝，不能留给下游两处各自选一行、选出两个不同的数。"""
+    bad = ("假设: 产能 | 第1年 | -1% | 1% | 3% | 「先给1%」\n"
+           "假设: 产能 | 第1年 | -5% | 30% | 35% | 「修正后」\n")
+    with pytest.raises(AssumeFailed, match="产能") as e:
+        assume.parse(bad, 1, decomps=_decomps())
+    assert "第 1 年" in str(e.value)
+
+
+def _dup_rows():
+    """`_check_factors`/`to_driver_block` 的纵深防御测试要跳过
+    `_parse_factors` 直接构造重复行——模拟人手改 JSON 或未来有人放开
+    查重之后，重复行仍然可能从别的路径混进 `AssumptionSet`。"""
+    return [
+        assume.Row(driver="revenue", year=1, bear=D("-0.01"), base=D("0.01"),
+                  bull=D("0.03"), factor_key="capacity"),
+        assume.Row(driver="revenue", year=1, bear=D("-0.05"), base=D("0.30"),
+                  bull=D("0.35"), factor_key="capacity"),
+        assume.Row(driver="revenue", year=1, bear=D("-0.06"), base=D("-0.02"),
+                  bull=D("0.01"), factor_key="asp"),
+        assume.Row(driver="gross_margin", year=1, bear=D("-2.5"), base=D("-1.0"),
+                  bull=D("0.5"), factor_key="util_leverage"),
+        assume.Row(driver="gross_margin", year=1, bear=D("-1.5"), base=D("-0.5"),
+                  bull=D("0.3"), factor_key="input_cost"),
+    ]
+
+
+def test_check也拒绝重复行不只依赖parse():
+    """C2 纵深防御：`check()` 在人工核实之后的第二阶段（`full.
+    run_valuation` 里 `from_json` 读回）会被再跑一遍，那时的
+    `AssumptionSet` 未必经过 `_parse_factors`——人手改 JSON 也可能
+    引入重复行。`_check_factors` 不能假设上游一定已经查过重。"""
+    a = assume.AssumptionSet(code="", labels=["2026E"], decomps=_decomps())
+    a.rows = _dup_rows()
+    with pytest.raises(AssumeFailed, match="产能"):
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                     decomps=_decomps(), base_margin=D("0.1415"))
+
+
+def test_to_driver_block与synthesize取值规则一致():
+    """C2 纵深防御：`to_driver_block` 此前用 `next()` 取第一行，
+    `synthesize`/`_synthesized_for` 用字典推导式取最后一行——即便
+    重复行绕过了 `check()`，两处至少不该各算各的。改成同一条『后写
+    入覆盖先写入』规则之后，两处对同一份（含重复行的）数据取到同一
+    个值。"""
+    a = assume.AssumptionSet(code="", labels=["2026E"], decomps=_decomps())
+    a.rows = _dup_rows()
+    a.decomps = _decomps()
+    g, _ = assume.synthesize(a, Case.BASE, D("0.1415"))
+    cal = {"periods": {"annual": ["p0"]}, "rev": {"p0": 1.0},
+          "cogs": {"p0": 1.0}, "judg": {"gm_hist": [0.1415]}}
+    block = assume.to_driver_block(a, cal)
+    capacity_base = block["revenue"]["values"]["base"][0][0]
+    assert capacity_base == pytest.approx(0.30), \
+        "to_driver_block 应与 synthesize 一样取最后一行（30%），不是 next() 的第一行（1%）"
+    # 两处应合成出同一个营收增速——用同一份（含重复行的）取值。
+    expected = (1 + 0.30) * (1 + (-0.02)) - 1
+    assert float(g[0]) == pytest.approx(expected)
+
+
+# ── I1（终审复核）：变化率因子单向单位守卫，裸数被静默吞下 ──────
+#
+# C4 只挡了 pp 因子里的字面量 %；变化率因子这一侧此前完全没有守卫——
+# 裸数、pp 后缀、bp 后缀都会被 `_pct` 当成小数直接使用。pp 侧的错法
+# 渲染成 "-300.00pp" 这种一眼可见的数，危害有限；变化率侧最危险的是
+# 裸数 0.5：合成后渲染成 "50.00%"，对一个扩产故事完全看得过去，人
+# 不会觉得异常。
+
+def test_变化率因子裸数被拒绝():
+    """I1 实测复现：修复前 `产能 | 第1年 | 0.5 | 0.5 | 0.6` 会被
+    `_pct` 当成小数 0.5 直接使用，合成/显示成 50.00%——对一个扩产
+    故事看起来完全正常，人根本看不出这里想表达的其实是 0.5%。"""
+    bad = f"假设: 产能 | 第1年 | 0.5 | 0.5 | 0.6 | 「{Q}」"
+    with pytest.raises(AssumeFailed, match="变化率"):
+        assume.parse(bad, 1, decomps=_decomps())
+
+
+def test_变化率因子写成pp后缀被拒绝():
+    """I1 实测复现：`-3.5pp` 没有 %，会被当裸数 -3.5 直接使用，合成
+    显示成 -350.00%——把 pp 误当变化率填的写法此前被静默吞下。"""
+    bad = f"假设: 产能 | 第1年 | -3.5pp | -1pp | 0.5pp | 「{Q}」"
+    with pytest.raises(AssumeFailed, match="变化率"):
+        assume.parse(bad, 1, decomps=_decomps())
+
+
+def test_变化率因子写成bp被拒绝():
+    """I1 实测复现：`-350bp` 没有 %，会被当裸数 -350 直接使用——
+    bp 与 % 不是同一套单位，不做隐式换算，必须显式拒绝并提示换算。"""
+    bad = f"假设: 产能 | 第1年 | -350bp | -100bp | 50bp | 「{Q}」"
+    with pytest.raises(AssumeFailed, match="bp"):
+        assume.parse(bad, 1, decomps=_decomps())
+
+
+def test_变化率因子全角百分号被规范化接受():
+    """I1：全角 ％ 信息无损，等价于 ASCII %，直接规范化接受——不强迫
+    模型改用半角，但要解析出正确的数值（修复前 `_NUM` 认不出全角 ％，
+    会把 % 整个丢掉按裸数处理，`-3.5％` 被解析成 -3.5 = -350%）。"""
+    ok = f"假设: 产能 | 第1年 | -6％ | -2％ | 1％ | 「{Q}」"
+    a = assume.parse(ok, 1, decomps=_decomps())
+    row = next(r for r in a.rows if r.factor_key == "capacity")
+    assert row.bear == D("-0.06")
+
+
+def test_pp因子全角百分号也被拒绝():
+    """I1：pp 侧的守卫此前只认 ASCII %，全角 ％ 能绕过去（`-3％` 被
+    当裸数 -3 直接使用，对 pp 而言"碰巧对"，但下一次全角换成
+    `-3.5％` 就会变成 -3.5pp 与 -350% 傻傻分不清）。规范化后全角
+    ％ 与半角 % 一视同仁，同样被拒绝。"""
+    bad = f"假设: 稼动率摊薄 | 第1年 | -3％ | -1 | 0.5 | 「{Q}」"
+    with pytest.raises(AssumeFailed, match="pp"):
+        assume.parse(bad, 1, decomps=_decomps())
+
+
 # ── I5：pp 的参照点在提示词里没定义 ───────────────────────────
 
 def test_提示词说明pp相对基期是累计值():
@@ -722,6 +944,27 @@ def test_提示词说明pp相对基期是累计值():
     三年同一个 base−1pp，且不会报错。"""
     txt = assume._factor_head(_decomps(), {})
     assert "累计" in txt and "基期" in txt
+
+
+# ── I2（终审复核）：提示词表只印状态词、不印原文片段 ────────────
+
+def test_提示词表对年报披露印出原文片段不只印状态词():
+    """I2 实测复现：`_factor_head` 此前只印 `fd.status`——模型看到
+    「年报披露」会直接当成有数据可用去填数字。「年报披露/研报测算」
+    只是文字命中，未必真给出了数值，甚至可能命中的是一句「未披露
+    XX」（见 gaps.py 的 I2 修复）。提示词表必须把 `gaps.collect` 摘出
+    来的原文片段一起摆出来，不能只让模型看一个状态词就代为下结论。"""
+    from ir_agent.gaps import ANNUAL, FactorData
+    d = _decomps()[0]
+    f = d.factors[0]   # capacity/产能
+    factor_data = {f.key: FactorData(
+        factor=f, status=ANNUAL,
+        note="「公司本年度未披露稼动率数据」——《管理层讨论与分析》"
+             "（文字依据，是否给出具体数值待人工确认）")}
+    txt = assume._factor_head([d], factor_data)
+    assert "年报披露" in txt
+    assert "未披露稼动率数据" in txt, \
+        "提示词表必须带上原文片段，只印状态词会让模型把'未披露'读成'已核实'"
 
 
 # ── M1：_NUM 不认 Unicode 减号，符号被悄悄翻转 ─────────────────

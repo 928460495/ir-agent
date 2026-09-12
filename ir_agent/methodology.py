@@ -83,6 +83,20 @@ def parse(text: str) -> Methodology:
             check_closure(d)
         except DecompositionInvalid as e:
             raise MethodologyFailed(str(e)) from e
+        # I3（终审复核）：同一 target 不能出现第二条分解式。下游
+        # `target_of = {f.key: d.target for d in decomps for f in
+        # d.factors}` 按 target 把多条分解式的因子拍平进同一个映射，
+        # 第一条会被第二条悄悄覆盖丢弃；`_describe_factors`/
+        # `to_driver_block` 逐年从 `a.rows` 里按 `r.year` 取值时，两条
+        # 分解式产出的行会被当成同一个 target 的不同年份处理，年份因此
+        # 整体错位（预测期 2 年却合成出 4 个营收增速）。必须在这里就
+        # 拒绝重复的 target，而不是留给下游悄悄合并。
+        if any(x.target == d.target for x in m.decompositions):
+            raise MethodologyFailed(
+                f"「{TARGET_LABEL.get(d.target, d.target)}」的分解式出现了"
+                "不止一条——下游按 target 把多条分解式的因子拍平进同一个"
+                "映射，多出的那条会把前一条悄悄覆盖，年份因此整体错位。"
+                "同一个目标只能给一条分解式，把因子都合并进这一条里。")
         m.decompositions.append(d)
 
     got = {d.target for d in m.decompositions}

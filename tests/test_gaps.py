@@ -225,12 +225,17 @@ def test_摘要区分文字依据与已核实数值():
 
 def test_真实因子标签剥后缀才能命中年报():
     """用报告里实测出现的真实标签复现：不剥后缀时，年报原文里的
-    「有效产能」「ASP」三个字不可能匹配上「有效产能变化率」
-    「ASP变化率」这种整串——这条测试在修复前必须失败。"""
-    factors = [_f("capacity", "有效产能变化率"), _f("asp", "ASP变化率")]
+    「有效产能」「ASP价格」四个字不可能匹配上「有效产能变化率」
+    「ASP价格变化率」这种整串——这条测试在修复前必须失败。
+
+    （I2 复核后阈值提到 4 字，纯用「ASP」三个字母做核心词也会被判
+    「过短」回退用原始标签——用「ASP价格」把核心词撑到 4 字，与
+    「有效产能」一起单独测试"够长的核心词仍要能剥出来命中"这件事，
+    短核心词的保守回退单独在下面几条测试里覆盖。）"""
+    factors = [_f("capacity", "有效产能变化率"), _f("asp", "ASP价格变化率")]
     d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=factors)
     sections = _sections(("core_competency", "核心竞争力分析",
-                          "报告期内公司有效产能维持满载运行，ASP保持稳定。"))
+                          "报告期内公司有效产能维持满载运行，ASP价格保持稳定。"))
     data = collect(_ExplodingClient(), [d], _led(), Corpus(as_of=AS_OF),
                    "封测", AS_OF, sections=sections)
     assert data["capacity"].status == "年报披露"
@@ -238,11 +243,16 @@ def test_真实因子标签剥后缀才能命中年报():
 
 
 def test_真实因子标签剥后缀才能命中研报():
-    factors = [_f("util", "稼动率贡献"), _f("mix", "先进封装收入占比提升贡献")]
+    """`util` 用「产能利用率贡献」而不是报告原例的「稼动率贡献」——
+    后者剥完只剩 3 字的「稼动率」，I2 复核后属于短核心词，会回退用
+    原始标签匹配（见 `test_短核心词回退用原始标签_不再误判`），不
+    适合再用来验证"够长的核心词能剥出来命中"这件事。"""
+    factors = [_f("util", "产能利用率贡献"),
+              _f("mix", "先进封装收入占比提升贡献")]
     d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=factors)
     corpus = Corpus(as_of=AS_OF)
-    corpus.add(_doc("我们测算稼动率将逐季回升，先进封装收入占比持续提升，"
-                    "带动毛利率修复。"))
+    corpus.add(_doc("我们测算产能利用率将逐季回升，先进封装收入占比持续"
+                    "提升，带动毛利率修复。"))
     data = collect(_ExplodingClient(), [d], _led(), corpus, "封测", AS_OF)
     assert data["util"].status == "研报测算"
     assert data["mix"].status == "研报测算"
@@ -260,28 +270,63 @@ def test_原材料及折旧成本变化贡献剥后缀后仍能命中():
     assert data["input_cost"].status == "年报披露"
 
 
-def test_汇率贡献剥后缀后仍能命中():
+def test_汇率贡献核心词过短回退用原始标签():
+    """I2 复核后：「汇率贡献」剥完只剩「汇率」（2 字），低于新阈值
+    （4 字），回退用原始标签「汇率贡献」去匹配。原文只写了「汇率」
+    两个字，不会逐字出现「汇率贡献」这个整串，因此正确地在②落空——
+    这条测试在 I2 修复前会失败（修复前"汇率"两字会被剥出来直接命中，
+    status 是"年报披露"）。"""
     f = _f("fx", "汇率贡献")
     d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[f])
-    sections = _sections(("md_a", "管理层讨论与分析", "受汇率波动影响，出口业务毛利率承压。"))
-    data = collect(_ExplodingClient(), [d], _led(), Corpus(as_of=AS_OF),
+    sections = _sections(("md_a", "管理层讨论与分析",
+                          "受汇率波动影响，出口业务毛利率承压。"))
+    data = collect(_Client(""), [d], _led(), Corpus(as_of=AS_OF),
                    "封测", AS_OF, sections=sections)
-    assert data["fx"].status == "年报披露"
+    assert data["fx"].status != "年报披露"
+
+
+# ── I2（终审复核）：短核心词命中"未披露"，把估计伪装成测量 ──────
+#
+# 年报原文「公司本年度**未**披露稼动率数据。行业整体产能过剩……
+# 汇率波动对业绩影响有限。」——`_core_label` 阈值原为 2，「稼动率」
+# （3字）「汇率」（2字）都被剥出来当核心词，与原文里"未披露稼动率"
+# "汇率波动"这几个字面撞上，命中状态被判成"年报披露"，把"未披露"
+# 这句话读反成"已披露"，还让②级的巧合命中直接掐断了本该走到的
+# ③④联网采集。
+
+def test_未披露被短核心词误判为年报披露():
+    """I2 实测复现：用报告给出的原文逐字复现。修复前（阈值 2）
+    「稼动率变化率」剥出核心词「稼动率」（3字）、「汇率贡献」剥出
+    核心词「汇率」（2字），两者都会在"未披露稼动率数据"/"汇率波动"
+    这两句里命中，被误判成"年报披露"。阈值提到 4 字后，这两个短核心
+    词回退用原始标签（"稼动率变化率"/"汇率贡献"）匹配，原文没有这
+    两个整串，正确地在②③都落空。"""
+    factors = [_f("utilization", "稼动率变化率"), _f("fx", "汇率贡献")]
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=factors)
+    sections = _sections(("md_a", "管理层讨论与分析",
+                          "公司本年度未披露稼动率数据。行业整体产能过剩，"
+                          "汇率波动对业绩影响有限。"))
+    data = collect(_Client(""), [d], _led(), Corpus(as_of=AS_OF),
+                   "封测", AS_OF, sections=sections)
+    assert data["utilization"].status != "年报披露", \
+        "「未披露稼动率数据」不该被短核心词「稼动率」误判成年报披露"
+    assert data["fx"].status != "年报披露", \
+        "「汇率波动」不该被短核心词「汇率」误判成年报披露"
 
 
 def test_剥后缀不引入过短核心词的误判():
     """保守：剥完后核心词过短就不剥，宁可落到④也不要拿一两个字这种
-    到处能命中的片段冒充"命中"。构造一个剥完只剩 1 个字的极端标签，
-    确认它不会被剥短——用会炸的 client 钉住"根本没剥、也没命中，
-    落到④走了 search()"这件事本身不该发生在这条用例里，改为直接断言
-    _core_label 的行为。"""
+    到处能命中的片段冒充"命中"。I2 复核后阈值从 2 提到 4——"稼动率"
+    （3字）"汇率"（2字）这两个此前刚好卡在旧阈值上的短词现在也要
+    回退不剥（`test_未披露被短核心词误判为年报披露` 是这个改动要防
+    的真实场景）。"""
     from ir_agent.gaps import _core_label
     assert _core_label("率贡献") == "率贡献"          # 剥完只剩1字，不剥
     assert _core_label("有效产能变化率") == "有效产能"
-    assert _core_label("稼动率贡献") == "稼动率"
+    assert _core_label("稼动率贡献") == "稼动率贡献"       # 核心词3字，过短不剥
     assert _core_label("先进封装收入占比提升贡献") == "先进封装收入"
     assert _core_label("原材料及折旧成本变化贡献") == "原材料及折旧成本"
-    assert _core_label("汇率贡献") == "汇率"
+    assert _core_label("汇率贡献") == "汇率贡献"           # 核心词2字，过短不剥
     assert _core_label("产能") == "产能"              # 无后缀，原样返回
 
 

@@ -48,6 +48,22 @@ def test_pp混进乘法链被驳回():
         parse(bad)
 
 
+def test_同一target出现两条分解式被驳回():
+    """I3 实测复现：`got = {d.target for d in m.decompositions}` 用
+    集合只查"有没有"、不查"是否唯一"。用 HEAD 版本验证过：预测期 2
+    年，营收给两条分解式（产能/稼动率 一条，份额/行业规模 另一条），
+    修复前 `assume.synthesize()` 会对每条 target=="revenue" 的分解式
+    都 `growth.append(...)`，两条营收分解式产出 `growth` 长度变成
+    2×年数（4，不是 2）；`to_driver_block` 按 target 覆盖写入 `out`
+    字典，第一条分解式（产能/稼动率）被第二条悄悄覆盖丢弃。必须在
+    `methodology.parse()` 解析阶段就拒绝同一 target 出现第二条。"""
+    bad = ("分解: 营收 | 乘 | 产能:变化率:年报 | 稼动率:变化率:研报\n"
+           "分解: 营收 | 乘 | 份额:变化率:研报 | 行业规模:变化率:研报\n"
+           "分解: 毛利率 | 加 | 稼动率摊薄:pp:固定成本占比 | 上游成本:pp:基板报价\n")
+    with pytest.raises(MethodologyFailed, match="营收"):
+        parse(bad)
+
+
 def test_两个目标都要给():
     """只给营收不给毛利率，毛利率就会沿用旧的两标量模式 ——
     半套分解比不分解更容易让人以为都分解了。"""

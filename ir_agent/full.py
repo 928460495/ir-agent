@@ -292,6 +292,23 @@ def _fact_value(ledger, key: str, period: str, as_of: date):
         return None
 
 
+def _latest_annual_period(ledger, as_of: date) -> str | None:
+    """最近一个完整年度的期间——**不跟着 `r.period` 走**。
+
+    I4（终审复核）：`r.period = f"{year}{period_suffix}"`
+    （`__main__.py` 的 `--period` 允许 H1/Q1-Q3/Q1），`--period H1`
+    时 `r.period` 就是「2025H1」。加法链（毛利率）的基期必须是**最近
+    一个完整年度**，与 `assume.apply_to`/`to_driver_block` 走的
+    `_base_margin_of`（从 calibrate 的年度历史序列取）必须是同一个
+    数——直接把 `r.period` 传给 `_fact_value`，会在 `--period H1` 下
+    取到中报毛利率，与 apply_to/to_driver_block 用的年度值分叉，正是
+    C3 注释里「必须是同一个数，而实际不是」的原话在另一个入口复现。
+    """
+    from ir_agent.operators.ratios import annual_periods
+    periods = annual_periods(ledger, as_of, years=1)
+    return periods[-1] if periods else None
+
+
 def _industry_profile(peers, agg, cache, r, as_of: date) -> tuple[str, str]:
     """由已缓存的同业事实组装行业画像。"""
     from ir_agent import industry_profile as ip
@@ -826,8 +843,11 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
     # 加法链（毛利率）的基期水平——与 assume.apply_to/to_driver_block
     # 里用的必须是同一个数，否则第一阶段判断项的口径与第二阶段建模的
-    # 口径就各算各的了。
-    base_margin = _fact_value(r.ledger, "gross_margin", r.period, as_of)
+    # 口径就各算各的了。I4：取「最近一个完整年度」，不跟着 r.period
+    # 走——`--period H1` 时 r.period 是「year+H1」，直接用会取到中报。
+    latest_annual = _latest_annual_period(r.ledger, as_of)
+    base_margin = (_fact_value(r.ledger, "gross_margin", latest_annual, as_of)
+                  if latest_annual else None)
     try:
         a = assume.decide(client, cal["judg"], labels, ctx,
                           ledger=r.ledger, body=body, as_of=as_of, code=code,
@@ -895,7 +915,11 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # 分解模式下重新校验要用同一套 decomps/base_margin，否则 check()
     # 会退回两标量分支，把因子模式的行误判成「营收增速缺第 N 年」而
     # 拒绝建模——那不是假设真的不合法，是校验用错了口径。
-    base_margin = _fact_value(r.ledger, "gross_margin", r.period, as_of)
+    # I4：取「最近一个完整年度」，不跟着 r.period 走——同一个理由见
+    # `_propose_assumptions`，第二阶段这里必须与第一阶段用同一个基期。
+    latest_annual = _latest_annual_period(r.ledger, as_of)
+    base_margin = (_fact_value(r.ledger, "gross_margin", latest_annual, as_of)
+                  if latest_annual else None)
     try:
         # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
         # 漏掉某一年，都会让模型算出一个看起来正常的错数。

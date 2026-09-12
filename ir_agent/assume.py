@@ -61,7 +61,10 @@ def _pct(raw: str) -> Decimal:
     # M1：全角/数学减号 U+2212（−）不是 ASCII 连字符，_NUM 认不出来，
     # 会把整个负号丢掉再匹配出一个正数——设计文档全文用的就是这个字符，
     # 模型很可能照抄，符号被悄悄翻转。规范化之后再匹配。
-    m = _NUM.search(raw.replace(",", "").replace("−", "-"))
+    # I1：全角百分号（％）同理不是 ASCII %，_NUM 认不出来，会把 % 整个
+    # 丢掉、按裸数处理——裸数对变化率因子是灾难性的（0.5% 写成 "0.5％"
+    # 会被当成 0.5 = 50%）。全角百分号信息无损，直接规范化成 ASCII。
+    m = _NUM.search(raw.replace(",", "").replace("−", "-").replace("％", "%"))
     if not m:
         raise AssumeFailed(f"取值不可解析：{raw!r}")
     t = m.group(0)
@@ -396,6 +399,13 @@ def _parse_factors(text: str, years: int,
     by_label = {f.label: f for d in decomps for f in d.factors}
     target_of = {f.key: d.target for d in decomps for f in d.factors}
     out = AssumptionSet(code="", labels=[], decomps=list(decomps))
+    # C2：同一因子同一年出现两行时，合成侧（synthesize/_synthesized_for）
+    # 用字典推导式取最后一行，to_driver_block 曾经用 next() 取第一行，
+    # 清单显示的是其中一行、工作簿实际建模用的是另一行——人批准的数字
+    # 与真正驱动估值的数字不是同一个。重复行本身就说明模型在一次回复
+    # 里生成了「修正前/修正后」两版，没想清楚，应当直接驳回重填，
+    # 而不是替它决定该采信哪一行。
+    seen: set[tuple[str, int]] = set()
     for m in _LINE.finditer(text):
         parts = [p.strip() for p in m.group(1).split("|")]
         if len(parts) < 6:
@@ -414,15 +424,47 @@ def _parse_factors(text: str, years: int,
             raise AssumeFailed(f"年份不可解析：{parts[1]!r}") from e
         if not 1 <= year <= years:
             raise AssumeFailed(f"年份 {year} 超出预测期 1..{years}")
+        if (f.key, year) in seen:
+            raise AssumeFailed(
+                f"因子「{label}」第 {year} 年出现了不止一行——重试提示词"
+                "里的「请修正后重新输出全部行」很容易诱发模型把修正前/"
+                "修正后两版都留在同一次回复里。重复行本身说明这个因子还"
+                "没想清楚，请只保留一行，不要让代码替你决定该采信哪一行。")
+        seen.add((f.key, year))
         # C4：pp 与 % 不是一回事——85%→82% 是 −3pp，写成 −3% 会被 _pct
         # 解析成 −0.03，缩小 100 倍。单调性/闭合校验都抓不住这个错，
         # 只能在这里把字面量本身挡下来。
-        if f.unit == "pp" and any("%" in parts[i] for i in (2, 3, 4)):
+        # I1：全角 ％ 与半角 % 一视同仁，否则 "-3％" 能绕过这道守卫
+        # （对 pp 而言"碰巧对"，但下一次全角换成 "-3.5％" 就会被当成
+        # 裸数 -3.5，渲染成 -350%）。
+        if f.unit == "pp" and any(
+                "%" in parts[i].replace("％", "%") for i in (2, 3, 4)):
             raise AssumeFailed(
                 f"因子「{label}」按 pp 计，不按 %：{parts[2]} / {parts[3]} "
                 f"/ {parts[4]} 里带了 % —— pp 与 % 不是一回事，85%→82% "
                 "是 −3pp，写成 −3% 会被当成 −0.03pp，缩小 100 倍。"
                 "请直接填数字（如 −3），不要带 %。")
+        # I1：单位守卫此前只挡了 pp 侧的字面量 %，变化率侧完全没有防护——
+        # 裸数 0.5 会被当成小数直接使用（渲染成 50.00%），对一个扩产
+        # 故事看起来完全正常，人根本看不出这里其实想表达 0.5%；
+        # -3.5pp / -350bp 这类把 pp/bp 误当变化率填的写法也会被静默
+        # 当裸数吞下去。变化率必须显式带 %（全角 ％ 等价，直接规范化；
+        # bp 是另一套单位，不做隐式换算，明确拒绝并提示换算方法）。
+        if f.unit != "pp":
+            for i in (2, 3, 4):
+                raw, norm = parts[i], parts[i].replace("％", "%")
+                if "bp" in norm.lower():
+                    raise AssumeFailed(
+                        f"因子「{label}」按变化率（%）计，不认 bp：{raw} —— "
+                        "bp 与 % 不是同一套单位，不做隐式换算，请直接换算"
+                        f"成百分比再填（如 −350bp 请写成 −3.5%）。")
+                if "%" not in norm:
+                    raise AssumeFailed(
+                        f"因子「{label}」按变化率计，必须带 %：{raw} —— "
+                        "裸数会被当成小数直接使用而不是百分比（0.5 会被"
+                        "解释成 50%，而不是你想表达的 0.5%），且这类错误"
+                        "合成后看起来仍然合理，人从清单上发现不了。"
+                        "请直接填百分比，如 −3.5%。")
         out.rows.append(Row(
             driver=target_of[f.key], year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
@@ -525,6 +567,24 @@ def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
     偏高、单价悲观档偏低，相乘后完全可能悲观反而高于中性，而那正是这道
     校验要抓住的错数。
     """
+    # C2 纵深防御：`_parse_factors` 已经在解析阶段拒绝重复行，但
+    # `check()` 也会在人工核实之后、`from_json` 读回时被再跑一遍
+    # （`full.run_valuation`）——那时的 `AssumptionSet` 未必经过
+    # `_parse_factors`，人手改 JSON 也可能引入重复行。这里再挡一次，
+    # 不依赖上游一定已经查过重。
+    label_of = {f.key: f.label for d in decomps for f in d.factors}
+    seen: set[tuple[str, int]] = set()
+    for r in a.rows:
+        if not r.factor_key:
+            continue
+        key = (r.factor_key, r.year)
+        if key in seen:
+            raise AssumeFailed(
+                f"因子「{label_of.get(r.factor_key, r.factor_key)}」"
+                f"第 {r.year} 年出现了不止一行——重复行会让清单显示的值"
+                "与实际参与合成的值不是同一行，必须只保留一行。")
+        seen.add(key)
+
     for d in decomps:
         for f in d.factors:
             got = {r.year for r in a.rows if r.factor_key == f.key}
@@ -614,7 +674,18 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
     for d in decomps:
         for f in d.factors:
             fd = factor_data.get(f.key)
-            st = fd.status if fd else "未采集"
+            if fd is None:
+                st = "未采集"
+            elif fd.note:
+                # I2：这里此前只印状态词、不印原文片段——模型看到「年报
+                # 披露」会直接当成有数据可用去填数字。「年报披露/研报
+                # 测算」只是文字命中，未必真给出了数值（甚至可能命中的
+                # 是一句「未披露 XX」），必须把 gaps.collect 摘出来的
+                # 原文片段一起摆出来，让模型自己判断这到底是不是能当
+                # 数值依据用的原文，而不是被一个状态词代为下结论。
+                st = f"{fd.status}（{fd.note}）"
+            else:
+                st = fd.status
             lines.append(f"| {f.label} | {f.unit} | {st} |")
     lines += ["",
               "**pp 不能进乘法链**：营收链的因子一律填变化率（含稼动率）——"
@@ -803,31 +874,52 @@ def _reconcile_decomp(d: Decomposition, ledger: FactLedger,
     return {"residuals": res, "no_history": no_history}
 
 
-def _annual_gm_hist(judg: dict) -> list:
-    """`judg["gm_hist"]` 里去掉末尾中报、只留完整年度的那一段。
+def _annual_gm_hist(cal: dict) -> list:
+    """`cal["judg"]["gm_hist"]` 里去掉末尾中报、只留完整年度的那一段。
 
     ashare_calibrate 的 `hp = ann + ([interim] if interim else [])`，
     `gm_hist` 按 `hp` 的顺序算出来，中报（如果有）只可能出现在**最后
-    一项**。`judg` 本身不直接携带年度期数，但 `g_hist` 只用 `ann` 算
-    （`len(g_hist) == len(ann) - 1`），可以反推出年度期数；`gm_hist`
-    比反推出的年度期数多出来的那一项，就是中报，要去掉——C3 的实测：
-    不去掉会把中报当基期，在 600584 上造成约 32% 的估值误差。
+    一项**。
+
+    **C1：此前靠 `len(g_hist) + 1` 反推年度期数，前提是 `gm_hist` 与
+    `g_hist` 各自的过滤结果长度差恰好为 1。** 但两者是各自独立过滤的
+    （`gm_hist` 按「营收 *和* 营业成本」过滤，`g_hist` 只按「营收」
+    过滤），而 `ashare_data.assert_modelable` 明文容忍近 5 年缺 1 年
+    营业成本（`have < len(annuals) - 1` 才拒绝）——这恰好把「差 1」这
+    个前提打破: 缺 1 年营业成本时 `gm_hist` 少一项、`g_hist` 不受影响，
+    反推出的期数会把中报也算进「年度」里，取到中报当基期（实测 600584
+    上约 32% 估值误差）；营收缺失导致 `g_hist` 少一项时，反推期数又会
+    偏小，取到比最近年度更早的一年，口径同样错，且两种情形都不报错。
+
+    **改为直接用 `cal["periods"]["annual"]` 数一遍。** 这是 calibrate
+    自己交付的年度期间列表（`gm_mean = np.mean(gm_hist[:len(ann)])` 用
+    的就是这个真实的 `len(ann)`），不需要也不应该从别的序列反推。具体
+    数法要与 `gm_hist` 的过滤条件完全一致（`rev.get(p) and cogs.get(p)`
+    同时成立才计入），否则数出来的年度期数会跟 `gm_hist` 里实际有多少
+    项对不上。
     """
+    judg = cal.get("judg") or {}
     gm_hist = judg.get("gm_hist") or []
     if not gm_hist:
         return []
-    g_hist = judg.get("g_hist") or []
-    n_annual = len(g_hist) + 1 if g_hist else len(gm_hist)
-    n_annual = min(max(n_annual, 1), len(gm_hist))
+    annual = (cal.get("periods") or {}).get("annual") or []
+    rev = cal.get("rev") or {}
+    cogs = cal.get("cogs") or {}
+    n_annual = sum(1 for p in annual if rev.get(p) and cogs.get(p))
+    n_annual = min(n_annual, len(gm_hist))
     return gm_hist[:n_annual]
 
 
-def _base_margin_of(judg: dict) -> Decimal:
+def _base_margin_of(cal: dict) -> Decimal:
     """基期毛利率 —— 加法链的起点，**对全部预测年、全部三档都是同一个数**
     （见 drivers.compose 的文档: 「基期」是账本口径的最近一期实绩，不随
     年份滚动）。取**最近一个完整年度**的实际毛利率（`gm_hist` 掐掉末尾
     可能有的中报之后的最后一项），不由 AI 给、也不能直接拿 `gm_hist[-1]`
     ——那一项在中报期可能是中报数字，不是完整年度。
+
+    参数是完整的 calibrate 输出 `cal`（不是 `cal["judg"]`）——C1 修复
+    后年度期数要从 `cal["periods"]["annual"]` 直接数，不再从 `judg`
+    内部的 `g_hist` 反推，因此需要 `cal` 顶层的 `periods`/`rev`/`cogs`。
 
     **没有 fallback。** 此前取不到 `gm_hist` 时会退回 `judg["gm"][0]`，
     但 `apply_to` 先跑、`to_driver_block` 后跑时，`gm[0]` 早已经是
@@ -836,7 +928,7 @@ def _base_margin_of(judg: dict) -> Decimal:
     产出时 `gm_hist` 不会为空，为空说明上游已经出了问题，静默凑一个
     近似值只会把错误往下游藏得更深，不如直接拒绝。
     """
-    annual = _annual_gm_hist(judg)
+    annual = _annual_gm_hist(cal)
     if not annual:
         raise AssumeFailed(
             "基期毛利率取不到（judg 里没有 gm_hist）—— 不能退回 "
@@ -862,7 +954,7 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
     """
     ju = dict(cal["judg"])
     if a.decomps:
-        base_margin = _base_margin_of(ju)
+        base_margin = _base_margin_of(cal)
         growth_scen, gm_scen = {}, {}
         for c in Case:
             g, m = synthesize(a, c, base_margin)
@@ -896,18 +988,28 @@ def to_driver_block(a: AssumptionSet, cal: dict) -> dict:
     两遍：先被吸进 base_level，又被工作表公式再加一次。`gm_hist` 是
     calibrate 的原始历史序列，不受 apply_to 影响，才是真正「不随年份
     滚动」的基期。
+
+    **取值规则与 synthesize()/_synthesized_for() 保持一致（C2 纵深防御）。**
+    同一因子同一年出现两行本应在 `_parse_factors`/`check()` 就被拒绝，
+    但这里不依赖那道门一定挡住了一切——`next(... )` 会取**第一行**，
+    与合成侧的字典推导式取**最后一行**是两条不同的规则，一旦有重复行
+    绕过检查混进来，清单显示的数字与这里实际写进工作簿的数字就会是
+    两行不同的取值。改成与合成侧同样的「后写入覆盖先写入」，即便查重
+    将来被放开，两侧至少不会各算各的。
     """
-    base_margin = float(_base_margin_of(cal.get("judg") or {}))
+    base_margin = float(_base_margin_of(cal))
     out = {}
     years = max((r.year for r in a.rows), default=0)
+    by_year_key: dict[tuple[int, str], Row] = {}
+    for r in a.rows:
+        if r.factor_key:
+            by_year_key[(r.year, r.factor_key)] = r
     for d in a.decomps:
         keys = [f.key for f in d.factors]
         vals = {}
         for case in ("bull", "base", "bear"):
-            vals[case] = [[float(getattr(
-                next(r for r in a.rows
-                     if r.year == y and r.factor_key == k), case))
-                for k in keys] for y in range(1, years + 1)]
+            vals[case] = [[float(getattr(by_year_key[(y, k)], case))
+                          for k in keys] for y in range(1, years + 1)]
         block = {"op": d.op.value,
                  "factors": [{"key": f.key, "label": f.label, "unit": f.unit}
                              for f in d.factors],
