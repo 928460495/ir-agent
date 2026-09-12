@@ -250,6 +250,23 @@ def test_提示词点明强周期的适用边界():
     assert "DOL" in _RULES or "经营杠杆" in _RULES
 
 
+def test_分解式非空时写入drivers块():
+    """Task 10 接线：判断项按因子分解时（assumptions.decomps 非空），
+    dcf.run 要把 assume.to_driver_block 的产出写进 cal["judg"]["drivers"]，
+    ashare_build 才会建「1b_驱动分解」表。apply_to 必须先跑一遍——
+    to_driver_block 的 base_level 依赖 cal["judg"]["gm_hist"]，那是
+    calibrate 的原始输出，不受 apply_to 影响，但顺序仍要摆对，避免
+    后来人误以为可以颠倒。"""
+    import inspect
+
+    src = inspect.getsource(dcf.run)
+    assert "assume.apply_to(" in src
+    assert "to_driver_block(" in src
+    assert src.index("apply_to(") < src.index("to_driver_block(")
+    assert "1b_驱动分解" in src
+    assert 'cal["judg"]["drivers"]' in src.replace("'", '"')
+
+
 def test_估值摘要进了提示词():
     from ir_agent.analyst import FactCatalog, build_prompt
     from ir_agent.ledger import FactLedger

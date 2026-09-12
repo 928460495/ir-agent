@@ -30,7 +30,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from ir_agent.basis import Basis, InvalidBasis, validate
-from ir_agent.drivers import Decomposition, compose
+from ir_agent.drivers import Decomposition, Factor, Op, compose
 from ir_agent.ledger import FactLedger
 from ir_agent.lineparse import keyed, pick
 
@@ -86,17 +86,41 @@ class Row:
     factor_key: str = ""
 
 
+def _decomp_to_dict(d: Decomposition) -> dict:
+    return {"target": d.target, "op": d.op.value,
+            "factors": [{"key": f.key, "label": f.label, "unit": f.unit,
+                        "source_hint": f.source_hint} for f in d.factors]}
+
+
+def _decomp_from_dict(d: dict) -> Decomposition:
+    op = next(o for o in Op if o.value == d["op"])
+    return Decomposition(
+        target=d["target"], op=op,
+        factors=[Factor(key=f["key"], label=f["label"], unit=f["unit"],
+                        source_hint=f.get("source_hint", ""))
+                for f in d["factors"]])
+
+
 def to_json(a: "AssumptionSet", **extra) -> dict:
     """待核实清单落盘。**连依据一起存** —— 只存数值的话，第二阶段读回来
     的假设一律「未提供任何依据」，会被自己的门挡住。
 
     同时记下 AI 的原始取值: 人改过之后，原来的依据未必还支撑新数字，
     那件事必须被看见而不是悄悄放行。
+
+    **分解模式下 `decomps` 与每行的 `factor_key` 必须一起存下来。**
+    漏掉它们不会立刻报错 —— 第二阶段照样能读出一个 AssumptionSet，
+    只是 `factor_key` 全变空串、`decomps` 变空列表：`synthesize()` 按
+    factor_key 分组，空 key 的行会被整体滤掉，`apply_to`/`to_driver_block`
+    因此拿到空列表，人在第一阶段批准的因子分解在第二阶段悄悄消失，
+    却不会有任何异常提示——这正是本模块要防的「静默出错」。
     """
     return {"labels": a.labels,
+            "decomps": [_decomp_to_dict(d) for d in a.decomps],
             "rows": [{"driver": r.driver, "year": r.year,
                       "bear": str(r.bear), "base": str(r.base),
                       "bull": str(r.bull), "note": r.note,
+                      "factor_key": r.factor_key,
                       "bases": [b.to_dict() for b in r.bases],
                       "proposed": {"bear": str(r.bear), "base": str(r.base),
                                    "bull": str(r.bull)}}
@@ -106,23 +130,39 @@ def to_json(a: "AssumptionSet", **extra) -> dict:
 
 def from_json(d: dict, code: str = "") -> tuple["AssumptionSet", list[str]]:
     """读回，并报出人改过哪些值。"""
+    decomps = [_decomp_from_dict(x) for x in (d.get("decomps") or [])]
     a = AssumptionSet(code=code or d.get("code", ""),
-                      labels=d.get("labels") or [])
+                      labels=d.get("labels") or [], decomps=decomps)
     edits: list[str] = []
     for x in d.get("rows") or []:
         r = Row(driver=x["driver"], year=int(x["year"]),
                 bear=Decimal(x["bear"]), base=Decimal(x["base"]),
                 bull=Decimal(x["bull"]), note=x.get("note", ""),
+                factor_key=x.get("factor_key", ""),
                 bases=[Basis.from_dict(b) for b in (x.get("bases") or [])])
         a.rows.append(r)
         p = x.get("proposed") or {}
         for case in ("bear", "base", "bull"):
             if case in p and Decimal(p[case]) != getattr(r, case):
-                cn = "营收增速" if r.driver == "growth" else "毛利率"
+                cn = _row_label(r, decomps)
                 edits.append(
                     f"{cn} 第{r.year}年 {case}：模型给 {p[case]}，"
                     f"核实后改为 {getattr(r, case)}")
     return a, edits
+
+
+def _row_label(r: "Row", decomps: list[Decomposition]) -> str:
+    """人改过的值要报得出名字。分解模式下 `r.driver` 是 revenue/
+    gross_margin，不是因子本身 —— 要报的是具体改了哪个因子（否则改了
+    「产能」和改了「单价」在提示里会长得一模一样，都写成同一个笼统的
+    目标名）。"""
+    if r.factor_key:
+        for d in decomps:
+            for f in d.factors:
+                if f.key == r.factor_key:
+                    return f.label
+        return r.factor_key
+    return "营收增速" if r.driver == "growth" else "毛利率"
 
 
 @dataclass
@@ -483,19 +523,88 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
         f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}")
 
 
+def _base_margin_of(judg: dict) -> Decimal:
+    """基期毛利率 —— 加法链的起点，**对全部预测年、全部三档都是同一个数**
+    （见 drivers.compose 的文档: 「基期」是账本口径的最近一期实绩，不随
+    年份滚动）。取 `gm_hist` 的最后一项（calibrate 给的历史毛利率序列，
+    不受 apply_to 影响）；取不到才退回 `gm[0]`（calibrate 模板的默认
+    首年预测值，只是一个近似）。
+    """
+    gm_hist = judg.get("gm_hist") or []
+    if gm_hist:
+        return Decimal(str(gm_hist[-1]))
+    gm = judg.get("gm") or [0.0]
+    return Decimal(str(gm[0]))
+
+
 def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
     """把判断项写回 calibrate 的输出，供 ashare_build 建表。
 
     三档分别写进 judg 的 *_scen，由 build 分列填入 Bull/Base/Bear；
     单列的 growth/gm 保留为选定档，兼容未改造的旧路径。
+
+    **分解模式下不能再按 growth/gm 两个旧键用 `path()` 过滤。**
+    `_parse_factors` 给每行 `Row.driver` 记的是分解目标本身
+    （revenue/gross_margin），不是 growth/gm —— 按旧键过滤会让
+    `a.path("growth", case)` 一行都匹配不上，把 calibrate 算好的模板
+    悄悄覆盖成空列表（下游 ashare_build 逐年取值会直接 IndexError）。
+    这里改为对每一档跑一遍 `synthesize()`，从因子合成回营收增速与
+    毛利率——语义上与 to_driver_block 的 base_level 必须用同一个基期，
+    否则两处各算各的，会在第一年的毛利率上重复计入一次 pp 增量。
     """
     ju = dict(cal["judg"])
-    ju["growth"] = [float(x) for x in a.path("growth", case)]
-    ju["gm"] = [float(x) for x in a.path("gm", case)]
-    ju["growth_scen"] = {c.name.lower(): [float(x) for x in a.path("growth", c)]
+    if a.decomps:
+        base_margin = _base_margin_of(ju)
+        growth_scen, gm_scen = {}, {}
+        for c in Case:
+            g, m = synthesize(a, c, base_margin)
+            growth_scen[c.name.lower()] = [float(x) for x in g]
+            gm_scen[c.name.lower()] = [float(x) for x in m]
+        ju["growth"] = growth_scen[case.name.lower()]
+        ju["gm"] = gm_scen[case.name.lower()]
+        ju["growth_scen"] = growth_scen
+        ju["gm_scen"] = gm_scen
+    else:
+        ju["growth"] = [float(x) for x in a.path("growth", case)]
+        ju["gm"] = [float(x) for x in a.path("gm", case)]
+        ju["growth_scen"] = {c.name.lower(): [float(x) for x in a.path("growth", c)]
+                             for c in Case}
+        ju["gm_scen"] = {c.name.lower(): [float(x) for x in a.path("gm", c)]
                          for c in Case}
-    ju["gm_scen"] = {c.name.lower(): [float(x) for x in a.path("gm", c)]
-                     for c in Case}
     out = dict(cal)
     out["judg"] = ju
+    return out
+
+
+def to_driver_block(a: AssumptionSet, cal: dict) -> dict:
+    """AssumptionSet → ashare_build 要的 `drivers` 结构。
+
+    三档顺序固定为 bull/base/bear，与工作簿 B/C/D 列绑定 ——
+    顺序写反不会让验算失败，只是「选悲观」会选出乐观值。
+
+    **base_level 取 `_base_margin_of`，不是 `cal["judg"]["gm"][0]`。**
+    `apply_to` 若已跑过，`gm[0]` 是**合成之后**的年度水平（基期 + 第一年
+    的 pp 增量），拿它当基期会让 1b_驱动分解 的公式把第一年的增量算
+    两遍：先被吸进 base_level，又被工作表公式再加一次。`gm_hist` 是
+    calibrate 的原始历史序列，不受 apply_to 影响，才是真正「不随年份
+    滚动」的基期。
+    """
+    base_margin = float(_base_margin_of(cal.get("judg") or {}))
+    out = {}
+    years = max((r.year for r in a.rows), default=0)
+    for d in a.decomps:
+        keys = [f.key for f in d.factors]
+        vals = {}
+        for case in ("bull", "base", "bear"):
+            vals[case] = [[float(getattr(
+                next(r for r in a.rows
+                     if r.year == y and r.factor_key == k), case))
+                for k in keys] for y in range(1, years + 1)]
+        block = {"op": d.op.value,
+                 "factors": [{"key": f.key, "label": f.label, "unit": f.unit}
+                             for f in d.factors],
+                 "values": vals}
+        if d.target == "gross_margin":
+            block["base_level"] = base_margin
+        out[d.target] = block
     return out

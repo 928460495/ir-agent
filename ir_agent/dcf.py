@@ -259,6 +259,13 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     if assumptions is not None:
         from ir_agent import assume
         cal = assume.apply_to(cal, assumptions)
+        if getattr(assumptions, "decomps", None):
+            # **只有方法论预研成功过才有分解式。** 预研失败退回两标量
+            # 模式时 assumptions.decomps 是空列表，此时不建「1b_驱动
+            # 分解」表 —— 工作簿形状与从前完全一致，不留一张空表。
+            cal["judg"]["drivers"] = assume.to_driver_block(assumptions, cal)
+            notes.append("工作簿含「1b_驱动分解」表，"
+                         "改一个因子会带动整条估值链重算")
         notes.append(
             "营收增速与毛利率三档由分析结论填入"
             + (f"，经 {approved_by} 核实" if approved_by else

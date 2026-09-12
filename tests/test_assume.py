@@ -347,3 +347,121 @@ def test_无分解式时退回两标量模式():
     a = assume.parse(_full(1), 1)
     assert {r.driver for r in a.rows} == {"growth", "gm"}
     _ok(a, 1)
+
+
+# ── Task 10：apply_to / to_driver_block 接线 ────────────────────
+#
+# 分解模式下 Row.driver 记的是分解目标（revenue/gross_margin），不是
+# growth/gm —— apply_to 若还按旧键用 path() 过滤，会把 rows 全部滤空，
+# 悄悄把 calibrate 算好的模板覆盖成空列表（下游 ashare_build 逐年取值
+# 会直接 IndexError）。以下测试锁住分解模式下 apply_to 必须改用
+# synthesize() 合成。
+
+def _cal_for_apply(gm_hist=("0.1415",)):
+    return {"judg": {"growth": [0.0], "gm": [0.0],
+                     "gm_hist": [float(x) for x in gm_hist],
+                     "cagr3": 0.1}}
+
+
+def test_分解模式下apply_to按因子合成而非清空():
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    out = assume.apply_to(_cal_for_apply(), a)
+    assert out["judg"]["growth"], "分解模式下 growth 不应被清空"
+    assert out["judg"]["gm"], "分解模式下 gm 不应被清空"
+    # 与 test_合成营收增速与毛利率 同一组因子：1.10×0.98−1=0.078；
+    # 14.15%−1.0pp−0.5pp=12.65%（中性档）
+    assert abs(D(str(out["judg"]["growth"][0])) - D("0.078")) < D("1e-6")
+    assert abs(D(str(out["judg"]["gm"][0])) - D("0.1265")) < D("1e-6")
+
+
+def test_分解模式下apply_to不改坏原cal():
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    cal = _cal_for_apply()
+    assume.apply_to(cal, a)
+    assert cal["judg"]["growth"] == [0.0]
+    assert cal["judg"]["gm"] == [0.0]
+
+
+def test_分解模式下apply_to产出三档且拉开():
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    out = assume.apply_to(_cal_for_apply(), a)
+    lo = out["judg"]["growth_scen"]["bear"][0]
+    mid = out["judg"]["growth_scen"]["base"][0]
+    hi = out["judg"]["growth_scen"]["bull"][0]
+    assert lo < mid < hi
+
+
+def test_to_driver_block产出结构():
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    cal = assume.apply_to(_cal_for_apply(), a)
+    drv = assume.to_driver_block(a, cal)
+    assert set(drv) == {"revenue", "gross_margin"}
+
+    rev = drv["revenue"]
+    assert rev["op"] == "乘"
+    assert [f["key"] for f in rev["factors"]] == ["capacity", "asp"]
+    # **三档顺序固定为 bull/base/bear**，与工作簿 B/C/D 列绑定——
+    # 顺序写反不会让验算失败，只是「选悲观」会选出乐观值。
+    assert rev["values"]["bull"][0] == [0.14, 0.01]
+    assert rev["values"]["base"][0] == [0.10, -0.02]
+    assert rev["values"]["bear"][0] == [0.05, -0.06]
+    assert "base_level" not in rev
+
+    gm = drv["gross_margin"]
+    assert gm["op"] == "加"
+    assert abs(gm["base_level"] - 0.1415) < 1e-9
+
+
+def test_to_driver_block基期不受apply_to合成结果污染():
+    """base_level 必须是账本口径的基期毛利率（gm_hist 最后一项），不能
+    读 apply_to 合成之后的 judg['gm'][0] —— 那已经是**含第一年 pp 增量**
+    的年度水平（12.65%），若拿它当基期，1b_驱动分解 的公式会把第一年的
+    pp 增量算两遍（先被吸进 base_level，又被工作表公式再加一次）。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    applied = assume.apply_to(_cal_for_apply(), a)
+    assert abs(applied["judg"]["gm"][0] - 0.1265) < 1e-6, \
+        "前置断言：apply_to 之后 gm[0] 已经是合成后的年度水平"
+    drv = assume.to_driver_block(a, applied)
+    assert abs(drv["gross_margin"]["base_level"] - 0.1415) < 1e-9
+
+
+def test_json往返保留分解式与因子key():
+    """to_json/from_json 若漏掉 decomps 或 factor_key，第二阶段读回的
+    AssumptionSet 就退化成一堆没有 factor_key 的行 —— synthesize() 按
+    factor_key 分组，空 key 的行会被整体滤掉，apply_to/to_driver_block
+    全部拿到空列表，人批准的因子分解在第二阶段就悄悄消失了。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    back, edits = assume.from_json(assume.to_json(a), code="600584")
+    assert edits == []
+    assert len(back.decomps) == 2
+    assert {d.target for d in back.decomps} == {"revenue", "gross_margin"}
+    assert {r.factor_key for r in back.rows} == {
+        "capacity", "asp", "util_leverage", "input_cost"}
+    # 往返后仍能正确合成 —— 这是最终的验收标准，不是「字段存在」这么浅
+    g, m = assume.synthesize(back, Case.BASE, base_margin=D("0.1415"))
+    assert abs(g[0] - D("0.078")) < D("1e-9")
+    assert abs(m[0] - D("0.1265")) < D("1e-9")
+
+
+def test_json往返后check仍能正确校验():
+    """run_valuation 读回 assumptions.json 后要用同一套 check()——若
+    decomps 没有一起存下来，check() 会退回两标量分支，把因子模式的行
+    误判成「营收增速缺第 1..N 年」而拒绝建模。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    a.labels = ["2026E"]
+    back, _ = assume.from_json(assume.to_json(a), code="600584")
+    assume.check(back, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                 decomps=back.decomps, base_margin=D("0.1415"))

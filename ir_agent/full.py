@@ -570,6 +570,10 @@ REPORT = "report.md"
 ASSUMPTIONS_MD = "assumptions.md"
 ASSUMPTIONS_JSON = "assumptions.json"
 STATE = "state.json"
+# 方法论预研（Task 4）的产出 —— 分解式落盘为独立文件，而不是塞进
+# brief.md 的某一段：它要在数据采集之前就能被人看到、改坏了可以直接
+# 改这个文件覆盖重跑，不必等简报写完。
+DRIVERS_MD = "drivers.md"
 
 
 def _analyse_facts(code: str, r, as_of: date, snapshot_dir):
@@ -610,10 +614,16 @@ def _analyse_facts(code: str, r, as_of: date, snapshot_dir):
     return md, pr, skipped
 
 
-def _analyse(code: str, r, as_of: date, snapshot_dir, model):
-    """确定性层 + 需要模型的定性层（宏观定性 / 战略 / 产业链）。"""
-    md, pr, skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+def _analyse_qualitative(code: str, r, as_of: date, model,
+                         md: dict, pr: dict, skipped: list[str]):
+    """需要模型的定性层（宏观定性 / 战略 / 产业链）。**就地**写入调用方的
+    md/pr/skipped，只返回本层用的 client —— 开销要累计到总开销里。
 
+    独立于 `_analyse_facts` 拆开（此前两者合在一个 `_analyse` 里）：
+    `run_analysis` 现在要在两者之间插入方法论预研之后、正式采集因子
+    数据之前的一段逻辑，拆开才能让「预研先于确定性层数据采集」这件事
+    在源码顺序上也看得出来（见 test_预研排在数据采集之前）。
+    """
     def take(name, fn):
         try:
             a, b, err = fn()
@@ -631,7 +641,41 @@ def _analyse(code: str, r, as_of: date, snapshot_dir, model):
     take("宏观定性", lambda: _load_macro_view(r, as_of, qual_client, pr["宏观"]))
     take("战略", lambda: _load_strategy(r, as_of, qual_client, spot))
     take("产业链", lambda: _load_value_chain(r, as_of, qual_client))
-    return md, pr, skipped, qual_client
+    return qual_client
+
+
+def _research_methodology(code: str, r, out: Path, client):
+    """方法论预研 —— 先问「这个行业靠什么赚钱」，再按答案去采集数据。
+
+    **不另设人工确认门。** 门的价值会被数量稀释: 现有那道判断项的门之所以
+    有效，是因为它一次只要求人看一件事；再加一道，人看两次的注意力未必比
+    看一次多。改用「立刻落盘 + 可中断 + 可覆盖」换取早期干预 —— 落盘为
+    drivers.md，看不对就改这个文件后重跑第一阶段。
+
+    **预研失败（MethodologyFailed）不中断整轮研究。** 联网拿不到闭合的
+    分解式是常态而非故障（比如模型答非所问、行业太冷门搜不到方法论），
+    此时退回不分解模式，判断项仍按营收增速/毛利率两项填写——降级但继续，
+    损失的是精度，不是担保。
+    """
+    from ir_agent import methodology
+
+    try:
+        from ir_agent.sources.taxonomy import fetch_all
+        rows = fetch_all()
+        me = next((e for e in rows if e.code == code), None)
+        industry = me.path if me else ""
+    except Exception:                                       # noqa: BLE001
+        industry = ""
+    if not industry:
+        return None, "方法论预研（取不到申万行业分类）"
+
+    try:
+        m = methodology.research(client, industry, code)
+    except methodology.MethodologyFailed as e:
+        return None, (f"方法论预研（{str(e)[:160]}）—— "
+                      "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+    (out / DRIVERS_MD).write_text(methodology.to_markdown(m), encoding="utf-8")
+    return m, ""
 
 
 def _prompt_bundle(pr: dict) -> dict:
@@ -658,12 +702,50 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     arts: dict[str, str] = {}
+    skipped: list[str] = []
 
-    md, pr, skipped, qual_client = _analyse(code, r, as_of, snapshot_dir, model)
+    # ── 方法论预研：先问「这个行业靠什么赚钱」──────────────────
+    # **必须排在 _analyse_facts（确定性层的数据采集）之前** —— 顺序
+    # 反了就退化成「先收集再解释」，那正是此前的形状: 固定模板 + 填
+    # 数据，无论研究什么公司问的都是同一组通用指标。
+    #
+    # 预研与随后的因子定向采集都要联网，client 必须提前显式开启
+    # WebSearch/WebFetch 工具 —— 不开的话不会报错，只会安静地什么都
+    # 搜不到，比直接失败更容易被忽略，所以单独开一个 client 而不是
+    # 复用下面 `_analyse_qualitative` 里那个默认不开工具的 client。
+    research_client = make_client(model=model, tools=["WebSearch", "WebFetch"])
+    # 预研抛 MethodologyFailed（或取不到申万行业分类）时，_research_methodology
+    # 返回 (None, 原因) 而不向上抛异常——退回不分解模式，判断项仍按营收增速/
+    # 毛利率两项填写，整轮研究继续跑，只是损失了因子层面的精度。
+    meth, meth_err = _research_methodology(code, r, out, research_client)
+    if meth_err:
+        skipped.append(meth_err)
+    if meth is not None:
+        arts["驱动因子分解"] = str(out / DRIVERS_MD)
+
+    md, pr, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+    skipped += facts_skipped
+    qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
+
+    # ── 按分解式定向采集因子数据 ────────────────────────────────
+    # 接在确定性层之后（要用它产出的 r.sections/r.corpus 做②年报③研报
+    # 两级文本命中）、撰写正文之前（采集结果要能进 DCF 判断项的提示词）。
+    factor_data: dict = {}
+    if meth is not None:
+        from ir_agent import gaps
+        from ir_agent.sources.external import Corpus
+        try:
+            factor_data = gaps.collect(
+                research_client, meth.decompositions, r.ledger,
+                r.corpus or Corpus(as_of=as_of), meth.industry, as_of,
+                sections=getattr(r, "sections", None))
+            md["因子数据"] = gaps.summary(factor_data)
+        except Exception as e:                              # noqa: BLE001
+            skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
 
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, brief=True, **_prompt_bundle(pr))
-    cost += getattr(qual_client, "total_cost_usd", 0.0)
+    cost += qual_client.total_cost_usd + research_client.total_cost_usd
     if err and body is None:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
         skipped.append("研究简报")
@@ -680,8 +762,10 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # ── AI 填写 DCF 判断项 ────────────────────────────────
     stage = Stage.AWAITING_REVIEW
     if body:
-        aerr = _propose_assumptions(code, r, body, md, as_of, out,
-                                    qual_client, arts)
+        aerr = _propose_assumptions(
+            code, r, body, md, as_of, out, qual_client, arts,
+            decomps=(meth.decompositions if meth is not None else None),
+            factor_data=factor_data)
         if aerr:
             skipped.append(aerr)
     else:
@@ -707,8 +791,14 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
                       f"{ASSUMPTIONS_JSON}），确认后运行第二阶段建模"))
 
 
-def _propose_assumptions(code, r, body, md, as_of, out, client, arts) -> str:
-    """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。"""
+def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
+                         decomps=None, factor_data=None) -> str:
+    """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。
+
+    `decomps`/`factor_data` 给定时按因子分解填写（方法论预研 + 定向
+    采集的产出），否则退回两标量模式 —— 预研失败时的降级路径，见
+    `_research_methodology`。
+    """
     from ir_agent import assume
 
     try:
@@ -718,9 +808,15 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts) -> str:
 
     labels = (cal.get("periods") or {}).get("proj") or []
     ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
+    # 加法链（毛利率）的基期水平——与 assume.apply_to/to_driver_block
+    # 里用的必须是同一个数，否则第一阶段判断项的口径与第二阶段建模的
+    # 口径就各算各的了。
+    base_margin = _fact_value(r.ledger, "gross_margin", r.period, as_of)
     try:
         a = assume.decide(client, cal["judg"], labels, ctx,
-                          ledger=r.ledger, body=body, as_of=as_of, code=code)
+                          ledger=r.ledger, body=body, as_of=as_of, code=code,
+                          decomps=decomps, factor_data=factor_data,
+                          base_margin=base_margin)
     except assume.AssumeFailed as e:
         return f"DCF 判断项（{str(e)[:200]}）"
 
@@ -777,22 +873,33 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     if not a.rows:
         raise SystemExit(
             f"{js} 里没有判断项 —— 请先跑完第一阶段。")
+    # 分解模式下重新校验要用同一套 decomps/base_margin，否则 check()
+    # 会退回两标量分支，把因子模式的行误判成「营收增速缺第 N 年」而
+    # 拒绝建模——那不是假设真的不合法，是校验用错了口径。
+    base_margin = _fact_value(r.ledger, "gross_margin", r.period, as_of)
     try:
         # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
         # 漏掉某一年，都会让模型算出一个看起来正常的错数。
-        assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of)
+        assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of,
+                     decomps=a.decomps or None, base_margin=base_margin)
     except assume.AssumeFailed as e:
         raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")
 
     # **人改过的数字要说出来。** 依据是为模型原来那个数写的，改了之后
     # 它未必还支撑新数字 —— 这件事代码判断不了，但必须让读者看见。
+    # skipped 要累加而非被后面重建派生事实的结果整体覆盖——此前这里
+    # 曾经是 `_, _, skipped = _analyse_facts(...)`，edits 非空时人工
+    # 调整的说明会被这一句悄悄丢掉（edits 为空时侥幸不报错，是因为
+    # 空列表压根不会走进这个 for 循环）。
+    skipped: list[str] = []
     for x in edits:
         skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
 
     # **必须重建派生事实**，否则摘要里的 [[industry.xxx]] 一个都解析不了。
     # 这一层不调模型，代价只是几次网络抓取。
     print("重建分析层事实（不调模型）…", file=sys.stderr)
-    _, _, skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+    _, _, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+    skipped += facts_skipped
     md = state.get("md") or {}
     pr = state.get("pr") or {}
 

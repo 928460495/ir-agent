@@ -202,6 +202,125 @@ def test_回写失败不丢弃正文():
     assert "err and body is None" in run, "有正文时不应报「研究简报」缺失"
 
 
+# ── Task 10: 方法论预研 → 定向采集 → 按因子填判断项 ─────────────
+
+def test_预研排在数据采集之前():
+    """**这是整个改造的要点。** 先问「这个行业靠什么赚钱」，再按答案去
+    采集数据 —— 顺序反了就退化成「先收集再解释」。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_analysis)
+    assert "methodology.research(" in src or "_research_methodology(" in src
+    assert src.index("methodology") < src.index("_analyse_facts("), \
+        "方法论预研必须在数据采集之前"
+
+
+def test_分解式立刻落盘且说明可覆盖():
+    """不另设人工门，改用「立刻落盘 + 可中断 + 可覆盖」换早期干预 ——
+    门加多了人会开始机械点同意。"""
+    import inspect
+
+    from ir_agent import full
+    assert full.DRIVERS_MD == "drivers.md"
+    src = inspect.getsource(full.run_analysis)
+    assert "DRIVERS_MD" in src
+
+
+def test_预研失败退回不分解而非中断():
+    """降级但继续 —— 损失的是精度，不是担保。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_analysis)
+    assert "MethodologyFailed" in src
+    assert "退回" in src or "不分解" in src
+
+
+def test_采集结果进批准清单():
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full._propose_assumptions)
+    assert "factor_data" in src and "decomps" in src
+
+
+def test_预研与采集使用已开工具的client():
+    """`methodology.research`/`gaps.collect`（经 `sources/web.search`）
+    都要求传入已显式开启 WebSearch/WebFetch 的 client，否则会安静地
+    什么都搜不到而不报错 —— 这条最容易被漏掉，因为它不报错。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_analysis)
+    assert "WebSearch" in src and "WebFetch" in src
+
+
+def test_研究方法论产出落盘为drivers_md(tmp_path, monkeypatch):
+    """`_research_methodology` 成功时把分解式写成 drivers.md，供人随时
+    打开查看、也可直接改这个文件覆盖后重跑第一阶段。"""
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full
+    from ir_agent.sources.taxonomy import Entry
+
+    monkeypatch.setattr(tax, "fetch_all", lambda: [
+        Entry(code="600584", name="长电科技", path="电子-半导体-封测")])
+
+    lines = ("分解: 营收 | 乘 | 产能:变化率:年报产能数据 | "
+             "单价:变化率:研报测算\n"
+             "分解: 毛利率 | 加 | 稼动率摊薄:pp:年报 | 上游成本:pp:研报\n")
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology("600584", _R(), tmp_path,
+                                        lambda prompt: lines)
+    assert err == ""
+    assert m is not None and len(m.decompositions) == 2
+    assert (tmp_path / full.DRIVERS_MD).exists()
+    assert "封测" in (tmp_path / full.DRIVERS_MD).read_text(encoding="utf-8")
+
+
+def test_研究方法论解析失败时退回不分解(tmp_path, monkeypatch):
+    """联网拿不到闭合分解式是常态（比如模型答非所问），不该让整轮
+    研究停摆 —— 退回不分解模式并如实说明原因。"""
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full
+    from ir_agent.sources.taxonomy import Entry
+
+    monkeypatch.setattr(tax, "fetch_all", lambda: [
+        Entry(code="600584", name="长电科技", path="电子-半导体-封测")])
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology(
+        "600584", _R(), tmp_path, lambda prompt: "胡言乱语，没有任何分解行")
+    assert m is None
+    assert "退回不分解" in err
+    assert not (tmp_path / full.DRIVERS_MD).exists()
+
+
+def test_研究方法论取不到行业分类时降级(tmp_path, monkeypatch):
+    """没有申万行业路径就无从预研 —— 降级说明原因，不抛异常中断。"""
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full
+
+    def _boom():
+        raise tax.TaxonomyUnavailable("网络不可用")
+
+    monkeypatch.setattr(tax, "fetch_all", _boom)
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology(
+        "600584", _R(), tmp_path, lambda prompt: "不会被调用")
+    assert m is None
+    assert "方法论预研" in err
+    assert not (tmp_path / full.DRIVERS_MD).exists()
+
+
 def test_辩论失败不丢弃正文():
     """**跑长电第八轮时踩到。** 撰写通过全部闸门、战略分析也过了，辩论的
     挑战者写了派生数字（投资现金流与资本开支的差额 27.6 亿、占比 44%）——
