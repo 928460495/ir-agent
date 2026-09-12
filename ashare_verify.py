@@ -33,6 +33,12 @@ _MAX_REF_DEPTH = 5
 _ARITH_CELL_RE = re.compile(r"\$?([A-Z]{1,3})\$?(\d{1,7})")
 
 
+class _CircularRefError(ValueError):
+    """_cell_value 的引用层数守卫专用异常——是 ValueError 的子类（不改变既有
+    `except ValueError` 调用方的行为），只为了在 _eval_arith 里能把它跟『解析
+    失败』的普通 ValueError 区分开，见 _eval_arith 里的说明。"""
+
+
 def _eval_arith(wb, sheet, expr, _depth):
     """对『仅含本表单元格引用与四则运算』的简单算式求值。
 
@@ -51,10 +57,22 @@ def _eval_arith(wb, sheet, expr, _depth):
         return f"({float(v)})"
     try:
         text = _ARITH_CELL_RE.sub(repl, expr)
+    except _CircularRefError:
+        # 循环引用的诊断信息必须穿透这里，不能被下面那条兜底 except 吞掉——
+        # 否则排查者看到的只是一个莫名其妙的 float() 类型错误，而不是「这里可能
+        # 有循环引用」。别的 ValueError（比如 repl 里 float(v) 碰到解析不出数值
+        # 的东西）仍然维持老行为：走 return None，让调用方原样吐回公式串。
+        raise
     except (TypeError, ValueError):
         return None
     if not re.fullmatch(r"[0-9+\-*/().\s]+", text):
         return None          # 残留非数字字符（如函数名）——不是我们支持的算式
+    if "**" in text:
+        # 显式拒绝乘方：白名单按字符放行 '*'，两个相邻就拼成 Python 的乘方
+        # 运算符。Excel 自己的乘方符号是 '^'（已被上面的 fullmatch 挡掉），
+        # 只有手改过的工作簿才写得出 9**9**9 这种指数塔 —— 它会算出一个几亿位
+        # 的大整数，把校验进程拖死。
+        return None
     try:
         return float(eval(text, {"__builtins__": {}}, {}))       # noqa: S307
     except Exception:
@@ -85,7 +103,7 @@ def _resolve_ref(v):
 def _cell_value(wb, sheet, addr, _depth=0):
     """读一个单元格的值，逐层解析引用（含跨表）。"""
     if _depth > _MAX_REF_DEPTH:
-        raise ValueError(
+        raise _CircularRefError(
             f"引用层数超过 {_MAX_REF_DEPTH} —— 可能存在循环引用")
     v = sheet[addr].value
     ref = _resolve_ref(v)
