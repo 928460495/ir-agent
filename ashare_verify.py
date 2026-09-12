@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """A股 DCF 模板 — 验证层。从工作簿读假设、用 Python 独立重算，再与公式引擎实跑结果比对。"""
 from __future__ import annotations
-import warnings, logging, math, os
+import warnings, logging, math, os, re
 warnings.filterwarnings("ignore"); logging.disable(logging.WARNING)
 import numpy as np
 from openpyxl import load_workbook
@@ -23,27 +23,66 @@ def _find(m, prefix):
     if len(hits)>1: raise KeyError(f"「{prefix}」前缀歧义，命中 {len(hits)} 行，请用完整标签")
     raise KeyError(prefix)
 
+_REF_RE = re.compile(
+    # 「!」不设为可选——本表引用已由 _SELF_REF_RE 先行拦截；这里若把「!」设为
+    # 可选，形如 "=B1+C1" 的普通公式会被表名分组贪婪吞掉 "B1+" 再回溯匹配出
+    # "C1"，被误判成引用。跨表引用必须显式带「!」，因此收紧为必选。
+    r"^=\s*(?:'([^']+)'|([^!'\s]+))!\$?([A-Z]+)\$?(\d+)\s*$")
+_SELF_REF_RE = re.compile(r"^=\s*\$?([A-Z]+)\$?(\d+)\s*$")
+_MAX_REF_DEPTH = 5
+
+
+def _resolve_ref(v):
+    """把单元格里的引用式拆成 (表名 或 None, 地址)。不是引用则返回 None。
+
+    此前只认本表引用（=B48）。接入驱动因子分解后，「1_假设」的增速与毛利率
+    单元格要指向「1b_驱动分解」，不支持跨表就会让 read_inputs 拿到公式字符串
+    然后 float() 抛异常 —— **独立复算验证会整个断掉**。
+    """
+    if not isinstance(v, str):
+        return None
+    m = _SELF_REF_RE.match(v.strip())
+    if m:
+        return None, f"{m.group(1)}{m.group(2)}"
+    m = _REF_RE.match(v.strip())
+    if not m:
+        return None
+    sheet = m.group(1) or m.group(2)
+    if not sheet:
+        return None
+    return sheet, f"{m.group(3)}{m.group(4)}"
+
+
+def _cell_value(wb, sheet, addr, _depth=0):
+    """读一个单元格的值，逐层解析引用（含跨表）。"""
+    if _depth > _MAX_REF_DEPTH:
+        raise ValueError(
+            f"引用层数超过 {_MAX_REF_DEPTH} —— 可能存在循环引用")
+    v = sheet[addr].value
+    ref = _resolve_ref(v)
+    if ref is None:
+        return v
+    name, target = ref
+    nxt = wb[name] if name else sheet
+    return _cell_value(wb, nxt, target, _depth + 1)
+
+
 def read_inputs(path):
     wb = load_workbook(path, data_only=False)
     a = wb["1_假设"]; am = _rowmap(a)
-    import re as _re
     def g(p, _depth=0):
-        """读假设值；若为本表单元格引用（如 =B48）则解析一层，避免读回公式字符串。"""
-        v = a.cell(_find(am, p), 2).value
-        while isinstance(v, str) and _depth < 5:
-            m = _re.fullmatch(r"=\$?([A-Z]+)\$?(\d+)", v.strip())
-            if not m: break
-            v = a[f"{m.group(1)}{m.group(2)}"].value; _depth += 1
-        return v
+        """读假设值；引用（含跨表）逐层解析，避免读回公式字符串。"""
+        return _cell_value(wb, a, f"B{_find(am, p)}")
     hdr = [wb["2_利润表"].cell(5,c).value for c in range(2,50)]
     hdr = [h for h in hdr if h]
     nh = sum(1 for h in hdr if h.endswith("A")); ny = len(hdr)-nh
     scen = int(g("选择情景"))
     def path3(prefix, n):
-        out=[]
+        out = []
         for i in range(n):
-            r=_find(am,f"{hdr[nh+i]} {prefix}")
-            out.append(float(a.cell(r,1+scen).value))
+            r = _find(am, f"{hdr[nh+i]} {prefix}")
+            col = chr(ord('A') + scen)      # scen=1→B, 2→C, 3→D
+            out.append(float(_cell_value(wb, a, f"{col}{r}")))
         return out
     o = {k: float(g(k)) for k in ["货币资金","交易性金融资产","应收票据及应收账款","存货","其他流动资产",
          "固定资产净额","在建工程","其他非流动资产","短期借款","应付票据及应付账款","其他流动负债",
