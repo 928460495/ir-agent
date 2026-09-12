@@ -1039,3 +1039,208 @@ def test_两标量模式本身连续失败仍照常拒绝():
     with pytest.raises(AssumeFailed, match="连续"):
         assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
                       ledger=FactLedger(), body=BODY, as_of=AS_OF)
+
+
+# ═══════════════════════════════════════════════════════════════
+# final-fix-D：合并前最后一批发现
+# ═══════════════════════════════════════════════════════════════
+
+# ── C-a：两标量降级路径漏了因子侧早就有的重复行查重 ───────────────
+#
+# 因子模式连续 3 次被「请修正后重新输出全部行」驳回之后才会走到这条
+# 降级路径——模型此时已经被连续训练成输出"修正前/修正后"两版。比
+# 因子模式更糟：`path()` 把全部行按年份排序后直接返回一个扁平列表，
+# `ashare_build.py` 按下标 `i`（不是按年份）取值，一条重复行会让它
+# 后面每一年整体错位一格。
+
+def test_两标量模式重复行被驳回():
+    """C-a 实测复现：`_parse_scalar` 修复前不查重，"先给的" 与 "修正
+    后" 两行会一起留下来，交给 `path()` 排序后返回，下游按下标取值时
+    会整体错位。必须在解析阶段就拒绝。"""
+    bad = "\n".join([
+        _line("营收增速", 1, "2%", "6%", "10%"),
+        _line("营收增速", 1, "2%", "30%", "40%", q="修正后"),
+        _line("营收增速", 2, "3%", "7%", "11%"),
+        _line("毛利率", 1, "12%", "14%", "16%"),
+        _line("毛利率", 2, "12%", "14%", "16%")])
+    with pytest.raises(AssumeFailed, match="营收增速") as e:
+        assume.parse(bad, 2)
+    assert "第 1 年" in str(e.value)
+
+
+def test_两标量模式check也拒绝重复行不只依赖parse():
+    """C-a 纵深防御：`check()` 在人工核实之后（`from_json` 读回）会被
+    再跑一遍（`full.run_valuation`），那时的 `AssumptionSet` 未必经过
+    `_parse_scalar`——人手改 JSON 也可能引入重复行。"""
+    a = assume.AssumptionSet(code="", labels=["2026E"])
+    a.rows = [
+        assume.Row(driver="growth", year=1, bear=D("0.01"), base=D("0.02"),
+                  bull=D("0.03")),
+        assume.Row(driver="growth", year=1, bear=D("-0.05"), base=D("0.30"),
+                  bull=D("0.35")),
+        assume.Row(driver="gm", year=1, bear=D("0.12"), base=D("0.14"),
+                  bull=D("0.16")),
+    ]
+    with pytest.raises(AssumeFailed, match="营收增速"):
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+
+
+def test_两标量模式重复行会让path按年份整体错位():
+    """C-a：不拦住会造成的真实危害——`path()` 是这条降级路径唯一把
+    数值交给 `apply_to` 的地方，重复行会让排序后的列表长度不对、
+    内容错位，后面每一年拿到的其实是前一条重复行的数字（`ashare_
+    build.py:87` 按下标 `i` 取值，不是按年份查找）。这里跳过 check()，
+    直接验证这个危害本身，证明"必须在早于 path() 的地方拦下"不是
+    纸上谈兵。"""
+    a = assume.AssumptionSet(code="", labels=["2026E", "2027E"])
+    a.rows = [
+        assume.Row(driver="growth", year=1, bear=D("0.01"), base=D("0.06"),
+                  bull=D("0.10")),
+        assume.Row(driver="growth", year=1, bear=D("0.05"), base=D("0.30"),
+                  bull=D("0.40")),
+        assume.Row(driver="growth", year=2, bear=D("0.02"), base=D("0.07"),
+                  bull=D("0.11")),
+    ]
+    got = a.path("growth", Case.BASE)
+    assert got == [D("0.06"), D("0.30"), D("0.07")]
+    assert got[1] != D("0.07"), \
+        "人批准的第2年 0.07 被顶到了下标2，下标1本该是第2年却是重复行的0.30"
+
+
+# ── I-a：一个空格就能绕过 I-1 的单位守卫 ─────────────────────────
+
+def test_变化率因子数字与百分号间空格绕过守卫被堵住():
+    """I-a 实测复现：修复前 `0.5 %`（数字与 % 间一个空格）能骗过守卫——
+    守卫只查整段字符串里有没有 % 字符（有，只是隔了个空格），但
+    `_pct` 的 `_NUM` 正则要求 % 紧贴数字，实际解析出的 token 是不带
+    % 的裸数 "0.5"，被当成 50% 直接使用（且不会被守卫拦下，因为守卫
+    看到字符串里"有 %"就放行了）。合成营收增速会因此暴涨，对一个
+    扩产故事完全看得过去，人从清单上发现不了。修复后应正确解析成
+    0.5%（=0.005），既不是 50%，也不是被拒绝。"""
+    ok = f"假设: 产能 | 第1年 | 0.5 % | 0.5 % | 0.6 % | 「{Q}」"
+    a = assume.parse(ok, 1, decomps=_decomps())
+    row = next(r for r in a.rows if r.factor_key == "capacity")
+    assert row.bear == D("0.005"), \
+        f"应解析成 0.5%=0.005，不该是被当裸数吞下的 0.5（=50%），取到了 {row.bear}"
+
+
+def test_变化率因子数字与百分号间空格规范化后能正确解析():
+    """回归：真正想表达 0.5% 而只是多打了个空格时，规范化后应该正确
+    解析出对应的小数，而不是被拒绝，也不是被错解成 50%。"""
+    ok = f"假设: 产能 | 第1年 | -6 % | -2 % | 1 % | 「{Q}」"
+    a = assume.parse(ok, 1, decomps=_decomps())
+    row = next(r for r in a.rows if r.factor_key == "capacity")
+    assert row.bear == D("-0.06")
+
+
+def test_变化率因子裸数与不相干百分号不再绕过守卫():
+    """I-a 实测复现：`2026年+5%` 整段确实含有 %，但 `_NUM.search`
+    实际抓到的第一个数字是它前面的 "2026"（后面跟着"年"，不紧贴
+    %），若守卫只查"字符串里有没有 %"就会被这个不相干的 % 放行，
+    `_pct` 却会解析出裸数 2026（渲染成 202600%）。守卫必须复用
+    `_pct` 自己会用到的那个 token 来判断，两处才是同一套判据。"""
+    bad = f"假设: 产能 | 第1年 | 2026年+5% | -2% | 1% | 「{Q}」"
+    with pytest.raises(AssumeFailed, match="变化率"):
+        assume.parse(bad, 1, decomps=_decomps())
+
+
+def test_变化率单位守卫不误伤已确认合法的写法():
+    """回归清单：I-a 的修法（规范化数字与 % 间的空白 + 守卫复用
+    _pct 实际解析出的 token）不能误伤这些已确认合法的写法。"""
+    legal = ["0%", "+3%", "100%", "-100%", "约3%", "3%~5%",
+            "1,000%", "10%(含新厂)", "-3.5％"]
+    for lit in legal:
+        line = f"假设: 产能 | 第1年 | {lit} | {lit} | {lit} | 「{Q}」"
+        a = assume.parse(line, 1, decomps=_decomps())
+        assert a.rows[0].factor_key == "capacity", f"{lit!r} 不应被拒绝"
+
+
+# ── Minor-1：_base_margin_of 在新失败路径下报错文案错误 ──────────
+
+def test_base_margin区分gm_hist为空与periods数不出年度():
+    """Minor-1 实测复现：`_annual_gm_hist` 在两种截然不同的原因下都
+    会返回空列表——`gm_hist` 本身是空的，或者 `gm_hist` 有值但 `cal`
+    缺 `periods["annual"]`/`rev`/`cogs`，按同一过滤条件数出来的年度
+    期数恰好是 0。修复前不管哪种原因都报「judg 里没有 gm_hist」——
+    后一种情形下 gm_hist 明明在，排障会被指向错误的地方。"""
+    with pytest.raises(AssumeFailed) as e:
+        assume._base_margin_of({"judg": {"gm_hist": [0.14, 0.15]}})
+    msg = str(e.value)
+    assert "periods" in msg
+    assert "judg 里没有 gm_hist" not in msg, \
+        "gm_hist 明明有值，不该报「judg 里没有 gm_hist」"
+
+
+# ── Minor-2 见 assume._annual_gm_hist 的文档字符串更新（无独立测试，
+#    只是把引用一个自身有 bug 的上游行为改成如实表述） ─────────────
+
+
+# ── Minor-3：年报原文片段里的 | 未转义，会打断提示词表 ────────────
+
+def test_年报原文含竖线时被转义不会撑坏提示词表():
+    """Minor-3 实测复现：`fd.note` 抄的是 gaps.collect 摘出来的原文
+    片段，PDF 抽出的表格章节带竖线很常见——未转义时那一行会被 markdown
+    表格解析器当成多出的列，单位这一列跟着错位。"""
+    from ir_agent.gaps import ANNUAL, FactorData
+    d = _decomps()[0]
+    f = d.factors[0]
+    factor_data = {f.key: FactorData(
+        factor=f, status=ANNUAL,
+        note="「产品|产能|产量…|1200|1350」——《产能情况》")}
+    txt = assume._factor_head(_decomps(), factor_data)
+    assert "产品|产能" not in txt, \
+        "未转义的竖线会被 markdown 表格当成列分隔符"
+    assert "产品\\|产能" in txt
+
+
+# ── Minor-4：to_driver_block 缺行时抛裸 KeyError ─────────────────
+
+def test_to_driver_block缺行时报出因子与年份而不是裸KeyError():
+    """Minor-4 实测复现：`check()` 用 `len(a.labels)` 定年数，
+    `to_driver_block` 用 `max(r.year)` 定年数——手改 JSON 把某个因子
+    的年份改到超出 labels 范围时两者会错开：那个因子多出的年份把这里
+    的 years 撑大，其它因子在那一年却没有取值。修复前这里直接抛裸
+    KeyError，一路冒到 `run_valuation` 的兜底里显示成「估值
+    （KeyError: (2, 'asp')）」，排障看不出是哪个因子哪一年。"""
+    a = assume.AssumptionSet(code="", labels=["2026E"], decomps=_decomps())
+    a.rows = [
+        assume.Row(driver="revenue", year=1, bear=D("0.01"), base=D("0.02"),
+                  bull=D("0.03"), factor_key="capacity"),
+        assume.Row(driver="revenue", year=1, bear=D("-0.01"), base=D("0.00"),
+                  bull=D("0.01"), factor_key="asp"),
+        assume.Row(driver="revenue", year=2, bear=D("0.02"), base=D("0.03"),
+                  bull=D("0.04"), factor_key="capacity"),
+        # asp 第 2 年缺行——手改 JSON 把 capacity 的年份改到了 2，
+        # asp 没有跟着改。
+        assume.Row(driver="gross_margin", year=1, bear=D("-1"), base=D("0"),
+                  bull=D("1"), factor_key="util_leverage"),
+        assume.Row(driver="gross_margin", year=1, bear=D("-1"), base=D("0"),
+                  bull=D("1"), factor_key="input_cost"),
+    ]
+    cal = {"periods": {"annual": ["p0"]}, "rev": {"p0": 1.0},
+          "cogs": {"p0": 1.0}, "judg": {"gm_hist": [0.1415]}}
+    with pytest.raises(AssumeFailed, match="单价") as e:
+        assume.to_driver_block(a, cal)
+    assert "第 2 年" in str(e.value)
+
+
+# ── Minor-5：两标量降级模式没有任何单位守卫 ───────────────────────
+
+def test_两标量模式bp字面量被拒绝():
+    """Minor-5 实测复现：与 C-a 同一片薄弱区域——两标量降级模式此前
+    完全没有单位守卫，`-350bp` 会被 `_pct` 当裸数 -350 直接吞下，
+    渲染成 -35000%。"""
+    bad = _line("营收增速", 1, "-350bp", "-100bp", "50bp")
+    with pytest.raises(AssumeFailed, match="bp"):
+        assume.parse(bad, 1)
+
+
+def test_两标量模式小数记法不受因子侧必须带百分号的约束():
+    """记录一个刻意的判断：没有照抄因子侧"必须带 %"的完整守卫。小数
+    记法（0.3 = 30%）是这条路径本就认可的既有约定（见
+    `test_百分号与小数都认`），营收增速/毛利率本身只有一套单位（都是
+    读作"这个比例"），不像因子侧那样存在 pp/% 两套单位真会相差
+    100 倍——没有第二套单位可供混淆，谈不上"必须带 %"，所以只加了
+    bp 这个真正跨单位、会被静默吞下的窄口径守卫。"""
+    a = assume.parse(_line("营收增速", 1, "0.02", "0.06", "0.10"), 1)
+    assert a.rows[0].bear == D("0.02")

@@ -52,25 +52,40 @@ def _core_label(label: str) -> str:
     """剥掉因子标签里的单位/运算后缀，取核心词做文本匹配。
 
     方向仍要保守：**宁可漏判落到④，不可误判成"已披露"**。剥完后核心词
-    过短就不剥，用原始标签去匹配——大概率落空退到④，但不会拿一两个字
-    这种几乎到处都能命中的片段冒充"命中"，把一个巧合伪装成证据（这正
-    是本模块要防的最严重失败模式）。
+    过短（<2 字）就不剥，用原始标签去匹配——大概率落空退到④，但不会
+    拿一两个字这种几乎到处都能命中的片段冒充"命中"，把一个巧合伪装成
+    证据（这正是本模块要防的最严重失败模式）。
 
-    I2（终审复核）：阈值原为 2，「稼动率」（3字）「汇率」（2字）这类
-    短核心词都会被剥出来直接做包含匹配——年报原文一句「公司本年度
-    **未**披露稼动率数据」照样会命中"稼动率"三个字，把"未披露"读反
-    成"年报披露"（把一句否定读成了肯定，正是本模块最怕的那种失败）。
-    阈值提到 4 字后，这类短词回退用原始标签（如"稼动率变化率"）去匹
-    配——真实年报几乎不会逐字出现这种带单位后缀的整串，宁可因此在少
-    数真命中的场景里多退到③④，也不要在"未披露"这种否定语境里被三个
-    字的片段撞上。
+    终审复核第二轮（final-fix-D I-b）：上一轮把这个阈值从 2 提到 4，
+    想靠"核心词够长"去挡"未披露稼动率数据"这类否定语境的误判——但
+    实测证明这防不住：失败模式跟长度无关，是**否定语义**。「未披露
+    **有效产能**的具体数据」里的「有效产能」有 4 字，够长，照样会被
+    误判成"年报披露"。长度阈值防不住否定句，代价却是把「产能变化率」
+    「单价变化率」「ASP变化率」……这批本仓库自己的规范因子名全部挤
+    回退到原始标签匹配，四级采集阶梯对它们退化成「④或无数据」两级。
+    阈值改回 2，否定语境的判断挪到真正命中的地方去做——见
+    `_valid_hit`：在命中处的前后窗口里查否定词，命中在否定语境里就
+    不算数，不管核心词剥得多长。
     """
     for suf in _SUFFIXES:
         if label.endswith(suf) and len(label) > len(suf):
             core = label[: -len(suf)]
-            if len(core) >= 4:
+            if len(core) >= 2:
                 return core
     return label
+
+
+# final-fix-D I-b：命中处如果落在否定语境里，就不算命中——「未披露」
+# 「未单独列示」这类短语几乎总是紧贴着被否定的那个词，用命中点前后
+# 一个摘要窗口的宽度去查就够了，不需要更复杂的句法分析。宁可因为
+# 窗口覆盖了不相关的另一句话而多退一次（④或无数据），也不可能把
+# "未披露"读成"已披露"。
+_NEGATIONS = ("未披露", "未单独列示", "未公开", "不适用", "无法计算",
+              "未予披露", "不予披露", "未予公开", "无法确定")
+
+
+def _negated(window: str) -> bool:
+    return any(neg in window for neg in _NEGATIONS)
 
 
 @dataclass
@@ -102,15 +117,29 @@ def _latest(ledger: FactLedger, key: str) -> str:
     return pers[-1] if pers else ""
 
 
-def _excerpt(text: str, label: str) -> str:
-    """摘出命中处前后的原文——只给片段，不代人下结论。"""
-    i = text.find(label)
-    if i < 0:
-        return ""
-    start = max(0, i - _EXCERPT_WINDOW)
-    end = min(len(text), i + len(label) + _EXCERPT_WINDOW)
-    body = text[start:end].replace("\n", "")
-    return ("…" if start > 0 else "") + body + ("…" if end < len(text) else "")
+def _valid_hit(text: str, core: str) -> str | None:
+    """在 text 里找 core 一处**不落在否定语境里**的出现，摘出前后原文
+    片段；找不到（含"所有出现都在否定语境里"）返回 None。
+
+    **不能只看第一次出现就下结论。** 同一段文字里，核心词可能既出现在
+    「未披露 XX」这种否定句里，也在别处真正给出了数据——只看第一次
+    命中，真命中会被前面一次巧合的否定命中连坐拖累（宁可漏判，但不该
+    漏成这样）；反过来，若唯一的出现就落在否定窗口里，就不能算数——
+    这正是 final-fix-D I-b 要堵的失败模式：核心词剥得再长也挡不住
+    「未披露有效产能的具体数据」这种紧贴否定词的命中。
+    """
+    start = 0
+    while True:
+        i = text.find(core, start)
+        if i < 0:
+            return None
+        lo = max(0, i - _EXCERPT_WINDOW)
+        hi = min(len(text), i + len(core) + _EXCERPT_WINDOW)
+        window = text[lo:hi]
+        if not _negated(window):
+            body = window.replace("\n", "")
+            return ("…" if lo > 0 else "") + body + ("…" if hi < len(text) else "")
+        start = i + len(core)
 
 
 def _match_annual(sections, label: str) -> tuple[str, str] | None:
@@ -121,13 +150,15 @@ def _match_annual(sections, label: str) -> tuple[str, str] | None:
 
     **匹配用剥掉后缀的核心词，不是原始标签。** 原始标签「有效产能变化
     率」这种带单位/运算后缀的整串不会逐字出现在年报里，见 `_core_label`。
+    落在否定语境（"未披露"等）里的出现不算命中，见 `_valid_hit`。
     """
     if sections is None:
         return None
     core = _core_label(label)
     for s in sections.sections.values():
-        if core in s.text:
-            return _excerpt(s.text, core), f"《{s.label}》"
+        hit = _valid_hit(s.text, core)
+        if hit is not None:
+            return hit, f"《{s.label}》"
     return None
 
 
@@ -137,8 +168,9 @@ def _match_report(corpus, label: str) -> tuple[str, str] | None:
         return None
     core = _core_label(label)
     for d in corpus.docs:
-        if core in d.text:
-            return _excerpt(d.text, core), d.cite()
+        hit = _valid_hit(d.text, core)
+        if hit is not None:
+            return hit, d.cite()
     return None
 
 

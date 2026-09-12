@@ -57,17 +57,44 @@ _REF = re.compile(r"\[\[[^\]]+\]\]")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?%?")
 
 
+def _normalize_num(raw: str) -> str:
+    """`_pct` 与它的单位守卫必须共用同一套规范化，见 `_pct_token`。
+
+    M1：全角/数学减号 U+2212（−）不是 ASCII 连字符，_NUM 认不出来，
+    会把整个负号丢掉再匹配出一个正数——设计文档全文用的就是这个字符，
+    模型很可能照抄，符号被悄悄翻转。规范化之后再匹配。
+    I1：全角百分号（％）同理不是 ASCII %，_NUM 认不出来，会把 % 整个
+    丢掉、按裸数处理——裸数对变化率因子是灾难性的（0.5% 写成 "0.5％"
+    会被当成 0.5 = 50%）。全角百分号信息无损，直接规范化成 ASCII。
+    I-a（final-fix-D）：数字与 % 之间若有空白（"0.5 %"），_NUM 要求
+    % 紧贴数字，空白会让匹配止步于数字本身、% 被整段丢弃——"0.5 %"
+    因此被当成裸数 0.5（=50%）吞下，是 I1 单位守卫本该挡住却没挡住
+    的同一类致命错误，只是多了一个空格。收紧数字与 % 之间的空白后
+    再匹配。
+    """
+    t = raw.replace(",", "").replace("−", "-").replace("％", "%")
+    return re.sub(r"(\d)\s+%", r"\1%", t)
+
+
+def _pct_token(raw: str) -> str | None:
+    """规范化后，`_pct` 实际会解析出的那个数字 token（含它自己的 %，
+    若有）。单位守卫必须复用这个 token 来判断"这个字面量到底有没有
+    带 %"，不能自己去查整段字符串里有没有 % 字符。
+
+    I-a 实测复现：字面量 "2026年+5%" 整段确实含有 %，但 `_NUM.search`
+    实际抓到的第一个数字是它前面的 "2026"（后面跟着"年"，不是紧贴
+    %），`_pct` 用的就是这个不带 % 的 token，取到的值是 2026 而不是
+    0.05。若守卫只查"字符串里有没有 %"，会因为字符串末尾那个不相干
+    的 "%" 而放行，两处判据不一致，等于形同虚设。
+    """
+    m = _NUM.search(_normalize_num(raw))
+    return m.group(0) if m else None
+
+
 def _pct(raw: str) -> Decimal:
-    # M1：全角/数学减号 U+2212（−）不是 ASCII 连字符，_NUM 认不出来，
-    # 会把整个负号丢掉再匹配出一个正数——设计文档全文用的就是这个字符，
-    # 模型很可能照抄，符号被悄悄翻转。规范化之后再匹配。
-    # I1：全角百分号（％）同理不是 ASCII %，_NUM 认不出来，会把 % 整个
-    # 丢掉、按裸数处理——裸数对变化率因子是灾难性的（0.5% 写成 "0.5％"
-    # 会被当成 0.5 = 50%）。全角百分号信息无损，直接规范化成 ASCII。
-    m = _NUM.search(raw.replace(",", "").replace("−", "-").replace("％", "%"))
-    if not m:
+    t = _pct_token(raw)
+    if t is None:
         raise AssumeFailed(f"取值不可解析：{raw!r}")
-    t = m.group(0)
     try:
         v = Decimal(t.rstrip("%"))
     except InvalidOperation as e:
@@ -347,6 +374,13 @@ class AssumptionSet:
         return lines
 
 
+def _esc_pipe(s: str) -> str:
+    """Minor-3（final-fix-D）：markdown 表格单元格里的 "|" 必须转义，
+    否则年报/研报原文片段里常见的表格竖线会被当成列分隔符，把这一行
+    提示词表格撑成错位的更多列。"""
+    return s.replace("|", "\\|")
+
+
 def _fmt_factor(v: Decimal, unit: str) -> str:
     """因子取值按单位格式化。**pp 不能用 :.2% 显示**——C4 的字面量
     百分号 bug 一旦漏网，`-0.03` 用 :.2% 会显示成 "-3.00%"，和正确的
@@ -368,6 +402,15 @@ def parse(text: str, years: int,
 
 def _parse_scalar(text: str, years: int) -> AssumptionSet:
     out = AssumptionSet(code="", labels=[])
+    # C-a（final-fix-D）：`_parse_factors` 早就查了 (factor_key, year)
+    # 重复，这条降级路径漏了同一道门——而它恰恰是因子模式连续 3 次被
+    # 「请修正后重新输出全部行」驳回之后才会走到的路径，模型此时已经
+    # 被连续训练成输出"修正前/修正后"两版。比因子模式更糟：`path()`
+    # 把全部行按年份排序后直接返回一个列表，一条重复行会让它后面
+    # 每一年整体错位一格（`ashare_build.py` 按下标 `i` 取值，不是按
+    # 年份查找），人批准的某一年会被静默丢弃、多出的一项顶替了别的
+    # 年份。降级模式不删，那它就必须和主路径一样硬。
+    seen: set[tuple[str, int]] = set()
     for m in _LINE.finditer(text):
         parts = [p.strip() for p in m.group(1).split("|")]
         if len(parts) < 6:
@@ -385,6 +428,27 @@ def _parse_scalar(text: str, years: int) -> AssumptionSet:
             raise AssumeFailed(f"年份不可解析：{parts[1]!r}") from e
         if not 1 <= year <= years:
             raise AssumeFailed(f"年份 {year} 超出预测期 1..{years}")
+        if (DRIVERS[cn], year) in seen:
+            raise AssumeFailed(
+                f"{cn} 第 {year} 年出现了不止一行——重试提示词里的「请"
+                "修正后重新输出全部行」很容易诱发模型把修正前/修正后"
+                "两版都留在同一次回复里。重复行会让 path() 按年份排序"
+                "后整体错位一格，后面每一年都会取到前一行的数字，请只"
+                "保留一行，不要让代码替你决定该采信哪一行。")
+        seen.add((DRIVERS[cn], year))
+        # Minor-5（final-fix-D）：与因子侧同形的窄口径守卫——不要求
+        # 必须带 %，小数记法（"0.02" = 2%）是这条路径本就认可的既有
+        # 约定（见 test_百分号与小数都认），营收增速/毛利率本身没有
+        # 像因子那样的 pp/% 双单位歧义，谈不上"必须带 %"。但 bp 是
+        # 另一套单位，混进来会被 `_pct` 当裸数直接吞下（"-350bp" 被
+        # 解析成 -350，渲染成 -35000%），必须显式拒绝。
+        for label, i in (("悲观", 2), ("中性", 3), ("乐观", 4)):
+            raw = parts[i]
+            if "bp" in raw.replace("％", "%").lower():
+                raise AssumeFailed(
+                    f"{cn} 第 {year} 年 {label}档 {raw!r} 按小数或百分比"
+                    "计，不认 bp —— bp 与 %/小数不是同一套单位，不做"
+                    "隐式换算，请换算成百分比或小数再填。")
         out.rows.append(Row(
             driver=DRIVERS[cn], year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
@@ -458,7 +522,13 @@ def _parse_factors(text: str, years: int,
                         f"因子「{label}」按变化率（%）计，不认 bp：{raw} —— "
                         "bp 与 % 不是同一套单位，不做隐式换算，请直接换算"
                         f"成百分比再填（如 −350bp 请写成 −3.5%）。")
-                if "%" not in norm:
+                # I-a（final-fix-D）：不能只查"整段字符串里有没有 %"——
+                # 一个 "0.5 %" 这样的空格就能骗过这道守卫（_pct 实际
+                # 解析出的 token 是不带 % 的裸数 "0.5"，%被空白隔开、
+                # 整个丢弃），"2026年+5%" 这类字面量也会因为字符串
+                # 末尾不相干的一个 % 而放行。守卫必须复用 `_pct` 自己
+                # 会用到的那个 token 来判断，两处才是同一套判据。
+                if not (_pct_token(raw) or "").endswith("%"):
                     raise AssumeFailed(
                         f"因子「{label}」按变化率计，必须带 %：{raw} —— "
                         "裸数会被当成小数直接使用而不是百分比（0.5 会被"
@@ -537,6 +607,23 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
 
 
 def _check_scalar(a: AssumptionSet, years: int) -> None:
+    # C-a 纵深防御（final-fix-D）：`_parse_scalar` 已在解析阶段拒绝
+    # 重复行，但 `check()` 也会在人工核实之后、`from_json` 读回时被
+    # 再跑一遍（`full.run_valuation`）——那时的 `AssumptionSet` 未必
+    # 经过 `_parse_scalar`，人手改 JSON 也可能引入重复行。这里再挡
+    # 一次，不依赖上游一定已经查过重（与 `_check_factors` 同一套
+    # 纵深防御思路）。
+    inv = {v: k for k, v in DRIVERS.items()}
+    seen: set[tuple[str, int]] = set()
+    for r in a.rows:
+        key = (r.driver, r.year)
+        if key in seen:
+            raise AssumeFailed(
+                f"{inv.get(r.driver, r.driver)} 第 {r.year} 年出现了不止"
+                "一行——重复行会让 path() 按年份排序后整体错位一格，"
+                "必须只保留一行。")
+        seen.add(key)
+
     for cn, key in DRIVERS.items():
         got = {r.year for r in a.rows if r.driver == key}
         missing = sorted(set(range(1, years + 1)) - got)
@@ -686,7 +773,12 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
                 st = f"{fd.status}（{fd.note}）"
             else:
                 st = fd.status
-            lines.append(f"| {f.label} | {f.unit} | {st} |")
+            # Minor-3（final-fix-D）：`fd.note` 抄的是 gaps.collect 摘出
+            # 来的年报/研报原文片段——PDF 抽出的章节带表格竖线很常见，
+            # 未转义的 "|" 会被当成这一行提示词表格自己的列分隔符，把
+            # 单位这一列错位到别处去。转义成 markdown 认得的 "\|"。
+            lines.append(f"| {_esc_pipe(f.label)} | {_esc_pipe(f.unit)} "
+                        f"| {_esc_pipe(st)} |")
     lines += ["",
               "**pp 不能进乘法链**：营收链的因子一律填变化率（含稼动率）——"
               "稼动率 85%→82% 是 −3pp，但变化率是 −3.5%。",
@@ -891,12 +983,18 @@ def _annual_gm_hist(cal: dict) -> list:
     上约 32% 估值误差）；营收缺失导致 `g_hist` 少一项时，反推期数又会
     偏小，取到比最近年度更早的一年，口径同样错，且两种情形都不报错。
 
-    **改为直接用 `cal["periods"]["annual"]` 数一遍。** 这是 calibrate
-    自己交付的年度期间列表（`gm_mean = np.mean(gm_hist[:len(ann)])` 用
-    的就是这个真实的 `len(ann)`），不需要也不应该从别的序列反推。具体
-    数法要与 `gm_hist` 的过滤条件完全一致（`rev.get(p) and cogs.get(p)`
-    同时成立才计入），否则数出来的年度期数会跟 `gm_hist` 里实际有多少
-    项对不上。
+    **改为直接用 `cal["periods"]["annual"]` 数一遍**，并按与 `gm_hist`
+    完全一致的过滤条件（`rev.get(p) and cogs.get(p)` 同时成立才计入）
+    筛选，不需要也不应该从别的序列反推。
+
+    Minor-2（final-fix-D）：这里不引用 `ashare_calibrate.py` 里
+    `gm_mean = np.mean(gm_hist[:len(ann)])`（约第 254 行）当作"这么
+    数是对的"的依据——查过那一行才发现它自己用的是**未经 rev/cogs
+    过滤的裸 `len(ann)`**，在缺 1 年营业成本的场景下，它自己也会把
+    中报算进年度均值，这正是本函数要修的那类偏差，不是可以援引的
+    正确参照。这里比那处更严格（过滤条件与 `gm_hist` 完全对齐），
+    但那处偏差属于 ashare-dcf 自己的问题，不在本仓库改动范围内，
+    只作只读参考记在这里，不要去改 ashare-dcf。
     """
     judg = cal.get("judg") or {}
     gm_hist = judg.get("gm_hist") or []
@@ -930,10 +1028,24 @@ def _base_margin_of(cal: dict) -> Decimal:
     """
     annual = _annual_gm_hist(cal)
     if not annual:
+        # Minor-1（final-fix-D）：`_annual_gm_hist` 在两种截然不同的
+        # 原因下都会返回空列表——`gm_hist` 本身是空的，或者 `gm_hist`
+        # 有值但 `cal["periods"]["annual"]`/`rev`/`cogs` 缺失、按同一
+        # 过滤条件数出来的年度期数恰好是 0。此前不管哪种原因都报同一
+        # 句「judg 里没有 gm_hist」——后一种情形下 `gm_hist` 明明在，
+        # 排障会被指向错误的地方。按实际原因分别给话。
+        gm_hist = (cal.get("judg") or {}).get("gm_hist") or []
+        if not gm_hist:
+            raise AssumeFailed(
+                "基期毛利率取不到（judg 里没有 gm_hist）—— 不能退回 "
+                "calibrate 模板给的默认预测值当基期，那本身是需要因子分解"
+                "合成出来的结果，拿它当基期会把第一年的增量重复计入一次。")
         raise AssumeFailed(
-            "基期毛利率取不到（judg 里没有 gm_hist）—— 不能退回 "
-            "calibrate 模板给的默认预测值当基期，那本身是需要因子分解"
-            "合成出来的结果，拿它当基期会把第一年的增量重复计入一次。")
+            "基期毛利率取不到——judg 里的 gm_hist 有值，不是空的；是 "
+            "cal 缺 periods['annual']，或其 rev/cogs 对不上（数年度期数"
+            "用的是 cal 顶层的 periods/rev/cogs，按与 gm_hist 相同的过滤"
+            "条件筛出来是 0 项）。请检查 calibrate 输出里这几项是否完整，"
+            "同样不能退回默认预测值当基期。")
     return Decimal(str(annual[-1]))
 
 
@@ -1006,10 +1118,32 @@ def to_driver_block(a: AssumptionSet, cal: dict) -> dict:
             by_year_key[(r.year, r.factor_key)] = r
     for d in a.decomps:
         keys = [f.key for f in d.factors]
+        label_of = {f.key: f.label for f in d.factors}
         vals = {}
         for case in ("bull", "base", "bear"):
-            vals[case] = [[float(getattr(by_year_key[(y, k)], case))
-                          for k in keys] for y in range(1, years + 1)]
+            rows_by_year = []
+            for y in range(1, years + 1):
+                vals_for_year = []
+                for k in keys:
+                    try:
+                        row = by_year_key[(y, k)]
+                    except KeyError as e:
+                        # Minor-4（final-fix-D）：此前这里是裸 KeyError，
+                        # 一路冒到 run_valuation 的兜底里显示成「估值
+                        # （KeyError: (2, 'asp')）」——排障看不出是哪个
+                        # 因子哪一年缺了取值。`check()` 用 len(a.labels)
+                        # 定年数，这里用 max(r.year) 定年数，两者本应
+                        # 一致，但人手改 JSON 把某个因子的年份改到超出
+                        # labels 范围时会错开：那个因子多出的年份把这里
+                        # 的 years 撑大，其它因子在那一年却没有取值。
+                        raise AssumeFailed(
+                            f"因子「{label_of.get(k, k)}」第 {y} 年缺"
+                            "取值，无法写入 1b_驱动分解 工作表——多半是"
+                            "人手改 JSON 把某个因子的年份改到了超出预测"
+                            "期范围，让不同因子的年份对不上。") from e
+                    vals_for_year.append(float(getattr(row, case)))
+                rows_by_year.append(vals_for_year)
+            vals[case] = rows_by_year
         block = {"op": d.op.value,
                  "factors": [{"key": f.key, "label": f.label, "unit": f.unit}
                              for f in d.factors],
