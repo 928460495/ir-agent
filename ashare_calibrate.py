@@ -251,7 +251,14 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
         except Exception: pass
     g_term = 0.03
     growth = [round(cagr3 + (g_term - cagr3)*(i+1)/nyears, 4) for i in range(nyears)]
-    gm_last = gm_hist[-1]; gm_mean = float(np.mean(gm_hist[:len(ann)]))
+    gm_last = gm_hist[-1]
+    # gm_hist 是按「营收 *和* 营业成本都有」过滤出来的（见上面的推导式），
+    # 而 assert_modelable 明文容忍近 5 年缺 1 年营业成本。所以它的长度不等于
+    # len(ann) —— 直接切 [:len(ann)] 会在缺年的情形下把末尾的中报也算进
+    # 「年度均值」，让一个半年度数字污染年度口径。年度项数要按与 gm_hist
+    # 完全相同的过滤条件数一遍。
+    n_ann_gm = sum(1 for p_ in ann if rev.get(p_) and cogs.get(p_))
+    gm_mean = float(np.mean(gm_hist[:n_ann_gm])) if n_ann_gm else float(np.mean(gm_hist))
     gm = [round(gm_last + (gm_mean - gm_last)*(i+1)/nyears, 4) for i in range(nyears)]
     dep_over_rev = (deprate * o["ppe"] + amortrate * rev[last]) / rev[last]
     capex = [round(capex_r + (dep_over_rev - capex_r)*(i)/max(nyears-1,1), 4) for i in range(nyears)]
