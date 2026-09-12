@@ -168,13 +168,27 @@ def test_机制回归哨兵_白名单外一律不得拔高(name):
 #
 # 上面那条哨兵能挡住把实现改回子串匹配，却挡不住另一种更隐蔽的退化——
 # 实现原封不动，有人往白名单元组里塞一个裸片段（"证券""期货""协会"
-# "央行"），白名单就悄悄退化回子串匹配的效果。web.py 里对此只有一句
+# "央行"），tier_of 用的是 startswith，这样的片段会让白名单退化回
+# **前缀**匹配，不是子串匹配（子串匹配是 `in`，会命中任意位置；这里
+# 只会让以该片段**开头**的名字被误判，比如塞进"证券"之后"新浪证券"
+# 这类"证券"在中间/结尾的名字完全不受影响）。web.py 里对此只有一句
 # 注释警告，注释拦不住任何人，所以在这里变成可执行的守卫。
 #
-# 阈值取 3 是有实测依据的，不是拍脑袋：现有全部条目最短就是 3
-# （IDC / SIA / UBS / 上交所 / 北交所 / 发改委），而所有危险裸片段都
-# 恰好是 2。真要加一个 2 字符的合法机构全称，改的应该是这条测试并
-# 说明理由，而不是让它默默通过。
+# 诚实地说，这条守卫是一个**粗略的代理检查**，不是机制保证：它管的
+# 属性是"条目够不够长"，真正危险的属性是"条目+修饰词的拼接会不会
+# 撞上一个真实媒体品牌名"，这两者并不等价。已经实测过反例：把"证券"
+# 塞进白名单后，60 条对抗名 + 105 条哨兵名一条都没被拔高，只有
+# "证券研究""证券中国""证券网"这类恰好被修饰词表拼满的名字出问题
+# ——阈值挡不住这个真正的失效模式，行为层测试（危害方向穷举 + 机制
+# 回归哨兵）对它也基本是盲的。这条测试仍然值得留着，因为它确实能挡住
+# "证券""期货"这类明显的关键词化退化；但它不是万能的，且阈值本身有
+# 已知的合法反例——`EY`（安永的法定简称）和`央行`（中国人民银行最
+# 常见的书面简称，模型很可能直接这么写）都是 2 字符、都是能唯一指向
+# 一家机构的合法全称。在"前缀+修饰词"机制下加`央行`并不会把"央行
+# 观察"错误拔高（剩余的"观察"拼不满任何修饰词组合）——阈值管的属性
+# 和真正危险的属性是两回事。将来要加`EY`/`央行`这类合法的 2 字符
+# 全称，就该同时改这条测试的阈值并在这里说明理由，而不是让它默默
+# 拦下一个合法条目。
 def test_结构哨兵_白名单不得含短片段():
     from ir_agent.sources import web as _web
 
@@ -182,8 +196,172 @@ def test_结构哨兵_白名单不得含短片段():
                + _web._OFFICIAL_CN + _web._OFFICIAL_ASCII)
     短片段 = [e for e in entries if len(_web._normalize(e)) < 3]
     assert 短片段 == [], (
-        f"白名单里混进了短片段 {短片段} —— 这会让白名单退化回子串匹配，"
-        "见 web.py 中 tier_of 的设计契约"
+        f"白名单里混进了短片段 {短片段} —— 这会让白名单退化回**前缀**匹配"
+        "（tier_of 用的是 startswith，不是子串匹配），见 web.py 中"
+        "tier_of 的设计契约"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Task 5 证伪审查：Critical 1——"中国"/"国际"不是修饰词，是机构名成分。
+#
+# 用的是审查者给出的原始反例：白名单全称接上"（中国网）"这类写法，
+# 此前会因为"中国"能被 _fully_modifiers 拼满而错误拔高成 OFFICIAL/
+# SELLSIDE。"统计局研究网"是同一类问题的另一种触发方式——不靠"中国"/
+# "国际"，靠的是裸"网"本身太通用，"研究"（合法修饰词）+ 裸"网"就能
+# 拼出一个读起来像媒体品牌的名字，所以修法里连带把裸"网"也从
+# _MODIFIERS 里删掉了（保留"官网"/"网站"/"官方网站"这些更具体的
+# 复合词）。
+_CRITICAL1_MEDIA_NAMES = [
+    "国家统计局（中国网）", "工信部（中国网）", "证监会（中国网）",
+    "商务部·中国网", "海关总署（中国网）", "中国人民银行·中国网",
+    "IDC·中国网", "SEMI（中国网）", "中信证券·中国网",
+    "国家统计局·国际网", "统计局研究网", "国家统计局中国官网",
+]
+
+
+@pytest.mark.parametrize("name", _CRITICAL1_MEDIA_NAMES)
+def test_critical1_中国国际不是修饰词而是机构名成分(name):
+    assert tier_of(name) is Tier.MEDIA
+
+
+# "中国"/"国际"删掉之后，真实存在的 SEMI/IDC/Gartner 中国分支需要作为
+# 全称补进白名单——按本模块自己的契约，判不出来的应对方式是加全称，
+# 不是留一个通用修饰词兜底。
+@pytest.mark.parametrize("name", ["SEMI中国", "IDC中国", "Gartner中国",
+                                   "SEMI 中国", "IDC 中国"])
+def test_critical1_真实中国分支补进白名单后仍判对(name):
+    assert tier_of(name) is Tier.OFFICIAL
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Task 5 证伪审查：Critical 2——_normalize 里的 s.upper() 是全 Unicode
+# 大写折叠，不是注释断言的"ASCII 转大写"。ı(U+0131)/ſ(U+017F) 会被
+# Python 的 str.upper() 折成 ASCII 的 I/S，让"ıdc""ſemi""ſemi中国"
+# 这种肉眼不像白名单条目的字符串被错误拔高成 OFFICIAL。
+@pytest.mark.parametrize("name", ["ıdc", "ſemi", "ſemi中国"])
+def test_critical2_非ascii大写折叠不得被拔高(name):
+    assert tier_of(name) is Tier.MEDIA
+
+
+# 方向对照：真正的同形字（西里尔 І、希腊 Ι、全角 ＩＤＣ/ｓｅｍｉ）不会
+# 被 Python 的大写折叠变成 ASCII，本来就应该落 MEDIA——这条测试确认
+# 修复没有反而误伤这些本就安全的输入。
+@pytest.mark.parametrize("name", ["Іdc", "Ιdc", "ＩＤＣ", "ｓｅｍｉ"])
+def test_critical2_真正同形字继续判为媒体(name):
+    assert tier_of(name) is Tier.MEDIA
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Task 5 证伪审查：Important 3——_MODIFIERS 英文侧此前一个词都没有，
+# 英文机构的正式写法（法定全称、"Research"部门名、官方域名后缀）反而
+# 落 MEDIA。补的这组 ASCII 修饰词经过保守选取，不包含 NEWS/DAILY/
+# TIMES/WEEKLY/JOURNAL/BLOG/REPORT/INSIGHTS/WATCH/CHINA 这些媒体名
+# 构件。
+_IMPORTANT3_RECALL = [
+    ("Gartner, Inc.", Tier.OFFICIAL),
+    ("Gartner Research", Tier.OFFICIAL),
+    ("IDC Research", Tier.OFFICIAL),
+    ("Counterpoint Research", Tier.OFFICIAL),
+    ("Omdia Research", Tier.OFFICIAL),
+    ("semi.org", Tier.OFFICIAL),
+    ("Goldman Sachs Research", Tier.SELLSIDE),
+    ("Morgan Stanley Research", Tier.SELLSIDE),
+    ("UBS Research", Tier.SELLSIDE),
+]
+
+
+@pytest.mark.parametrize("name, expected", _IMPORTANT3_RECALL)
+def test_important3_英文修饰词补齐后召回(name, expected):
+    assert tier_of(name) is expected
+
+
+# 方向对照：明确不该加的媒体名构件（NEWS/DAILY/...）依然不是修饰词，
+# 这些英文机构名 + 媒体构件的组合应当继续落 MEDIA——不是因为白名单
+# 挡不住，而是因为它们本来就该被挡住。
+@pytest.mark.parametrize("name", [
+    "IDC China",  # CHINA 不是修饰词，理由与"中国"被删除相同
+    "IC Insights Report",  # REPORT 是媒体名构件，明确不加
+])
+def test_important3_明确不加的修饰词继续落媒体(name):
+    assert tier_of(name) is Tier.MEDIA
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Task 5 证伪审查：Important 5——中信建投/申万宏源/国泰海通/海通国际
+# 是市场惯用简称，但公告和研报封面落款用的是全称，此前全部落 MEDIA。
+_IMPORTANT5_SELLSIDE_FULLNAMES = [
+    "中信建投证券", "中信建投证券股份有限公司", "申万宏源证券",
+    "国泰海通证券", "国泰海通证券研究所", "海通国际证券",
+]
+
+
+@pytest.mark.parametrize("name", _IMPORTANT5_SELLSIDE_FULLNAMES)
+def test_important5_券商全称召回(name):
+    assert tier_of(name) is Tier.SELLSIDE
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Task 5 证伪审查：Important 4——_fully_modifiers 从递归回溯改成迭代
+# 后缀可达性 DP。递归版本每多吃一层修饰词就多两个栈帧，约 500 个
+# 修饰词 token 拼接就会撞上 RecursionError；publisher 来自模型输出，
+# 不是可信输入，模型退化重复生成同一个字符是已知的失败模式。这里用
+# "IDC" + "网" 除以数百次构造超长 publisher，走完整条 parse_findings
+# 路径（而不是只测 _fully_modifiers 本身），断言不抛异常——危害本来
+# 就不是"这一条发现被丢"，而是整批 parse_findings 被 RecursionError
+# 冲掉，连同批次里正常的发现一起丢失。
+def test_important4_超长publisher不引发递归错误():
+    huge_publisher = "IDC" + "网" * 600
+    text = (f"发现: utilization | 稼动率约78% | https://example.com/x | "
+            f"{huge_publisher} | 2026-07-01\n")
+    got = parse_findings(text)  # 不应抛 RecursionError
+    assert len(got) == 1
+    # "网"已从 _MODIFIERS 删除（见 Critical 1 的连带修法），600 个裸
+    # "网"拼不满，落 MEDIA 是正确结果，不只是"没崩"。
+    assert got[0].tier is Tier.MEDIA
+
+
+def test_important4_超长remainder直接调用不引发递归错误():
+    from ir_agent.sources import web as _web
+
+    # 直接测 _fully_modifiers 本身，覆盖 parse_findings 之外可能的
+    # 其它调用路径；用一个能被拼满的长串（全是"研究"）确认 DP 实现
+    # 在深度很大时依然给出正确答案，不只是不崩溃。
+    assert _web._fully_modifiers("研究" * 400) is True
+    assert _web._fully_modifiers("网" * 600) is False
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Task 5 证伪审查：补一条真正的不变式测试——白名单条目两两互不为
+# **跨档**前缀（SELLSIDE 与 OFFICIAL 之间）。tier_of 的 candidates
+# 排序与"优先试最长前缀"逻辑依赖这条不变式：一旦有一条 SELLSIDE 全称
+# 是某条 OFFICIAL 全称的前缀（或反过来），同一个名字会同时命中两档，
+# 结果取决于哪个候选先被排到、哪个候选的剩余部分先被修饰词拼满，
+# 而不是取决于这家机构真正属于哪一档。
+#
+# 范围特意限定在**跨档**：同一档内的前缀对（比如 SELLSIDE 里"中信
+# 建投"是"中信建投证券"的前缀，OFFICIAL 里"SEMI"是"SEMI中国"的
+# 前缀）是安全的——它们是同一家机构的简称与全称/分支名，谁先命中都
+# 给出相同的 Tier，不会导致误判方向。Important 5 与 Critical 1 的
+# 修法都刻意引入了这类同档前缀对，所以不能把"两两互不为前缀"当成
+# 对全部条目的无条件要求，只对跨档情形要求。
+def test_不变式_白名单条目跨档互不为前缀():
+    from ir_agent.sources import web as _web
+
+    sell = {_web._normalize(x) for x in
+            _web._SELLSIDE_CN + _web._SELLSIDE_ASCII}
+    off = {_web._normalize(x) for x in
+           _web._OFFICIAL_CN + _web._OFFICIAL_ASCII}
+
+    冲突 = []
+    for a in sell:
+        for b in off:
+            if a and b and a != b and (a.startswith(b) or b.startswith(a)):
+                冲突.append((a, b))
+    assert 冲突 == [], (
+        f"SELLSIDE 与 OFFICIAL 之间存在互为前缀的条目 {冲突} —— tier_of "
+        "会依据排序细节而非机构真实归属来判定分级，见 tier_of 里 "
+        "candidates.sort 附近的说明"
     )
 
 
