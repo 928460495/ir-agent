@@ -249,3 +249,101 @@ def test_理由也跨阶段存活():
         f"假设: 营收增速 | 第1年 | 1% | 2% | 3% | 份额在丢 「{Q}」", 1)
     back, _ = assume.from_json(assume.to_json(a))
     assert "份额在丢" in back.rows[0].note
+
+
+# ── Task 7：按驱动因子填写 ───────────────────────────────────
+
+from ir_agent.drivers import Decomposition, Factor, Op
+
+
+def _decomps():
+    rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="capacity", label="产能", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])
+    gm = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="util_leverage", label="稼动率摊薄", unit="pp"),
+        Factor(key="input_cost", label="上游成本", unit="pp")])
+    return [rev, gm]
+
+
+def _factor_lines(years=1):
+    out = []
+    for y in range(1, years + 1):
+        out += [
+            f"假设: 产能 | 第{y}年 | 5% | 10% | 14% | 新厂投产 「{Q}」",
+            f"假设: 单价 | 第{y}年 | -6% | -2% | 1% | 竞争压价 「{Q}」",
+            f"假设: 稼动率摊薄 | 第{y}年 | -2.5 | -1.0 | 0.5 | 扩产摊薄 「{Q}」",
+            f"假设: 上游成本 | 第{y}年 | -1.5 | -0.5 | 0.3 | 基板涨价 「{Q}」"]
+    return "\n".join(out)
+
+
+def test_按因子解析():
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    assert {r.factor_key for r in a.rows} == {
+        "capacity", "asp", "util_leverage", "input_cost"}
+
+
+def test_未知因子被驳回并列出可选():
+    bad = f"假设: 品牌力 | 第1年 | 1% | 2% | 3% | 「{Q}」"
+    with pytest.raises(AssumeFailed) as e:
+        assume.parse(bad, 1, decomps=_decomps())
+    assert "产能" in str(e.value) and "单价" in str(e.value)
+
+
+def test_缺某个因子被驳回():
+    """漏掉的因子会沿用模板默认值，而那不是你的判断。"""
+    partial = f"假设: 产能 | 第1年 | 5% | 10% | 14% | 「{Q}」"
+    a = assume.parse(partial, 1, decomps=_decomps())
+    with pytest.raises(AssumeFailed, match="单价|缺"):
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                     decomps=_decomps())
+
+
+def test_合成营收增速与毛利率():
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    g, m = assume.synthesize(a, Case.BASE, base_margin=D("0.1415"))
+    # 1.10 × 0.98 − 1 = 0.078
+    assert abs(g[0] - D("0.078")) < D("1e-9")
+    # 14.15% − 1.0pp − 0.5pp = 12.65%
+    assert abs(m[0] - D("0.1265")) < D("1e-9")
+
+
+def test_三档合成后仍然单调():
+    """因子各自拉开不等于合成后拉开 —— 必须在合成结果上再验一次。"""
+    a = assume.parse(_factor_lines(1), 1, decomps=_decomps())
+    a.decomps = _decomps()
+    lo, _ = assume.synthesize(a, Case.BEAR, base_margin=D("0.1415"))
+    mid, _ = assume.synthesize(a, Case.BASE, base_margin=D("0.1415"))
+    hi, _ = assume.synthesize(a, Case.BULL, base_margin=D("0.1415"))
+    assert lo[0] < mid[0] < hi[0]
+
+
+def test_合成后不单调则驳回():
+    """构造一组因子: 各自三档拉开，但相乘后悲观反而高于中性。"""
+    weird = "\n".join([
+        f"假设: 产能 | 第1年 | 50% | 10% | 11% | 「{Q}」",   # 悲观档产能暴涨
+        f"假设: 单价 | 第1年 | -1% | -2% | 1% | 「{Q}」"])
+    d = [Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="capacity", label="产能", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])]
+    a = assume.parse(weird, 1, decomps=d)
+    a.decomps = d
+    with pytest.raises(AssumeFailed, match="合成后"):
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                     decomps=d, base_margin=D("0.14"))
+
+
+def test_提示词列出因子与单位():
+    txt = assume.build_prompt({"g_stats": (), "gm_stats": ()}, ["2026E"],
+                              "摘要", brief="简报", decomps=_decomps())
+    assert "产能" in txt and "变化率" in txt
+    assert "稼动率摊薄" in txt and "pp" in txt
+    assert "pp 不能进乘法链" in txt
+
+
+def test_无分解式时退回两标量模式():
+    """降级路径必须还能走 —— 预研失败不该让整轮研究停摆。"""
+    a = assume.parse(_full(1), 1)
+    assert {r.driver for r in a.rows} == {"growth", "gm"}
+    _ok(a, 1)

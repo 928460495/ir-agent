@@ -30,6 +30,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from ir_agent.basis import Basis, InvalidBasis, validate
+from ir_agent.drivers import Decomposition, compose
 from ir_agent.ledger import FactLedger
 from ir_agent.lineparse import keyed, pick
 
@@ -80,6 +81,9 @@ class Row:
     # 此前只抽占位符、把散文丢掉，于是待核实清单上只剩一串数字和一串
     # key，人要判断「这个增速为什么是 3%」却无从判起。
     note: str = ""
+    # 分解模式下这一行对应哪个因子。空串表示旧的两标量模式 ——
+    # 预研失败时的降级路径，必须保留。
+    factor_key: str = ""
 
 
 def to_json(a: "AssumptionSet", **extra) -> dict:
@@ -127,6 +131,12 @@ class AssumptionSet:
     labels: list[str]                       # 预测期年标签
     rows: list[Row] = field(default_factory=list)
     rationale: str = ""
+    # 以下三项只在按因子分解模式下有内容 —— 两标量降级模式留空即可。
+    decomps: list = field(default_factory=list)          # 本轮用的分解式
+    factor_data: dict = field(default_factory=dict)      # 因子采集结果（Task 6）
+    # 历史回算残差，报告用，**不是通过/不通过的判据** ——
+    # Π(1+r) 永远不会正好等于实际增速，拿它做硬校验只会逼出假精度。
+    residuals: dict = field(default_factory=dict)
 
     def path(self, driver: str, case: Case) -> list[Decimal]:
         got = sorted((r for r in self.rows if r.driver == driver),
@@ -156,7 +166,18 @@ class AssumptionSet:
         return "\n".join(lines)
 
 
-def parse(text: str, years: int) -> AssumptionSet:
+def parse(text: str, years: int,
+          decomps: list[Decomposition] | None = None) -> AssumptionSet:
+    """decomps 给定时按因子解析；否则沿用两标量模式（降级路径）。
+
+    降级路径不删 —— 预研（拆分解式、采数据）失败不该让整轮研究停摆。
+    """
+    if not decomps:
+        return _parse_scalar(text, years)
+    return _parse_factors(text, years, decomps)
+
+
+def _parse_scalar(text: str, years: int) -> AssumptionSet:
     out = AssumptionSet(code="", labels=[])
     for m in _LINE.finditer(text):
         parts = [p.strip() for p in m.group(1).split("|")]
@@ -180,6 +201,65 @@ def parse(text: str, years: int) -> AssumptionSet:
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
             bases=_basis(parts[5], cn), note=_note(parts[5])))
     return out
+
+
+def _parse_factors(text: str, years: int,
+                   decomps: list[Decomposition]) -> AssumptionSet:
+    """按因子解析。每一行对应分解式里的一个因子，而不是营收增速/毛利率
+    本身 —— 合成交给 `synthesize`，模型只负责填因子。"""
+    by_label = {f.label: f for d in decomps for f in d.factors}
+    target_of = {f.key: d.target for d in decomps for f in d.factors}
+    out = AssumptionSet(code="", labels=[], decomps=list(decomps))
+    for m in _LINE.finditer(text):
+        parts = [p.strip() for p in m.group(1).split("|")]
+        if len(parts) < 6:
+            raise AssumeFailed(
+                f"假设一行字段不足（需 6 段：因子|年|悲观|中性|乐观|依据），"
+                f"得到 {len(parts)}：{m.group(1)}")
+        label = pick(parts[0], list(by_label))
+        if label is None:
+            raise AssumeFailed(
+                f"未知的因子 {parts[0]!r}，本次分解式里只有："
+                + "、".join(by_label))
+        f = by_label[label]
+        try:
+            year = int(re.search(r"\d+", parts[1]).group(0))
+        except (AttributeError, ValueError) as e:
+            raise AssumeFailed(f"年份不可解析：{parts[1]!r}") from e
+        if not 1 <= year <= years:
+            raise AssumeFailed(f"年份 {year} 超出预测期 1..{years}")
+        out.rows.append(Row(
+            driver=target_of[f.key], year=year,
+            bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
+            bases=_basis(parts[5], label), note=_note(parts[5]),
+            factor_key=f.key))
+    return out
+
+
+def synthesize(a: AssumptionSet, case: Case,
+              base_margin: Decimal) -> tuple[list[Decimal], list[Decimal]]:
+    """把因子合成回逐年营收增速与毛利率。**代码算，不是模型填。**
+
+    若让模型自己算出结果再填进去，分解就退化成一层装饰 —— 它可以先想好
+    结果，再倒推几个因子凑出来。所以这里真的从因子值算，模型只填因子。
+
+    注意: 本函数本身**不做单调性校验** —— 校验属于 `check`（它要跨三档
+    分别调用本函数再比较），这里只管合成这一步。
+    """
+    attr = {Case.BULL: "bull", Case.BASE: "base", Case.BEAR: "bear"}[case]
+    years = max((r.year for r in a.rows), default=0)
+    growth, margin = [], []
+    for y in range(1, years + 1):
+        vals = {r.factor_key: getattr(r, attr)
+                for r in a.rows if r.year == y and r.factor_key}
+        for d in a.decomps:
+            picked = {k: v for k, v in vals.items()
+                      if k in {f.key for f in d.factors}}
+            if d.target == "revenue":
+                growth.append(compose(d, picked))
+            else:
+                margin.append(compose(d, picked, base=base_margin))
+    return growth, margin
 
 
 def _note(raw: str) -> str:
@@ -207,7 +287,19 @@ def _basis(raw: str, what: str) -> list[Basis]:
 
 
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
-          as_of: date) -> None:
+          as_of: date, decomps: list[Decomposition] | None = None,
+          base_margin: Decimal | None = None) -> None:
+    if decomps:
+        _check_factors(a, years, decomps, base_margin)
+    else:
+        _check_scalar(a, years)
+    flat = [b for r in a.rows for b in r.bases]
+    problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
+    if problems:
+        raise AssumeFailed("依据不可核验：" + "；".join(problems))
+
+
+def _check_scalar(a: AssumptionSet, years: int) -> None:
     for cn, key in DRIVERS.items():
         got = {r.year for r in a.rows if r.driver == key}
         missing = sorted(set(range(1, years + 1)) - got)
@@ -216,7 +308,6 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
                 f"{cn} 缺第 {missing} 年 —— 预测期每一年都要给，"
                 "漏掉的年份会沿用模板默认值，而那不是你的判断")
 
-    flat = []
     for r in a.rows:
         # **三档必须拉开。** 模板默认 Bull=Base=Bear，那等于没有情景；
         # 拉不开的情景分析只是把同一个数抄三遍。
@@ -225,18 +316,55 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
                 f"第 {r.year} 年的{'营收增速' if r.driver == 'growth' else '毛利率'}"
                 f"三档未拉开（悲观 {r.bear} / 中性 {r.base} / 乐观 {r.bull}）"
                 " —— 必须严格递增，否则情景分析没有意义")
-        flat += r.bases
 
-    problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
-    if problems:
-        raise AssumeFailed("依据不可核验：" + "；".join(problems))
+
+def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
+                   base_margin: Decimal | None) -> None:
+    """分解模式下的校验。
+
+    **不在这里逐因子比较 bear<base<bull。** 单个因子档位的方向性因子而异
+    （例如同一因子在悲观档被写得很极端，未必意味着它对目标的方向也是
+    悲观的），代码判断不了「这个因子往哪个方向走算悲观」。真正要卡的是
+    **合成结果**——三档营收增速 / 毛利率必须严格拉开，这是唯一能客观
+    判定方向对不对的地方。因子层面各自拉开不等于合成后拉开：产能悲观档
+    偏高、单价悲观档偏低，相乘后完全可能悲观反而高于中性，而那正是这道
+    校验要抓住的错数。
+    """
+    for d in decomps:
+        for f in d.factors:
+            got = {r.year for r in a.rows if r.factor_key == f.key}
+            missing = sorted(set(range(1, years + 1)) - got)
+            if missing:
+                raise AssumeFailed(
+                    f"因子「{f.label}」缺第 {missing} 年 —— 预测期每一年都要给，"
+                    "漏掉的年份会沿用模板默认值，而那不是你的判断")
+
+    # **合成后再验一次单调。** 这是本模块真正的闸门。
+    if base_margin is None:
+        base_margin = Decimal("0.10")
+    a.decomps = list(decomps)
+    lo, lom = synthesize(a, Case.BEAR, base_margin)
+    mid, midm = synthesize(a, Case.BASE, base_margin)
+    hi, him = synthesize(a, Case.BULL, base_margin)
+    for i in range(len(mid)):
+        if not (lo[i] < mid[i] < hi[i]):
+            raise AssumeFailed(
+                f"第 {i + 1} 年的营收增速**合成后**不再单调"
+                f"（悲观 {lo[i]:.2%} / 中性 {mid[i]:.2%} / 乐观 {hi[i]:.2%}）"
+                " —— 因子各自拉开不等于合成结果拉开，请调整因子取值，"
+                "不要悄悄修正合成结果")
+    for i in range(len(midm)):
+        if not (lom[i] < midm[i] < him[i]):
+            raise AssumeFailed(
+                f"第 {i + 1} 年的毛利率**合成后**不再单调"
+                f"（悲观 {lom[i]:.2%} / 中性 {midm[i]:.2%} / 乐观 {him[i]:.2%}）"
+                " —— 因子各自拉开不等于合成结果拉开，请调整因子取值，"
+                "不要悄悄修正合成结果")
 
 
 PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 
-**你只填这两项**：逐年营收增速、逐年毛利率。
-费用率、周转天数、折旧率、税率、β、债务成本等由历史财务数据校准而来，
-已经算好，不需要也不应该由你改动。
+{head}
 
 **预测期**：{years} 年（{labels}）
 
@@ -248,9 +376,6 @@ PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 
 **各层分析口径摘要**（供你判断，**不是可引用的正文**）
 {context}
-
-对每一项、每一年给出一行：
-`假设: <营收增速|毛利率> | 第N年 | <悲观> | <中性> | <乐观> | 「正文原话」或 [[占位符]]`
 
 **硬性要求**
 - 三档必须**严格拉开**（悲观 < 中性 < 乐观）。模板默认三档同值，
@@ -270,8 +395,48 @@ PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 """
 
 
+_SCALAR_HEAD = """**你只填这两项**：逐年营收增速、逐年毛利率。
+费用率、周转天数、折旧率、税率、β、债务成本等由历史财务数据校准而来，
+已经算好，不需要也不应该由你改动。
+
+对每一项、每一年给出一行：
+`假设: <营收增速|毛利率> | 第N年 | <悲观> | <中性> | <乐观> | 「正文原话」或 [[占位符]]`"""
+
+
+def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
+    """分解模式下替换 `_SCALAR_HEAD` 的提示词头部。
+
+    **逐因子填、代码合成**——不是把「你只填这两项」换成「你只填一堆
+    因子」这么简单，还要把单位规则钉死在提示词里，否则模型很容易把 pp
+    填进乘法链（稼动率 85%→82% 写成 −3pp 混进变化率链）。
+    """
+    lines = ["**本次按驱动因子分解填写。** 分解式："]
+    for d in decomps:
+        lines.append(f"  {d.describe()}")
+    lines += ["", "逐个因子填，代码会把它们合成回营收增速与毛利率——",
+              "**不要自己算出增速或毛利率再倒推因子**，那样分解就没有意义。",
+              "", "| 因子 | 单位 | 数据 |", "| --- | --- | --- |"]
+    for d in decomps:
+        for f in d.factors:
+            fd = factor_data.get(f.key)
+            st = fd.status if fd else "未采集"
+            lines.append(f"| {f.label} | {f.unit} | {st} |")
+    lines += ["",
+              "**pp 不能进乘法链**：营收链的因子一律填变化率（含稼动率）——"
+              "稼动率 85%→82% 是 −3pp，但变化率是 −3.5%。",
+              "毛利率链的因子一律填 pp。",
+              "标「无数据」或「年报披露/研报测算」（文字依据，未必有具体数值，"
+              "待人工确认）的因子取值是**估计**，理由里要说明依据什么估的。",
+              "",
+              "对每一个因子、每一年给出一行：",
+              "`假设: <因子名> | 第N年 | <悲观> | <中性> | <乐观> | "
+              "「正文原话」或 [[占位符]]`"]
+    return "\n".join(lines)
+
+
 def build_prompt(judg: dict, labels: list[str], context: str,
-                 brief: str = "") -> str:
+                 brief: str = "", decomps: list[Decomposition] | None = None,
+                 factor_data: dict | None = None) -> str:
     g, gm = judg.get("g_stats") or (), judg.get("gm_stats") or ()
     hist = []
     if g:
@@ -283,21 +448,26 @@ def build_prompt(judg: dict, labels: list[str], context: str,
                     f"{(judg.get('gm_hist') or [0])[-1] * 100:.1f}%、"
                     f"历史均值 {gm[0] * 100:.1f}%、标准差 {gm[1] * 100:.1f}pp、"
                     f"区间 {gm[2] * 100:.1f}%~{gm[3] * 100:.1f}%")
-    return PROMPT.format(years=len(labels), labels="、".join(labels),
+    head = _factor_head(decomps, factor_data or {}) if decomps else _SCALAR_HEAD
+    return PROMPT.format(head=head, years=len(labels), labels="、".join(labels),
                          history="\n".join(hist) or "  （无）",
                          context=context, brief=brief or "（无）")
 
 
 def decide(client, judg: dict, labels: list[str], context: str, *,
            ledger: FactLedger, body: str, as_of: date, code: str = "",
-           max_attempts: int = 3) -> AssumptionSet:
-    prompt = build_prompt(judg, labels, context, brief=body)
-    last = ""
+           max_attempts: int = 3, decomps: list[Decomposition] | None = None,
+           factor_data: dict | None = None,
+           base_margin: Decimal | None = None) -> AssumptionSet:
+    prompt = build_prompt(judg, labels, context, brief=body, decomps=decomps,
+                          factor_data=factor_data)
+    last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
         raw = client(prompt)
         try:
-            a = parse(raw, len(labels))
-            check(a, len(labels), ledger=ledger, body=body, as_of=as_of)
+            a = parse(raw, len(labels), decomps=decomps)
+            check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
+                  decomps=decomps, base_margin=base_margin)
         except AssumeFailed as e:
             last = str(e)
             prompt = (f"{prompt}\n\n---\n"
@@ -305,8 +475,12 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
                       "请修正后重新输出全部行。\n")
             continue
         a.code, a.labels = code, labels
+        a.decomps = list(decomps or [])
+        a.factor_data = dict(factor_data or {})
         return a
-    raise AssumeFailed(f"连续 {max_attempts} 次给不出可核验的假设：{last}")
+    raise AssumeFailed(
+        f"连续 {max_attempts} 次给不出可核验的假设：{last}"
+        f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}")
 
 
 def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
