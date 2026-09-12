@@ -492,3 +492,45 @@ def test_因子模式降级时判断项仍写出且降级原因入skipped(tmp_pa
     assert degraded_msg in (tmp_path / full.ASSUMPTIONS_MD).read_text(
         encoding="utf-8"), "assumptions.md 里也要如实写明降级原因"
     assert "DCF 判断项（待核实）" in arts
+
+
+def test_判断项环节的接口错误降级而不抛出(tmp_path, monkeypatch):
+    """模型接口本身失败（额度用尽/超时/CLI 报错）必须降级，不能让整轮炸掉。
+
+    实测教训（600584 第三次真实实跑）：辩论已完成并回写了 5 项成立的
+    挑战，brief.md 与 debate.md 都已落盘、钱也花了，紧接着填判断项的
+    调用撞上「You've hit your session limit」，而这一处当时只捕
+    `AssumeFailed`，于是 ClaudeCliError 以未捕获异常的形式把整轮分析
+    连同已有产物一起带走——state/dashboard 全没写出来。
+
+    `run_analysis` 里其他每个联网环节（产业链、因子采集、撰写/辩论）
+    都把这类错误记进 skipped 后继续，唯独这一处漏了。**能力边界不是
+    故障，整轮研究不该因此停摆。**
+    """
+    from datetime import date
+
+    from ir_agent import assume, dcf, full
+    from ir_agent.clients.claude_cli import ClaudeCliError
+    from ir_agent.ledger import FactLedger
+
+    monkeypatch.setattr(
+        dcf, "calibrate_only",
+        lambda code, as_of, ledger: {
+            "judg": {"g_stats": (), "gm_stats": ()},
+            "periods": {"proj": ["2026E"]}})
+
+    def _boom(*a, **kw):
+        raise ClaudeCliError("claude 返回错误：You've hit your session limit")
+    monkeypatch.setattr(assume, "decide", _boom)
+
+    class _R:
+        ledger = FactLedger()
+        period = "2025FY"
+
+    err = full._propose_assumptions(
+        "600584", _R(), "body", {}, date(2026, 9, 7), tmp_path,
+        lambda p: "", {})
+
+    assert err, "接口错误必须作为非致命说明返回，而不是抛出"
+    assert "ClaudeCliError" in err, "说明里要点明是接口错误，便于排查"
+    assert "session limit" in err, "原始错误信息要带上，不能只说失败"

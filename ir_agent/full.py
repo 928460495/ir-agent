@@ -856,6 +856,17 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                           base_margin=base_margin)
     except assume.AssumeFailed as e:
         return f"DCF 判断项（{str(e)[:200]}）"
+    except ClaudeCliError as e:
+        # 模型接口本身失败（额度用尽、超时、CLI 报错）与「填不出合格的
+        # 判断项」是两件事，但处置必须一样: **记进 skipped、让整轮继续**。
+        # 此前这里只捕 AssumeFailed，于是一个额度错误会以未捕获异常的形式
+        # 把已经写好、已经付过钱的 brief.md 与 debate.md 连同整轮分析一起
+        # 带走 —— 实测 600584 第三次实跑正是这样炸的，辩论已完成并回写了
+        # 5 项挑战，却因为下一个调用撞上额度上限而一个产物都没留下。
+        # run_analysis 里其他每一个联网环节都做了这件事（见产业链、因子
+        # 采集、撰写/辩论），唯独这一处漏了。**能力边界不是故障，
+        # 整轮研究不该因此停摆。**
+        return f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
 
     (out / ASSUMPTIONS_MD).write_text(
         a.describe() + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
