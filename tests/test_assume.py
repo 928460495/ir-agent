@@ -1924,3 +1924,60 @@ def test_两标量模式的引文驳回不附加因子出路():
         A.check(a, 1, ledger=FactLedger(), body="别的内容",
                 as_of=date(2026, 9, 12))
     assert "无数据（估计）" not in str(ei.value)
+
+
+def _estimate_note():
+    return ("无数据（估计）。该因子没有官方或卖方口径数据，取值为估计，"
+            "估计方向参照资本开支规模")
+
+
+def test_理由自称估计却挂了占位符时仍要算进估计汇总():
+    """**600584 实跑当场抓到的绕过。** 40 行判断项里有 4 个因子，理由
+    白纸黑字写着「无数据（估计）」，依据列却挂了一个账本占位符：
+
+        产能规模           → [[company.revenue_yoy_vs_industry@2025FY]]
+        稼动率环比变化     → [[depreciation_amortization@2025FY]]
+        产品结构(先进封装) → [[gross_margin.percentile@2025FY]]
+        折旧摊销占收入比重 → [[depreciation_amortization@2025FY]]
+
+    这些事实**真实存在、方向上也沾边**（折旧摊销之于固定成本分摊、
+    营收增速之于扩产节奏），所以四道闸门全部放行。问题在后果：
+    `_describe_estimated` 当时的判据是 `not r.bases`，于是只要挂上任何
+    一个占位符，这一行就不再算「估计」——底部那份「没有证据支撑」的
+    名单里，五个该在的因子只剩下一个（人民币兑美元均价）。
+
+    **等于用一个合法但不直接支撑取值的占位符，把「这个数是拍的」从
+    清单上抹掉了。** 而清单是人工批准唯一能看的东西，「遗漏必须可见」
+    这条约束就是在这里被绕过的。
+
+    判据改为**按理由自述归类**：理由自己说了无数据、是估计，那它就是
+    估计，挂不挂占位符都一样。占位符本身仍然照常显示——它是真的、也
+    有参考价值，只是不能冒充「这个取值的证据」。
+    """
+    d = _one_factor_decomp()
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[d])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"),
+                         base=D("0.08"), bull=D("0.12"),
+                         factor_key="utilization", note=_estimate_note(),
+                         bases=[assume.Basis.fact("[[depreciation_amortization@2025FY]]")])]
+    txt = a.describe()
+
+    assert "没有证据支撑，是估计" in txt, "理由自称估计的因子必须进估计汇总"
+    assert "稼动率" in txt.split("没有证据支撑")[-1]
+    # 占位符不能被藏起来——它是真事实、有参考价值，只是不能冒充证据
+    assert "depreciation_amortization" in txt
+    assert "⚠ 估计" in txt
+
+
+def test_真有依据的行不被误判成估计():
+    """回归锁：理由正常、依据是真占位符的行，不该被这条新判据误伤。"""
+    d = _one_factor_decomp()
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[d])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"),
+                         base=D("0.08"), bull=D("0.12"),
+                         factor_key="utilization",
+                         note="理由：产能爬坡带动稼动率回升",
+                         bases=[assume.Basis.fact("[[depreciation_amortization@2025FY]]")])]
+    txt = a.describe()
+    assert "没有证据支撑，是估计" not in txt
+    assert "⚠ 估计" not in txt

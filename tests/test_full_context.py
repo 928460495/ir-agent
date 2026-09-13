@@ -735,7 +735,7 @@ def test_预研撞上额度上限时降级而不是把整轮炸掉(tmp_path, mon
 ASSUMPTIONS_ART_KEY = "DCF 判断项（待核实）"
 
 
-def test_判断项没写出来时不能说待人工核实():
+def test_判断项没写出来时不能说待人工核实(tmp_path):
     """**今天 18:08 的实跑现场。** 额度用尽 → 简报没写成 → 判断项根本
     没产出，`out/600584/` 里只有 dashboard.html / model.xlsx / state.json
     三个文件。终端却照样打出
@@ -778,7 +778,11 @@ def test_判断项没写出来时不能说待人工核实():
                         skipped=["研究简报"], upheld=0,
                         cost_usd=Decimal("0"), route_reason=reason)
     assert "不适用 DCF" not in o.summary()
-    acts = next_actions(stage, "600584", out_dir="out/600584", year=2025)
+    # out_dir 必须用 tmp_path：指真实的 out/600584 会让这条断言依赖仓库
+    # 里当时有没有跑出 assumptions.md——实跑产出它之后，这里就会拿到
+    # 「接着跑第二阶段」那条指引而不是重跑第一阶段。测试不该被工作目录
+    # 的残留状态左右。
+    acts = next_actions(stage, "600584", out_dir=str(tmp_path), year=2025)
     assert acts and "--analyse" in acts[0], "要给一条能直接粘贴重跑的命令"
 
     stage2, reason2 = full._review_stage(

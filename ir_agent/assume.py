@@ -324,13 +324,31 @@ class AssumptionSet:
                     # 设却连标注都看不见"。引文本身（quote）仍然原样显示
                     # ——它不是编造，只是没能逐字对应，人要看到具体写的
                     # 是什么才能判断这段转述靠不靠谱。
-                    if r.basis_unverified:
-                        ref = ("⚠ 依据未能逐字核验：" +
-                               "；".join(b.describe() for b in r.bases))
-                    elif r.bases:
-                        ref = "；".join(b.describe() for b in r.bases)
-                    else:
-                        ref = "⚠ 估计（无数据支撑）"
+                    #
+                    # **理由自称「无数据（估计）」的行，挂了占位符也还是
+                    # 估计。** 600584 实跑当场抓到：4 个因子的理由白纸黑字
+                    # 写着无数据、取值为估计，依据列却挂着一个真实存在、
+                    # 方向上沾边的账本占位符（折旧摊销之于固定成本分摊、
+                    # 营收增速之于扩产节奏），于是判据 `not r.bases` 认为
+                    # 它们"有依据"，底部那份「没有证据支撑」的名单里五个
+                    # 该在的因子只剩一个。等于用一个合法但不直接支撑取值的
+                    # 占位符，把"这个数是拍的"从清单上抹掉——而清单是人工
+                    # 批准唯一能看的东西。占位符本身照常显示（它是真的、
+                    # 有参考价值），只是改称「方向性参照」，不再冒充
+                    # 「这个取值的证据」。
+                    est = _looks_like_estimate(r.note)
+                    parts: list[str] = []
+                    if est or not r.bases:
+                        parts.append("⚠ 估计（无数据支撑）")
+                    if r.bases:
+                        body = "；".join(b.describe() for b in r.bases)
+                        if r.basis_unverified:
+                            parts.append("⚠ 依据未能逐字核验：" + body)
+                        elif est:
+                            parts.append("方向性参照：" + body)
+                        else:
+                            parts.append(body)
+                    ref = "；".join(parts)
                     lines.append(
                         f"| {lab} | {_fmt_factor(r.bear, f.unit)} "
                         f"| {_fmt_factor(r.base, f.unit)} "
@@ -365,8 +383,7 @@ class AssumptionSet:
         这正是当初做因子分解要保留的东西：与其在两标量模式下笼统地填
         一个营收增速，不如把"到底哪些因子有据、哪些是拍脑袋"摊开来看。
         """
-        labels = sorted({_row_label(r, self.decomps)
-                         for r in self.rows if r.factor_key and not r.bases})
+        labels = estimated_labels(self)
         if not labels:
             return []
         return ["⚠ **以下因子的取值没有证据支撑，是估计**"
@@ -1479,6 +1496,24 @@ def _base_margin_of(cal: dict) -> Decimal:
             "条件筛出来是 0 项）。请检查 calibrate 输出里这几项是否完整，"
             "同样不能退回默认预测值当基期。")
     return Decimal(str(annual[-1]))
+
+
+def estimated_labels(a: AssumptionSet) -> list[str]:
+    """哪些因子的取值没有证据支撑、是估计。空列表 = 都有依据。
+
+    判据是**按理由自述归类**，不是"有没有挂依据"：理由自己写了无数据、
+    取值为估计，那它就是估计，挂不挂账本占位符都一样。
+
+    原判据 `not r.bases` 被 600584 实跑当场绕过——4 个因子的理由白纸
+    黑字写着「无数据（估计）」，依据列却挂着一个真实存在、方向上沾边的
+    占位符，于是它们从「没有证据支撑」的名单里消失了，五个只剩一个。
+    占位符指向的事实是真的、四道闸门也都该放行，但它不支撑这个取值，
+    不能拿它把"这个数是拍的"从清单上抹掉——清单是人工批准唯一能看的
+    东西，**遗漏必须可见**这条约束正是在这里被绕过的。
+    """
+    return sorted({_row_label(r, a.decomps) for r in a.rows
+                   if r.factor_key and (not r.bases
+                                        or _looks_like_estimate(r.note))})
 
 
 def unverified_labels(a: AssumptionSet) -> list[str]:
