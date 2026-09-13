@@ -250,6 +250,57 @@ def calibrate_only(code: str, *, as_of: date, ledger=None, years: int = 5,
     return _calibrate(D, C, code, as_of, ledger, years)[0]
 
 
+_SCEN_CN = {"bull": "乐观", "base": "中性", "bear": "悲观"}
+
+
+def _close(a: list[float], b: list[float], tol: float) -> bool:
+    return len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
+    """建完表再回读一遍：工作簿里真正参与估值的数，是不是人批准的那几个。
+
+    **闸门查的都是「用得对不对」，没有一道查「结果对不对」。** 人工批准
+    判断项是整个流程的核心关卡，而批准之后一直没有任何一道检查回头确认
+    这件事。踩过的两次（C2 / C-a）都是这条链断在中间：同一因子同一年
+    两行，清单显示一行、工作簿用另一行；重复行让 path() 按年份排序后
+    整体错位一格，人批准第 2 年的 7%、工作簿拿到第 1 年那条重复行的
+    30%。两次都是人自己读工作簿才发现的，修法也都是"不许有重复行"
+    ——仍然在查输入，没有查输出。
+
+    `ashare_verify.read_inputs()` 本来就把工作簿里逐年的营收增速/毛利率
+    读了回来（已并入「Δ」偏移），与 `assume.apply_to` 写进 `cal["judg"]`
+    的三档比一遍即可闭环，成本几乎为零。
+
+    对不上时分两种说法：数字命中了三档里的**另一档**（多半是工作簿的
+    「选择情景」被改过），与数字**三档都对不上**（错位或没写进去）——
+    前者是选错了档，后者是建模链断了，读者的处置完全不同。
+    """
+    problems: list[str] = []
+    for key, cn, dkey in (("growth", "营收增速", "dg"), ("gm", "毛利率", "dm")):
+        # 「Δ」是 1_假设 里人有意加的整体偏移，read_inputs 已经并进了
+        # 逐年值。它不是错位，扣掉再比。
+        delta = float(inp.get(dkey) or 0.0)
+        got = [float(x) - delta for x in (inp.get(key) or [])]
+        want = [float(x) for x in (judg.get(key) or [])]
+        if _close(got, want, tol):
+            continue
+        scen = judg.get(f"{key}_scen") or {}
+        hit = next((n for n, v in scen.items()
+                    if _close(got, [float(x) for x in v], tol)), "")
+        if hit:
+            problems.append(
+                f"工作簿的{cn}用的是{_SCEN_CN.get(hit, hit)}档，不是批准"
+                f"清单定案的中性档——「选择情景」被改过，估值结果对应的"
+                f"不是人批准的那一档")
+        else:
+            problems.append(
+                f"工作簿的{cn}与人工批准的对不上：批准 {want}，工作簿 "
+                f"{got} —— 人批准的数没有进到真正参与估值的地方，"
+                f"**本结果不可采信**")
+    return problems
+
+
 def run(code: str, out_dir: str | Path, *, as_of: date,
         ledger: FactLedger | None = None, years: int = 5,
         dirpath: Path | None = None, assumptions=None,
@@ -305,6 +356,11 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     rows, _ = V.recompute(inp)
     warns = (V.sanity(dv, rows) + V.balance_sheet_warnings(inp, rows)
              + V.assumption_warnings(inp))
+    if assumptions is not None:
+        # 见 `_readback_check`：人批准的数必须真的进了工作簿。**排在所有
+        # 健全性告警前面** —— 数要是根本没进去，后面那些告警都是在给一个
+        # 错的模型体检。
+        warns = _readback_check(cal["judg"], inp) + list(warns)
 
     ev0 = Decimal(str(dv["ev0"]))
     res = DcfResult(

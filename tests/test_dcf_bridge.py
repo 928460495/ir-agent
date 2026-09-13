@@ -322,3 +322,85 @@ def test_估值占位符的期间与落账本的期间一致():
     ref_periods = {per for _, _, per in REF_RE.findall(_res(as_of=as_of).summary())}
     assert fact_periods == ref_periods, \
         f"账本期间 {fact_periods} 与占位符期间 {ref_periods} 不一致"
+
+
+class Test批准的数字必须真的进了工作簿:
+    """**闸门查的都是「用得对不对」，没有一道查「结果对不对」。**
+
+    这是与「占位符有没有被替换」同一类的漏网。人工批准判断项是整个流程
+    的核心关卡，而批准之后没有任何一道检查回头确认：工作簿里真正参与
+    估值的那几个数，就是人批准的那几个数。
+
+    此前踩过的两次都是这条链断在中间（C2 / C-a）：同一因子同一年出现
+    两行，清单显示其中一行、工作簿用另一行；重复行让 path() 按年份排序
+    后整体错位一格，人批准第 2 年的 7%、工作簿拿到的是第 1 年那条重复行
+    的 30%。两次都是**人自己读工作簿**才发现的。修法都是"不许出现重复
+    行"——仍然是在查输入用得对不对，没有查输出对不对。
+
+    `ashare_verify.read_inputs()` 本来就会把工作簿里逐年的营收增速/毛利率
+    读回来（`growth`/`gm`，已含 Δ 偏移），拿它与 `apply_to` 写进
+    `cal["judg"]` 的三档比一遍即可闭环，成本几乎为零。
+    """
+
+    def _judg(self):
+        return {"growth": [0.10, 0.08], "gm": [0.15, 0.16],
+                "growth_scen": {"bull": [0.14, 0.12], "base": [0.10, 0.08],
+                                "bear": [0.05, 0.03]},
+                "gm_scen": {"bull": [0.18, 0.19], "base": [0.15, 0.16],
+                            "bear": [0.12, 0.11]}}
+
+    def test_对得上时不报任何问题(self):
+        from ir_agent import dcf
+        inp = {"growth": [0.10, 0.08], "gm": [0.15, 0.16], "dg": 0.0, "dm": 0.0}
+        assert dcf._readback_check(self._judg(), inp) == []
+
+    def test_Δ偏移不算对不上(self):
+        """`1_假设` 里的「营收增速 Δ」是人有意加的整体偏移，`read_inputs`
+        把它并进了 growth。它不是错位，扣掉再比。"""
+        from ir_agent import dcf
+        inp = {"growth": [0.12, 0.10], "gm": [0.15, 0.16],
+               "dg": 0.02, "dm": 0.0}
+        assert dcf._readback_check(self._judg(), inp) == []
+
+    def test_工作簿的数与批准的对不上要报出来(self):
+        """整体错位一格正是踩过的那次：人批准第 1 年 10%、第 2 年 8%，
+        工作簿拿到的是 8%、8%。"""
+        from ir_agent import dcf
+        inp = {"growth": [0.08, 0.08], "gm": [0.15, 0.16],
+               "dg": 0.0, "dm": 0.0}
+        problems = dcf._readback_check(self._judg(), inp)
+        assert problems, "工作簿用的数与批准的不一致，必须报出来"
+        assert "营收增速" in problems[0]
+        assert "不可采信" in "".join(problems)
+
+    def test_选中的是别的档要说清是哪一档(self):
+        """工作簿的「选择情景」被改成乐观档时，数字对得上三档里的一档、
+        只是不是中性档——这与"数字错了"是两回事，要分开说，否则人会以为
+        建模坏了。"""
+        from ir_agent import dcf
+        inp = {"growth": [0.14, 0.12], "gm": [0.18, 0.19],
+               "dg": 0.0, "dm": 0.0}
+        problems = dcf._readback_check(self._judg(), inp)
+        assert problems
+        assert "乐观" in "".join(problems) or "bull" in "".join(problems)
+
+    def test_年数对不上也要报(self):
+        from ir_agent import dcf
+        inp = {"growth": [0.10], "gm": [0.15, 0.16], "dg": 0.0, "dm": 0.0}
+        assert dcf._readback_check(self._judg(), inp)
+
+
+def test_回读校验真的接在建表之后():
+    """光有 `_readback_check` 不算数——它必须真的被 `run()` 调用，而且要
+    用建完表之后回读的 `inp`（不是建表前的 cal），否则查的还是输入。
+
+    照本仓库既有做法（见 test_预研排在数据采集之前）用源码断言接线：
+    这一步要真跑一遍得先有 ashare-dcf 与一个真实工作簿，代价太大。"""
+    import inspect
+    from ir_agent import dcf
+
+    src = inspect.getsource(dcf.run)
+    assert "_readback_check(" in src, "回读校验没有接进 run()"
+    assert src.index("read_inputs") < src.index("_readback_check("), \
+        "必须用建表之后回读的 inp"
+    assert "assumptions is not None" in src
