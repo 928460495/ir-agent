@@ -30,7 +30,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from ir_agent import gaps
-from ir_agent.basis import Basis, InvalidBasis, validate
+from ir_agent.basis import Basis, BasisKind, InvalidBasis, validate
 from ir_agent.drivers import (Decomposition, Factor, Op, TARGET_LABEL,
                               compose, reconcile)
 from ir_agent.gaps import FactorData
@@ -130,6 +130,15 @@ class Row:
     # 分解模式下这一行对应哪个因子。空串表示旧的两标量模式 ——
     # 预研失败时的降级路径，必须保留。
     factor_key: str = ""
+    # 因子模式的取舍（放宽因子依据审核）：引文类依据（BasisKind.REPORT）
+    # 逐字核验不过时不再致命——真实实跑（600584，9 因子×5 年×3 档=45
+    # 行）显示这道闸门约拦下一半产出，卡点几乎都是模型对正文的**概括**
+    # 而非**捏造**。非空时记下核验失败的具体原因，`describe()` 用它
+    # 显著标出「依据未能逐字核验」，`check()` 不再因此 raise。
+    # **不进 to_json/from_json**——它是 check() 每次重新核验时的派生
+    # 结果，不是模型输出或人的决定，跨阶段没有持久化的必要，第二阶段
+    # `run_valuation` 重跑 check() 会重新算出同样的标记。
+    basis_unverified: str = ""
 
 
 def _decomp_to_dict(d: Decomposition) -> dict:
@@ -308,8 +317,20 @@ class AssumptionSet:
                     # 行看起来一样（一样都是拿 join 拼一遍，空列表拼出的
                     # 是空字符串，读者会当成"依据列忘了填"而不是"这本来
                     # 就是没有依据的估计"）。必须显式标出来，一眼分得清。
-                    ref = ("；".join(b.describe() for b in r.bases)
-                           if r.bases else "⚠ 估计（无数据支撑）")
+                    #
+                    # `basis_unverified` 非空——引文逐字核验不过、但因子
+                    # 模式下已放宽为标注而非驳回：这一格同样不能跟"核验
+                    # 通过"的行长得一样，否则放宽换来的就是"审核形同虚
+                    # 设却连标注都看不见"。引文本身（quote）仍然原样显示
+                    # ——它不是编造，只是没能逐字对应，人要看到具体写的
+                    # 是什么才能判断这段转述靠不靠谱。
+                    if r.basis_unverified:
+                        ref = ("⚠ 依据未能逐字核验：" +
+                               "；".join(b.describe() for b in r.bases))
+                    elif r.bases:
+                        ref = "；".join(b.describe() for b in r.bases)
+                    else:
+                        ref = "⚠ 估计（无数据支撑）"
                     lines.append(
                         f"| {lab} | {_fmt_factor(r.bear, f.unit)} "
                         f"| {_fmt_factor(r.base, f.unit)} "
@@ -319,7 +340,24 @@ class AssumptionSet:
             lines += self._describe_composed(d)
             lines += self._describe_residuals(d)
         lines += self._describe_estimated()
+        lines += self._describe_unverified()
         return lines
+
+    def _describe_unverified(self) -> list[str]:
+        """**遗漏必须可见**——这条约束不能因为放宽引文审核而丢。
+
+        引文核验不过在因子模式下不再致命（见 `check()` 的取舍说明），
+        但"哪些依据是软的"不能因此悄悄消失在各自因子的表格里：单独
+        汇总一段，按因子、按年份列出，让人一眼看出哪些判断项的依据
+        没有通过逐字核验、需要多担一分心去复核，而不是与核验通过的
+        行混在一起被当成同等可信。"""
+        labels = sorted({f"{_row_label(r, self.decomps)}第{r.year}年"
+                         for r in self.rows if r.factor_key and r.basis_unverified})
+        if not labels:
+            return []
+        return ["⚠ **以下因子的依据未能逐字核验**"
+                "（已如实标注，不阻断，需人工复核是否可信）："
+                + "、".join(labels), ""]
 
     def _describe_estimated(self) -> list[str]:
         """**遗漏必须可见。** 因子取值若完全靠估计（出口二：无数据、
@@ -866,7 +904,6 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
         _check_factors(a, years, decomps, base_margin)
     else:
         _check_scalar(a, years)
-    flat = [b for r in a.rows for b in r.bases]
     # 出口二（「无数据（估计）」）合法时 `Row.bases` 就是空列表——
     # `basis.validate([])` 的原意是防"整批一条依据都没给"，但因子模式
     # 下"每一行都被 `_factor_basis` 判定为合法的无数据估计"是一种真实
@@ -874,31 +911,50 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
     # 缺数据），不是"没做功课"。这种情形已经在 `_factor_basis`/
     # `_check_factors` 里逐行验过一遍（确实 MISSING、且有理由），不需要
     # 再套用这条本来是给"完全没有产出"设的全局闸门；反过来，只要有任何
-    # 一行不是走这条出口（`flat` 非空），就仍然照常校验，不放过真正
-    # 缺依据的情形。
+    # 一行不是走这条出口，就仍然照常校验，不放过真正缺依据的情形。
     all_estimated = bool(a.rows) and decomps and all(not r.bases for r in a.rows)
-    if not all_estimated:
-        problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
-        if problems:
-            msg = "依据不可核验：" + "；".join(problems)
-            if decomps and any("在正文中找不到" in p for p in problems):
-                # **驳回必须是可满足的，而且要让对方看得见满足的方式。**
-                # 原来的消息只说「找不到 —— 与凭空捏造无异」，没说该怎么
-                # 办，于是模型的自然反应是再换一句引文重试——而它换来的
-                # 往往还是转述（实测 600584：「上游议价能力弱意味着公司对
-                # 设备与原材料价格波动的传导能力有限」「修复但未完全追平」
-                # 都是对正文含义的概括，正文里没有逐字对应），三次耗尽后
-                # 整个分解被丢掉、退回两标量。
-                #
-                # 它其实有合法出路（那几个因子的采集状态就是「无数据」，
-                # 可以走出口二），只是驳回时没人告诉它。把出路写进错误
-                # 消息里，重试循环才可能收敛。
-                msg += ("　引文必须与正文**逐字一致**（直接复制，不要转述、"
-                        "概括或改写）。若你要表达的意思在正文里没有逐字"
-                        "对应的句子，不要硬凑引文——改引该因子自己采集到"
-                        "的证据原文；该因子若确实没有数据，就写"
-                        "「无数据（估计）」，把你的推理放进理由列。")
-            raise AssumeFailed(msg)
+    if all_estimated:
+        return
+    # **放宽因子模式的引文审核（用户明确决定）**：真实实跑（600584，
+    # 9 因子×5 年×3 档=45 行）显示逐字引文这道闸门约拦下一半产出，卡点
+    # 几乎都是模型对正文含义的**概括**而非**捏造**——「上游议价能力弱
+    # 意味着公司对设备与原材料价格波动的传导能力有限」「修复但未完全
+    # 追平」，这两句正文里都没有逐字对应，却也不是编出来的。规则要求
+    # 逐字，连续 3 次被拒后整个因子分解被丢掉、退回两标量模式——而
+    # 因子分解正是这条产品线的全部意义。用户判断：因子该按数值是否
+    # 合理来审，不该被引文格式卡死。
+    #
+    # 因此逐 Basis 校验（而不是像原来那样把全部 Basis 拼成一个 `flat`
+    # 列表一次性核验）：这样才能按 `BasisKind` 精确分流——只有 REPORT
+    # （引正文逐字核验不过）在因子模式下降级为标注在对应 `Row` 上；
+    # FACT（占位符指向的账本事实不存在）与 EXTERNAL（外部资料核验
+    # 不过）继续致命，理由见下面分支的注释。两标量模式（`decomps`
+    # 为空）完全不受影响——那条路径引的是正文，正文本来就覆盖增速/
+    # 毛利率两项，逐字核验在那里可满足，这次放宽只针对因子行。
+    fatal: list[str] = []
+    for r in a.rows:
+        if not r.bases:
+            continue
+        soft: list[str] = []
+        for b in r.bases:
+            problems = validate([b], ledger=ledger, body=body, as_of=as_of)
+            if not problems:
+                continue
+            if decomps and b.kind is BasisKind.REPORT:
+                soft.extend(problems)
+            else:
+                # FACT：占位符格式合法但指向的 key@period 在账本里不存在
+                # ——这是对账本的**假陈述**，且下游会拿占位符去做字符串
+                # 替换，编造的占位符会让替换失败或替换出错的值（实测踩
+                # 过整段估值漏成未替换占位符）。EXTERNAL：外部资料核验
+                # 不过。两者都与"对正文的转述 vs 逐字"不是一类问题，
+                # 不在这次放宽范围内，继续致命。
+                fatal.append(f"{_row_label(r, a.decomps)} 第{r.year}年："
+                            + "；".join(problems))
+        if soft:
+            r.basis_unverified = "；".join(soft)
+    if fatal:
+        raise AssumeFailed("依据不可核验：" + "；".join(fatal))
 
 
 def _check_scalar(a: AssumptionSet, years: int) -> None:
@@ -1105,22 +1161,37 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
               "原文片段/发现。下面各节（宏观、行业、可比公司、外部资料、"
               "产业链……）、本表的因子名和单位这些表头，都只是给你判断"
               "用的上下文，**不是**可引用的正文——从里面摘一句当引文"
-              "（哪怕摘的是某节小标题）会被直接驳回。",
-              "**引文必须逐字连续摘录**：不要用省略号（…/...）缩写，"
-              "也不要把原文里不相邻的句子拼起来当一句引文。理由那部分"
-              "可以照常总结复述，但引文这部分要能被代码原样在来源里"
-              "逐字反查到——用省略号跳过中间几个字，或者拼接两处不相邻"
-              "的话，都会让这段引文在来源里找不到连续对应的片段，"
-              "代码分不清这是真引用还是你自己编的，只会被当作编造直接"
-              "驳回。",
+              "（哪怕摘的是某节小标题）核验不过，会被标注为「依据未能"
+              "逐字核验」，交人工额外复核。",
+              "**优先给出可逐字核验的依据**：账本占位符 [[key@period]]、"
+              "正文原话、下表这个因子自己采集到的证据原文，或"
+              "「无数据（估计）」「同上」回指——这几类代码都能逐字反查，"
+              "人工批准时不用再多看一眼。不要用省略号（…/...）缩写引文，"
+              "也不要把原文里不相邻的句子拼起来当一句引文。",
+              "**引文核验不过不会被驳回，但会被标注。** 因子分解要填的"
+              "行很多（一个分解式常有好几个因子、好几个预测年），逐字"
+              "引文有时确实凑不出来——若引文没能在来源里逐字找到，这一"
+              "行仍会通过，只是会在待核实清单上被显著标出「依据未能"
+              "逐字核验」，与核验通过的行一眼可分，需要人工多担一分"
+              "风险去复核。**这不等于随便写都行**：标注是有代价的——"
+              "能给出逐字引文就一定给逐字引文，只有在你要表达的意思在"
+              "来源里确实没有逐字对应的句子时，才退而求其次转述，并把"
+              "推理写进理由列；转述得越多，清单上被标注的行就越多，人工"
+              "复核的负担就越重。",
+              "**这条放宽只针对引文本身，账本占位符不受影响**："
+              "`[[key@period]]` 必须真实指向账本里存在的事实，写错的"
+              "占位符（账本里根本没有这个 key/period）依旧会被直接驳回"
+              "——那是对账本的假陈述，下游会拿它去做字符串替换，错了会"
+              "让整段估值替换失败，跟「转述 vs 逐字」不是一类问题。",
               "",
               "**依据除了「正文原话」「[[占位符]]」，还有三条路——"
               "很多因子正文根本没提过，也不在账本里，这些路才是它们"
-              "唯一合法的依据写法**：",
+              "免于被标注、能拿到确凿出处的依据写法**：",
               "① 上表「数据」列若给出了具体的原文片段或「发现」，你可以"
               "**逐字**引用那一段（仍然写成「引文」的样子），出处（网址/"
               "抓取日期）由代码自动核对并填上——不要自己写网址或日期，"
-              "写了也不会被采信，一个字都对不上会被直接驳回。",
+              "写了也不会被采信；一个字都对不上会退回按正文引用处理，"
+              "适用上面「核验不过会被标注」的规则。",
               "② 上表「数据」列若是「无数据」（或整行都没有），可以直接"
               "写「无数据（估计）」，但理由里**必须**说明这个估计是怎么"
               "来的（参照哪个可比公司、哪个行业惯例、哪条常识……）——"

@@ -1437,11 +1437,16 @@ def test_引用该因子采集到的Finding代码自动补上真实出处():
     assert basis.retrieved == AS_OF
 
 
-def test_引用不存在的发现会掉回正文核验并被驳回():
+def test_引用不存在的发现会掉回正文核验并被标注():
     """模型编一句看起来像证据、但不在任何 Finding.claim 里的话——不能
     因为"看起来像因子证据"就绕过核验，应当掉回"当作正文引用"这条老
-    路径，然后因为它确实不在正文里而被驳回，行为与修复前对普通正文
-    引用的处理一致，没有开新的口子。"""
+    路径去核验（不能被 `_match_finding` 意外放行）。
+
+    回归调整（放宽因子模式引文审核）：这条路径核验的落点变了——引文
+    确实不在正文里，但那与凭空捏造不是一回事，因子模式下不再因此
+    致命，而是照常通过并标注「依据未能逐字核验」。行为仍然与修复前
+    对普通正文引用的处理一致（同一条 REPORT 校验路径），变的只是
+    check() 对 REPORT 核验失败的处置方式。"""
     d = _one_factor_decomp()
     finding = Finding(factor_key="utilization", claim="平均稼动率约78%",
                       url="https://semi.org/x", publisher="SEMI",
@@ -1451,8 +1456,10 @@ def test_引用不存在的发现会掉回正文核验并被驳回():
     body = "公司积极扩产，产能持续释放。"
     raw = "假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「稼动率将大幅提升至95%」"
     a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
-    with pytest.raises(AssumeFailed, match="不可核验"):
-        assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    assert a.rows[0].bases[0].kind.value == "report", \
+        "没有匹配到 Finding.claim，必须走回正文引用这条老路径，不能被意外放行成别的 kind"
+    assert a.rows[0].basis_unverified, "正文里确实没有这句话，应当被标注为未核验"
 
 
 def test_引用年报摘录片段代码自动补上年报出处():
@@ -1506,10 +1513,14 @@ def test_引用研报摘录片段代码自动补上研报文档的真实url():
         "研报的抓取日期应是该 Document 自己的 retrieved，不是这一轮的 as_of"
 
 
-def test_年报摘录引文对不上原文片段时掉回正文核验并被驳回():
+def test_年报摘录引文对不上原文片段时掉回正文核验并被标注():
     """模型引的话跟 `fd.source_excerpt` 对不上（比如编了数字或改了
-    表述）——不能被 _match_excerpt 放过，应当掉回"当作正文引用"、
-    然后因为不在正文里而被驳回，不能被这条新出口意外放行。"""
+    表述）——不能被 `_match_excerpt` 放过，应当掉回"当作正文引用"这条
+    老路径核验，不能被这条出口意外放行成 EXTERNAL。
+
+    回归调整（放宽因子模式引文审核）：掉回正文核验之后，引文确实不在
+    正文里，但因子模式下这不再致命——转述与凭空捏造不是一回事，照常
+    通过并标注「依据未能逐字核验」，人工批准时会看见。"""
     d = _one_factor_decomp()
     excerpt = "稼动率维持在行业前列"
     fd = {"utilization": gaps.FactorData(
@@ -1521,8 +1532,10 @@ def test_年报摘录引文对不上原文片段时掉回正文核验并被驳�
     body = "公司持续推进降本增效。"
     raw = "假设: 稼动率 | 第1年 | -2% | 0% | 2% | 「稼动率已提升至95%」"
     a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
-    with pytest.raises(AssumeFailed, match="不可核验"):
-        assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    assert a.rows[0].bases[0].kind.value == "report", \
+        "跟年报摘录对不上，必须掉回正文引用这条老路径，不能被误判成 EXTERNAL"
+    assert a.rows[0].basis_unverified, "跟正文也对不上，应当被标注为未核验"
 
 
 def test_年报摘录含嵌套弯引号仍可核验依据_600584实测复现():
@@ -1735,7 +1748,12 @@ def test_同上不跨因子继承():
 def test_同行真实引文优先于同上字样():
     """注意不要误伤：一行里如果同时给了真实引文和「同上」字样，应以
     真实引文为准——`_QUOTE` 在 `_looks_like_ditto` 之前被检查，真实
-    引文分支必然优先命中。"""
+    引文分支必然优先命中，不能被误判成"同上"回指。
+
+    回归调整（放宽因子模式引文审核）：走到 REPORT 核验之后，引文确实
+    不在正文里——但这不再是"不可核验就致命"，因子模式下照常通过并
+    标注。这条测试守的核心不变（不能被误判成回指，必须真去核验这句
+    话本身），变的只是核验不过之后 check() 的处置方式。"""
     d = _one_factor_decomp()
     fd = {"utilization": gaps.FactorData(
         factor=d.factors[0], status=gaps.MISSING, note="未找到任何数据")}
@@ -1748,10 +1766,13 @@ def test_同行真实引文优先于同上字样():
     a = assume.parse(raw, 2, decomps=[d], factor_data=fd, as_of=AS_OF)
     # 第二行含有真实的「…」引文，即便引文正文本身出现了"同上"字样，
     # 也必须走 `_basis`/`_factor_basis` 的正文引用出口，而不是被误判
-    # 成回指——这里正文没有这句话，应当在 check() 阶段因不可核验被拒。
-    with pytest.raises(AssumeFailed, match="不可核验"):
-        assume.check(a, 2, ledger=FactLedger(), body="公司持续推进降本增效。",
-                    as_of=AS_OF, decomps=[d])
+    # 成回指——不能与第一行共享同一个（空的）Basis 列表。
+    assert a.rows[1].bases != a.rows[0].bases
+    assume.check(a, 2, ledger=FactLedger(), body="公司持续推进降本增效。",
+                as_of=AS_OF, decomps=[d])
+    assert a.rows[1].bases[0].kind.value == "report"
+    assert a.rows[1].basis_unverified, "正文里没有这句话，应当被标注为未核验"
+    assert not a.rows[0].basis_unverified, "第一行走的是无数据估计出口，不该被牵连标注"
 
 
 def _two_factor_decomp():
@@ -1774,44 +1795,85 @@ def test_提示词说明同上的精确含义():
     assert "第一次出现该因子时必须给出完整依据" in txt or "第一次出现" in txt
 
 
-def test_因子模式引文驳回要给出合法出路():
-    """**驳回必须是可满足的，而且要让对方看得见满足的方式。**
+def test_因子模式引文核验不过被标注而非驳回_600584实测复现():
+    """**这是本次放宽要修的失败场景本身的最小复现**（用户明确决定：
+    「放宽对于因子的审核，只要数据合理便可以考虑通过」）。
 
-    实测教训（600584 诊断实跑）：模型在依据列写的是对正文含义的转述
-    （「上游议价能力弱意味着公司对设备与原材料价格波动的传导能力有限」
-    「修复但未完全追平」），正文里没有逐字对应。原来的驳回只说「在正文
-    中找不到 —— 与凭空捏造无异」，没说该怎么办，于是模型再换一句引文
-    重试——换来的还是转述，三次耗尽，整个分解被丢掉退回两标量。
+    实测教训（600584 诊断实跑，9 因子×5 年×3 档=45 行，约 50% 成功率）：
+    模型在依据列写的是对正文含义的**概括**，不是**捏造**——
+    「上游议价能力弱意味着公司对设备与原材料价格波动的传导能力有限」
+    「修复但未完全追平」，这两句正文里都没有逐字对应。放宽前的行为
+    （已用本条最小复现实测确认，见下方 `git show` 的固定探针）：
 
-    它其实有合法出路（那些因子的采集状态就是「无数据」），只是驳回时
-    没人告诉它。错误消息必须把出路一并给出，重试循环才可能收敛。
+        依据不可核验：依据引用的正文片段「修复但未完全追平」在正文中
+        找不到 —— 与凭空捏造无异。　引文必须与正文**逐字一致**……
+
+    连续 3 次被拒后整个因子分解被丢掉、退回两标量模式——而因子分解
+    正是这条产品线的全部意义。放宽后：这一行照常通过，但要在 `Row`
+    上留下可见的标记，人工批准时能看见、能拒，不能被悄悄放行成跟
+    "核验通过"一样。
     """
-    from datetime import date
-    from decimal import Decimal as D
-
-    import pytest
-
-    from ir_agent import assume as A
-    from ir_agent.basis import Basis
-    from ir_agent.drivers import Decomposition, Factor, Op
-    from ir_agent.ledger import FactLedger
-
     cap = Factor(key="cap", label="产能规模", unit="变化率")
     rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[cap])
-    a = A.AssumptionSet(code="600584", labels=["2026E"])
+    a = assume.AssumptionSet(code="600584", labels=["2026E"])
     a.decomps = [rev]
-    a.rows = [A.Row(driver="revenue", year=1, bear=D("-0.02"), base=D("0.03"),
-                    bull=D("0.08"), note="理由", factor_key="cap",
-                    bases=[Basis.report("修复但未完全追平")])]
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("-0.02"), base=D("0.03"),
+                         bull=D("0.08"), note="理由", factor_key="cap",
+                         bases=[assume.Basis.report("修复但未完全追平")])]
 
-    with pytest.raises(A.AssumeFailed) as ei:
-        A.check(a, 1, ledger=FactLedger(), body="正文里没有这句话",
-                as_of=date(2026, 9, 12), decomps=[rev],
-                base_margin=D("0.1415"))
-    msg = str(ei.value)
-    assert "在正文中找不到" in msg, "原有的诊断信息不能丢"
-    assert "逐字" in msg, "要说清引文必须逐字，不能转述"
-    assert "无数据（估计）" in msg, "要把出口二这条合法出路指出来"
+    assume.check(a, 1, ledger=FactLedger(), body="正文里没有这句话",
+                as_of=AS_OF, decomps=[rev], base_margin=D("0.1415"))
+
+    row = a.rows[0]
+    assert row.basis_unverified, "引文核验不过应当标注在 Row 上，不能悄悄放行"
+    assert "修复但未完全追平" in row.basis_unverified or \
+        "在正文中找不到" in row.basis_unverified
+    # 原始引文本身不能被抹掉——人要看到具体写的是什么才能判断这段
+    # 转述靠不靠谱，不是只留一个"未核验"的标签。
+    assert row.bases and row.bases[0].quote == "修复但未完全追平"
+
+    a.code = "600584"
+    txt = a.describe()
+    assert "依据未能逐字核验" in txt, "待核实清单上必须显著标出，与核验通过的行一眼可分"
+    assert "修复但未完全追平" in txt, "原始引文仍要留在清单上，不能只剩标签"
+    # 底部要单独汇总一段：哪些因子的哪些年份依据是软的——遗漏必须可见。
+    assert "⚠ **以下因子的依据未能逐字核验**" in txt
+    assert "产能规模第1年" in txt
+
+
+def test_两标量模式对同款引文场景仍然驳回_回归锁():
+    """回归锁：同一个真实失败场景（引文「修复但未完全追平」，正文里
+    没有这句话）放到两标量降级模式下，必须仍然驳回——这次放宽只针对
+    因子行，两标量模式引的是正文，正文本来就覆盖增速/毛利率两项，
+    逐字核验在那里可满足，不该被一并放宽。"""
+    a = assume.AssumptionSet(code="600584", labels=["2026E"])
+    a.rows = [
+        assume.Row(driver="growth", year=1, bear=D("-0.02"), base=D("0.03"),
+                  bull=D("0.08"), note="理由",
+                  bases=[assume.Basis.report("修复但未完全追平")]),
+        # 补全毛利率这一行，确保测试真的走到依据核验这一步，而不是
+        # 提前被"缺第 1 年"这条不相干的门拦下。
+        assume.Row(driver="gm", year=1, bear=D("0.12"), base=D("0.14"),
+                  bull=D("0.16"), note="理由", bases=[assume.Basis.report(Q)]),
+    ]
+    with pytest.raises(AssumeFailed, match="不可核验"):
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+
+
+def test_因子模式伪造账本占位符依旧驳回():
+    """**放宽不能连坐到账本占位符。** `[[key@period]]` 指向账本里根本
+    不存在的事实，是对账本的假陈述，且下游会拿占位符去做字符串替换
+    ——错了会让整段估值替换失败（实测踩过整段漏成未替换占位符）。这
+    与"对正文的转述"不是一类问题，因子模式下必须继续致命，不能被
+    这次放宽一并放过。"""
+    d = _one_factor_decomp()
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[d])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"), base=D("0.08"),
+                         bull=D("0.12"), note="理由", factor_key="utilization",
+                         bases=[assume.Basis.fact("[[revenue.yoy@2099FY]]")])]
+    with pytest.raises(AssumeFailed, match="不可核验"):
+        assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
+                    decomps=[d])
 
 
 def test_两标量模式的引文驳回不附加因子出路():

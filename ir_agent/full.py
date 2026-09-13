@@ -887,7 +887,18 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     # I4：因子模式连续失败后 assume.decide 会退回两标量模式，不是抛错——
     # 判断项照常写出，但降级这件事不能只留在 assumptions.md 里，终端的
     # skipped 清单是读者第一眼看到的地方，同一条原因要在这里再报一次。
-    return f"DCF 判断项（{a.degraded}）" if a.degraded else ""
+    notes: list[str] = []
+    if a.degraded:
+        notes.append(a.degraded)
+    # 放宽因子模式引文核验之后的代价：依据没被拒绝，但也不能只悄悄
+    # 留在 assumptions.md 的表格里等人自己逐行发现——终端产物清单是
+    # 读者第一眼看到的地方，同一件事要在这里也露出来，而不是非致命
+    # 就等于"没有的事"。
+    unverified = sum(1 for r in a.rows if getattr(r, "basis_unverified", ""))
+    if unverified:
+        notes.append(f"{unverified} 行依据未能逐字核验（已标注，未阻断，"
+                     "需人工复核）")
+    return f"DCF 判断项（{'；'.join(notes)}）" if notes else ""
 
 
 _APPROVE_NOTE = """

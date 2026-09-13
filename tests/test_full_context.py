@@ -494,6 +494,51 @@ def test_因子模式降级时判断项仍写出且降级原因入skipped(tmp_pa
     assert "DCF 判断项（待核实）" in arts
 
 
+def test_因子模式引文未核验的行数入非致命说明(tmp_path, monkeypatch):
+    """放宽因子模式引文审核之后的代价：核验不过的行不再致命，但也不能
+    只悄悄留在 assumptions.md 的表格里——`_propose_assumptions` 要把
+    「N 行依据未能逐字核验」作为非致命说明通过返回值交给调用方，
+    `run_analysis` 会把它塞进 `skipped`，终端产物清单上也要看得见。"""
+    from datetime import date
+    from decimal import Decimal
+
+    from ir_agent import assume, dcf, full
+    from ir_agent.basis import Basis
+    from ir_agent.ledger import FactLedger
+
+    monkeypatch.setattr(
+        dcf, "calibrate_only",
+        lambda code, as_of, ledger: {
+            "judg": {"g_stats": (), "gm_stats": ()},
+            "periods": {"proj": ["2026E"]}})
+
+    def _fake_decide(client, judg, labels, ctx, **kw):
+        a = assume.AssumptionSet(code="600584", labels=labels)
+        r1 = assume.Row(driver="revenue", year=1, bear=Decimal("-0.02"),
+                        base=Decimal("0.03"), bull=Decimal("0.08"), note="x",
+                        factor_key="cap", bases=[Basis.report("修复但未完全追平")])
+        r1.basis_unverified = "依据引用的正文片段「修复但未完全追平」在正文中找不到"
+        r2 = assume.Row(driver="revenue", year=2, bear=Decimal("-0.01"),
+                        base=Decimal("0.04"), bull=Decimal("0.09"), note="y",
+                        factor_key="cap", bases=[Basis.report("正文里有的话")])
+        a.rows = [r1, r2]
+        return a
+    monkeypatch.setattr(assume, "decide", _fake_decide)
+
+    class _R:
+        ledger = FactLedger()
+        period = "2025FY"
+
+    arts: dict[str, str] = {}
+    err = full._propose_assumptions(
+        "600584", _R(), "body", {}, date(2026, 9, 7), tmp_path,
+        lambda p: "", arts)
+
+    assert "1 行依据未能逐字核验" in err, \
+        "只有 r1 被标注，说明里要报出准确的行数，不是笼统一句话"
+    assert "未阻断" in err or "已标注" in err
+
+
 def test_判断项环节的接口错误降级而不抛出(tmp_path, monkeypatch):
     """模型接口本身失败（额度用尽/超时/CLI 报错）必须降级，不能让整轮炸掉。
 
