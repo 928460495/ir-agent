@@ -381,3 +381,22 @@ class TestUnrenderedPlaceholdersAreCaught:
             r = audit("ROE [[roe@2025FY]]。", led, SnapshotStore(d),
                       as_of=date(2026, 6, 1))
         assert r.unrendered == [] and r.ok and r.traceability == 1.0
+
+
+def test_缺快照的来源在研报附录里也要去重():
+    """实跑产出的 report.md 附录里写着「em_macro、em_macro、em_macro…」
+    整整 20 个，其中 em_macro 重复 7 次、eastmoney_report 重复 13 次
+    ——列表是按脚注逐条追加的，照抄只会刷屏。读者要知道的是哪几个来源、
+    总共多少条（终端那条说明已经这么做了，交付文件不该比终端更难读）。"""
+    from ir_agent.audit import AuditResult, Footnote
+    from datetime import date
+    res = AuditResult(
+        rendered="正文",
+        footnotes=[Footnote(marker=1, key="roe", period="2025FY",
+                            source_id="em_macro", as_of=date(2026, 1, 1),
+                            method="reported", display="30%")],
+        missing_snapshots=["em_macro"] * 7 + ["eastmoney_report"] * 13)
+    txt = res.with_sources()
+    line = [x for x in txt.splitlines() if "缺少原始接口快照" in x][0]
+    assert line.count("em_macro") == 1, "来源要去重"
+    assert "20" in line, "要给出总条数"

@@ -67,9 +67,17 @@ class AuditResult:
             lines.append(f"| {n.display} | {n.key}@{n.period} | {n.source_id} "
                          f"| {n.as_of.isoformat()} | {n.method} |")
         if self.missing_snapshots:
+            # 去重后再列。这张表按脚注逐条追加，实跑里 em_macro 重复
+            # 7 次、eastmoney_report 重复 13 次，照抄只会刷屏——读者要
+            # 知道的是哪几个来源、总共多少条（终端那条说明已经这么做，
+            # 交付文件不该比终端更难读）。
+            seen: list[str] = []
+            for x in self.missing_snapshots:
+                if x not in seen:
+                    seen.append(x)
             lines.append("")
-            lines.append("> 以下引用缺少原始接口快照，无法完整回查："
-                         + "、".join(self.missing_snapshots))
+            lines.append(f"> 有 {len(self.missing_snapshots)} 条引用缺少原始"
+                         "接口快照，无法完整回查，来源：" + "、".join(seen))
         if self.unrendered:
             lines.append("")
             lines.append("> 以下占位符未能替换成真实数字，正文里仍是原样的"

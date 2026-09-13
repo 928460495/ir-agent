@@ -892,7 +892,9 @@ def _audit_note(what: str, res) -> str:
                      + "、".join(res.bare_numbers[:6]))
     if not parts:
         return ""
-    return f"{what}审计未通过：" + "；".join(parts)
+    # 前缀固定以「审计未通过」开头——`research._mark` 按前缀给标记，
+    # 把 what 放在前面会让它落到默认的「未生成」上，而研报其实生成了。
+    return f"审计未通过（{what}）：" + "；".join(parts)
 
 
 def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
