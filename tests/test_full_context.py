@@ -867,7 +867,7 @@ def test_依据未核验要写进最终研报而不是只留在批准清单():
     import re
     from ir_agent import full
 
-    prompt_line, appendix = full._unverified_disclosure(_unverified_set())
+    prompt_line, appendix = full._assumption_caveats(_unverified_set())
 
     assert prompt_line and "逐字核验" in prompt_line
     assert not re.search(r"\d", prompt_line), \
@@ -883,7 +883,7 @@ def test_全部依据都核验通过时不加这一段():
     from ir_agent import full
     a = _unverified_set()
     a.rows[0].basis_unverified = ""
-    assert full._unverified_disclosure(a) == ("", "")
+    assert full._assumption_caveats(a) == ("", "")
 
 
 def test_未核验声明真的接进了第二阶段():
@@ -893,9 +893,100 @@ def test_未核验声明真的接进了第二阶段():
     from ir_agent import full
 
     src = inspect.getsource(full.run_valuation)
-    assert "_unverified_disclosure(" in src
+    assert "_assumption_caveats(" in src
     assert src.index("audit(full") < src.index("REPORT"), "附录必须追加在审计之后"
-    assert "_unverified_disclosure(" in src
+    assert "_assumption_caveats(" in src
 
     wsrc = inspect.getsource(full._write_full_report)
     assert "caveat" in wsrc and "valuation_summary" in wsrc
+
+
+def _estimate_only_set():
+    """理由自称「无数据（估计）」、依据挂着方向性参照——600584 实跑里
+    8 个因子全是这个形状。"""
+    from decimal import Decimal as D
+    from ir_agent import assume
+    from ir_agent.drivers import Decomposition, Factor, Op
+    cap = Factor(key="cap", label="产能规模", unit="变化率")
+    rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[cap])
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[rev])
+    a.rows = [assume.Row(
+        driver="revenue", year=1, bear=D("0.03"), base=D("0.06"),
+        bull=D("0.10"), factor_key="cap",
+        note="理由：资本开支强度处于同业前列。依据：无数据（估计）。产能"
+             "规模无官方口径数据，取值为估计",
+        bases=[assume.Basis.fact("[[depreciation_amortization@2025FY]]")])]
+    return a
+
+
+def test_取值是估计这件事也要进研报():
+    """**实跑当场暴露的缺口。** 600584 那份研报末尾如实写了「8 项依据
+    未能逐字核验」，却没写「8 个因子的取值本身就是估计」——而后者更重：
+    读者会以为问题只是"出处是转述"，真相是这些数字本身没有数据支撑。
+
+    同一条原则（放宽/软性的代价要跟着交付物走）对它同样适用。约束也
+    一样：进提示词的那句不能带数字，进 report.md 的附录可以带。"""
+    import re
+    from ir_agent import full
+
+    prompt_line, appendix = full._assumption_caveats(_estimate_only_set())
+
+    assert prompt_line and "估计" in prompt_line
+    assert not re.search(r"\d", prompt_line), "进提示词的话不能带数字"
+    assert "1" in appendix and "产能规模" in appendix
+    assert "估计" in appendix
+
+
+def test_未核验与估计两件事都在时各说各的():
+    from ir_agent import full
+    a = _estimate_only_set()
+    a.rows[0].basis_unverified = "引文在正文中找不到"
+    prompt_line, appendix = full._assumption_caveats(a)
+    assert "逐字核验" in prompt_line and "估计" in prompt_line
+    assert "逐字核验" in appendix and "估计" in appendix
+
+
+def test_两件事都没有时不加任何声明():
+    from decimal import Decimal as D
+    from ir_agent import full, assume
+    a = _estimate_only_set()
+    a.rows[0].note = "理由：资本开支强度处于同业前列，产能投放节奏明确"
+    assert full._assumption_caveats(a) == ("", "")
+
+
+def test_缺快照的引用也要进终端清单():
+    """**实跑当场暴露的第二条。** 研报附录如实写了「以下引用缺少原始
+    接口快照，无法完整回查：em_macro×7、eastmoney_report×13」，
+    `audit.ok` 因此是 False——而终端产物清单一个字没提。
+
+    与「未替换的占位符」同一个函数、同一条原则：算出来了、写进文件了，
+    不等于交付了；终端清单才是读者第一眼看到的地方。
+
+    来源名按去重后列出：原始列表里 em_macro 重复 7 次，照抄只会刷屏，
+    读者要知道的是「哪几个来源、总共多少条引用」。"""
+    from ir_agent import full
+    from ir_agent.audit import AuditResult
+
+    res = AuditResult(rendered="正文",
+                      missing_snapshots=["em_macro"] * 7
+                                        + ["eastmoney_report"] * 13)
+    note = full._audit_note("完整研报", res)
+    assert "快照" in note
+    assert "em_macro" in note and "eastmoney_report" in note
+    assert note.count("em_macro") == 1, "来源要去重，不要照抄 7 遍"
+    assert "20" in note, "要给出总条数"
+
+
+def test_审计三类问题同时存在时一条都不吞():
+    from ir_agent import full
+    from ir_agent.audit import AuditResult
+    res = AuditResult(rendered="正文", unrendered=["[[x]]"],
+                      missing_snapshots=["em_macro"], bare_numbers=["3.5"])
+    note = full._audit_note("完整研报", res)
+    assert "未替换" in note and "快照" in note and "裸数字" in note
+
+
+def test_审计全过时不加说明():
+    from ir_agent import full
+    from ir_agent.audit import AuditResult
+    assert full._audit_note("完整研报", AuditResult(rendered="正文")) == ""

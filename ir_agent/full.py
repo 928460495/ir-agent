@@ -780,43 +780,65 @@ def _review_stage(arts: dict):
         "但估值尚无从谈起")
 
 
-def _unverified_disclosure(a) -> tuple[str, str]:
-    """放宽的代价要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
+def _assumption_caveats(a) -> tuple[str, str]:
+    """判断项的软处要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
 
-    因子依据从「核验不过就驳回」改成「标注后放行」之后，
-    `Row.basis_unverified` 只到 assumptions.md 与终端 skipped——而对外
-    传阅的是 report.md，读者在那里看不到「这份估值有几个判断项的依据
-    没能逐字核验」。本仓库自己的标准（`AuditResult.with_sources` 的
-    文档）：算出来了不交付，等于没兑现。
+    两件事，分别说：
+
+    - **依据未能逐字核验**：因子依据从「核验不过就驳回」改成「标注后
+      放行」（用户明确决定的取舍）之后留下的代价。
+    - **取值本身是估计**：模型自己在理由里写明「无数据（估计）」的因子。
+      600584 实跑里这是 **8 个因子全中**——而第一版声明只写了未核验，
+      读者会以为问题仅仅是"出处是转述"，真相更重：这些数字本身就没有
+      数据支撑。后者比前者更该被看见。
+
+    两者都只到 `assumptions.md` 与终端是不够的——对外传阅的是
+    `report.md`。本仓库自己的标准（`AuditResult.with_sources` 的文档）：
+    算出来了不交付，等于没兑现。
 
     两个出口分开给，因为约束不同：
 
     - **进提示词的那句不能带数字。** 研报正文的每个数字都必须写成占位符，
-      模型照抄一句「12 行」会被裸数字审计判掉——等于我自己给自己埋雷。
-      所以这句只讲事实、不讲数量，具体几行去看 assumptions.md。
-    - **附录在 `audit()` 之后追加**（与数据来源附录同一处待遇），因此
-      可以带准确行数与具体是哪些因子哪些年份。
+      模型照抄一句「8 个」会被裸数字审计判掉——等于自己给自己埋雷。
+      所以只讲事实、不讲数量，具体几项去看 assumptions.md。
+    - **附录在 `audit()` 之后追加**（与数据来源附录同一处待遇：代码写的，
+      不是模型写的），因此可以带准确条数与具体是哪些因子哪些年份。
     """
     from ir_agent import assume
 
-    labels = assume.unverified_labels(a)
-    if not labels:
+    unverified = assume.unverified_labels(a)
+    estimated = assume.estimated_labels(a)
+    if not unverified and not estimated:
         return "", ""
-    prompt_line = (
-        "**注意：部分 DCF 判断项的依据未能逐字核验**（具体哪些行见待核实"
-        "清单 assumptions.md 上的标注）——这些判断项的出处是转述而非原文"
-        "引用。撰写估值一节时必须如实说明这一点，不要把它们写得与有确凿"
-        "出处的判断项同等确定。")
-    appendix = "\n".join([
-        "", "---", "", "## ⚠ 判断项依据核验", "",
-        f"本报告的估值建立在人工批准的 DCF 判断项之上，其中 {len(labels)} "
-        "项的依据**未能在来源里逐字核验**（已在 assumptions.md 上逐行"
-        "标注，人工批准时可见）：",
-        "", "、".join(labels), "",
-        "这是一次有意的取舍：因子分解的依据允许转述，换来分解能真正跑通；"
-        "代价是这些数字的出处无法被逐字反查。请据此调整对相应判断项的"
-        "信任度——它们未必错，但没有原文替它们背书。", ""])
-    return prompt_line, appendix
+
+    says: list[str] = []
+    if unverified:
+        says.append("部分 DCF 判断项的依据**未能逐字核验**——出处是转述"
+                    "而非原文引用")
+    if estimated:
+        says.append("部分驱动因子**没有任何数据支撑、取值是估计**（该因子"
+                    "在公开渠道本就无口径数据），依据列里的东西只是方向性"
+                    "参照，不是这个取值的证据")
+    prompt_line = ("**注意：以下关于判断项的保留必须写进估值一节**（具体"
+                   "条目见待核实清单 assumptions.md 上的逐行标注）："
+                   + "；".join(says)
+                   + "。不要把它们写得与有确凿出处的判断项同等确定。")
+
+    body: list[str] = ["", "---", "", "## ⚠ 判断项依据核验", ""]
+    if estimated:
+        body += [f"本报告估值所用的驱动因子中，有 {len(estimated)} 个**取值"
+                 "没有任何数据支撑、是估计**（模型在待核实清单的「理由」列"
+                 "已逐条写明该因子无公开口径数据）：",
+                 "", "、".join(estimated), ""]
+    if unverified:
+        body += [f"另有 {len(unverified)} 项判断项的依据**未能在来源里逐字"
+                 "核验**（已在 assumptions.md 上逐行标注，人工批准时可见）：",
+                 "", "、".join(unverified), ""]
+    body += ["这是一次有意的取舍：因子分解的依据允许转述、允许在确实没有"
+             "数据时给出估计，换来分解能真正跑通；代价是上述条目无法被逐字"
+             "反查。请据此调整对相应判断项的信任度——它们未必错，但没有"
+             "原文或数据替它们背书。", ""]
+    return prompt_line, "\n".join(body)
 
 
 def _report_stage(stage, arts: dict):
@@ -838,19 +860,39 @@ def _report_stage(stage, arts: dict):
 
 
 def _audit_note(what: str, res) -> str:
-    """审计发现的"占位符没被替换"要作为非致命说明返回，供 `skipped` 用。
+    """审计发现的问题要作为非致命说明返回，供 `skipped` 用。
 
-    **写进文件附录不等于交付了。** 600584 实测那次整段估值漏成未替换的
-    占位符，是人读 report.md 才发现的——而终端的产物清单才是第一眼看到
-    的地方，降级原因、估值健全性告警、依据未逐字核验都往那里报，唯独
-    审计自己发现的问题没有。占位符没被替换意味着读者拿到的那一段根本
-    没有数字，比多数健全性告警更该被立刻看见。
+    **写进文件附录不等于交付了。** 两次实测都栽在这条上：600584 那次
+    整段估值漏成未替换的占位符，是人读 report.md 才发现的；第二阶段那
+    份研报的附录如实写了「以下引用缺少原始接口快照，无法完整回查：
+    em_macro×7、eastmoney_report×13」（`audit.ok` 因此是 False），而终端
+    产物清单一个字没提。终端才是读者第一眼看到的地方——降级原因、估值
+    健全性告警、依据未逐字核验都往那里报，唯独审计自己发现的问题没有。
+
+    三类一条都不吞：占位符没被替换（读者那一段根本没有数字）、引用缺
+    快照（数字在，但反查不到原始接口响应）、裸数字（数字没经过账本）。
+    来源名去重后再列——原始列表按脚注逐条追加，em_macro 重复 7 次，
+    照抄只会刷屏；读者要知道的是哪几个来源、总共多少条。
     """
-    if not res.unrendered:
+    parts: list[str] = []
+    if res.unrendered:
+        parts.append(f"{len(res.unrendered)} 个未替换的占位符（正文里仍是"
+                     "原样的占位符，读者看不到真实数字）："
+                     + "、".join(res.unrendered[:6]))
+    if res.missing_snapshots:
+        seen: list[str] = []
+        for x in res.missing_snapshots:
+            if x not in seen:
+                seen.append(x)
+        parts.append(f"{len(res.missing_snapshots)} 条引用缺少原始接口快照"
+                     "（数字在，但反查不到当时的接口响应），来源："
+                     + "、".join(seen[:6]))
+    if res.bare_numbers:
+        parts.append(f"{len(res.bare_numbers)} 个未经账本的裸数字："
+                     + "、".join(res.bare_numbers[:6]))
+    if not parts:
         return ""
-    return (f"{what}有 {len(res.unrendered)} 个未替换的占位符（正文里仍是"
-            f"原样的占位符，读者看不到真实数字）："
-            + "、".join(res.unrendered[:6]))
+    return f"{what}审计未通过：" + "；".join(parts)
 
 
 def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
@@ -1144,8 +1186,8 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
             skipped.append(f"估值健全性：{x}")
 
     cost = 0.0
-    # 放宽因子依据审核的代价要跟着交付物走，见 `_unverified_disclosure`。
-    caveat, unverified_md = _unverified_disclosure(a)
+    # 判断项的软处（依据未逐字核验 / 取值是估计）要跟着交付物走，见 `_assumption_caveats`。
+    caveat, caveats_md = _assumption_caveats(a)
     if dcf_res is not None:
         full, cost, ferr = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), caveat=caveat)
@@ -1156,7 +1198,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
             # 附录追加在 `audit()` **之后**：它是代码写的、不是模型写的，
             # 里面的行数不该被当成正文里的裸数字（与数据来源附录同一处
             # 待遇）。
-            (out / REPORT).write_text(r.audit.with_sources() + unverified_md,
+            (out / REPORT).write_text(r.audit.with_sources() + caveats_md,
                                       encoding="utf-8")
             arts["完整研报"] = str(out / REPORT)
             if (note := _audit_note("完整研报", r.audit)):
