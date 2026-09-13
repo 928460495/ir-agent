@@ -868,7 +868,25 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
     if not all_estimated:
         problems = validate(flat, ledger=ledger, body=body, as_of=as_of)
         if problems:
-            raise AssumeFailed("依据不可核验：" + "；".join(problems))
+            msg = "依据不可核验：" + "；".join(problems)
+            if decomps and any("在正文中找不到" in p for p in problems):
+                # **驳回必须是可满足的，而且要让对方看得见满足的方式。**
+                # 原来的消息只说「找不到 —— 与凭空捏造无异」，没说该怎么
+                # 办，于是模型的自然反应是再换一句引文重试——而它换来的
+                # 往往还是转述（实测 600584：「上游议价能力弱意味着公司对
+                # 设备与原材料价格波动的传导能力有限」「修复但未完全追平」
+                # 都是对正文含义的概括，正文里没有逐字对应），三次耗尽后
+                # 整个分解被丢掉、退回两标量。
+                #
+                # 它其实有合法出路（那几个因子的采集状态就是「无数据」，
+                # 可以走出口二），只是驳回时没人告诉它。把出路写进错误
+                # 消息里，重试循环才可能收敛。
+                msg += ("　引文必须与正文**逐字一致**（直接复制，不要转述、"
+                        "概括或改写）。若你要表达的意思在正文里没有逐字"
+                        "对应的句子，不要硬凑引文——改引该因子自己采集到"
+                        "的证据原文；该因子若确实没有数据，就写"
+                        "「无数据（估计）」，把你的推理放进理由列。")
+            raise AssumeFailed(msg)
 
 
 def _check_scalar(a: AssumptionSet, years: int) -> None:

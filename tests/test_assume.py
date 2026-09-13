@@ -1752,3 +1752,65 @@ def test_提示词说明同上的精确含义():
     assert "同上" in txt
     assert "同一因子" in txt or "同一个因子" in txt
     assert "第一次出现该因子时必须给出完整依据" in txt or "第一次出现" in txt
+
+
+def test_因子模式引文驳回要给出合法出路():
+    """**驳回必须是可满足的，而且要让对方看得见满足的方式。**
+
+    实测教训（600584 诊断实跑）：模型在依据列写的是对正文含义的转述
+    （「上游议价能力弱意味着公司对设备与原材料价格波动的传导能力有限」
+    「修复但未完全追平」），正文里没有逐字对应。原来的驳回只说「在正文
+    中找不到 —— 与凭空捏造无异」，没说该怎么办，于是模型再换一句引文
+    重试——换来的还是转述，三次耗尽，整个分解被丢掉退回两标量。
+
+    它其实有合法出路（那些因子的采集状态就是「无数据」），只是驳回时
+    没人告诉它。错误消息必须把出路一并给出，重试循环才可能收敛。
+    """
+    from datetime import date
+    from decimal import Decimal as D
+
+    import pytest
+
+    from ir_agent import assume as A
+    from ir_agent.basis import Basis
+    from ir_agent.drivers import Decomposition, Factor, Op
+    from ir_agent.ledger import FactLedger
+
+    cap = Factor(key="cap", label="产能规模", unit="变化率")
+    rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[cap])
+    a = A.AssumptionSet(code="600584", labels=["2026E"])
+    a.decomps = [rev]
+    a.rows = [A.Row(driver="revenue", year=1, bear=D("-0.02"), base=D("0.03"),
+                    bull=D("0.08"), note="理由", factor_key="cap",
+                    bases=[Basis.report("修复但未完全追平")])]
+
+    with pytest.raises(A.AssumeFailed) as ei:
+        A.check(a, 1, ledger=FactLedger(), body="正文里没有这句话",
+                as_of=date(2026, 9, 12), decomps=[rev],
+                base_margin=D("0.1415"))
+    msg = str(ei.value)
+    assert "在正文中找不到" in msg, "原有的诊断信息不能丢"
+    assert "逐字" in msg, "要说清引文必须逐字，不能转述"
+    assert "无数据（估计）" in msg, "要把出口二这条合法出路指出来"
+
+
+def test_两标量模式的引文驳回不附加因子出路():
+    """回归锁：出口二只存在于因子模式，两标量模式不该看到这段指引
+    ——那会让人以为标量假设也能写「无数据（估计）」。"""
+    from datetime import date
+    from decimal import Decimal as D
+
+    import pytest
+
+    from ir_agent import assume as A
+    from ir_agent.basis import Basis
+    from ir_agent.ledger import FactLedger
+
+    a = A.AssumptionSet(code="600584", labels=["2026E"])
+    a.rows = [A.Row(driver="growth", year=1, bear=D("-0.02"), base=D("0.03"),
+                    bull=D("0.08"), note="理由",
+                    bases=[Basis.report("正文里没有的话")])]
+    with pytest.raises(A.AssumeFailed) as ei:
+        A.check(a, 1, ledger=FactLedger(), body="别的内容",
+                as_of=date(2026, 9, 12))
+    assert "无数据（估计）" not in str(ei.value)
