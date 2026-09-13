@@ -915,6 +915,19 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
     all_estimated = bool(a.rows) and decomps and all(not r.bases for r in a.rows)
     if all_estimated:
         return
+    # 上面那条出口之外，"整批一条依据都没给"这道全局闸门必须原样保留。
+    # 放宽把整批核验（`validate(flat)`）改成了逐行逐依据核验，而逐行
+    # 循环对空 `bases` 的行直接跳过——因子模式没事（空 `bases` 是
+    # 「无数据（估计）」这条合法出口，`_check_factors` 另有"没给理由
+    # 就驳回"兜底），**两标量模式却没有任何兜底**：`_parse_scalar` 里
+    # 缺依据必然抛错，但 `check()` 会在人工核实之后、`from_json` 读回
+    # 时脱离解析器再跑一遍（`full.run_valuation`），人手把 `bases` 清空
+    # 就能一路通过。这道门守的是真实踩过的事故（见
+    # `test_依据跨阶段存活`：依据没跨阶段带过去，读回来一律"未提供任何
+    # 依据"而拒绝建模——门是对的）。这次放宽只针对因子引文，不该顺手
+    # 把它拆掉。
+    if not any(r.bases for r in a.rows):
+        raise AssumeFailed("依据不可核验：未提供任何依据。")
     # **放宽因子模式的引文审核（用户明确决定）**：真实实跑（600584，
     # 9 因子×5 年×3 档=45 行）显示逐字引文这道闸门约拦下一半产出，卡点
     # 几乎都是模型对正文含义的**概括**而非**捏造**——「上游议价能力弱

@@ -1860,6 +1860,34 @@ def test_两标量模式对同款引文场景仍然驳回_回归锁():
         assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
 
 
+def test_两标量模式一条依据都没给仍然驳回_全局闸门不能被顺手拆掉():
+    """**回归锁：放宽因子引文，不能把「整批一条依据都没给」这道全局
+    闸门一起拆掉。**
+
+    这道门守的是真实踩过的事故（见 `test_依据跨阶段存活` 的记录：
+    「读回来的假设一律『未提供任何依据』而拒绝建模 —— 门是对的」）。
+    它原来由 `validate(flat)` 在 `flat` 为空时提供；放宽把整批核验
+    改成了逐行逐依据核验，而逐行循环对空 `bases` 的行直接 `continue`
+    ——因子模式没事（空 `bases` 是「无数据（估计）」这条合法出口，
+    `_check_factors` 另有「没给理由就驳回」兜底），**两标量模式却
+    没有任何兜底**：`_parse_scalar` 走 `_basis()` 时缺依据必然抛错，
+    但 `check()` 会在人工核实之后、`from_json` 读回时脱离解析器再跑
+    一遍（`full.run_valuation`），人手改 JSON 把 `bases` 清空就能一路
+    通过——依据被抹掉了，建模照做。
+
+    两标量模式是因子模式连续被拒后的降级路径，正是最容易被忽视的
+    那条；这次放宽明确只针对因子行，它必须原样硬。"""
+    a = assume.AssumptionSet(code="600584", labels=["2026E"])
+    a.rows = [
+        assume.Row(driver="growth", year=1, bear=D("-0.02"), base=D("0.03"),
+                  bull=D("0.08"), note="理由", bases=[]),
+        assume.Row(driver="gm", year=1, bear=D("0.12"), base=D("0.14"),
+                  bull=D("0.16"), note="理由", bases=[]),
+    ]
+    with pytest.raises(AssumeFailed, match="未提供任何依据"):
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+
+
 def test_因子模式伪造账本占位符依旧驳回():
     """**放宽不能连坐到账本占位符。** `[[key@period]]` 指向账本里根本
     不存在的事实，是对账本的假陈述，且下游会拿占位符去做字符串替换
