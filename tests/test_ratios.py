@@ -185,6 +185,33 @@ def test_次新股不足四年返回实际有的():
     assert len(ratios.annual_periods(led, AS_OF)) == 2
 
 
+def test_一致预期的预测期不算已完成年度():
+    """实测复现：as_of=2026-09-12 时，一致预期对 2026/2027/2028FY 的
+    EPS 已经合法可见（披露于 as_of 之前），但这三个会计年度本身还没
+    结束。`annual_periods` 此前只按「披露时点 ≤ as_of」过滤（挡的是
+    未来函数），没有再问一句「这个年度是不是已经走完」——于是把
+    consensus.* 的预测期当成了「最近一个已完成年度」，
+    `_latest_annual_period` 会取到 2028FY 而不是 2025FY。
+
+    这里用真实账本形状复现：2020–2025FY 是实绩，2026/2027/2028FY
+    只有 consensus.* 系列的键（一致预期），披露于 as_of 之前。"""
+    led = FactLedger()
+    for y in range(2020, 2026):
+        for k, v in BASE.items():
+            led.put(Fact(key=k, value=D(str(v)), unit="元",
+                        period=f"{y}FY", as_of=date(y + 1, 4, 1),
+                        source_id="t", method=Method.REPORTED))
+    for y in (2026, 2027, 2028):
+        led.put(Fact(key="consensus.eps", value=D("1.0"), unit="currency",
+                    period=f"{y}FY", as_of=date(2026, 1, 1),
+                    source_id="eastmoney_report", method=Method.REPORTED))
+
+    as_of = date(2026, 9, 12)
+    periods = ratios.annual_periods(led, as_of, years=6)
+    assert periods == [f"{y}FY" for y in range(2020, 2026)], \
+        f"预测期混进了已完成年度列表：{periods}"
+
+
 def test_趋势方向是结论():
     led = _multi({
         "2021FY": {**BASE, "current_assets": 400},

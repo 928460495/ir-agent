@@ -29,6 +29,7 @@ from ir_agent.metrics import (
 )
 from ir_agent.operators.base import derive
 from ir_agent.periods import UnknownPeriod
+from ir_agent.periods import period_end_date
 from ir_agent.periods import sort_key as period_key
 from ir_agent.sources.eastmoney import CompanyType
 
@@ -280,14 +281,38 @@ def compute(ledger: FactLedger, period: str, as_of: date,
 
 def annual_periods(ledger: FactLedger, as_of: date,
                    years: int = TREND_YEARS) -> list[str]:
-    """时点内可见的最近若干个年度期间，早到晚。
+    """**已经结束**的最近若干个年度期间，早到晚 —— 不是预测期。
 
     课程要求四年趋势。次新股不足四年时**返回实际有的**，
     由调用方说明样本长度 —— 凑不出四年是标的的事实，不是缺陷。
+
+    教训（实测复现过一次）：这里原来只按「披露时点 ≤ as_of」过滤
+    （挡 `LookAheadError`，即未来函数），没有再问一句「这个年度是不是
+    已经走完」。「披露时点」与「期间是否已经结束」是两件不同的事 ——
+    一份对 2028 年的卖方一致预期完全可以披露于 2026 年、合法可见，
+    但 2028FY 这个会计年度显然没结束。此前的写法会把 `consensus.*`
+    这类对未来年度的键当成「最近的年度」选中，取到的毛利率基期就变成
+    了「未来年度」（对应实绩事实根本不存在，取到 None），与
+    `assume._base_margin_of`（走 calibrate 的年度历史序列，天然只有
+    已完成年度）分叉——正是这个分支反复在防的那类「人批准的和模型
+    用的不是同一个数」的失败。所以在披露时点过滤之外，再按
+    `period_end_date` 挡一道：期间的日历终止日必须 ≤ as_of。
+
+    **不要因为要放行更多期间就删掉这道过滤** —— 四个生产调用方
+    （本模块的 6 年趋势、`full._latest_annual_period`、
+    `assume._historical_series` 残差回算、比率趋势）要的全是已完成
+    年度，没有一个想要预测期；一致预期功能不经过这里，它按显式
+    `key@period` 直接从账本取（见 `sources/reports.py` 的
+    `consensus_facts` 与 `corpus.py` 的引用），过滤掉预测期不影响它。
     """
     seen: set[str] = set()
     for key, per in ledger._facts:                       # noqa: SLF001
         if not per.endswith("FY"):
+            continue
+        try:
+            if period_end_date(per) > as_of:
+                continue
+        except UnknownPeriod:
             continue
         try:
             ledger.get(key, per, as_of=as_of)

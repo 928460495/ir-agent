@@ -679,6 +679,16 @@ def test_base_margin与full用的是同一个数():
     是同一个数——不能只测 assume 这一侧，两处各算各的才是这个 bug
     真正的危害所在（full.py 用账本年度值，assume 曾经用 gm_hist 末项，
     分歧只是因为这个值最终只喂进一个对基期免疫的单调性校验才没暴露）。
+
+    这条测试当初没覆盖「账本里混有一致预期的预测期」这个场景——
+    C3 之后又实测复现了一次分叉：`full._latest_annual_period` 内部靠
+    `ratios.annual_periods` 找「最近一个完整年度」，而 `annual_periods`
+    此前只按披露时点过滤、不问期间是否已经结束，账本里一旦有
+    consensus.* 在 2026/2027/2028FY 这类未来期间上的键，就会被
+    误当成「最近的年度」取到 2028FY（对应的 gross_margin 事实并不
+    存在，取到 None）。这里不再手工把 "2025FY" 传给 `_fact_value`，
+    而是先跑 `_latest_annual_period` 拿到期间、再取值——这样才会真的
+    走到 `annual_periods` 里去，复现（或验证修复）这条链路。
     """
     from ir_agent import full
     annual = ["20211231", "20221231", "20231231", "20241231", "20251231"]
@@ -686,7 +696,17 @@ def test_base_margin与full用的是同一个数():
               g_hist=[0.1069, -0.1215, 0.2124, 0.0809])
     led = FactLedger()
     _put(led, "gross_margin", "2025FY", "0.1415")
-    got_full = full._fact_value(led, "gross_margin", "2025FY", AS_OF)
+    # 一致预期对未来三个年度的 EPS——披露于 AS_OF 之前，合法可见，
+    # 但这三个会计年度本身还没结束，不该被当成「最近一个完整年度」。
+    for y in (2026, 2027, 2028):
+        _put(led, "consensus.eps", f"{y}FY", "1.0")
+
+    latest = full._latest_annual_period(led, AS_OF)
+    assert latest == "2025FY", \
+        f"预测期混进了年度期间列表，取到了 {latest}"
+    got_full = full._fact_value(led, "gross_margin", latest, AS_OF)
+    assert got_full is not None, "基期毛利率取到了 None——判断项清单会显示" \
+        "「基期毛利率未知」，人批准时看不到合成后的毛利率"
     got_assume = assume._base_margin_of(cal)
     assert got_full == D("0.1415")
     assert D(str(got_full)) == got_assume, \

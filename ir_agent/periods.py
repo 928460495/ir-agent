@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import calendar
 import re
+from datetime import date
 
 # 累计口径截止月份。半年报叫 H1 而不是 Q2，这是账本沿用的标签，不是笔误。
 _END_MONTH = {
@@ -50,6 +52,39 @@ def sort_key(period: str) -> tuple[int, int, int]:
         if month is None:
             raise UnknownPeriod(period)
         return year, month, 0 if single else 31
+
+    raise UnknownPeriod(period)
+
+
+def period_end_date(period: str) -> date:
+    """该期间覆盖范围的真实日历终止日 —— 用于判断「这个期间是否已经
+    结束」，这与 `sort_key` 要回答的问题不是一回事。
+
+    踩过的教训（annual_periods 曾经的 bug）：账本的 `as_of` 时点守卫
+    回答的是「**披露时点**是否已到」，一份对 2028 年的卖方一致预期
+    可以披露于 2026 年、完全合法可见 —— 但 2028FY 这个**会计年度**
+    显然没有结束。「披露时点 ≤ as_of」不等于「期间已经结束」，混用
+    这两者会把预测期误当成已完成期间。`sort_key` 给单季标签（如
+    `Q3S`）的日占位是 0，是排序用的哨兵值，不是日历日期，不能拿来
+    做这个判断，所以另开一个函数、不复用 `sort_key` 的返回值。
+    """
+    m = _DAILY.match(period)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+    m = _MONTHLY.match(period)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        return date(year, month, calendar.monthrange(year, month)[1])
+
+    m = _ACCOUNTING.match(period)
+    if m:
+        year, tag = int(m.group(1)), m.group(2)
+        base = tag[:-1] if tag.endswith("S") else tag
+        month = _END_MONTH.get(base)
+        if month is None:
+            raise UnknownPeriod(period)
+        return date(year, month, calendar.monthrange(year, month)[1])
 
     raise UnknownPeriod(period)
 
