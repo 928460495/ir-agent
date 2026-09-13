@@ -534,3 +534,55 @@ def test_判断项环节的接口错误降级而不抛出(tmp_path, monkeypatch)
     assert err, "接口错误必须作为非致命说明返回，而不是抛出"
     assert "ClaudeCliError" in err, "说明里要点明是接口错误，便于排查"
     assert "session limit" in err, "原始错误信息要带上，不能只说失败"
+
+
+def test_因子模式降级时完整原始输出要落盘(tmp_path, monkeypatch):
+    """**排查工具本身也要能用。**
+
+    实测教训：因子模式一次要输出几十行（600584 真实分解式是 9 因子 ×
+    5 年 = 45 行），故障常出在中段，而降级说明里只放得下末 400 字。
+    连续几轮排查都只能靠残缺的尾巴反推模型写成了什么格式——最后一次
+    是从 400 字尾巴里认出「贡献**（无数据，估计——依据：…）」这个
+    片段，才判断出模型改用了散文式条目而不是管道分隔行。
+
+    完整草稿必须落盘，但不能混进 assumptions.md——那是给人批准的清单。
+    """
+    from datetime import date
+    from decimal import Decimal
+
+    from ir_agent import assume, dcf, full
+    from ir_agent.ledger import FactLedger
+
+    monkeypatch.setattr(
+        dcf, "calibrate_only",
+        lambda code, as_of, ledger: {
+            "judg": {"g_stats": (), "gm_stats": ()},
+            "periods": {"proj": ["2026E"]}})
+
+    full_raw = "行一\n" * 200 + "中段才出问题的那一行"
+
+    def _fake_decide(client, judg, labels, ctx, **kw):
+        a = assume.AssumptionSet(code="600584", labels=labels)
+        a.degraded = "因子模式连续 3 次填不出合格的判断项"
+        a.degraded_raw = full_raw
+        a.rows = [assume.Row(driver="growth", year=1, bear=Decimal("0.02"),
+                             base=Decimal("0.06"), bull=Decimal("0.10"),
+                             note="x", bases=[])]
+        return a
+    monkeypatch.setattr(assume, "decide", _fake_decide)
+
+    class _R:
+        ledger = FactLedger()
+        period = "2025FY"
+
+    arts: dict[str, str] = {}
+    full._propose_assumptions("600584", _R(), "body", {}, date(2026, 9, 7),
+                              tmp_path, lambda p: "", arts)
+
+    dumped = tmp_path / full.FAILED_RAW
+    assert dumped.exists(), "降级时完整原始输出必须落盘"
+    assert dumped.read_text(encoding="utf-8") == full_raw, "要完整，不能截断"
+    assert "因子模式失败时的原始输出" in arts, "产物清单要指向它"
+    assert "中段才出问题的那一行" not in (
+        tmp_path / full.ASSUMPTIONS_MD).read_text(encoding="utf-8"), \
+        "失败草稿不能混进给人批准的清单"

@@ -40,7 +40,16 @@ from ir_agent.operators.ratios import annual_periods
 
 
 class AssumeFailed(Exception):
-    """假设不可核验或自相矛盾 —— 拒绝交给建模。"""
+    """假设不可核验或自相矛盾 —— 拒绝交给建模。
+
+    `raw` 带着最后一次的**完整**模型输出（没有的话是空串）。消息里只放
+    得下末 400 字，而因子模式一次要输出几十行，故障往往在中段——只看
+    尾巴等于让每一次排查都变成靠数字形状猜。调用方拿到它应落盘。
+    """
+
+    def __init__(self, *args, raw: str = ""):
+        super().__init__(*args)
+        self.raw = raw
 
 
 class Case(str, Enum):
@@ -224,6 +233,9 @@ class AssumptionSet:
     # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
     # 「降级但继续」不能悄悄发生，人必须一眼看到这轮其实是降级产出的。
     degraded: str = ""
+    # 降级时最后一次的**完整**模型输出，供调用方落盘排查（见 AssumeFailed.raw）。
+    # 不进 describe()——它是给人批准用的清单，不该混进几十行失败草稿。
+    degraded_raw: str = ""
 
     def path(self, driver: str, case: Case) -> list[Decimal]:
         got = sorted((r for r in self.rows if r.driver == driver),
@@ -1195,7 +1207,8 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
         return a
     raise AssumeFailed(
         f"连续 {max_attempts} 次给不出可核验的假设：{last}"
-        f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}")
+        f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}",
+        raw=raw)
 
 
 def decide(client, judg: dict, labels: list[str], context: str, *,
@@ -1227,6 +1240,7 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
                          body=body, as_of=as_of, code=code,
                          max_attempts=max_attempts, decomps=None,
                          factor_data=None, base_margin=None)
+        a.degraded_raw = getattr(e, "raw", "")
         a.degraded = (f"因子模式连续 {max_attempts} 次填不出合格的判断项"
                       f"（{str(e)[:160]}）—— 已退回两标量模式（营收增速/"
                       "毛利率），损失的是因子层面的精度，不是担保")

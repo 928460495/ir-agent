@@ -586,6 +586,7 @@ BRIEF = "brief.md"
 REPORT = "report.md"
 ASSUMPTIONS_MD = "assumptions.md"
 ASSUMPTIONS_JSON = "assumptions.json"
+FAILED_RAW = "assumptions_failed_raw.txt"
 STATE = "state.json"
 # 方法论预研（Task 4）的产出 —— 分解式落盘为独立文件，而不是塞进
 # brief.md 的某一段：它要在数据采集之前就能被人看到、改坏了可以直接
@@ -876,6 +877,13 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                                   approved_at=""),
                    ensure_ascii=False, indent=2), encoding="utf-8")
     arts["DCF 判断项（待核实）"] = str(out / ASSUMPTIONS_MD)
+    if getattr(a, "degraded_raw", ""):
+        # 降级时把最后一次的**完整**模型输出落盘。此前只有末 400 字进了
+        # 降级说明，而因子模式一次要输出几十行、故障常在中段——实测排查
+        # 时只能靠残缺的尾巴反推格式，每一轮都是猜。这份草稿不进
+        # assumptions.md（那是给人批准的清单，不该混进失败稿），单独成文件。
+        (out / FAILED_RAW).write_text(a.degraded_raw, encoding="utf-8")
+        arts["因子模式失败时的原始输出"] = str(out / FAILED_RAW)
     # I4：因子模式连续失败后 assume.decide 会退回两标量模式，不是抛错——
     # 判断项照常写出，但降级这件事不能只留在 assumptions.md 里，终端的
     # skipped 清单是读者第一眼看到的地方，同一条原因要在这里再报一次。
