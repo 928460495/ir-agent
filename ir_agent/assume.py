@@ -351,8 +351,7 @@ class AssumptionSet:
         汇总一段，按因子、按年份列出，让人一眼看出哪些判断项的依据
         没有通过逐字核验、需要多担一分心去复核，而不是与核验通过的
         行混在一起被当成同等可信。"""
-        labels = sorted({f"{_row_label(r, self.decomps)}第{r.year}年"
-                         for r in self.rows if r.factor_key and r.basis_unverified})
+        labels = unverified_labels(self)
         if not labels:
             return []
         return ["⚠ **以下因子的依据未能逐字核验**"
@@ -1480,6 +1479,17 @@ def _base_margin_of(cal: dict) -> Decimal:
             "条件筛出来是 0 项）。请检查 calibrate 输出里这几项是否完整，"
             "同样不能退回默认预测值当基期。")
     return Decimal(str(annual[-1]))
+
+
+def unverified_labels(a: AssumptionSet) -> list[str]:
+    """哪些因子的哪些年份，依据没能逐字核验。空列表 = 全部核验通过。
+
+    **单一定义。** 待核实清单（`describe()`）与最终研报的声明
+    （`full._unverified_disclosure`）都用它——两处各写一遍"怎么给这些行
+    起名"，早晚会分叉成人在清单上看到的和研报里写的对不上号。
+    """
+    return sorted({f"{_row_label(r, a.decomps)}第{r.year}年"
+                   for r in a.rows if r.factor_key and r.basis_unverified})
 
 
 def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:

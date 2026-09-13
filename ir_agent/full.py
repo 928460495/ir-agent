@@ -780,6 +780,45 @@ def _review_stage(arts: dict):
         "但估值尚无从谈起")
 
 
+def _unverified_disclosure(a) -> tuple[str, str]:
+    """放宽的代价要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
+
+    因子依据从「核验不过就驳回」改成「标注后放行」之后，
+    `Row.basis_unverified` 只到 assumptions.md 与终端 skipped——而对外
+    传阅的是 report.md，读者在那里看不到「这份估值有几个判断项的依据
+    没能逐字核验」。本仓库自己的标准（`AuditResult.with_sources` 的
+    文档）：算出来了不交付，等于没兑现。
+
+    两个出口分开给，因为约束不同：
+
+    - **进提示词的那句不能带数字。** 研报正文的每个数字都必须写成占位符，
+      模型照抄一句「12 行」会被裸数字审计判掉——等于我自己给自己埋雷。
+      所以这句只讲事实、不讲数量，具体几行去看 assumptions.md。
+    - **附录在 `audit()` 之后追加**（与数据来源附录同一处待遇），因此
+      可以带准确行数与具体是哪些因子哪些年份。
+    """
+    from ir_agent import assume
+
+    labels = assume.unverified_labels(a)
+    if not labels:
+        return "", ""
+    prompt_line = (
+        "**注意：部分 DCF 判断项的依据未能逐字核验**（具体哪些行见待核实"
+        "清单 assumptions.md 上的标注）——这些判断项的出处是转述而非原文"
+        "引用。撰写估值一节时必须如实说明这一点，不要把它们写得与有确凿"
+        "出处的判断项同等确定。")
+    appendix = "\n".join([
+        "", "---", "", "## ⚠ 判断项依据核验", "",
+        f"本报告的估值建立在人工批准的 DCF 判断项之上，其中 {len(labels)} "
+        "项的依据**未能在来源里逐字核验**（已在 assumptions.md 上逐行"
+        "标注，人工批准时可见）：",
+        "", "、".join(labels), "",
+        "这是一次有意的取舍：因子分解的依据允许转述，换来分解能真正跑通；"
+        "代价是这些数字的出处无法被逐字反查。请据此调整对相应判断项的"
+        "信任度——它们未必错，但没有原文替它们背书。", ""])
+    return prompt_line, appendix
+
+
 def _report_stage(stage, arts: dict):
     """完整研报没写出来就不算「已建模完成」。
 
@@ -1105,14 +1144,20 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
             skipped.append(f"估值健全性：{x}")
 
     cost = 0.0
+    # 放宽因子依据审核的代价要跟着交付物走，见 `_unverified_disclosure`。
+    caveat, unverified_md = _unverified_disclosure(a)
     if dcf_res is not None:
         full, cost, ferr = _write_full_report(
-            code, r, body, model, dcf_res, _prompt_bundle(pr))
+            code, r, body, model, dcf_res, _prompt_bundle(pr), caveat=caveat)
         if ferr:
             skipped.append(ferr)
         if full:
             r.audit = audit(full, r.ledger, r.store, as_of=r.as_of)
-            (out / REPORT).write_text(r.audit.with_sources(), encoding="utf-8")
+            # 附录追加在 `audit()` **之后**：它是代码写的、不是模型写的，
+            # 里面的行数不该被当成正文里的裸数字（与数据来源附录同一处
+            # 待遇）。
+            (out / REPORT).write_text(r.audit.with_sources() + unverified_md,
+                                      encoding="utf-8")
             arts["完整研报"] = str(out / REPORT)
             if (note := _audit_note("完整研报", r.audit)):
                 skipped.append(note)
@@ -1140,7 +1185,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         cost_usd=Decimal(str(cost)), route_reason=reason)
 
 
-def _write_full_report(code, r, brief, model, dcf_res, bundle):
+def _write_full_report(code, r, brief, model, dcf_res, bundle, caveat=""):
     """在简报之上补出完整研报 —— 第 8 节要拿估值结果与前面各节对账。"""
     from ir_agent.analyst import FactCatalog, write_body
 
@@ -1154,7 +1199,8 @@ def _write_full_report(code, r, brief, model, dcf_res, bundle):
     try:
         print("撰写完整研报（含估值一节）…", file=sys.stderr)
         full, _ = write_body(cat, client, code=code, period=r.period,
-                             valuation_summary=dcf_res.summary(),
+                             valuation_summary=(dcf_res.summary()
+                                                + ("\n\n" + caveat if caveat else "")),
                              context=f"**已完成的分析简报**\n\n{brief}",
                              **{k: v or None for k, v in bundle.items()})
         return full, client.total_cost_usd, ""

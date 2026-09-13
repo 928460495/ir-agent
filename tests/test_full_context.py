@@ -824,3 +824,74 @@ def test_未跑完时的重跑指引要看目录里到底有什么(tmp_path):
     joined = "".join(acts2)
     assert "--value" in joined and "--approved-by" in joined
     assert "--analyse" not in joined, "判断项还在，不能教人重做第一阶段把它覆盖掉"
+
+
+def _unverified_set():
+    from decimal import Decimal as D
+    from ir_agent import assume
+    from ir_agent.drivers import Decomposition, Factor, Op
+    cap = Factor(key="cap", label="产能规模", unit="变化率")
+    rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[cap])
+    a = assume.AssumptionSet(code="600584", labels=["2026E"], decomps=[rev])
+    a.rows = [
+        assume.Row(driver="revenue", year=1, bear=D("-0.02"), base=D("0.03"),
+                   bull=D("0.08"), note="理由", factor_key="cap",
+                   bases=[assume.Basis.report("修复但未完全追平")],
+                   basis_unverified="引文在正文中找不到"),
+        assume.Row(driver="revenue", year=2, bear=D("-0.01"), base=D("0.04"),
+                   bull=D("0.09"), note="理由", factor_key="cap",
+                   bases=[assume.Basis.report("真引文")]),
+    ]
+    return a
+
+
+def test_依据未核验要写进最终研报而不是只留在批准清单():
+    """**放宽的代价必须跟着交付物走。** 因子依据从「核验不过就驳回」改成
+    「标注后放行」之后，`basis_unverified` 只到 assumptions.md 与终端
+    skipped——而对外传阅的是 report.md，读者在那里看不到「这份估值有几个
+    判断项的依据没能逐字核验」。
+
+    本仓库自己的原则（`AuditResult.with_sources` 的文档）：脚注「算了不
+    交付等于没兑现」。同一条标准适用于这里。
+
+    两个出口分开给，因为约束不同：
+    - 进提示词的那句**不能带数字**——研报正文的每个数字都必须是占位符，
+      模型照抄一句「12 行」会被裸数字审计判掉，等于我自己给自己埋雷。
+    - 进 report.md 的附录块在 `audit()` 之后追加（与数据来源附录同一处
+      待遇），可以带准确行数与具体是哪些因子哪些年份。
+    """
+    import re
+    from ir_agent import full
+
+    prompt_line, appendix = full._unverified_disclosure(_unverified_set())
+
+    assert prompt_line and "逐字核验" in prompt_line
+    assert not re.search(r"\d", prompt_line), \
+        "进提示词的这句不能带数字，否则模型照抄会被裸数字审计判掉"
+
+    assert "1" in appendix, "附录要给准确行数"
+    assert "产能规模第1年" in appendix
+    assert "assumptions.md" in appendix, "要指路到标注在哪"
+    assert "产能规模第2年" not in appendix, "核验通过的行不该被写成未核验"
+
+
+def test_全部依据都核验通过时不加这一段():
+    from ir_agent import full
+    a = _unverified_set()
+    a.rows[0].basis_unverified = ""
+    assert full._unverified_disclosure(a) == ("", "")
+
+
+def test_未核验声明真的接进了第二阶段():
+    """光有函数不算数：附录要追加进 report.md（且在 audit 之后，附录里的
+    数字不该被当成正文裸数字），那句话要真的进撰写提示词。"""
+    import inspect
+    from ir_agent import full
+
+    src = inspect.getsource(full.run_valuation)
+    assert "_unverified_disclosure(" in src
+    assert src.index("audit(full") < src.index("REPORT"), "附录必须追加在审计之后"
+    assert "_unverified_disclosure(" in src
+
+    wsrc = inspect.getsource(full._write_full_report)
+    assert "caveat" in wsrc and "valuation_summary" in wsrc
