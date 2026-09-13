@@ -662,3 +662,24 @@ def test_第二阶段先重建派生事实再校验批准的假设():
     i_base = src.index("_latest_annual_period(r.ledger, as_of)")
     assert i_rebuild < i_base, \
         "基期毛利率取自派生层的 gross_margin，也要在重建之后再取"
+
+
+def test_未替换的占位符要进终端产物清单():
+    """**文件附录里写了不等于交付了。** 600584 实测那次，整段估值漏成
+    未替换的占位符，人是读 report.md 才发现的——而终端的 skipped 清单
+    才是读者第一眼看到的地方，降级原因、健全性告警、依据未核验都往那里
+    报，唯独审计发现的"占位符没被替换"没有。
+
+    这里钉住的是那条通道本身：审计不通过时必须给出一句非致命说明，供
+    `run_analysis`/`run_valuation` 塞进 `skipped`。"""
+    from ir_agent import full
+    from ir_agent.audit import AuditResult
+
+    bad = AuditResult(rendered="每股 [[valuation.value_per_share]]",
+                      unrendered=["[[valuation.value_per_share]]"])
+    note = full._audit_note("完整研报", bad)
+    assert "完整研报" in note and "未替换" in note
+    assert "[[valuation.value_per_share]]" in note
+
+    good = AuditResult(rendered="每股 28.92 元")
+    assert full._audit_note("完整研报", good) == ""

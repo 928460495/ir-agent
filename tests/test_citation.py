@@ -324,3 +324,60 @@ class Test期间标签白名单的实测缺口:
         """回归锁：`1.5`是小数，不能因为后面紧跟顿号就被误判成序号——
         序号要求前面不是数字或小数点。"""
         assert audit_bare_numbers("1.5、2.3两个假设区间") != []
+
+
+class TestUnrenderedPlaceholdersAreCaught:
+    """**没有一道闸门查「占位符有没有被替换」。**
+
+    实测教训（600584 端到端，用户亲自读到）：`dcf.summary()` 写的是
+    `[[valuation.wacc]]`——少了 `@period`，`REF_RE` 压根不认它是占位符，
+    于是 `REF_RE.sub` 看都没看见，整段估值原样漏进最终交付的 report.md，
+    真实数字只出现在终端。它穿过了全部四道闸门：每一道查的都是「占位符
+    用得对不对」（格式合法吗、指向的事实存在吗、期间同源吗），
+    **没有一道查「占位符有没有被替换」**。
+
+    2481cde 修的是那一个产出端（补上 @period），闸门本身一直没有。
+    这里补的就是闸门：`render()` 之后正文里若还留着 `[[...]]` 形状的
+    东西，那就是没被替换——不管它为什么没被替换，都不能算验收通过。
+    """
+
+    def _audit(self, draft):
+        import tempfile
+        from datetime import date
+        from ir_agent.audit import audit
+        from ir_agent.ledger import FactLedger
+        from ir_agent.sources.snapshot import SnapshotStore
+        with tempfile.TemporaryDirectory() as d:
+            return audit(draft, FactLedger(), SnapshotStore(d),
+                         as_of=date(2026, 9, 12))
+
+    def test_畸形占位符漏进正文时审计判不通过(self):
+        r = self._audit("## 估值\n\n每股内在价值 [[valuation.value_per_share]]，"
+                        "WACC [[valuation.wacc]]。\n")
+        assert not r.ok, "整段估值都是未替换的占位符，不能判通过"
+        assert "[[valuation.wacc]]" in r.unrendered
+        assert "[[valuation.value_per_share]]" in r.unrendered
+        assert "未替换" in r.summary()
+
+    def test_未替换的占位符要拉低可溯源率(self):
+        """`__main__` 的验收线是 `audit.traceability == 1.0`——未替换的
+        占位符本来就是"没落地的数字"，不计进分母的话，一份一个数字都没
+        渲染出来的研报反而是满分（实测确认过：可溯源率 100.0%）。"""
+        r = self._audit("WACC [[valuation.wacc]]。")
+        assert r.traceability < 1.0
+
+    def test_正常渲染的正文不被误伤(self):
+        from datetime import date
+        from decimal import Decimal
+        import tempfile
+        from ir_agent.audit import audit
+        from ir_agent.ledger import Fact, FactLedger, Method
+        from ir_agent.sources.snapshot import SnapshotStore
+        led = FactLedger()
+        led.put(Fact(key="roe", value=Decimal("0.3"), unit="ratio",
+                     currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                     source_id="calc_roe", method=Method.COMPUTED))
+        with tempfile.TemporaryDirectory() as d:
+            r = audit("ROE [[roe@2025FY]]。", led, SnapshotStore(d),
+                      as_of=date(2026, 6, 1))
+        assert r.unrendered == [] and r.ok and r.traceability == 1.0

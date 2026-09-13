@@ -724,6 +724,22 @@ def _prompt_bundle(pr: dict) -> dict:
         consensus_summary=pr.get("外部资料", ""))
 
 
+def _audit_note(what: str, res) -> str:
+    """审计发现的"占位符没被替换"要作为非致命说明返回，供 `skipped` 用。
+
+    **写进文件附录不等于交付了。** 600584 实测那次整段估值漏成未替换的
+    占位符，是人读 report.md 才发现的——而终端的产物清单才是第一眼看到
+    的地方，降级原因、估值健全性告警、依据未逐字核验都往那里报，唯独
+    审计自己发现的问题没有。占位符没被替换意味着读者拿到的那一段根本
+    没有数字，比多数健全性告警更该被立刻看见。
+    """
+    if not res.unrendered:
+        return ""
+    return (f"{what}有 {len(res.unrendered)} 个未替换的占位符（正文里仍是"
+            f"原样的占位符，读者看不到真实数字）："
+            + "、".join(res.unrendered[:6]))
+
+
 def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
                  model: str | None = None,
                  snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
@@ -793,6 +809,8 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
         r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
         (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
         arts["研究简报"] = str(out / BRIEF)
+        if (note := _audit_note("研究简报", r.audit)):
+            skipped.append(note)
 
     # ── AI 填写 DCF 判断项 ────────────────────────────────
     stage = Stage.AWAITING_REVIEW
@@ -1024,6 +1042,8 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
             r.audit = audit(full, r.ledger, r.store, as_of=r.as_of)
             (out / REPORT).write_text(r.audit.with_sources(), encoding="utf-8")
             arts["完整研报"] = str(out / REPORT)
+            if (note := _audit_note("完整研报", r.audit)):
+                skipped.append(note)
     else:
         skipped.append("完整研报（无估值结果，第 8 节无从写起）")
 
