@@ -72,6 +72,14 @@ class DcfResult:
     reinvest_rate: Decimal
     terminal_share: Decimal          # 终值占 EV
     verified: bool                   # 公式引擎是否实跑通过
+    # 估值时点。**summary() 写占位符要用它拼 @period。** to_facts 以
+    # `as_of.isoformat()` 作为期间把 valuation.* 落进账本，而替换机制
+    # （citation.REF_RE）硬性要求 `[[key@period]]` 两段——此前 summary()
+    # 拿不到时点、只写了 `[[valuation.wacc]]`，于是那些占位符压根不被
+    # 识别为占位符，一路原样漏进最终研报（600584 端到端实测：交付的
+    # report.md 里整个估值段落是六个未替换的占位符，而真实数字只出现在
+    # 终端摘要里）。产出端与消费端对同一个契约的格式约定必须一致。
+    as_of: date | None = None
     warnings: list[str] = field(default_factory=list)
     crosscheck: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -88,11 +96,15 @@ class DcfResult:
             lines.append("  ✓ 公式引擎实跑验算通过")
         else:
             lines.append("  ✗ **公式引擎验算未通过 —— 结果不可采信**")
-        lines.append(f"  每股内在价值 [[valuation.value_per_share]]　"
-                     f"现价 [[valuation.price]]")
-        lines.append(f"  WACC [[valuation.wacc]]　终值 ROIC "
-                     f"[[valuation.terminal_roic]]　"
-                     f"终值占企业价值 [[valuation.terminal_share]]")
+        # 期间必须与 to_facts 落账本时用的一致（as_of.isoformat()），
+        # 否则 REF_RE 匹配不上、占位符不会被替换。
+        per = self.as_of.isoformat() if self.as_of else ""
+        at = f"@{per}" if per else ""
+        lines.append(f"  每股内在价值 [[valuation.value_per_share{at}]]　"
+                     f"现价 [[valuation.price{at}]]")
+        lines.append(f"  WACC [[valuation.wacc{at}]]　终值 ROIC "
+                     f"[[valuation.terminal_roic{at}]]　"
+                     f"终值占企业价值 [[valuation.terminal_share{at}]]")
         for x in self.notes:
             lines.append(f"  · {x}")
         for x in self.crosscheck:
@@ -304,6 +316,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         reinvest_rate=Decimal(str(dv["rr"])),
         terminal_share=(Decimal(str(dv["pvtv"])) / ev0 if ev0 else Decimal(0)),
         verified=not fails,
+        as_of=as_of,
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"

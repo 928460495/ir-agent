@@ -275,3 +275,50 @@ def test_估值摘要进了提示词():
     txt = build_prompt(cat, code="600584", period="2025FY",
                        valuation_summary="DCF 估值（ashare-dcf 三表模型）")
     assert "ashare-dcf 三表模型" in txt and "估值结果" in txt
+
+
+def test_估值摘要里的占位符必须能被替换机制识别():
+    """**产出端写的占位符，消费端必须真能解析。**
+
+    实测教训（600584 端到端）：`summary()` 此前写的是
+    `[[valuation.wacc]]`——没有 `@period`，而 `citation.REF_RE` 硬性要求
+    `[[key@period]]` 两段。于是这些占位符压根不被识别为占位符，一路原样
+    漏进最终交付的 report.md：整个估值段落是六个未替换的占位符，真实数字
+    （每股 28.92、WACC 9.11% 等）只出现在终端摘要里，读者拿到的研报没有
+    一个估值数字。
+
+    事实本身是入了账本的（`to_facts` 以 `as_of.isoformat()` 作期间），
+    占位符也是照契约写的——只是两端对格式的约定不一致。这条测试钉住
+    「摘要里的每一个占位符都能被 REF_RE 识别」，而不只是「摘要里有占位符」。
+    """
+    from datetime import date
+
+    from ir_agent.citation import REF_RE
+
+    as_of = date(2026, 9, 12)
+    txt = _res(as_of=as_of).summary()
+    refs = REF_RE.findall(txt)
+    assert refs, "摘要里应当有可识别的占位符"
+    keys = {k for _, k, _ in refs}
+    assert keys >= {"valuation.value_per_share", "valuation.price",
+                    "valuation.wacc", "valuation.terminal_roic",
+                    "valuation.terminal_share"}, \
+        f"估值关键项都要能被识别，实际只认出 {keys}"
+    for _, _, per in refs:
+        assert per == as_of.isoformat(), \
+            f"期间必须与 to_facts 落账本时一致（{as_of.isoformat()}），得到 {per}"
+
+
+def test_估值占位符的期间与落账本的期间一致():
+    """回归锁：占位符里的 period 与 to_facts 写进账本的 period 必须同源。
+    两边各写一次字面量，早晚会分叉——这条测试让分叉立刻可见。"""
+    from datetime import date
+
+    from ir_agent.citation import REF_RE
+    from ir_agent import dcf
+
+    as_of = date(2026, 9, 12)
+    fact_periods = {f.period for f in dcf.to_facts(_res(as_of=as_of), as_of)}
+    ref_periods = {per for _, _, per in REF_RE.findall(_res(as_of=as_of).summary())}
+    assert fact_periods == ref_periods, \
+        f"账本期间 {fact_periods} 与占位符期间 {ref_periods} 不一致"
