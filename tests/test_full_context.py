@@ -586,3 +586,34 @@ def test_因子模式降级时完整原始输出要落盘(tmp_path, monkeypatch)
     assert "中段才出问题的那一行" not in (
         tmp_path / full.ASSUMPTIONS_MD).read_text(encoding="utf-8"), \
         "失败草稿不能混进给人批准的清单"
+
+
+def test_第二阶段先重建派生事实再校验批准的假设():
+    """**重建派生事实必须排在校验之前。**
+
+    实测教训（600584 端到端）：第一阶段的判断项合法引用了
+    `[[industry.dtl@2025FY]]`（行业画像算出的派生事实，只存在于内存
+    账本）。第二阶段是新进程，账本刚从接口重建、派生层还没跑，而假设
+    校验排在重建之前——于是人已经批准，系统却在建模前一刻报「批准的
+    假设不合法，拒绝建模：依据引用的事实 industry.dtl@2025FY 在账本中
+    不存在」。理由不是假设有问题，是校验时账本还没建好，**人工批准这道
+    关卡因此被架空**。
+
+    用源码顺序断言，而不是跑一遍真流程——真流程要联网抓数、建三表模型，
+    在单测里跑不动；而这个 bug 的本质就是两行代码的先后。
+    """
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full.run_valuation)
+    i_rebuild = src.index("_analyse_facts(code, r, as_of, snapshot_dir)")
+    i_check = src.index("assume.check(")
+    assert i_rebuild < i_check, (
+        "重建派生事实必须排在 assume.check 之前，否则第一阶段合法引用的 "
+        "industry.* / comps.* / macro.* 派生事实在第二阶段校验时还不存在，"
+        "人工批准过的假设会被拒绝建模"
+    )
+    i_base = src.index("_latest_annual_period(r.ledger, as_of)")
+    assert i_rebuild < i_base, \
+        "基期毛利率取自派生层的 gross_margin，也要在重建之后再取"

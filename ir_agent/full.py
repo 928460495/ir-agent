@@ -935,6 +935,32 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # 分解模式下重新校验要用同一套 decomps/base_margin，否则 check()
     # 会退回两标量分支，把因子模式的行误判成「营收增速缺第 N 年」而
     # 拒绝建模——那不是假设真的不合法，是校验用错了口径。
+    # **人改过的数字要说出来。** 依据是为模型原来那个数写的，改了之后
+    # 它未必还支撑新数字 —— 这件事代码判断不了，但必须让读者看见。
+    # skipped 要累加而非被重建派生事实的结果整体覆盖——此前这里曾经是
+    # `_, _, skipped = _analyse_facts(...)`，edits 非空时人工调整的说明
+    # 会被那一句悄悄丢掉（edits 为空时侥幸不报错，是因为空列表压根不会
+    # 走进这个 for 循环）。
+    skipped: list[str] = []
+    for x in edits:
+        skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
+
+    # **重建派生事实必须排在校验之前。** industry.* / comps.* / macro.*
+    # 这些 key 只存在于内存账本，由 _analyse_facts 算出来；第一阶段的
+    # 判断项完全可以合法地引用它们（依据写成 [[industry.dtl@2025FY]]），
+    # 而第二阶段是一个新进程，账本刚从接口重建、还没跑派生层。
+    #
+    # 实测踩到（600584 端到端）：人已经批准，第二阶段却在建模前一刻报
+    # 「批准的假设不合法，拒绝建模：依据引用的事实 industry.dtl@2025FY
+    # 在账本中不存在」——理由不是假设有问题，是**校验时账本还没建好**。
+    # 人工批准这道关卡因此被架空：批准的东西下一步就不合法了。
+    #
+    # 这一层不调模型，代价只是几次网络抓取，提前跑没有副作用。
+    print("重建分析层事实（不调模型）…", file=sys.stderr)
+    _, _, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+    skipped += facts_skipped
+
+    # 基期毛利率也要在重建之后再取——gross_margin 同样来自派生层。
     # I4：取「最近一个完整年度」，不跟着 r.period 走——同一个理由见
     # `_propose_assumptions`，第二阶段这里必须与第一阶段用同一个基期。
     latest_annual = _latest_annual_period(r.ledger, as_of)
@@ -948,21 +974,6 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     except assume.AssumeFailed as e:
         raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")
 
-    # **人改过的数字要说出来。** 依据是为模型原来那个数写的，改了之后
-    # 它未必还支撑新数字 —— 这件事代码判断不了，但必须让读者看见。
-    # skipped 要累加而非被后面重建派生事实的结果整体覆盖——此前这里
-    # 曾经是 `_, _, skipped = _analyse_facts(...)`，edits 非空时人工
-    # 调整的说明会被这一句悄悄丢掉（edits 为空时侥幸不报错，是因为
-    # 空列表压根不会走进这个 for 循环）。
-    skipped: list[str] = []
-    for x in edits:
-        skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
-
-    # **必须重建派生事实**，否则摘要里的 [[industry.xxx]] 一个都解析不了。
-    # 这一层不调模型，代价只是几次网络抓取。
-    print("重建分析层事实（不调模型）…", file=sys.stderr)
-    _, _, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
-    skipped += facts_skipped
     md = state.get("md") or {}
     pr = state.get("pr") or {}
 
