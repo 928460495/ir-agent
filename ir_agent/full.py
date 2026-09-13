@@ -20,6 +20,7 @@ from ir_agent.debate import DebateRefused, run_debate
 from ir_agent.market import market_of
 from ir_agent import dcf
 from ir_agent.research import (
+    ASSUMPTIONS_MD,
     ResearchOutcome,
     Stage,
     assumption_template,
@@ -584,7 +585,10 @@ def _write_and_debate(r, code: str, model: str | None,
 # 建模之前不该存在一份读起来像结论的完整研报。
 BRIEF = "brief.md"
 REPORT = "report.md"
-ASSUMPTIONS_MD = "assumptions.md"
+# ASSUMPTIONS_MD 定义在 research.py 并从那里导入——`next_actions` 要按
+# 「判断项文件在不在」决定教人重跑哪一阶段，两处各写一遍同一个文件名
+# 早晚分叉（本仓库已经在占位符期间上踩过这种分叉）。research 不能反向
+# 导入 full（full 依赖 research），所以单一定义放在被依赖的那一侧。
 ASSUMPTIONS_JSON = "assumptions.json"
 FAILED_RAW = "assumptions_failed_raw.txt"
 STATE = "state.json"
@@ -774,6 +778,24 @@ def _review_stage(arts: dict):
         "本轮未产出 DCF 判断项（原因见上方未生成清单）——"
         "确定性层的产物（看板、工作簿、事实账本）仍然可用，"
         "但估值尚无从谈起")
+
+
+def _report_stage(stage, arts: dict):
+    """完整研报没写出来就不算「已建模完成」。
+
+    第二阶段的同一个洞：`run_valuation` 建模成功就把 stage 设成 VALUED，
+    而完整研报是**之后**才写的——`_write_full_report` 撞上额度上限时返回
+    None、原因进 skipped，stage 却仍是 VALUED，于是 `complete` 为真、
+    `next_actions` 返回空列表，等于告诉人「全做完了，没有待办」，而
+    report.md 根本不存在。与第一阶段那次是同一类：只按预期路径下结论，
+    不查结果。
+
+    只降 VALUED 这一档：验算未通过本来就是 AWAITING_REVIEW，不该顺手
+    改掉它自己的语义。
+    """
+    if stage is Stage.VALUED and "完整研报" not in arts:
+        return Stage.INCOMPLETE
+    return stage
 
 
 def _audit_note(what: str, res) -> str:
@@ -1096,6 +1118,9 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
                 skipped.append(note)
     else:
         skipped.append("完整研报（无估值结果，第 8 节无从写起）")
+
+    # **没写出研报就不算做完。** 见 `_report_stage`。
+    stage = _report_stage(stage, arts)
 
     build_dashboard(r, path=out / "dashboard.html", context=md, dcf=dcf_res)
     arts["看板"] = str(out / "dashboard.html")

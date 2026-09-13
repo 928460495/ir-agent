@@ -785,3 +785,42 @@ def test_判断项没写出来时不能说待人工核实():
         {ASSUMPTIONS_ART_KEY: "out/600584/assumptions.md"})
     assert stage2 is Stage.AWAITING_REVIEW
     assert "assumptions.md" in reason2 and "待人工核实" in reason2
+
+
+def test_研报没写出来时不能算已完成(tmp_path):
+    """**第二阶段的同一个洞。** `run_valuation` 在建模成功后就把 stage 设成
+    `VALUED`，而完整研报是**之后**才写的：`_write_full_report` 撞上额度
+    上限（今晚极可能发生）时返回 None、原因进 skipped，stage 却仍是
+    `VALUED` —— `complete` 为真、`next_actions` 返回空列表，等于告诉人
+    「全做完了，没有待办」，而 report.md 根本不存在。
+
+    与第一阶段那次是同一类：**只按预期路径下结论，不查结果**。"""
+    from ir_agent import full
+    from ir_agent.research import Stage
+
+    assert full._report_stage(Stage.VALUED, {"DCF 模型": "x"}) is Stage.INCOMPLETE
+    assert full._report_stage(
+        Stage.VALUED, {"DCF 模型": "x", "完整研报": "y"}) is Stage.VALUED
+    # 验算未通过本来就不是 VALUED，不要顺手把它改掉
+    assert full._report_stage(
+        Stage.AWAITING_REVIEW, {"DCF 模型": "x"}) is Stage.AWAITING_REVIEW
+
+
+def test_未跑完时的重跑指引要看目录里到底有什么(tmp_path):
+    """`INCOMPLETE` 可能来自两个阶段，重跑的命令完全不同——第二阶段
+    失败时让人去重跑 `--analyse` 是**有害**的指引：那会重做第一阶段、
+    覆盖掉人已经核实过的判断项。
+
+    判据同样是「实际产物」：判断项还在，就说明该接着跑第二阶段。"""
+    from ir_agent.research import Stage, next_actions
+
+    acts = next_actions(Stage.INCOMPLETE, "600584",
+                        out_dir=str(tmp_path), year=2025)
+    assert "--analyse" in acts[0]
+
+    (tmp_path / "assumptions.md").write_text("判断项", encoding="utf-8")
+    acts2 = next_actions(Stage.INCOMPLETE, "600584",
+                        out_dir=str(tmp_path), year=2025)
+    joined = "".join(acts2)
+    assert "--value" in joined and "--approved-by" in joined
+    assert "--analyse" not in joined, "判断项还在，不能教人重做第一阶段把它覆盖掉"

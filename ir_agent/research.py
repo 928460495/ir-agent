@@ -22,6 +22,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import Enum
+from pathlib import Path
+
+
+# 第一阶段写出的待核实清单文件名。**单一定义**——full.py 从这里
+# 导入，不要在两处各写一遍：next_actions 要按这个文件在不在决定
+# 教人重跑哪一阶段，写岔了就会教人去覆盖已核实的判断项。
+ASSUMPTIONS_MD = "assumptions.md"
 
 
 class Stage(str, Enum):
@@ -118,6 +125,18 @@ def next_actions(stage: Stage, code: str,
             f"--approved-by <你的名字>",
         ]
     if stage in (Stage.NOT_APPLICABLE, Stage.INCOMPLETE):
+        # **重跑哪一阶段，看目录里到底有什么。** INCOMPLETE 两个阶段都
+        # 可能产生，而命令完全不同：第二阶段失败时教人重跑 --analyse 是
+        # 有害的指引——那会重做第一阶段、把人已经核实过的判断项覆盖掉。
+        # 判断项还在，就说明该接着跑第二阶段。
+        if (Path(out) / ASSUMPTIONS_MD).exists():
+            return [
+                "判断项已核实但本轮未跑完（模型额度、网络等）——"
+                "**不要重跑第一阶段**，那会覆盖掉已核实的判断项。"
+                f"接着跑第二阶段即可：\n"
+                f"     python -m ir_agent {code} {y} --value {out} "
+                f"--approved-by <你的名字>",
+            ]
         return [
             "本轮未产出估值。若因分析步骤失败（模型额度、网络等），"
             f"重跑第一阶段即可：\n"
