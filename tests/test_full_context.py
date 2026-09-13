@@ -683,3 +683,50 @@ def test_未替换的占位符要进终端产物清单():
 
     good = AuditResult(rendered="每股 28.92 元")
     assert full._audit_note("完整研报", good) == ""
+
+
+def test_预研撞上额度上限时降级而不是把整轮炸掉(tmp_path, monkeypatch):
+    """**今天 17:53 的实跑现场复现。** `python -m ir_agent 600584 --year
+    2025 --analyse out/600584` 跑了 25 秒，确定性层全部完成——eastmoney
+    2930 条事实、sina 95 条、三表勾稽通过、跨源勾稽一致、可溯源率
+    100%——紧接着第一个联网调用（方法论预研）撞上
+
+        claude 返回错误：You've hit your session limit · resets 8:20pm
+
+    `_research_methodology` 当时只捕 `MethodologyFailed`，于是
+    `ClaudeCliError` 以未捕获异常的形式一路冒到 `__main__`，整轮退出码
+    1，**产物一个都没写出来**：state、dashboard、简报全没有，前面那
+    2930 条事实白抓。
+
+    这与 5db4ca5 修过的是同一个洞、同一个错误消息，只是换了个调用点
+    ——那次是填判断项，这次是预研。`run_analysis` 里每一个联网环节都已
+    经把这类错误记进 skipped 后继续，唯独预研这一处漏了。**能力边界
+    不是故障，整轮研究不该因此停摆。**
+
+    另一层要求：降级理由必须说清这是**接口失败**而不是「这个行业分解
+    不了」——两者都退回不分解模式，但前者重跑就能拿回因子分解，后者
+    重跑多少次都一样。降级到两标量正是这条产品线最不该悄悄发生的事。
+    """
+    import ir_agent.sources.taxonomy as tax
+    from ir_agent import full
+    from ir_agent.clients.claude_cli import ClaudeCliError
+    from ir_agent.sources.taxonomy import Entry
+
+    monkeypatch.setattr(tax, "fetch_all", lambda: [
+        Entry(code="600584", name="长电科技", path="电子-半导体-封测")])
+
+    def _limit(prompt):
+        raise ClaudeCliError(
+            "claude 返回错误：You've hit your session limit · resets 8:20pm "
+            "(Asia/Singapore)")
+
+    class _R:
+        code = "600584"
+
+    m, err = full._research_methodology("600584", _R(), tmp_path, _limit)
+
+    assert m is None
+    assert "session limit" in err, "原始错误要如实带出来，人才知道该等额度还是改代码"
+    assert "接口" in err, "要说清这是接口失败，不是这个行业分解不了"
+    assert "重跑" in err, "要告诉人接口恢复后重跑就能拿回因子分解"
+    assert not (tmp_path / full.DRIVERS_MD).exists()

@@ -708,6 +708,24 @@ def _research_methodology(code: str, r, out: Path, client):
     except methodology.MethodologyFailed as e:
         return None, (f"方法论预研（{str(e)[:160]}）—— "
                       "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+    except ClaudeCliError as e:
+        # **与 5db4ca5 修过的是同一个洞，只是换了个调用点。** 实测
+        # （600584 --analyse，确定性层已跑完 2930 条事实、三表与跨源勾稽
+        # 全部通过）第一个联网调用就撞上「You've hit your session limit」，
+        # 而这里当时只捕 MethodologyFailed，于是 ClaudeCliError 一路冒到
+        # __main__，整轮退出码 1、产物一个都没写出来。run_analysis 里其他
+        # 每一个联网环节都已经把这类错误记进 skipped 后继续，唯独预研这一
+        # 处漏了。**能力边界不是故障，整轮研究不该因此停摆。**
+        #
+        # 降级理由要说清这是**接口失败**而不是「这个行业分解不了」：
+        # 两者都退回不分解模式，但前者重跑就能拿回因子分解，后者重跑
+        # 多少次都一样。降级到两标量是这条产品线最不该悄悄发生的事，
+        # 起码要让人一眼看出这次降级是可恢复的。
+        return None, (f"方法论预研（{e.__class__.__name__}: {str(e)[:160]}）"
+                      "—— 模型接口失败（额度用尽/超时/CLI 报错），不是这个"
+                      "行业分解不了：本轮退回不分解模式，判断项按营收增速/"
+                      "毛利率两项填写；接口恢复后重跑 --analyse 即可拿回"
+                      "因子分解")
     path.write_text(methodology.to_markdown(m), encoding="utf-8")
     return m, ""
 
