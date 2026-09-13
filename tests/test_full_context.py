@@ -730,3 +730,58 @@ def test_预研撞上额度上限时降级而不是把整轮炸掉(tmp_path, mon
     assert "接口" in err, "要说清这是接口失败，不是这个行业分解不了"
     assert "重跑" in err, "要告诉人接口恢复后重跑就能拿回因子分解"
     assert not (tmp_path / full.DRIVERS_MD).exists()
+
+
+ASSUMPTIONS_ART_KEY = "DCF 判断项（待核实）"
+
+
+def test_判断项没写出来时不能说待人工核实():
+    """**今天 18:08 的实跑现场。** 额度用尽 → 简报没写成 → 判断项根本
+    没产出，`out/600584/` 里只有 dashboard.html / model.xlsx / state.json
+    三个文件。终端却照样打出
+
+        · 估值方法：分析完成，DCF 判断项待人工核实。核实
+          out/600584/assumptions.md（需改数值就改 assumptions.json）
+        下一步：
+          1. 核实 DCF 判断项…：out/600584/assumptions.md
+          3. 确认后进入第二阶段：python -m ir_agent … --value …
+
+    **那个文件不存在**，第 3 步照做只会拿模板默认值（三档同值）去建模。
+    `run_analysis` 把 `stage` 无条件设成 `AWAITING_REVIEW`，没有回头看
+    判断项到底写出来没有——与「占位符有没有被替换」「批准的数有没有进
+    工作簿」是同一类：只按预期路径下结论，不查结果。
+
+    `research.next_actions` 的 docstring 自己写着：「命令必须能直接粘贴
+    运行——给一条跑不通的命令比不给指引更糟…**过时的指引是会主动误导人
+    的那种错**」。指向一个不存在的文件同样如此。
+
+    判断项没写出来时正确的状态是 `INCOMPLETE`，它给出的指引正是
+    「重跑第一阶段即可」——额度用尽这一场景要的就是这句。
+    """
+    from ir_agent import full
+    from ir_agent.research import Stage
+
+    stage, reason = full._review_stage({"看板": "x", "工作簿": "y"})
+    assert stage is Stage.INCOMPLETE
+    assert "assumptions" not in reason, "没写出来的文件不能出现在指引里"
+    assert "待人工核实" not in reason
+
+    # 不能借 NOT_APPLICABLE 顶替：那一档的文案是「本标的不适用 DCF」，
+    # 对长电科技来说是一句**假话**——这轮没跑出来的原因是额度用尽，
+    # 不是这家公司不适合 DCF。状态是给人看的结论，不能为了省一个枚举
+    # 值就说错。
+    from ir_agent.research import ResearchOutcome, next_actions
+    from datetime import date
+    from decimal import Decimal
+    o = ResearchOutcome(code="600584", period="2025FY", as_of=date(2026, 9, 13),
+                        stage=stage, artifacts={"看板": "x"},
+                        skipped=["研究简报"], upheld=0,
+                        cost_usd=Decimal("0"), route_reason=reason)
+    assert "不适用 DCF" not in o.summary()
+    acts = next_actions(stage, "600584", out_dir="out/600584", year=2025)
+    assert acts and "--analyse" in acts[0], "要给一条能直接粘贴重跑的命令"
+
+    stage2, reason2 = full._review_stage(
+        {ASSUMPTIONS_ART_KEY: "out/600584/assumptions.md"})
+    assert stage2 is Stage.AWAITING_REVIEW
+    assert "assumptions.md" in reason2 and "待人工核实" in reason2

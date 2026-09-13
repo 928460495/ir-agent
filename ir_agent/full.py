@@ -742,6 +742,40 @@ def _prompt_bundle(pr: dict) -> dict:
         consensus_summary=pr.get("外部资料", ""))
 
 
+# 判断项产出后登记的产物名——`_propose_assumptions` 写成功才登记，
+# 因此它就是"判断项到底写出来没有"唯一可信的信号。
+ASSUMPTIONS_ART = "DCF 判断项（待核实）"
+
+
+def _review_stage(arts: dict):
+    """按**实际产物**定状态与指引，不按预期路径。
+
+    实测现场（600584 --analyse，18:08）：额度用尽 → 简报没写成 → 判断项
+    根本没产出，目录里只有 dashboard/model/state 三个文件。而这里当时
+    无条件 `stage = AWAITING_REVIEW`，于是终端照样打出「分析完成，DCF
+    判断项待人工核实。核实 out/600584/assumptions.md」以及「下一步：
+    1. 核实 …/assumptions.md　3. 确认后 --value」——那个文件不存在，
+    第 3 步照做只会拿模板默认值（三档同值）去建模。
+
+    `research.next_actions` 的文档自己写着「给一条跑不通的命令比不给
+    指引更糟…过时的指引是会主动误导人的那种错」，指向一个不存在的文件
+    同样如此。判断项没写出来时正确的状态是 `NOT_APPLICABLE`，它给的
+    指引正是「重跑第一阶段即可」——额度用尽要的就是这句。
+
+    与「占位符有没有被替换」「批准的数有没有进工作簿」同一类：
+    **只按预期路径下结论，不查结果。**
+    """
+    if ASSUMPTIONS_ART in arts:
+        return Stage.AWAITING_REVIEW, (
+            "分析完成，DCF 判断项待人工核实。核实 "
+            f"{arts[ASSUMPTIONS_ART]}（需改数值就改 {ASSUMPTIONS_JSON}），"
+            "确认后运行第二阶段建模")
+    return Stage.INCOMPLETE, (
+        "本轮未产出 DCF 判断项（原因见上方未生成清单）——"
+        "确定性层的产物（看板、工作簿、事实账本）仍然可用，"
+        "但估值尚无从谈起")
+
+
 def _audit_note(what: str, res) -> str:
     """审计发现的"占位符没被替换"要作为非致命说明返回，供 `skipped` 用。
 
@@ -831,7 +865,6 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             skipped.append(note)
 
     # ── AI 填写 DCF 判断项 ────────────────────────────────
-    stage = Stage.AWAITING_REVIEW
     if body:
         aerr = _propose_assumptions(
             code, r, body, md, as_of, out, qual_client, arts,
@@ -853,13 +886,12 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
          "md": md, "pr": pr, "upheld": upheld}, ensure_ascii=False, indent=2),
         encoding="utf-8")
 
+    # **状态按实际产物定，不按预期路径。** 见 `_review_stage`。
+    stage, reason = _review_stage(arts)
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=stage,
         artifacts=arts, skipped=skipped, upheld=upheld,
-        cost_usd=Decimal(str(cost)),
-        route_reason=("分析完成，DCF 判断项待人工核实。"
-                      f"核实 {out / ASSUMPTIONS_MD}（需改数值就改 "
-                      f"{ASSUMPTIONS_JSON}），确认后运行第二阶段建模"))
+        cost_usd=Decimal(str(cost)), route_reason=reason)
 
 
 def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
@@ -912,7 +944,7 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         json.dumps(assume.to_json(a, code=code, approved_by="",
                                   approved_at=""),
                    ensure_ascii=False, indent=2), encoding="utf-8")
-    arts["DCF 判断项（待核实）"] = str(out / ASSUMPTIONS_MD)
+    arts[ASSUMPTIONS_ART] = str(out / ASSUMPTIONS_MD)
     if getattr(a, "degraded_raw", ""):
         # 降级时把最后一次的**完整**模型输出落盘。此前只有末 400 字进了
         # 降级说明，而因子模式一次要输出几十行、故障常在中段——实测排查

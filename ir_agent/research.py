@@ -27,6 +27,12 @@ from enum import Enum
 class Stage(str, Enum):
     AWAITING_REVIEW = "awaiting_review"      # 假设待定（模型未能给出合法假设）
     NOT_APPLICABLE = "not_applicable"        # 路由判定不适用 DCF
+    # 这一轮没跑完（模型额度、网络、接口失败……），与「不适用 DCF」
+    # **不是一回事**：前者重跑就能好，后者重跑多少次都一样。实测踩到：
+    # 额度用尽那轮借用 NOT_APPLICABLE，终端打出「本标的不适用 DCF」
+    # —— 对长电科技来说这是一句假话。状态是给人看的结论，不能为了省一个
+    # 枚举值就说错。
+    INCOMPLETE = "incomplete"
     VALUED = "valued"                        # 已建模
     FAILED = "failed"
 
@@ -61,6 +67,9 @@ class ResearchOutcome:
             lines.append("  ⚠ 估值未建模 —— 假设尚未定案，报告尚不完整")
         elif self.stage is Stage.NOT_APPLICABLE:
             lines.append("  ⚠ 估值未建模 —— 本标的不适用 DCF")
+        elif self.stage is Stage.INCOMPLETE:
+            lines.append("  ⚠ 估值未建模 —— 本轮分析未跑完（原因见下方"
+                         "清单），重跑即可")
         for s in self.skipped:
             lines.append(f"  {_mark(s)}{s}")
         return "\n".join(lines)
@@ -108,7 +117,7 @@ def next_actions(stage: Stage, code: str,
             f"     python -m ir_agent {code} {y} --value {out} "
             f"--approved-by <你的名字>",
         ]
-    if stage is Stage.NOT_APPLICABLE:
+    if stage in (Stage.NOT_APPLICABLE, Stage.INCOMPLETE):
         return [
             "本轮未产出估值。若因分析步骤失败（模型额度、网络等），"
             f"重跑第一阶段即可：\n"
