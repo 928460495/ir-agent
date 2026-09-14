@@ -81,8 +81,23 @@ def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
         for f in consensus_facts(cs):
             r.ledger.put(f)
     md = cp.summary() + "\n\n" + C.consensus_md(cs)
+    # **缺什么都要说出来，一致预期也不例外。** 原来只为「一篇研报都没
+    # 取到」设了话，一致预期为空时直接静默返回——实测（生益科技 600183
+    # 第一阶段）研报取到 9 篇、一致预期一条没有，于是 brief.md 里
+    # 零条 `consensus.*`（长电那轮有 14 条），「同业比较与一致预期对照」
+    # 整节失去外部校验，而终端产物清单一个字没提。
+    #
+    # 研报有、一致预期没有，是很常见的组合（多数 A 股没有券商跟踪 EPS
+    # 预测），正因为常见才更要说出来：读者会默认那一节有外部数据背书。
+    notes: list[str] = []
     if not cp.docs:
-        return md, "", "外部资料（未取到任何券商研报，外部视角缺位）"
+        notes.append("未取到任何券商研报，外部视角缺位")
+    if cs is None or not cs.has_data():
+        notes.append("未取到一致预期（券商 EPS 预测），"
+                     "同业比较与一致预期对照一节缺外部校验")
+    if notes:
+        prompt = "" if not cp.docs else C.consensus_prompt(cs)
+        return md, prompt, "外部资料（" + "；".join(notes) + "）"
     return md, C.consensus_prompt(cs), ""
 
 
@@ -478,17 +493,34 @@ def _macro_periods(r) -> tuple[str, ...]:
     from ir_agent.periods import UnknownPeriod
     from ir_agent.periods import sort_key as pk
 
-    out: dict[str, tuple] = {}
+    # **按 key 取各自最新一期，不是按期间取最新的几个。** 两者在有逐日
+    # 序列时天差地别：`rates.fetch_yields()` 是逐日的，原来「最新 6 个
+    # 期间」的写法会被最近六个交易日占满，月度的 2026-07（PMI/CPI/PPI/
+    # M1/M2）与半年度的 2026H1（GDP）一个都进不去。
+    #
+    # 实测（生益科技 600183）：多空辩论一口气判了 4 项「无据断言」，
+    # 理由是「清单中通篇检索，制造业 PMI…七个字段均不存在」——而这些
+    # 事实就在账本里，摘要里也印着并进了提示词。摘要给模型看了数、
+    # 清单里却引不到，模型只能照着摘要写占位符，然后被判无据。仓库自己
+    # 的话：**「我往提示词里放了模型用不了的东西」**。
+    #
+    # 这个函数原本的文档写的就是「每个 key 只需最新一期」——意图一直是
+    # 对的，是实现按期间去重把意图丢了。改回按 key 去重之后期间数天然
+    # 很少（逐日利率全部收敛到同一个最新交易日），不需要再截断；留一个
+    # 宽松上限只是防病理情况。
+    newest: dict[str, tuple[str, tuple]] = {}
     for key, per in r.ledger._facts:                     # noqa: SLF001
         if not key.startswith(_CONTEXT_PREFIXES):
             continue
         try:
-            out[per] = pk(per)
+            k = pk(per)
         except UnknownPeriod:
             continue
-    # 每个 key 只需最新一期即可支撑论述，全给会把目录撑爆。
-    # 利率是逐日的，几十条同类事实会把可引用清单淹没。
-    return tuple(sorted(out, key=lambda p: out[p], reverse=True)[:6])
+        cur = newest.get(key)
+        if cur is None or k > cur[1]:
+            newest[key] = (per, k)
+    out: dict[str, tuple] = {per: k for per, k in newest.values()}
+    return tuple(sorted(out, key=lambda p: out[p], reverse=True)[:12])
 
 
 def _peer_names(code: str) -> tuple[str, ...]:

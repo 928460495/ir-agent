@@ -990,3 +990,97 @@ def test_审计全过时不加说明():
     from ir_agent import full
     from ir_agent.audit import AuditResult
     assert full._audit_note("完整研报", AuditResult(rendered="正文")) == ""
+
+
+def test_可引用清单不能被逐日利率挤掉整条宏观序列():
+    """**生益科技（600183）实跑抓到。** 多空辩论一口气判了 4 项「无据
+    断言」，理由是「清单中通篇检索，制造业 PMI、非制造业 PMI、M1 同比、
+    M2 同比、M1−M2 剪刀差、PPI 同比、CPI 同比**七个字段均不存在**」。
+
+    但这些事实是**在账本里**的——`_load_macro` 逐条 `ledger.put`，摘要
+    里也印着「制造业 PMI（2026-07）49.2」并进了提示词。进不了可引用清单
+    的原因在这里：`_macro_periods` 取的是「最新的 6 个**期间**」，而
+    `rates.fetch_yields()` 是**逐日**的，六个名额全被最近六个交易日占满，
+    月度的 2026-07 与半年度的 2026H1 一个都进不去。
+
+    于是链条变成：摘要给模型看了数、清单里却引不到 → 模型只能照着摘要
+    写占位符 → 被判无据断言。仓库自己的话：**「我往提示词里放了模型用
+    不了的东西」**。
+
+    这个函数的文档写的本来就是「**每个 key 只需最新一期**」——意图是
+    对的，实现按期间去重，把意图丢了。改成按 key 取各自最新一期。
+    """
+    from datetime import date
+    from decimal import Decimal
+    from ir_agent import full
+    from ir_agent.ledger import Fact, FactLedger, Method
+
+    led = FactLedger()
+
+    def put(key, per, day):
+        led.put(Fact(key=key, value=Decimal("1"), unit="ratio", currency=None,
+                     period=per, as_of=day, source_id="x",
+                     method=Method.REPORTED))
+
+    # 逐日利率：10 个交易日 × 2 个期限，全都比月度/半年度"新"
+    for d in range(2, 12):
+        day = date(2026, 9, d)
+        put("rate.cgb_10y", day.isoformat(), day)
+        put("rate.cgb_2y", day.isoformat(), day)
+    put("macro.pmi_manufacturing", "2026-07", date(2026, 7, 31))
+    put("macro.cpi_yoy", "2026-07", date(2026, 7, 31))
+    put("macro.gdp_real_yoy", "2026H1", date(2026, 8, 30))
+    put("beta", "2026-09-11", date(2026, 9, 11))
+
+    class _R:
+        ledger = led
+
+    pers = full._macro_periods(_R())
+    assert "2026-07" in pers, "月度宏观整条序列被逐日利率挤掉了"
+    assert "2026H1" in pers, "半年度宏观同样不能被挤掉"
+    assert "2026-09-11" in pers, "β 自己那一期也要在"
+    assert "2026-09-11" in pers and any(p.startswith("2026-09") for p in pers), \
+        "利率最新一期仍要保留"
+
+
+def test_一致预期缺失时要如实喊出来():
+    """**同一轮实跑的第二条。** 生益第一阶段 `brief.md` 里一条
+    `consensus.*` 都没有（长电那轮有 14 条），「同业比较与一致预期对照」
+    整节失去外部校验——而终端产物清单**一个字没提**。
+
+    `_load_external` 只为「没取到任何券商研报」设了话，一致预期为空时
+    直接 `return md, prompt, ""`。研报取到了、一致预期没取到，是很常见的
+    组合（多数 A 股没有券商跟踪 EPS 预测），正因为常见才更要说出来，
+    否则读者会以为那一节有外部数据背书。
+    """
+    from datetime import date
+    from ir_agent import full, corpus as C
+
+    class _Cs:
+        def has_data(self):
+            return False
+
+    class _Cp:
+        docs = ["一篇研报"]
+
+        def summary(self):
+            return "外部资料 1 篇"
+
+    class _R:
+        corpus = None
+        consensus = None
+        ledger = None
+
+    import types
+    monk = types.SimpleNamespace()
+    orig_gather, orig_md, orig_prompt = C.gather, C.consensus_md, C.consensus_prompt
+    C.gather = lambda **kw: (_Cp(), _Cs())
+    C.consensus_md = lambda cs: "（无一致预期）"
+    C.consensus_prompt = lambda cs: ""
+    try:
+        _, _, err = full._load_external("600183", _R(), date(2026, 9, 14))
+    finally:
+        C.gather, C.consensus_md, C.consensus_prompt = orig_gather, orig_md, orig_prompt
+
+    assert err, "一致预期为空必须给出非致命说明"
+    assert "一致预期" in err
