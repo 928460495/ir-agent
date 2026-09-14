@@ -166,3 +166,8 @@ def test_审计未通过不该被标成未生成():
     from ir_agent.research import _mark
     assert _mark("审计未通过（完整研报）：20 条引用缺少原始接口快照") == "  ⚠ "
     assert _mark("研究简报") == "  – 未生成："
+
+
+def test_锚定覆盖标成警示而不是未生成():
+    from ir_agent.research import _mark
+    assert _mark("判断项被锚定覆盖：首年被锚定已披露中期实际覆盖") == "  ⚠ "

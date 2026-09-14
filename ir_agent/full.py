@@ -812,7 +812,7 @@ def _review_stage(arts: dict):
         "但估值尚无从谈起")
 
 
-def _assumption_caveats(a) -> tuple[str, str]:
+def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
     """判断项的软处要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
 
     两件事，分别说：
@@ -840,10 +840,14 @@ def _assumption_caveats(a) -> tuple[str, str]:
 
     unverified = assume.unverified_labels(a)
     estimated = assume.estimated_labels(a)
-    if not unverified and not estimated:
+    if not unverified and not estimated and not anchor_note:
         return "", ""
 
     says: list[str] = []
+    # 锚定影响最大，先说：首年批准值整个没进模型，研报正文却一直按它讲。
+    if anchor_note:
+        says.append("**首个预测年由已披露中期锚定**，批准清单上该年的营收增速"
+                    "与毛利率不进模型，估值用的是按中期实际反推的全年值")
     if unverified:
         says.append("部分 DCF 判断项的依据**未能逐字核验**——出处是转述"
                     "而非原文引用")
@@ -857,6 +861,10 @@ def _assumption_caveats(a) -> tuple[str, str]:
                    + "。不要把它们写得与有确凿出处的判断项同等确定。")
 
     body: list[str] = ["", "---", "", "## ⚠ 判断项依据核验", ""]
+    if anchor_note:
+        body += [f"**{anchor_note}**", "",
+                 "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
+                 "第三小节。", ""]
     if estimated:
         body += [f"本报告估值所用的驱动因子中，有 {len(estimated)} 个**取值"
                  "没有任何数据支撑、是估计**（模型在待核实清单的「理由」列"
@@ -866,10 +874,12 @@ def _assumption_caveats(a) -> tuple[str, str]:
         body += [f"另有 {len(unverified)} 项判断项的依据**未能在来源里逐字"
                  "核验**（已在 assumptions.md 上逐行标注，人工批准时可见）：",
                  "", "、".join(unverified), ""]
-    body += ["这是一次有意的取舍：因子分解的依据允许转述、允许在确实没有"
-             "数据时给出估计，换来分解能真正跑通；代价是上述条目无法被逐字"
-             "反查。请据此调整对相应判断项的信任度——它们未必错，但没有"
-             "原文或数据替它们背书。", ""]
+    # 这段讲的是转述与估计，只剩锚定时对不上号，不能照印。
+    if unverified or estimated:
+        body += ["这是一次有意的取舍：因子分解的依据允许转述、允许在确实没有"
+                 "数据时给出估计，换来分解能真正跑通；代价是上述条目无法被逐字"
+                 "反查。请据此调整对相应判断项的信任度——它们未必错，但没有"
+                 "原文或数据替它们背书。", ""]
     return prompt_line, "\n".join(body)
 
 
@@ -1217,11 +1227,17 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         # 产物清单 —— 而终端是读者第一眼看到的地方。实测: 终值占 EV
         # 77.7%（>75%）的警告算出来了却没交付。
         for x in dcf_res.warnings:
-            skipped.append(f"估值健全性：{x}")
+            # 锚定说明混在 warnings 里（回读校验报的），但它不是健全性问题，
+            # 是「人批准的数没被用上」——换个前缀，不另起一条重复的。
+            if dcf_res.anchor_note and x == dcf_res.anchor_note:
+                skipped.append(f"判断项被锚定覆盖：{x}")
+            else:
+                skipped.append(f"估值健全性：{x}")
 
     cost = 0.0
     # 判断项的软处（依据未逐字核验 / 取值是估计）要跟着交付物走，见 `_assumption_caveats`。
-    caveat, caveats_md = _assumption_caveats(a)
+    caveat, caveats_md = _assumption_caveats(
+        a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""))
     if dcf_res is not None:
         full, cost, ferr = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), caveat=caveat)

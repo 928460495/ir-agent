@@ -1084,3 +1084,41 @@ def test_一致预期缺失时要如实喊出来():
 
     assert err, "一致预期为空必须给出非致命说明"
     assert "一致预期" in err
+
+
+_ANCHOR = ("首年被「锚定已披露中期实际」覆盖，人批准的值未参与建模：营收增速 批准 "
+           "22.31% → 实际用 39.85%；毛利率 批准 27.77% → 实际用 30.69%。")
+
+
+def _plain_set():
+    """依据齐全、不是估计、没有未核验——只剩锚定这一件事。"""
+    a = _estimate_only_set()
+    a.rows[0].note = "理由：资本开支强度处于同业前列，产能投放节奏明确"
+    return a
+
+
+def test_锚定覆盖首年要进研报附录与提示词():
+    """研报正文一直按批准值讲首年，而模型用的是锚定值——必须说出来。
+    进提示词那句不带数字，附录里给准确数字。"""
+    import re
+    from ir_agent import full
+    prompt_line, appendix = full._assumption_caveats(_plain_set(), anchor_note=_ANCHOR)
+    assert "锚定" in prompt_line
+    assert not re.search(r"\d", prompt_line), "进提示词的话不能带数字"
+    assert "39.85%" in appendix and "22.31%" in appendix
+
+
+def test_只有锚定时附录不谈转述与估计():
+    from ir_agent import full
+    _, appendix = full._assumption_caveats(_plain_set(), anchor_note=_ANCHOR)
+    assert "允许转述" not in appendix
+
+
+def test_锚定覆盖接进第二阶段且终端不按健全性归类():
+    """cd142a1 的锚定说明混在 warnings 里，终端打成「估值健全性：首年被…」。
+    它不是健全性问题，是人批准的数没被用上——换个前缀，不另起一条。"""
+    import inspect
+    from ir_agent import full
+    src = inspect.getsource(full.run_valuation)
+    assert "判断项被锚定覆盖：" in src
+    assert "anchor_note=" in src
