@@ -555,11 +555,8 @@ def _write_and_debate(r, code: str, model: str | None,
                       chain_summary: str = "", consensus_summary: str = "",
                       valuation_summary: str = "", brief: bool = False):
     """撰写 → 辩论 → 回写。返回 (正文, 成立挑战数, 辩论摘要, 开销, 失败说明)。"""
-    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
-                 if f.key == "market_cap"), None)
-    extra = _macro_periods(r) + ((spot,) if spot else ())
     cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
-                                  extra_periods=extra)
+                                  extra_periods=_catalog_periods(r))
     cat.evidence = _build_evidence(r, code)
     client = make_client(model=model)
     try:
@@ -764,6 +761,28 @@ def _research_methodology(code: str, r, out: Path, client):
                       "因子分解")
     path.write_text(methodology.to_markdown(m), encoding="utf-8")
     return m, ""
+
+
+def _catalog_periods(r) -> tuple[str, ...]:
+    """可引用清单要收进哪些期间（公司报告期之外）。**写作方与辩论裁判用同一份。**
+
+    实测（生益科技两次第一阶段）：简报里一致预期 0 条。写作方的提示词
+    （`corpus.consensus_prompt`）直接给出 `[[consensus.eps@2026FY]]` 这类占位符，
+    正文校验走 `render()` 查账本，一致预期在账本里，引用能通过；辩论裁判拿的却是
+    这份清单，而清单只收公司报告期与 `_macro_periods`，没有 2026FY 起的预测年。
+    于是裁判判「均不在本轮可用事实清单内」、无据断言成立、回写时把一致预期的
+    句子删掉——每次辩论成功就删光（长电辩论失败没回写，反而留下 14 条）。
+
+    - 宏观/利率/β：每个 key 取最新一期（`_macro_periods`）
+    - 一致预期：**全部**期间——提示词三个预测年都给了，只收最新一期等于只给
+      裁判看一年
+    - 行情：市值所在的报价日
+    """
+    cons = sorted({per for key, per in r.ledger._facts           # noqa: SLF001
+                   if key.startswith("consensus.")})
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    return _macro_periods(r) + tuple(cons) + ((spot,) if spot else ())
 
 
 def _prompt_bundle(pr: dict) -> dict:
@@ -1309,11 +1328,8 @@ def _write_full_report(code, r, brief, model, dcf_res, bundle, caveat=""):
     """在简报之上补出完整研报 —— 第 8 节要拿估值结果与前面各节对账。"""
     from ir_agent.analyst import FactCatalog, write_body
 
-    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
-                 if f.key == "market_cap"), None)
-    extra = _macro_periods(r) + ((spot,) if spot else ())
     cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
-                                  extra_periods=extra)
+                                  extra_periods=_catalog_periods(r))
     cat.evidence = _build_evidence(r, code)
     client = make_client(model=model)
     try:

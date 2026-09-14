@@ -1185,3 +1185,86 @@ def test_两个阶段都把自己是哪一阶段带进结果():
     assert 'phase="analyse"' in inspect.getsource(full.run_analysis)
     assert 'phase="value"' in inspect.getsource(full.run_valuation)
     assert "phase=outcome.phase" in inspect.getsource(full.report)
+
+
+def _ledger_with_consensus():
+    from datetime import date
+    from decimal import Decimal
+    from ir_agent.ledger import Fact, FactLedger, Method
+    led = FactLedger()
+
+    def put(key, per, day):
+        led.put(Fact(key=key, value=Decimal("1"), unit="ratio", currency=None,
+                     period=per, as_of=day, source_id="x", method=Method.REPORTED))
+    for y in ("2026FY", "2027FY", "2028FY"):
+        put("consensus.eps", y, date(2026, 9, 1))
+        put("consensus.brokers", y, date(2026, 9, 1))
+    put("macro.pmi_manufacturing", "2026-08", date(2026, 8, 31))
+    for d in range(8, 15):
+        put("rate.cgb_10y", date(2026, 9, d).isoformat(), date(2026, 9, d))
+    return led
+
+
+class _Quotes:
+    def __init__(self):
+        from datetime import date
+        from decimal import Decimal
+        from ir_agent.ledger import Fact, Method
+        self.facts = [Fact(key="market_cap", value=Decimal("1"), unit="元",
+                           currency="CNY", period="2026-09-14",
+                           as_of=date(2026, 9, 14), source_id="q",
+                           method=Method.REPORTED)]
+
+
+def test_写作方与辩论裁判看的是同一份可引用清单():
+    """**生益科技两次第一阶段都抓到的：简报里一致预期 0 条。**
+
+    - 写作方：`corpus.consensus_prompt` 在提示词里直接给出
+      `[[consensus.eps@2026FY]]` 这类占位符；正文校验走 `render()` 查**账本**，
+      一致预期在账本里，引用能通过。
+    - 裁判方：`run_debate` 拿的是 `catalog.render_for_prompt()`——可引用清单，
+      而清单只收公司报告期与 `_macro_periods`，**没有 2026FY/2027FY/2028FY**。
+      于是裁判判「consensus.eps… 均不在本轮可用事实清单内」→ 无据断言成立 →
+      回写时把一致预期的句子删掉。
+
+    每次辩论成功，一致预期就被删光：长电 9/13 辩论失败没回写，简报留下 14 条；
+    生益两次辩论成功，0 条；第二阶段研报不跑辩论，13 条。**写作方与裁判方
+    必须用同一份「可用事实」。**
+
+    一致预期要收**全部**期间，不能像宏观那样只取每个 key 最新一期——提示词
+    三个预测年都给了。"""
+    from ir_agent import full
+
+    class _R:
+        ledger = _ledger_with_consensus()
+        quotes = _Quotes()
+
+    pers = full._catalog_periods(_R())
+    for y in ("2026FY", "2027FY", "2028FY"):
+        assert y in pers, f"一致预期 {y} 不在清单期间里，裁判会判它无据"
+    assert "2026-08" in pers and "2026-09-14" in pers
+
+
+def test_一致预期的占位符都进了可引用清单():
+    from datetime import date
+    from ir_agent import full
+    from ir_agent.analyst import FactCatalog
+
+    class _R:
+        ledger = _ledger_with_consensus()
+        quotes = _Quotes()
+        period = "2025FY"
+
+    cat = FactCatalog.from_ledger(_R.ledger, period=_R.period, as_of=date(2026, 9, 15),
+                                  extra_periods=full._catalog_periods(_R()))
+    for y in ("2026FY", "2027FY", "2028FY"):
+        assert f"[[consensus.eps@{y}]]" in cat.tokens
+
+
+def test_两处建清单都用同一个期间来源():
+    import inspect
+    from ir_agent import full
+    for fn in (full._write_and_debate, full._write_full_report):
+        src = inspect.getsource(fn)
+        assert "_catalog_periods(r)" in src, fn.__name__
+        assert "_macro_periods(r) + ((spot" not in src, fn.__name__
