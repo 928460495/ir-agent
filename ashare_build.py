@@ -146,13 +146,11 @@ def build(cal: dict, path: str) -> dict:
         #         → 属于 Bull，所以 Bull 列放最小值。
         #   剩余期毛利率：Base 沿用已披露期毛利率，Bull/Bear 各偏离一个历史
         #         年度毛利率标准差（下限 0.5pp，防止历史过于平稳时三档重合）。
-        _sh = IT["share_hist"]
-        _gsd = max(float(JU["gm_stats"][1]), 0.005)
+        #   规则本身在 ashare_calibrate.anchor_three，这里只读结果——ir-agent 也
+        #   读同一份，算各档锚定后的首年毛利率。
         three = {
-            "已披露期占全年营收比重": (min(_sh), IT["share"], max(_sh)),
-            "剩余期毛利率": (min(round(IT["gm"] + _gsd, 4), 0.95),
-                           round(IT["gm"], 4),
-                           max(round(IT["gm"] - _gsd, 4), 0.0)),
+            "已披露期占全年营收比重": tuple(IT["share3"]),
+            "剩余期毛利率": tuple(IT["gm_rest3"]),
         }
         base_r=r
         for lbl,v,f,note in rows_spec:

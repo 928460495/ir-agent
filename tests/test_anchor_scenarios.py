@@ -93,3 +93,26 @@ def test_三档之下公式引擎验算仍然全过(cal, tmp_path):
     assert not fails
     bad = [x for x in V.verify_all_scenarios(str(p), quiet=True) if x[0] != "Base"]
     assert not bad
+
+
+def test_锚定三档规则只在calibrate里定义一份():
+    """三档规则原先写在 build 里。ir-agent 为了算「各档锚定后的首年毛利率」也要
+    用同一套规则——两边各写一遍，早晚分叉成工作簿一个数、清单另一个数。规则
+    挪到 calibrate，结果写进中期块，build 与 ir-agent 都只读。"""
+    import ashare_calibrate as C
+    sh = [0.5204, 0.4751, 0.4723, 0.446]
+    share3, gm3 = C.anchor_three(sh, gm=0.3069, gm_std=0.03)
+    assert share3 == (0.446, round(sum(sh) / len(sh), 4), 0.5204)
+    assert gm3 == (0.3369, 0.3069, 0.2769)
+
+
+def test_毛利率历史过于平稳时三档仍然拉开():
+    import ashare_calibrate as C
+    _, gm3 = C.anchor_three([0.47, 0.47], gm=0.30, gm_std=0.0)
+    assert gm3[0] > gm3[1] > gm3[2]
+
+
+def test_calibrate把三档写进中期块(cal):
+    it = cal["interim"]
+    assert len(it["share3"]) == 3 and len(it["gm_rest3"]) == 3
+    assert it["share3"][0] == pytest.approx(min(it["share_hist"]), abs=1e-4)

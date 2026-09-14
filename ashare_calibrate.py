@@ -68,6 +68,25 @@ def implied_da(inc, bal, cf, periods) -> list[float]:
         out.append(ocf - ni + (nwc(p1) - nwc(p0)))
     return out
 
+def anchor_three(share_hist, gm, gm_std):
+    """锚定两格的三档 (Bull, Base, Bear)：已披露期占全年营收比重、剩余期毛利率。
+
+    **规则只在这里定义一份。** 工作簿按它填 1_假设 第三小节；ir-agent 按它算
+    「各档锚定后的首年毛利率」，好让第 2 年起的毛利率路径从各档实际起点接着
+    走。两边各写一遍规则，早晚分叉成工作簿一个数、批准清单另一个数。
+
+    - 占比：近几年同期占比的最小/均值/最大。占比越低 → 隐含全年营收越高 →
+      Bull，所以 Bull 取最小值。
+    - 剩余期毛利率：Base 沿用已披露期毛利率，Bull/Bear 各偏离一个历史年度
+      毛利率标准差（下限 0.5pp，防历史过于平稳时三档重合）。
+    """
+    sd = max(float(gm_std), 0.005)
+    share3 = (round(min(share_hist), 4), round(float(np.mean(share_hist)), 4),
+              round(max(share_hist), 4))
+    gm3 = (min(round(gm + sd, 4), 0.95), round(gm, 4), max(round(gm - sd, 4), 0.0))
+    return share3, gm3
+
+
 def beta_blume(code: str, years: int = 5) -> tuple[float, float, int]:
     px = D.fetch_prices(code); ix = D.fetch_index()
     m = px.join(ix, lsuffix="_s", rsuffix="_i").dropna()
@@ -280,6 +299,10 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                              share_hist=[round(x,4) for x in sh_hist],
                              share_std=round(float(np.std(sh_hist)), 4),
                              label="半年报" if mmdd=="0630" else ("一季报" if mmdd=="0331" else "三季报"))
+            if itm_block["gm"] is not None:
+                # σ 与 gm_stats 同源（round(np.std(gm_hist), 4)），不另起口径。
+                itm_block["share3"], itm_block["gm_rest3"] = anchor_three(
+                    sh_hist, itm_block["gm"], round(float(np.std(gm_hist)), 4))
     # 债务权重按公司【实际】资本结构算，不能硬编码。
     # 原来固定 1%：生益碰巧接近真值(1.01%)，长电实际 7.23% → WACC 被高估 0.43pp。
     _debt = o["st"] + o["cur"] + o["lt"]
