@@ -479,3 +479,33 @@ class Test锚定会覆盖人批准的首年假设:
         from ir_agent import dcf
         d = self._inp(); d["it"] = None
         assert dcf._readback_check(self._judg(), d) == []
+
+
+class Test锚定说明要能单独取出来:
+    """cd142a1 把「首年被锚定覆盖」塞在回读校验的 problems 里，只进得了终端。
+    研报附录和第一阶段批准清单也要说同一句话，得有一个单独的出口；而反推
+    公式只能有一份——三处各算一遍，早晚算出三个不同的数。"""
+
+    _judg = Test锚定会覆盖人批准的首年假设._judg
+    _inp = Test锚定会覆盖人批准的首年假设._inp
+
+    def test_反推公式是一个纯函数(self):
+        g, m = dcf.anchored_year1(rev_h=190.2561, cogs_h=131.8622, share=0.4785,
+                                  gm_rest=0.3069, base_rev=284.3113845944)
+        assert g == pytest.approx(0.3985, abs=5e-4)
+        assert m == pytest.approx(0.3069, abs=5e-4)
+
+    def test_锚定说明单独可取且与回读校验说的是同一句(self):
+        note = dcf._anchor_note(self._judg(), self._inp())
+        assert "39.85%" in note and "30.69%" in note
+        assert "22.31%" in note and "27.77%" in note
+        assert "不可采信" not in note
+        assert note in dcf._readback_check(self._judg(), self._inp())
+
+    def test_没锚定时没有说明(self):
+        assert dcf._anchor_note(self._judg(), self._inp(it={"sw": 0.0})) == ""
+
+    def test_建模结果带出锚定说明(self):
+        import inspect
+        assert dcf.DcfResult.__dataclass_fields__["anchor_note"].default == ""
+        assert "anchor_note=" in inspect.getsource(dcf.run)

@@ -83,6 +83,9 @@ class DcfResult:
     warnings: list[str] = field(default_factory=list)
     crosscheck: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # 首年被锚定覆盖的说明（`_anchor_note`）。它同时在 warnings 里进终端；
+    # 单列出来是给研报附录用的——研报正文一直按批准值讲首年。
+    anchor_note: str = ""
 
     @property
     def upside(self) -> Decimal | None:
@@ -257,6 +260,22 @@ def _close(a: list[float], b: list[float], tol: float) -> bool:
     return len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
 
 
+def anchored_year1(*, rev_h: float, cogs_h: float, share: float,
+                   gm_rest: float, base_rev: float) -> tuple[float, float]:
+    """锚定反推：由已披露中期算出首个预测年的 (营收增速, 毛利率)。
+
+    与 `1_假设` 的 E 列、`ashare_verify.recompute` 同一套算法——全年营收 =
+    已披露营收 ÷ 占全年比重；全年成本 = 已披露成本 + 剩余期营收 ×
+    (1 − 剩余期毛利率)。
+
+    **只能有这一份。** 回读校验、研报附录、第一阶段批准清单横幅都要说
+    「首年实际用的是多少」，三处各算一遍，早晚算出三个不同的数。
+    """
+    rev = rev_h / share
+    cogs = cogs_h + (rev - rev_h) * (1 - gm_rest)
+    return rev / base_rev - 1, 1 - cogs / rev
+
+
 def _effective_first_year(inp: dict) -> tuple[float, float] | None:
     """锚定开启时，首年**实际生效**的 (营收增速, 毛利率)。None = 没锚定。
 
@@ -276,10 +295,35 @@ def _effective_first_year(inp: dict) -> tuple[float, float] | None:
     base_rev = float((inp.get("o") or {}).get("基期营业总收入") or 0)
     if not share or not base_rev:
         return None
-    rev_h = float(it["rev"])
-    rev = rev_h / share                                   # 隐含全年营收
-    cogs = float(it["cogs"]) + (rev - rev_h) * (1 - float(it["gm_rest"]))
-    return rev / base_rev - 1, 1 - cogs / rev
+    return anchored_year1(rev_h=float(it["rev"]), cogs_h=float(it["cogs"]),
+                          share=share, gm_rest=float(it["gm_rest"]),
+                          base_rev=base_rev)
+
+
+def _anchor_note(judg: dict, inp: dict) -> str:
+    """首年被锚定覆盖时，把「人批准的」与「实际用的」并排写出来。没锚定、
+    或两者恰好一致时返回空串。
+
+    从 `_readback_check` 抽出来单独成一个出口：终端只是三处之一，研报
+    附录也要说同一句话（研报正文一直按批准值讲首年）。说法沿用 cd142a1
+    的取舍——**不说「不可采信」**：锚定用的是已披露中报的真实营收与成本，
+    比一个判断可靠，说成错误会诱使人去关掉锚定。
+    """
+    eff = _effective_first_year(inp)
+    if eff is None:
+        return ""
+    g_eff, m_eff = eff
+    pairs = [("营收增速", float((judg.get("growth") or [0])[0]), g_eff),
+             ("毛利率", float((judg.get("gm") or [0])[0]), m_eff)]
+    diff = [f"{cn} 批准 {app:.2%} → 实际用 {act:.2%}"
+            for cn, app, act in pairs if abs(app - act) > 5e-5]
+    if not diff:
+        return ""
+    return ("首年被「锚定已披露中期实际」覆盖，人批准的值未参与建模："
+            + "；".join(diff)
+            + "。锚定用的是已披露中报的真实营收与成本，通常比判断"
+              "可靠，因此不算错——但待核实清单、终端与研报都是按"
+              "批准值讲的，这个差异必须让人看见")
 
 
 def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
@@ -313,20 +357,9 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
     # 所以这条**不说"不可采信"**——说成错误会诱使人去关掉锚定，那才是
     # 坏事。要报的是"人批准的数没被用上"，让人知道自己批的是什么、
     # 模型跑的是什么。
-    eff = _effective_first_year(inp)
-    if eff is not None:
-        g_eff, m_eff = eff
-        pairs = [("营收增速", float((judg.get("growth") or [0])[0]), g_eff),
-                 ("毛利率", float((judg.get("gm") or [0])[0]), m_eff)]
-        diff = [f"{cn} 批准 {app:.2%} → 实际用 {act:.2%}"
-                for cn, app, act in pairs if abs(app - act) > 5e-5]
-        if diff:
-            problems.append(
-                "首年被「锚定已披露中期实际」覆盖，人批准的值未参与建模："
-                + "；".join(diff)
-                + "。锚定用的是已披露中报的真实营收与成本，通常比判断"
-                  "可靠，因此不算错——但待核实清单、终端与研报都是按"
-                  "批准值讲的，这个差异必须让人看见")
+    note = _anchor_note(judg, inp)
+    if note:
+        problems.append(note)
     for key, cn, dkey in (("growth", "营收增速", "dg"), ("gm", "毛利率", "dm")):
         # 「Δ」是 1_假设 里人有意加的整体偏移，read_inputs 已经并进了
         # 逐年值。它不是错位，扣掉再比。
@@ -423,6 +456,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         terminal_share=(Decimal(str(dv["pvtv"])) / ev0 if ev0 else Decimal(0)),
         verified=not fails,
         as_of=as_of,
+        anchor_note=(_anchor_note(cal["judg"], inp) if assumptions is not None else ""),
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"
