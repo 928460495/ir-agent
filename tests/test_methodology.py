@@ -244,3 +244,9 @@ def test_代码块内容本身不合法时报出具体原因():
                         "产能:pp:年报产能与在建工程")
     with pytest.raises(MethodologyFailed, match="变化率"):
         from_markdown(broken)
+
+
+def test_提示词讲清营收乘法链不放占比类因子():
+    """错误消息就是下一轮提示词——但首轮就说清，能省一次被驳回。"""
+    from ir_agent import methodology
+    assert "占比" in methodology.PROMPT and "市占率" in methodology.PROMPT

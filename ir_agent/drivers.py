@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -61,6 +62,16 @@ class Decomposition:
             else f"{head} = 基期 + {body}"
 
 
+# 乘法链里的「占比/比重/结构」是**组合**变量，不是营收的乘数：高端产品收入
+# 占比 20%→22.4% 是 +12% 的相对变化，但营收不会因此多长 12%——结构升级对营收
+# 的影响只经由均价体现（占比变化 × 高端溢价），对毛利率的影响走加法链。
+# 生益科技实跑出过「营收 = 产能 × 利用率 × 铜价传导 × 高端产品收入占比」，四个
+# 乘数里单项贡献最大的就是这个量纲错误，而这里原本只查单位与算术闭合，放行了。
+# 市占率不在此列：营收 = 行业规模 × 市占率 是合法的乘法分解，分母在公司之外。
+_MIX = re.compile(r"占比|比重|结构")
+_SHARE_OK = re.compile(r"市占|份额")
+
+
 def check_closure(d: Decomposition) -> None:
     """闭合校验。不合法抛 DecompositionInvalid，**不返回布尔值** ——
     调用方拿到的必须是「为什么不行」，不是一个 False。"""
@@ -109,6 +120,14 @@ def check_closure(d: Decomposition) -> None:
             raise DecompositionInvalid(
                 f"因子「{f.label}」的单位是 {f.unit!r}，"
                 f"而 {d.op.value} 法链只接受 {want_unit!r}。" + detail)
+        # 放在单位校验之后：「客户结构优化:定性」这类仍按单位报错，原因更根本。
+        if d.op is Op.MULTIPLY and _MIX.search(f.label) and not _SHARE_OK.search(f.label):
+            raise DecompositionInvalid(
+                f"因子「{f.label}」是占比/结构类变量，不能进营收乘法链——"
+                "结构变化本身不产生营收：高端产品占比 20%→22.4% 是 +12% 的"
+                "相对变化，营收不会因此多长 12%。结构升级对营收的影响请并进"
+                "「平均单价/ASP」因子，对毛利率的影响放进毛利率加法链。"
+                "市占率可以乘（营收 = 行业规模 × 市占率）。")
         if f.key in seen:
             raise DecompositionInvalid(f"因子 key 重复：{f.key}")
         seen.add(f.key)

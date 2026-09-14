@@ -292,3 +292,33 @@ def test_加法链base缺失不该speculatively调用compose(monkeypatch):
     got = drivers_mod.reconcile(d, hist, actual)  # 完全不给 base
     assert calls == [], "compose 根本不该在 base 缺失时被调用"
     assert got == []
+
+
+def test_营收乘法链拒收占比类因子():
+    """**生益科技实跑**：「营收 = 覆铜板产能 × 产能利用率 × 铜价传导系数 ×
+    高端产品(M9/M10)收入占比」。高端占比 20%→22.4% 是 +12% 的相对变化，但营收
+    不会因此多长 12%——结构变化本身不产生营收，只经由均价体现。四个乘数里单项
+    贡献最大的恰恰是这个量纲错误，而 check_closure 只查算术闭合，放行了。"""
+    import pytest
+    from ir_agent.drivers import (Decomposition, DecompositionInvalid, Factor,
+                                  Op, check_closure)
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="cap", label="覆铜板产能", unit="变化率"),
+        Factor(key="mix", label="高端产品收入占比", unit="变化率")])
+    with pytest.raises(DecompositionInvalid, match="占比"):
+        check_closure(d)
+
+
+def test_市占率可以进营收乘法链():
+    """营收 = 行业规模 × 市占率 是合法的乘法分解——分母在公司之外。"""
+    from ir_agent.drivers import Decomposition, Factor, Op, check_closure
+    check_closure(Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="mkt", label="行业规模", unit="变化率"),
+        Factor(key="shr", label="市占率", unit="变化率")]))
+
+
+def test_毛利率加法链里的结构因子不受影响():
+    from ir_agent.drivers import Decomposition, Factor, Op, check_closure
+    check_closure(Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="mix", label="产品结构(先进封装收入占比)", unit="pp"),
+        Factor(key="cost", label="上游成本", unit="pp")]))
