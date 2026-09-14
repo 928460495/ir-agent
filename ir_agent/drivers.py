@@ -72,9 +72,7 @@ _MIX = re.compile(r"占比|比重|结构")
 _SHARE_OK = re.compile(r"市占|份额")
 
 
-def check_closure(d: Decomposition) -> None:
-    """闭合校验。不合法抛 DecompositionInvalid，**不返回布尔值** ——
-    调用方拿到的必须是「为什么不行」，不是一个 False。"""
+def _check_target_op(d: Decomposition) -> None:
     want_op = TARGETS.get(d.target)
     if want_op is None:
         raise DecompositionInvalid(
@@ -85,15 +83,8 @@ def check_closure(d: Decomposition) -> None:
             f"{d.target} 只能用 {want_op.value}（{UNITS[want_op]}），"
             f"得到 {d.op.value}")
 
-    n = len(d.factors)
-    if n < MIN_FACTORS:
-        raise DecompositionInvalid(
-            f"至少 {MIN_FACTORS} 个因子，得到 {n} —— 一个因子不叫分解")
-    if n > MAX_FACTORS:
-        raise DecompositionInvalid(
-            f"至多 {MAX_FACTORS} 个因子，得到 {n} —— "
-            "分解的价值在于人能检查，不在于穷举")
 
+def _check_factor_dims(d: Decomposition) -> None:
     want_unit = UNITS[d.op]
     seen: set[str] = set()
     for f in d.factors:
@@ -131,6 +122,38 @@ def check_closure(d: Decomposition) -> None:
         if f.key in seen:
             raise DecompositionInvalid(f"因子 key 重复：{f.key}")
         seen.add(f.key)
+
+
+def check_dimensions(d: Decomposition) -> None:
+    """只查**会算错数**的那几条：目标与运算配对、因子单位、占比类因子进
+    乘法链、key 重复。不查因子个数。
+
+    给读回路径用（`assume._check_factors`）：判断项从 assumptions.json 读
+    回来时，`_decomp_from_dict` 直接构造对象，预研时的闸门一次都没跑——
+    生益科技目录里残留的 9/14 那份判断项，营收链里还有「高端产品收入占比」，
+    能一路走进建模。读回这道闸门防的是算错数（pp 进乘法链差一百倍、
+    占比当增速乘），而「一个因子不叫分解」是方法论质量规则，预研时把关
+    即可，读回时再拦只会误伤。
+    """
+    _check_target_op(d)
+    _check_factor_dims(d)
+
+
+def check_closure(d: Decomposition) -> None:
+    """闭合校验。不合法抛 DecompositionInvalid，**不返回布尔值** ——
+    调用方拿到的必须是「为什么不行」，不是一个 False。"""
+    _check_target_op(d)
+
+    n = len(d.factors)
+    if n < MIN_FACTORS:
+        raise DecompositionInvalid(
+            f"至少 {MIN_FACTORS} 个因子，得到 {n} —— 一个因子不叫分解")
+    if n > MAX_FACTORS:
+        raise DecompositionInvalid(
+            f"至多 {MAX_FACTORS} 个因子，得到 {n} —— "
+            "分解的价值在于人能检查，不在于穷举")
+
+    _check_factor_dims(d)
 
 
 # ============================================================================

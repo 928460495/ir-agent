@@ -31,8 +31,8 @@ from enum import Enum
 
 from ir_agent import gaps
 from ir_agent.basis import Basis, BasisKind, InvalidBasis, validate
-from ir_agent.drivers import (Decomposition, Factor, Op, TARGET_LABEL,
-                              compose, reconcile)
+from ir_agent.drivers import (Decomposition, DecompositionInvalid, Factor, Op,
+                              TARGET_LABEL, check_dimensions, compose, reconcile)
 from ir_agent.gaps import FactorData
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.lineparse import keyed, pick
@@ -1034,6 +1034,19 @@ def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
     偏高、单价悲观档偏低，相乘后完全可能悲观反而高于中性，而那正是这道
     校验要抓住的错数。
     """
+    # **读回的分解式要重过闸门。** `_decomp_from_dict` 直接构造对象，
+    # 预研时的闸门在读回路径上一次都没跑。生益科技目录里残留
+    # 的 9/14 那份 assumptions.json，营收链里还有「高端产品收入占比」——新
+    # 闸门在预研时会拒收它，读回时却能一路走进建模。与「人手改 JSON 可能
+    # 引入重复行」同一类：不依赖上游一定已经查过。
+    # 只跑量纲类检查（check_dimensions），不跑因子个数——见其文档字符串。
+    for d in decomps:
+        try:
+            check_dimensions(d)
+        except DecompositionInvalid as e:
+            raise AssumeFailed(
+                f"判断项里的分解式已不合法：{e}　——请重跑第一阶段，"
+                "重新预研分解式后再填判断项。") from e
     # C2 纵深防御：`_parse_factors` 已经在解析阶段拒绝重复行，但
     # `check()` 也会在人工核实之后、`from_json` 读回时被再跑一遍
     # （`full.run_valuation`）——那时的 `AssumptionSet` 未必经过

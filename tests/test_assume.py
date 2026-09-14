@@ -1981,3 +1981,21 @@ def test_真有依据的行不被误判成估计():
     txt = a.describe()
     assert "没有证据支撑，是估计" not in txt
     assert "⚠ 估计" not in txt
+
+
+def test_读回的判断项要重过分解式闸门():
+    """**第二阶段读回判断项时不会再过分解式闸门**：`_decomp_from_dict` 直接构造
+    对象，`check_closure` 在 assume/full 里一次都没调用。生益科技目录里残留的
+    9/14 那份 assumptions.json，营收链里还有「高端产品收入占比」——预研时新闸门
+    会拒收它，读回时却能一路走进建模。与「人手改 JSON 可能引入重复行」同一类，
+    check() 必须再挡一次，不依赖上游一定已经查过。"""
+    rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="cap", label="覆铜板产能", unit="变化率"),
+        Factor(key="mix", label="高端产品收入占比", unit="变化率")])
+    a = assume.AssumptionSet(code="600183", labels=["2026E"], decomps=[rev])
+    a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.01"), base=D("0.05"),
+                         bull=D("0.09"), note="理由", factor_key=k)
+              for k in ("cap", "mix")]
+    with pytest.raises(AssumeFailed, match="占比"):
+        assume.check(a, 1, ledger=FactLedger(), body="正文", as_of=AS_OF,
+                     decomps=[rev])
