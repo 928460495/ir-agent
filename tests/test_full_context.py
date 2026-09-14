@@ -1154,3 +1154,34 @@ def test_横幅真的写进批准清单顶部():
     import inspect
     from ir_agent import full
     assert "_anchor_banner(cal, labels)" in inspect.getsource(full._propose_assumptions)
+
+
+def test_第一阶段未跑完时目录里残留的旧判断项不能当成本轮的(tmp_path):
+    """**生益科技重跑（9/15 00:57）当场抓到，是 8689861 自己埋的。** 第一阶段
+    撞额度、没写出判断项，终端却说「判断项已核实但本轮未跑完——**不要重跑第一
+    阶段**…接着跑第二阶段即可」。目录里那份 assumptions.md 是 9/14 09:18 上一轮
+    留下的，建在已被新闸门拒收的旧分解式上（营收链里还有「高端产品收入占比」）。
+
+    按「文件在不在」猜失败的是哪一阶段，就会把残留当成本轮产物，而且给出的
+    指引与正确做法正好相反。**阶段必须由结果自己带着，不能从目录里猜。**"""
+    from ir_agent.research import Stage, next_actions
+    (tmp_path / "assumptions.md").write_text("上一轮的判断项", encoding="utf-8")
+    acts = "".join(next_actions(Stage.INCOMPLETE, "600183", out_dir=str(tmp_path),
+                                year=2025, phase="analyse"))
+    assert "--analyse" in acts and "--value" not in acts
+    assert "上一轮" in acts, "残留的旧判断项要点明，免得人拿它去跑第二阶段"
+
+
+def test_第二阶段未跑完时仍教人接着跑第二阶段(tmp_path):
+    from ir_agent.research import Stage, next_actions
+    acts = "".join(next_actions(Stage.INCOMPLETE, "600183", out_dir=str(tmp_path),
+                                year=2025, phase="value"))
+    assert "--value" in acts and "--analyse" not in acts
+
+
+def test_两个阶段都把自己是哪一阶段带进结果():
+    import inspect
+    from ir_agent import full
+    assert 'phase="analyse"' in inspect.getsource(full.run_analysis)
+    assert 'phase="value"' in inspect.getsource(full.run_valuation)
+    assert "phase=outcome.phase" in inspect.getsource(full.report)

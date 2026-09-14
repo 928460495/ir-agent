@@ -55,6 +55,10 @@ class ResearchOutcome:
     upheld: int = 0
     cost_usd: Decimal = Decimal(0)
     route_reason: str = ""
+    # 这份结果出自哪一阶段（"analyse" / "value"）。下一步指引靠它决定教人
+    # 重跑哪一阶段——**不能从目录里猜**：上一轮残留的 assumptions.md 会把
+    # 第一阶段的失败伪装成第二阶段的失败（生益科技重跑实测）。
+    phase: str = ""
 
     @property
     def complete(self) -> bool:
@@ -108,7 +112,8 @@ def _mark(s: str) -> str:
 def next_actions(stage: Stage, code: str,
                  assumptions_path: str | None = None,
                  out_dir: str | None = None,
-                 year: int | None = None) -> list[str]:
+                 year: int | None = None,
+                 phase: str = "") -> list[str]:
     """下一步该做什么。空列表 = 无阻塞。
 
     命令必须**能直接粘贴运行** —— 给一条跑不通的命令比不给指引更糟。
@@ -131,11 +136,38 @@ def next_actions(stage: Stage, code: str,
             f"--approved-by <你的名字>",
         ]
     if stage in (Stage.NOT_APPLICABLE, Stage.INCOMPLETE):
-        # **重跑哪一阶段，看目录里到底有什么。** INCOMPLETE 两个阶段都
-        # 可能产生，而命令完全不同：第二阶段失败时教人重跑 --analyse 是
-        # 有害的指引——那会重做第一阶段、把人已经核实过的判断项覆盖掉。
-        # 判断项还在，就说明该接着跑第二阶段。
-        if (Path(out) / ASSUMPTIONS_MD).exists():
+        # **重跑哪一阶段，由结果自己说，不从目录里猜。** INCOMPLETE 两个阶段
+        # 都可能产生，而命令完全不同：第二阶段失败时教人重跑 --analyse，会
+        # 覆盖掉人已经核实过的判断项；第一阶段失败时教人跑 --value，会拿
+        # 上一轮残留的判断项去建模。
+        #
+        # 8689861 用「assumptions.md 在不在」来猜，生益科技重跑当场翻车：
+        # 第一阶段撞额度、没写出判断项，目录里却躺着 9/14 上一轮的那份（建在
+        # 已被新闸门拒收的旧分解式上），于是终端说「不要重跑第一阶段，接着
+        # 跑第二阶段」——与正确做法正好相反。
+        stale = (Path(out) / ASSUMPTIONS_MD).exists()
+        if phase == "value":
+            return [
+                "判断项已核实但第二阶段未跑完（模型额度、网络等）——"
+                "**不要重跑第一阶段**，那会覆盖掉已核实的判断项。"
+                f"接着跑第二阶段即可：\n"
+                f"     python -m ir_agent {code} {y} --value {out} "
+                f"--approved-by <你的名字>",
+            ]
+        if phase == "analyse":
+            acts = [
+                "本轮未产出估值。若因分析步骤失败（模型额度、网络等），"
+                f"重跑第一阶段即可：\n"
+                f"     python -m ir_agent {code} {y} --analyse {out}",
+            ]
+            if stale:
+                acts.append(
+                    f"⚠ {out}/{ASSUMPTIONS_MD} 是**上一轮**留下的，不是本轮产物——"
+                    "本轮的分解式可能已经变了，**不要拿它跑第二阶段**；"
+                    "重跑第一阶段成功后会被覆盖。")
+            return acts
+        # 未注明阶段的旧调用方：沿用按文件判断的旧逻辑。
+        if stale:
             return [
                 "判断项已核实但本轮未跑完（模型额度、网络等）——"
                 "**不要重跑第一阶段**，那会覆盖掉已核实的判断项。"

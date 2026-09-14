@@ -1038,7 +1038,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=stage,
         artifacts=arts, skipped=skipped, upheld=upheld,
-        cost_usd=Decimal(str(cost)), route_reason=reason)
+        cost_usd=Decimal(str(cost)), route_reason=reason, phase="analyse")
 
 
 def _anchor_banner(cal: dict, labels: list[str]) -> str:
@@ -1302,7 +1302,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=stage,
         artifacts=arts, skipped=skipped, upheld=0,
-        cost_usd=Decimal(str(cost)), route_reason=reason)
+        cost_usd=Decimal(str(cost)), route_reason=reason, phase="value")
 
 
 def _write_full_report(code, r, brief, model, dcf_res, bundle, caveat=""):
@@ -1335,7 +1335,7 @@ def report(outcome: ResearchOutcome, out_dir: str | None = None,
     print(outcome.summary())
     acts = next_actions(outcome.stage, outcome.code,
                         outcome.artifacts.get("假设模板"),
-                        out_dir=out_dir, year=year)
+                        out_dir=out_dir, year=year, phase=outcome.phase)
     if acts:
         print("\n下一步：")
         for i, act in enumerate(acts, 1):
