@@ -134,14 +134,36 @@ def build(cal: dict, path: str) -> dict:
         rows_spec=[("锚定开关（1=锚定 0=按增速外推）",1,"0",
                     "1 时首个预测年营收 = 已披露实际 ÷ 占比，忽略上方该年的营收增速假设"),
                    ("已披露期占全年营收比重",IT["share"],PCT2,
-                    f"近{len(IT['share_hist'])}年同期占比：{hs}｜均值 {IT['share']*100:.2f}% 标准差 {IT['share_std']*100:.2f}pp"),
+                    f"三档＝近{len(IT['share_hist'])}年同期占比 最小/均值/最大：{hs}"
+                    f"（占比越低→隐含全年越高→Bull）｜标准差 {IT['share_std']*100:.2f}pp"),
                    ("剩余期毛利率",round(IT["gm"],4),PCT2,
-                    f"默认沿用已披露期毛利率 {IT['gm']*100:.2f}%；判断剩余期是否改善请自行调整")]
+                    f"Base＝已披露期毛利率 {IT['gm']*100:.2f}%；Bull/Bear＝±1 个历史年度毛利率标准差")]
+        # 锚定开启后，首个预测年的营收与毛利率由这两格反推，上方该年的三档
+        # 判断项被完全覆盖——Bull/Bear 在首年根本不分叉，而首年是整条路径的
+        # 基数（生益科技实跑：批准 22.31%/27.77%，生效 39.85%/30.69%）。三档
+        # 必须挂到真正起作用的格子上。
+        #   占比：取近几年同期占比的最小/均值/最大。占比越低 → 隐含全年越高
+        #         → 属于 Bull，所以 Bull 列放最小值。
+        #   剩余期毛利率：Base 沿用已披露期毛利率，Bull/Bear 各偏离一个历史
+        #         年度毛利率标准差（下限 0.5pp，防止历史过于平稳时三档重合）。
+        _sh = IT["share_hist"]
+        _gsd = max(float(JU["gm_stats"][1]), 0.005)
+        three = {
+            "已披露期占全年营收比重": (min(_sh), IT["share"], max(_sh)),
+            "剩余期毛利率": (min(round(IT["gm"] + _gsd, 4), 0.95),
+                           round(IT["gm"], 4),
+                           max(round(IT["gm"] - _gsd, 4), 0.0)),
+        }
         base_r=r
         for lbl,v,f,note in rows_spec:
             ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
-            cc=ws.cell(r,2,v); cc.font=F_IN; cc.number_format=f
-            cc.fill=P_O if "开关" in lbl else P_Y
+            if lbl in three:
+                for j,x in enumerate(three[lbl]):
+                    cc=ws.cell(r,2+j,round(float(x),4)); cc.font=F_IN; cc.number_format=f; cc.fill=P_Y
+                cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=f
+            else:
+                cc=ws.cell(r,2,v); cc.font=F_IN; cc.number_format=f
+                cc.fill=P_O if "开关" in lbl else P_Y
             ws.cell(r,6,note).font=Font(size=9,color="808080" if "开关" in lbl else "C00000"); r+=1
         IT_ROWS={sp[0]:base_r+i for i,sp in enumerate(rows_spec)}
         ws.cell(r,1,"已披露期营业总收入（实际）").font=Font(size=10); ws.cell(r,1).border=BX
@@ -151,13 +173,13 @@ def build(cal: dict, path: str) -> dict:
         cc=ws.cell(r,2,round(IT["cogs"],4)); cc.font=F_LNK; cc.number_format=NUM
         IT_ROWS["cogs"]=r; r+=1
         ws.cell(r,1,"→ 隐含全年营业总收入").font=Font(bold=True,size=10)
-        cc=ws.cell(r,2,f"=B{IT_ROWS['rev']}/B{IT_ROWS['已披露期占全年营收比重']}")
+        cc=ws.cell(r,2,f"=B{IT_ROWS['rev']}/E{IT_ROWS['已披露期占全年营收比重']}")
         cc.font=Font(bold=True,size=10); cc.number_format=NUM
         IT_ROWS["fy_rev"]=r
         ws.cell(r,6,"锚定开关=1 时，首个预测年营收即取此值").font=Font(size=9,color="006400"); r+=1
         ws.cell(r,1,"→ 隐含全年营业成本").font=Font(bold=True,size=10)
         cc=ws.cell(r,2,(f"=B{IT_ROWS['cogs']}+(B{IT_ROWS['fy_rev']}-B{IT_ROWS['rev']})"
-                        f"*(1-B{IT_ROWS['剩余期毛利率']})"))
+                        f"*(1-E{IT_ROWS['剩余期毛利率']})"))
         cc.font=Font(bold=True,size=10); cc.number_format=NUM
         IT_ROWS["fy_cogs"]=r; r+=2
 

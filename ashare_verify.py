@@ -150,8 +150,13 @@ def read_inputs(path):
            "非经营资产（加回）","少数股东扣除方式","少数股东利润占比"]}
     it=None
     try:
-        it=dict(sw=float(g("锚定开关")), share=float(g("已披露期占全年营收比重")),
-                gm_rest=float(g("剩余期毛利率")), rev=float(g("已披露期营业总收入（实际）")),
+        def g3(p):
+            """三档行按当前情景取列（1→B 2→C 3→D）。旧工作簿这两行只有
+            B 列，C/D 为空时回落 B，已有工作簿不因此失效。"""
+            rr=_find(am,p); v=_cell_value(wb,a,f"{chr(ord('A')+scen)}{rr}")
+            return v if v not in (None,"") else _cell_value(wb,a,f"B{rr}")
+        it=dict(sw=float(g("锚定开关")), share=float(g3("已披露期占全年营收比重")),
+                gm_rest=float(g3("剩余期毛利率")), rev=float(g("已披露期营业总收入（实际）")),
                 cogs=float(g("已披露期营业成本（实际）")))
     except KeyError:
         pass
