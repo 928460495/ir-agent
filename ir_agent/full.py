@@ -1041,6 +1041,33 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
         cost_usd=Decimal(str(cost)), route_reason=reason)
 
 
+def _anchor_banner(cal: dict, labels: list[str]) -> str:
+    """批准清单顶部的锚定横幅：首个预测年会被已披露中期覆盖。
+
+    人在第一阶段批准首年的营收增速与毛利率，要到第二阶段建模时才会被
+    锚定覆盖——那时已经批完了。生益科技实跑正是如此：批准 22.31% /
+    27.77%，生效 39.85% / 30.69%，清单上一个字没提。横幅给 Base 档的
+    生效值（占比取历史均值、剩余期毛利率沿用已披露期），Bull/Bear 两档
+    见工作簿。反推公式用 `dcf.anchored_year1`，与回读校验、研报附录同源。
+    """
+    it = cal.get("interim")
+    if not it or not it.get("share") or not it.get("rev") or not it.get("cogs"):
+        return ""
+    annual = (cal.get("periods") or {}).get("annual") or []
+    base_rev = (cal.get("rev") or {}).get(annual[-1]) if annual else None
+    if not base_rev:
+        return ""
+    g1, m1 = dcf.anchored_year1(rev_h=float(it["rev"]), cogs_h=float(it["cogs"]),
+                                share=float(it["share"]), gm_rest=float(it["gm"]),
+                                base_rev=float(base_rev))
+    first = labels[0] if labels else "首个预测年"
+    return (f"> ⚠ **{first} 将由{it.get('label') or '已披露中期'}锚定**：按已披露"
+            f"实际反推，Base 档生效营收增速约 {g1:.2%}、毛利率约 {m1:.2%}。"
+            f"下表 {first} 的取值**不进模型**，批准时请把注意力放在后续年份；"
+            "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
+            "第三小节。\n\n")
+
+
 def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                          decomps=None, factor_data=None) -> str:
     """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。
@@ -1085,7 +1112,8 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         return f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
 
     (out / ASSUMPTIONS_MD).write_text(
-        a.describe() + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
+        _anchor_banner(cal, labels) + a.describe()
+        + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
         encoding="utf-8")
     (out / ASSUMPTIONS_JSON).write_text(
         json.dumps(assume.to_json(a, code=code, approved_by="",

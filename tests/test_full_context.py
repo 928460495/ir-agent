@@ -1122,3 +1122,35 @@ def test_锚定覆盖接进第二阶段且终端不按健全性归类():
     src = inspect.getsource(full.run_valuation)
     assert "判断项被锚定覆盖：" in src
     assert "anchor_note=" in src
+
+
+def _cal_with_interim():
+    """生益科技 calibrate 返回值里与锚定有关的几项（2026H1 实跑数据）。"""
+    return {"interim": {"period": "20260630", "label": "半年报", "rev": 190.2561,
+                        "cogs": 131.8622, "share": 0.4785, "gm": 0.3069},
+            "rev": {"20251231": 284.3113845944},
+            "periods": {"annual": ["20251231"], "proj": ["2026E", "2027E"]}}
+
+
+def test_批准前就要告诉人首年会被锚定():
+    """人在第一阶段批准首年的数，第二阶段建模时才被锚定覆盖——那时已经批完
+    了。生益科技实跑：批准 22.31% / 27.77%，生效 39.85% / 30.69%，清单上一个
+    字没提。横幅要在批准清单最顶上，给 Base 档生效值并指明哪一年不进模型。"""
+    from ir_agent import full
+    txt = full._anchor_banner(_cal_with_interim(), ["2026E", "2027E"])
+    assert "2026E" in txt and "半年报" in txt
+    assert "39.85%" in txt and "30.69%" in txt
+    assert "不进模型" in txt
+
+
+def test_没有中期数据就不加横幅():
+    from ir_agent import full
+    cal = _cal_with_interim()
+    cal["interim"] = None
+    assert full._anchor_banner(cal, ["2026E"]) == ""
+
+
+def test_横幅真的写进批准清单顶部():
+    import inspect
+    from ir_agent import full
+    assert "_anchor_banner(cal, labels)" in inspect.getsource(full._propose_assumptions)
