@@ -509,3 +509,33 @@ class Test锚定说明要能单独取出来:
         import inspect
         assert dcf.DcfResult.__dataclass_fields__["anchor_note"].default == ""
         assert "anchor_note=" in inspect.getsource(dcf.run)
+
+
+class Test研报对WACC的归因必须指向真正参与计算的β:
+    """**生益科技研报原话**：「模型所用WACC为9.84%，其中权益成本部分依赖的β
+    （对沪深300、周频两年）为1.84x」。而 9.84% 是用 1.3717（五年对上证综指 +
+    Blume）算的；用 1.84 算，WACC 约 12.6%。交付物说了假话。
+
+    根子：账本里只有 ir-agent 自己回归的 `beta`，模型实际用的 β 从未落账本，
+    研报想谈 WACC 的 β 只引得到那一个。"""
+
+    def test_模型所用β落账本(self):
+        res = _res(as_of=AS_OF)
+        res.beta = D("1.3717")
+        keys = {f.key: f for f in dcf.to_facts(res, AS_OF)}
+        assert keys["valuation.beta"].value == D("1.3717")
+        assert keys["valuation.beta"].period == AS_OF.isoformat()
+
+    def test_摘要里给出模型所用β的占位符(self):
+        res = _res(as_of=AS_OF)
+        res.beta = D("1.3717")
+        assert f"[[valuation.beta@{AS_OF.isoformat()}]]" in res.summary()
+
+    def test_另一个β的标签写明未用于WACC(self):
+        from ir_agent.analyst import LABELS
+        assert "未用于 WACC" in LABELS["beta"]
+        assert "WACC" in LABELS["valuation.beta"]
+
+    def test_建模时从工作簿读出所用β(self):
+        import inspect
+        assert 'inp["dcf"]["Beta（5年"]' in inspect.getsource(dcf.run)

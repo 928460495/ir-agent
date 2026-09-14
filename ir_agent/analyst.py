@@ -81,7 +81,12 @@ LABELS = {
     "industry.income_elasticity": "行业收入弹性",
     "industry.leverage_median": "行业权益乘数中位",
     # 折现率输入 —— β 脱离窗口与基准没有意义，标签里点明口径
-    "beta": "β（对沪深300，周频两年）", "beta.r_squared": "β 回归 R²",
+    # 两个 β 口径不同：`beta` 是 ir-agent 自己回归的，**没有用于 WACC**；
+    # WACC 用的是 ashare-dcf 的 `valuation.beta`。标签不写明，模型就会把
+    # WACC 归因到前者（生益科技研报原话：「WACC 9.84% 依赖的 β 为 1.84」，
+    # 而 9.84% 是用 1.3717 算的）。
+    "beta": "β（对沪深300，周频两年；未用于 WACC，仅作交叉参照）", "beta.r_squared": "β 回归 R²",
+    "valuation.beta": "WACC 所用 β（五年对上证综指，Blume 调整）",
     **{f"rate.cgb_{t}y": f"{cn}年期国债到期收益率"
        for t, cn in ((2, "两"), (5, "五"), (10, "十"), (30, "三十"))},
     # 可比 —— comps_facts 写入的键。没有标签就会在提示词里显示成裸 key，

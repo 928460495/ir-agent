@@ -86,6 +86,10 @@ class DcfResult:
     # 首年被锚定覆盖的说明（`_anchor_note`）。它同时在 warnings 里进终端；
     # 单列出来是给研报附录用的——研报正文一直按批准值讲首年。
     anchor_note: str = ""
+    # 模型实际用于 WACC 的 β（ashare-dcf：五年对上证综指回归 + Blume 调整）。
+    # 研报谈 WACC 时必须引用它，而不是账本里另一个口径的 `beta`——生益科技
+    # 研报曾写「WACC 9.84% 依赖的 β 为 1.84」，而 9.84% 是用 1.3717 算的。
+    beta: Decimal = Decimal(0)
 
     @property
     def upside(self) -> Decimal | None:
@@ -108,6 +112,8 @@ class DcfResult:
         lines.append(f"  WACC [[valuation.wacc{at}]]　终值 ROIC "
                      f"[[valuation.terminal_roic{at}]]　"
                      f"终值占企业价值 [[valuation.terminal_share{at}]]")
+        # 期限写中文数字：这一行进研报提示词，照抄阿拉伯数字会被裸数字审计判掉。
+        lines.append(f"  WACC 所用 β [[valuation.beta{at}]]（五年对上证综指回归，Blume 调整）")
         for x in self.notes:
             lines.append(f"  · {x}")
         for x in self.crosscheck:
@@ -215,6 +221,10 @@ def to_facts(res: DcfResult, as_of: date,
         f("valuation.terminal_roic", res.terminal_roic, "ratio"),
         f("valuation.reinvest_rate", res.reinvest_rate, "ratio"),
         f("valuation.terminal_share", res.terminal_share, "ratio"),
+        # 模型实际用于 WACC 的 β。账本里原本只有 ir-agent 自己回归的 `beta`
+        # （对沪深300周频两年），研报想谈 WACC 只引得到那一个，于是把 WACC
+        # 归因到了一个根本没参与计算的数上。
+        f("valuation.beta", res.beta, "x"),
     ]
 
 
@@ -457,6 +467,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         verified=not fails,
         as_of=as_of,
         anchor_note=(_anchor_note(cal["judg"], inp) if assumptions is not None else ""),
+        beta=Decimal(str(inp["dcf"]["Beta（5年"])),
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"
