@@ -418,7 +418,13 @@ def _build_driver_sheet(wb, drv, YE, assum_ws, g_row, m_row):
                 if block["op"] == "乘":
                     expr = "*".join(f"(1+{x})" for x in refs) + "-1"
                 else:
-                    base = block.get("base_level", 0.0)
+                    # 按档、按年的基期（ir-agent 在锚定开启时给）：第 2 年起毛利率从
+                    # 各档锚定后的首年水平接着走，不回到年报基期——否则 Base 档会
+                    # 出现锚定年 30.69%、次年掉回 25.87% 的断层（生益科技实跑）。
+                    # 不给时维持单一基期。公式形状不变：常数 + 引用。
+                    bls = block.get("base_levels")
+                    base = (bls[("bull", "base", "bear")[ci]][yi] if bls
+                            else block.get("base_level", 0.0))
                     expr = f"{base}+(" + "+".join(refs) + ")/100"
                 cc = ds.cell(r, 2 + ci, f"={expr}")
                 cc.font = F_FX; cc.number_format = PCT

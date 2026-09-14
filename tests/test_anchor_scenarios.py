@@ -116,3 +116,64 @@ def test_calibrate把三档写进中期块(cal):
     it = cal["interim"]
     assert len(it["share3"]) == 3 and len(it["gm_rest3"]) == 3
     assert it["share3"][0] == pytest.approx(min(it["share_hist"]), abs=1e-4)
+
+
+def _with_drivers(cal, base_levels=None):
+    """给夹具 cal 注入一份最小的因子分解块（ir-agent 的 to_driver_block 产出形状）。"""
+    c = copy.deepcopy(cal)
+    n = len(c["periods"]["proj"])
+    rev = {"op": "乘",
+           "factors": [{"key": "cap", "label": "产能", "unit": "变化率"},
+                       {"key": "asp", "label": "单价", "unit": "变化率"}],
+           "values": {k: [[0.05, 0.01]] * n for k in ("bull", "base", "bear")}}
+    gm = {"op": "加",
+          "factors": [{"key": "mix", "label": "结构", "unit": "pp"},
+                      {"key": "cost", "label": "成本", "unit": "pp"}],
+          "values": {"bull": [[1.0, 0.5]] * n, "base": [[0.5, 0.2]] * n,
+                     "bear": [[0.0, -0.2]] * n},
+          "base_level": 0.2647}
+    if base_levels:
+        gm["base_levels"] = base_levels
+    c["judg"]["drivers"] = {"revenue": rev, "gross_margin": gm}
+    return c
+
+
+def _gm_synth_formula(path, year_label, col):
+    ds = load_workbook(path)["1b_驱动分解"]
+    r = _rowmap(ds)[f"{year_label} 毛利率（合成）"]
+    return str(ds[f"{col}{r}"].value)
+
+
+def test_1b毛利率合成可以按档按年用不同基期(cal, tmp_path):
+    """锚定开启时，第 2 年起的毛利率要从各档锚定后的首年水平接着走，而不是回到
+    2025 年的基期——生益科技实跑 Base 档 2026 年锚定 30.69%，2027 年却掉回
+    25.87%。基期因此要能按档、按年给。"""
+    n = len(cal["periods"]["proj"])
+    bl = {"bull": [0.2647] + [0.3010] * (n - 1),
+          "base": [0.2647] + [0.2900] * (n - 1),
+          "bear": [0.2647] + [0.2800] * (n - 1)}
+    p = tmp_path / "w.xlsx"
+    B.build(_with_drivers(cal, bl), str(p))
+    y1, y2 = cal["periods"]["proj"][0], cal["periods"]["proj"][1]
+    assert _gm_synth_formula(p, y1, "B").startswith("=0.2647+")
+    assert _gm_synth_formula(p, y2, "B").startswith("=0.301+")
+    assert _gm_synth_formula(p, y2, "C").startswith("=0.29+")
+    assert _gm_synth_formula(p, y2, "D").startswith("=0.28+")
+
+
+def test_不给按年基期时维持单一基期(cal, tmp_path):
+    p = tmp_path / "w.xlsx"
+    B.build(_with_drivers(cal), str(p))
+    y2 = cal["periods"]["proj"][1]
+    for col in "BCD":
+        assert _gm_synth_formula(p, y2, col).startswith("=0.2647+")
+
+
+def test_按年基期之下公式引擎验算仍然全过(cal, tmp_path):
+    n = len(cal["periods"]["proj"])
+    bl = {k: [0.2647] + [v] * (n - 1)
+          for k, v in (("bull", 0.301), ("base", 0.29), ("bear", 0.28))}
+    p = tmp_path / "w.xlsx"
+    B.build(_with_drivers(cal, bl), str(p))
+    fails, _ = V.verify(str(p), quiet=True)
+    assert not fails
