@@ -257,6 +257,31 @@ def _close(a: list[float], b: list[float], tol: float) -> bool:
     return len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
 
 
+def _effective_first_year(inp: dict) -> tuple[float, float] | None:
+    """锚定开启时，首年**实际生效**的 (营收增速, 毛利率)。None = 没锚定。
+
+    `1_假设` 的生效值 E 列是
+
+        E11 = IF($B$30=1, B35/$B$81-1, CHOOSE($B$6,B11,C11,D11)+$B$26)
+        E16 = IF($B$30=1, 1-B36/B35,  CHOOSE($B$6,B16,C16,D16)+$B$27)
+
+    锚定开关一开，首年就完全不看情景列——也就是完全不看人批准的那个数。
+    这里按同一套算法重算一遍（`read_inputs` 的 `it` 字典里几个输入都在），
+    好把"实际用的"与"人批准的"摆在一起给人看。
+    """
+    it = inp.get("it")
+    if not it or not float(it.get("sw") or 0):
+        return None
+    share = float(it.get("share") or 0)
+    base_rev = float((inp.get("o") or {}).get("基期营业总收入") or 0)
+    if not share or not base_rev:
+        return None
+    rev_h = float(it["rev"])
+    rev = rev_h / share                                   # 隐含全年营收
+    cogs = float(it["cogs"]) + (rev - rev_h) * (1 - float(it["gm_rest"]))
+    return rev / base_rev - 1, 1 - cogs / rev
+
+
 def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
     """建完表再回读一遍：工作簿里真正参与估值的数，是不是人批准的那几个。
 
@@ -277,6 +302,31 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
     前者是选错了档，后者是建模链断了，读者的处置完全不同。
     """
     problems: list[str] = []
+    # **锚定会把首年整个换掉，而情景列看不出来。** 实测（生益科技
+    # 600183）：人批准 2026 营收增速 22.31%、毛利率 27.77%，工作簿实际
+    # 用的是 39.85% 与 30.69%——而下面那段比的是 `read_inputs` 的
+    # growth/gm，那是 `path3()` 从 B/C/D **情景列**读的，情景列当然对得上
+    # （`apply_to` 刚写进去的）。查了输入没查生效值，正是这道闸门本来要
+    # 防的事，它自己犯了一遍。
+    #
+    # 锚定本身是对的：用已披露中报的真实营收与成本，比一个判断可靠。
+    # 所以这条**不说"不可采信"**——说成错误会诱使人去关掉锚定，那才是
+    # 坏事。要报的是"人批准的数没被用上"，让人知道自己批的是什么、
+    # 模型跑的是什么。
+    eff = _effective_first_year(inp)
+    if eff is not None:
+        g_eff, m_eff = eff
+        pairs = [("营收增速", float((judg.get("growth") or [0])[0]), g_eff),
+                 ("毛利率", float((judg.get("gm") or [0])[0]), m_eff)]
+        diff = [f"{cn} 批准 {app:.2%} → 实际用 {act:.2%}"
+                for cn, app, act in pairs if abs(app - act) > 5e-5]
+        if diff:
+            problems.append(
+                "首年被「锚定已披露中期实际」覆盖，人批准的值未参与建模："
+                + "；".join(diff)
+                + "。锚定用的是已披露中报的真实营收与成本，通常比判断"
+                  "可靠，因此不算错——但待核实清单、终端与研报都是按"
+                  "批准值讲的，这个差异必须让人看见")
     for key, cn, dkey in (("growth", "营收增速", "dg"), ("gm", "毛利率", "dm")):
         # 「Δ」是 1_假设 里人有意加的整体偏移，read_inputs 已经并进了
         # 逐年值。它不是错位，扣掉再比。

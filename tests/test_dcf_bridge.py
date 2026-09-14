@@ -404,3 +404,78 @@ def test_回读校验真的接在建表之后():
     assert src.index("read_inputs") < src.index("_readback_check("), \
         "必须用建表之后回读的 inp"
     assert "assumptions is not None" in src
+
+
+class Test锚定会覆盖人批准的首年假设:
+    """**生益科技实跑当场抓到的盲区。**
+
+    `1_假设` 的生效值 E 列公式是
+
+        E11 = IF($B$30=1, B35/$B$81-1, CHOOSE($B$6,B11,C11,D11)+$B$26)
+        E16 = IF($B$30=1, 1-B36/B35,  CHOOSE($B$6,B16,C16,D16)+$B$27)
+
+    锚定开关 B30=1 时，**首年的营收增速与毛利率完全不用人批准的值**，
+    改用已披露中期实际倒推。生益实测：人批准 22.31% / 27.77%，工作簿
+    实际用 39.85% / 30.69%——而待核实清单、终端、研报全都按 22.31% 讲。
+
+    `_readback_check` 上一版比的是 `read_inputs` 的 `growth`/`gm`，那是
+    `path3()` 从 B/C/D **情景列**读的，情景列当然对得上（`apply_to` 刚
+    写进去的）。**查了输入，没查生效值**——正是这道闸门本来要防的事，
+    它自己犯了一遍。
+
+    锚定本身是对的（用已披露的真实中报，比判断可靠）。要防的不是锚定，
+    是"人批准的数被悄悄换掉而没人知道"。
+    """
+
+    def _judg(self):
+        return {"growth": [0.2231, 0.1782], "gm": [0.2777, 0.2917],
+                "growth_scen": {"bull": [0.45, 0.38], "base": [0.2231, 0.1782],
+                                "bear": [0.03, 0.01]},
+                "gm_scen": {"bull": [0.30, 0.33], "base": [0.2777, 0.2917],
+                            "bear": [0.25, 0.24]}}
+
+    def _inp(self, **kw):
+        # 生益实测的真实数：H1 营收 190.2561、成本 131.8622、占全年 47.85%、
+        # 剩余期毛利率 30.69%、基期营收 284.3114
+        it = {"sw": 1.0, "share": 0.4785, "gm_rest": 0.3069,
+              "rev": 190.2561, "cogs": 131.8622}
+        it.update(kw.pop("it", {}))
+        d = {"growth": [0.2231, 0.1782], "gm": [0.2777, 0.2917],
+             "dg": 0.0, "dm": 0.0, "it": it,
+             "o": {"基期营业总收入": 284.3113845944}}
+        d.update(kw)
+        return d
+
+    def test_锚定覆盖首年时必须报出来(self):
+        from ir_agent import dcf
+        problems = dcf._readback_check(self._judg(), self._inp())
+        joined = "".join(problems)
+        assert problems, "首年被锚定换掉却一声不吭，等于人工批准被架空"
+        assert "锚定" in joined
+        assert "22.31%" in joined and "39.85%" in joined, "两个数都要摆出来"
+        assert "27.77%" in joined and "30.69%" in joined
+
+    def test_锚定不是错_不该说不可采信(self):
+        """锚定用的是已披露的中报实际，比判断可靠。要报的是「被换掉了」，
+        不是「算错了」——把它说成不可采信会让人去关掉锚定，那才是坏事。"""
+        from ir_agent import dcf
+        joined = "".join(dcf._readback_check(self._judg(), self._inp()))
+        assert "不可采信" not in joined
+
+    def test_锚定开着也要照常查第二年起(self):
+        """首年豁免，不等于整列豁免。第 2 年起仍然走 CHOOSE(情景)，
+        对不上就是真的错位。"""
+        from ir_agent import dcf
+        bad = self._inp(growth=[0.2231, 0.9999])
+        joined = "".join(dcf._readback_check(self._judg(), bad))
+        assert "不可采信" in joined and "营收增速" in joined
+
+    def test_锚定关闭时维持原样(self):
+        from ir_agent import dcf
+        off = self._inp(it={"sw": 0.0})
+        assert dcf._readback_check(self._judg(), off) == []
+
+    def test_没有锚定字段时维持原样(self):
+        from ir_agent import dcf
+        d = self._inp(); d["it"] = None
+        assert dcf._readback_check(self._judg(), d) == []
