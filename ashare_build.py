@@ -148,9 +148,17 @@ def build(cal: dict, path: str) -> dict:
         #         年度毛利率标准差（下限 0.5pp，防止历史过于平稳时三档重合）。
         #   规则本身在 ashare_calibrate.anchor_three，这里只读结果——ir-agent 也
         #   读同一份，算各档锚定后的首年毛利率。
+        if IT.get("share3") and IT.get("gm_rest3"):
+            _s3, _g3 = tuple(IT["share3"]), tuple(IT["gm_rest3"])
+        else:
+            # 旧版 calibrate 的产出（含各处缓存的 pickle）没有这两项：调用同一个
+            # 规则函数现算，不在这里另写一份规则。σ 与 calibrate 同源（gm_stats）。
+            import ashare_calibrate as _C
+            _s3, _g3 = _C.anchor_three(IT["share_hist"], IT["gm"], JU["gm_stats"][1],
+                                       share_mean=IT["share"])
         three = {
-            "已披露期占全年营收比重": tuple(IT["share3"]),
-            "剩余期毛利率": tuple(IT["gm_rest3"]),
+            "已披露期占全年营收比重": _s3,
+            "剩余期毛利率": _g3,
         }
         base_r=r
         for lbl,v,f,note in rows_spec:

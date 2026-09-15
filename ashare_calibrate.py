@@ -68,7 +68,7 @@ def implied_da(inc, bal, cf, periods) -> list[float]:
         out.append(ocf - ni + (nwc(p1) - nwc(p0)))
     return out
 
-def anchor_three(share_hist, gm, gm_std):
+def anchor_three(share_hist, gm, gm_std, share_mean=None):
     """锚定两格的三档 (Bull, Base, Bear)：已披露期占全年营收比重、剩余期毛利率。
 
     **规则只在这里定义一份。** 工作簿按它填 1_假设 第三小节；ir-agent 按它算
@@ -81,8 +81,11 @@ def anchor_three(share_hist, gm, gm_std):
       毛利率标准差（下限 0.5pp，防历史过于平稳时三档重合）。
     """
     sd = max(float(gm_std), 0.005)
-    share3 = (round(min(share_hist), 4), round(float(np.mean(share_hist)), 4),
-              round(max(share_hist), 4))
+    # share_mean：调用方手里只有**已取整**的历史序列时（build 读旧形状的中期块），
+    # 直接传 calibrate 当初用原始序列算好的均值——在取整后的数据上重新求均值会差
+    # 一位小数（生益：0.47845→0.4784，而原值是 0.4785），工作簿与清单就不是同一个数。
+    mean = float(share_mean) if share_mean is not None else float(np.mean(share_hist))
+    share3 = (round(min(share_hist), 4), round(mean, 4), round(max(share_hist), 4))
     gm3 = (min(round(gm + sd, 4), 0.95), round(gm, 4), max(round(gm - sd, 4), 0.0))
     return share3, gm3
 

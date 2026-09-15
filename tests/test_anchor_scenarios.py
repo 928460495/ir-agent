@@ -177,3 +177,21 @@ def test_按年基期之下公式引擎验算仍然全过(cal, tmp_path):
     B.build(_with_drivers(cal, bl), str(p))
     fails, _ = V.verify(str(p), quiet=True)
     assert not fails
+
+
+def test_旧形状的中期块也能建表且三档口径一致(cal, tmp_path):
+    """旧版 calibrate 的产出（包括各处缓存下来的 pickle）中期块里没有 share3 /
+    gm_rest3。4049205 让 build 只读这两项，于是任何旧形状的 cal 都会 KeyError
+    崩掉——ir-agent 的 1b 工作表测试就是这么撞上的。build 缺这两项时要调用同一个
+    规则函数现算，不另写一份规则，结果与新版 calibrate 逐位相同。"""
+    old = copy.deepcopy(cal)
+    old["interim"].pop("share3")
+    old["interim"].pop("gm_rest3")
+    p = tmp_path / "w.xlsx"
+    B.build(old, str(p))
+    a = load_workbook(p)["1_假设"]
+    m = _rowmap(a)
+    for label, key in (("已披露期占全年营收比重", "share3"), ("剩余期毛利率", "gm_rest3")):
+        r = m[label]
+        got = tuple(a.cell(r, c).value for c in (2, 3, 4))
+        assert got == tuple(cal["interim"][key]), label
