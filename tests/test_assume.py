@@ -1999,3 +1999,108 @@ def test_读回的判断项要重过分解式闸门():
     with pytest.raises(AssumeFailed, match="占比"):
         assume.check(a, 1, ledger=FactLedger(), body="正文", as_of=AS_OF,
                      decomps=[rev])
+
+
+# ── 锚定开启时，毛利率第 2 年起从各档锚定水平接着走 ─────────────────────
+
+def _anchor_600183():
+    """生益科技 2026H1 实跑的锚定输入；三档与 ashare_calibrate.anchor_three 同口径。"""
+    return {"rev": 190.2561, "cogs": 131.8622,
+            "share3": (0.446, 0.4785, 0.5204), "gm_rest3": (0.3369, 0.3069, 0.2769),
+            "base_rev": 284.3113845944}
+
+
+def _two_year_set(bull_gm=((1.0, 0.5), (1.2, 0.7)), base_gm=((0.5, 0.2), (0.9, 0.4)),
+                  bear_gm=((0.0, -0.2), (0.0, -0.1))):
+    rev = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="cap", label="产能", unit="变化率"),
+        Factor(key="asp", label="单价", unit="变化率")])
+    gm = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="spread", label="价差", unit="pp"),
+        Factor(key="util", label="稼动率摊薄", unit="pp")])
+    a = assume.AssumptionSet(code="600183", labels=["2026E", "2027E"], decomps=[rev, gm])
+    rows = []
+    for y in (1, 2):
+        rows.append(assume.Row(driver="revenue", year=y, bear=D("0.01"), base=D("0.05"),
+                               bull=D("0.09"), note="理由", factor_key="cap"))
+        rows.append(assume.Row(driver="revenue", year=y, bear=D("0.00"), base=D("0.01"),
+                               bull=D("0.02"), note="理由", factor_key="asp"))
+        for k, j in (("spread", 0), ("util", 1)):
+            rows.append(assume.Row(
+                driver="gross_margin", year=y, note="理由", factor_key=k,
+                bear=D(str(bear_gm[y - 1][j])), base=D(str(base_gm[y - 1][j])),
+                bull=D(str(bull_gm[y - 1][j]))))
+    a.rows = rows
+    return a, [rev, gm]
+
+
+def _cal_600183():
+    return {"judg": {"gm_hist": [0.2500, 0.2647], "growth": [0.1, 0.1], "gm": [0.26, 0.26]},
+            "periods": {"annual": ["20241231", "20251231"], "proj": ["2026E", "2027E"]},
+            "rev": {"20241231": 200.0, "20251231": 284.3113845944},
+            "cogs": {"20241231": 150.0, "20251231": 284.3113845944 * (1 - 0.2647)},
+            "interim": {"rev": 190.2561, "cogs": 131.8622,
+                        "share3": [0.446, 0.4785, 0.5204],
+                        "gm_rest3": [0.3369, 0.3069, 0.2769]}}
+
+
+def test_锚定时毛利率第二年起从各档锚定水平接着走():
+    """**生益科技实跑**：Base 档 2026 被半年报锚定在 30.69%，2027 却回到「年报
+    基期 26.47% + 累计 pp」= 25.87%，一年凭空掉 4.8pp。加法链对全部年份用同一个
+    年报基期，与已被实际数覆盖的首年混用了两个起点。
+
+    改为第 t 年 = 该档锚定后的首年毛利率 +（第 t 年累计 pp − 第 1 年累计 pp）：
+    保留模型判断的逐年变化，起点换成实际水平。"""
+    a, _ = _two_year_set()
+    bases = assume.margin_bases(a, D("0.2647"), _anchor_600183())
+    _, gm = assume.synthesize(a, assume.Case.BASE, D("0.2647"), bases)
+    assert float(gm[1]) == pytest.approx(0.3069 + 0.006, abs=5e-4)
+    # 第 1 年仍是年报基期 + 首年累计：该年由锚定覆盖，清单横幅已说明
+    assert float(gm[0]) == pytest.approx(0.2647 + 0.007, abs=1e-9)
+
+
+def test_没有锚定时维持单一年报基期():
+    a, _ = _two_year_set()
+    assert assume.margin_bases(a, D("0.2647"), None) is None
+    _, gm = assume.synthesize(a, assume.Case.BASE, D("0.2647"), None)
+    assert float(gm[1]) == pytest.approx(0.2647 + 0.013, abs=1e-9)
+
+
+def test_合成后单调性按平移后的路径查():
+    """不平移时三档合格，平移后乐观档第 2 年落到中性档下面——闸门必须查真正
+    建模用的那条路径，不是展示用的另一条。"""
+    a, ds = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
+    assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds,
+                 base_margin=D("0.2647"))
+    a2, ds2 = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
+    with pytest.raises(AssumeFailed, match="毛利率"):
+        assume.check(a2, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds2,
+                     base_margin=D("0.2647"), anchor=_anchor_600183())
+
+
+def test_清单上的合成结果与建模同一套基期():
+    a, ds = _two_year_set()
+    assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds,
+                 base_margin=D("0.2647"), anchor=_anchor_600183())
+    a.base_margin = D("0.2647")
+    assert "31.29%" in a.describe(), "清单展示的第 2 年毛利率要与建模时平移后的一致"
+
+
+def test_工作簿三档列与1b表用同一套按年基期():
+    a, _ = _two_year_set()
+    cal = _cal_600183()
+    out = assume.apply_to(cal, a)
+    block = assume.to_driver_block(a, cal)["gross_margin"]
+    bm = assume._base_margin_of(cal)
+    bases = assume.margin_bases(a, bm, assume.anchor_from_cal(cal))
+    assert block["base_levels"]["base"] == [float(x) for x in bases["base"]]
+    _, want = assume.synthesize(a, assume.Case.BASE, bm, bases)
+    assert out["judg"]["gm_scen"]["base"] == [float(x) for x in want]
+
+
+def test_建模时平移后不单调也要拒绝():
+    """第二阶段的 check() 拿不到 calibrate 结果，不平移；平移发生在 apply_to——
+    所以 apply_to 自己要再查一次单调，不能让不合格的路径进工作簿。"""
+    a, _ = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
+    with pytest.raises(AssumeFailed, match="毛利率"):
+        assume.apply_to(_cal_600183(), a)

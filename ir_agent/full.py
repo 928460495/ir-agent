@@ -1115,7 +1115,9 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         a = assume.decide(client, cal["judg"], labels, ctx,
                           ledger=r.ledger, body=body, as_of=as_of, code=code,
                           decomps=decomps, factor_data=factor_data,
-                          base_margin=base_margin)
+                          base_margin=base_margin,
+                          # 锚定输入：清单上展示的毛利率路径与建模时同一套基期。
+                          anchor=assume.anchor_from_cal(cal))
     except assume.AssumeFailed as e:
         return f"DCF 判断项（{str(e)[:200]}）"
     except ClaudeCliError as e:

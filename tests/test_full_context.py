@@ -1268,3 +1268,9 @@ def test_两处建清单都用同一个期间来源():
         src = inspect.getsource(fn)
         assert "_catalog_periods(r)" in src, fn.__name__
         assert "_macro_periods(r) + ((spot" not in src, fn.__name__
+
+
+def test_第一阶段填判断项时带上锚定输入():
+    import inspect
+    from ir_agent import full
+    assert "anchor=assume.anchor_from_cal(cal)" in inspect.getsource(full._propose_assumptions)

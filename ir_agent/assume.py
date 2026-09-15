@@ -237,6 +237,10 @@ class AssumptionSet:
     # base_margin）——describe() 展示「合成结果」要用同一个数，
     # 不能自己另算一个，否则清单上显示的数和实际建模用的数就会分叉。
     base_margin: Decimal | None = None
+    # 锚定开启时毛利率的按档、按年基期（`margin_bases`）。派生量，不进 JSON：
+    # 第一阶段由 check() 按锚定输入算出，给清单展示用；第二阶段由 apply_to
+    # 按当时的 calibrate 结果重算，给工作簿用——两处用的是同一个函数。
+    margin_bases: dict | None = None
     # I4：因子模式连续填不出合格判断项时，decide() 回落到两标量模式，
     # 这里记下降级原因。**不进 to_json/from_json**——降级是这一轮研究
     # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
@@ -414,7 +418,9 @@ class AssumptionSet:
             if d.op is Op.MULTIPLY:
                 out.append(compose(d, vals))
             else:
-                out.append(compose(d, vals, base=self.base_margin))
+                base = (self.margin_bases[attr][y - 1] if self.margin_bases
+                        else self.base_margin)
+                out.append(compose(d, vals, base=base))
         return out
 
     def _describe_composed(self, d: Decomposition) -> list[str]:
@@ -654,8 +660,61 @@ def _parse_factors(text: str, years: int,
     return out
 
 
-def synthesize(a: AssumptionSet, case: Case,
-              base_margin: Decimal) -> tuple[list[Decimal], list[Decimal]]:
+def anchor_from_cal(cal: dict) -> dict | None:
+    """锚定反推各档首年毛利率所需的输入；没有中期、或 calibrate 没给三档时返回 None。
+
+    三档（`share3` / `gm_rest3`）由 `ashare_calibrate.anchor_three` 定义，只在
+    那里算一份——工作簿第三小节填的也是它，两边不会各算各的。
+    """
+    it = cal.get("interim") or {}
+    annual = (cal.get("periods") or {}).get("annual") or []
+    base_rev = (cal.get("rev") or {}).get(annual[-1]) if annual else None
+    if not (it.get("rev") and it.get("cogs") and it.get("share3")
+            and it.get("gm_rest3") and base_rev):
+        return None
+    return {"rev": float(it["rev"]), "cogs": float(it["cogs"]),
+            "share3": tuple(it["share3"]), "gm_rest3": tuple(it["gm_rest3"]),
+            "base_rev": float(base_rev)}
+
+
+def margin_bases(a: AssumptionSet, base_margin: Decimal,
+                 anchor: dict | None) -> dict[str, list[Decimal]] | None:
+    """锚定开启时毛利率的按档、按年基期；没有锚定返回 None（维持单一年报基期）。
+
+    **生益科技实跑**：Base 档 2026 被半年报锚定在 30.69%，2027 却回到「年报
+    基期 26.47% + 累计 pp」= 25.87%，一年凭空掉 4.8pp。加法链对全部年份用同
+    一个年报基期，而首年已被实际数覆盖——两个起点混用了。
+
+    第 1 年仍用年报基期（该年由工作簿锚定覆盖，清单横幅已说明）；第 2 年起
+    用「该档锚定后的首年毛利率 − 该档首年累计 pp」，于是第 t 年 = 锚定水平 +
+    （第 t 年累计 − 第 1 年累计）：保留模型判断的逐年变化，起点换成实际水平。
+    """
+    if anchor is None:
+        return None
+    gm_d = next((d for d in a.decomps if d.target == "gross_margin"), None)
+    if gm_d is None:
+        return None
+    keys = {f.key for f in gm_d.factors}
+    years = max((r.year for r in a.rows if r.factor_key in keys), default=0)
+    if years == 0:
+        return None
+    from ir_agent.dcf import anchored_year1
+
+    out: dict[str, list[Decimal]] = {}
+    for i, name in enumerate(("bull", "base", "bear")):
+        _, gm1 = anchored_year1(rev_h=anchor["rev"], cogs_h=anchor["cogs"],
+                                share=float(anchor["share3"][i]),
+                                gm_rest=float(anchor["gm_rest3"][i]),
+                                base_rev=anchor["base_rev"])
+        cum1 = sum((getattr(r, name) for r in a.rows
+                    if r.year == 1 and r.factor_key in keys), Decimal(0))
+        shifted = Decimal(str(round(gm1, 6))) - cum1 / 100
+        out[name] = [base_margin] + [shifted] * (years - 1)
+    return out
+
+
+def synthesize(a: AssumptionSet, case: Case, base_margin: Decimal,
+               bases: dict | None = None) -> tuple[list[Decimal], list[Decimal]]:
     """把因子合成回逐年营收增速与毛利率。**代码算，不是模型填。**
 
     若让模型自己算出结果再填进去，分解就退化成一层装饰 —— 它可以先想好
@@ -676,7 +735,9 @@ def synthesize(a: AssumptionSet, case: Case,
             if d.target == "revenue":
                 growth.append(compose(d, picked))
             else:
-                margin.append(compose(d, picked, base=base_margin))
+                # bases 给了（锚定开启）就按档按年取，见 margin_bases。
+                base = bases[case.name.lower()][y - 1] if bases else base_margin
+                margin.append(compose(d, picked, base=base))
     return growth, margin
 
 
@@ -915,9 +976,9 @@ def _factor_basis(raw: str, label: str, fd: FactorData | None,
 
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
           as_of: date, decomps: list[Decomposition] | None = None,
-          base_margin: Decimal | None = None) -> None:
+          base_margin: Decimal | None = None, anchor: dict | None = None) -> None:
     if decomps:
-        _check_factors(a, years, decomps, base_margin)
+        _check_factors(a, years, decomps, base_margin, anchor)
     else:
         _check_scalar(a, years)
     # 出口二（「无数据（估计）」）合法时 `Row.bases` 就是空列表——
@@ -1023,7 +1084,7 @@ def _check_scalar(a: AssumptionSet, years: int) -> None:
 
 
 def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
-                   base_margin: Decimal | None) -> None:
+                   base_margin: Decimal | None, anchor: dict | None = None) -> None:
     """分解模式下的校验。
 
     **不在这里逐因子比较 bear<base<bull。** 单个因子档位的方向性因子而异
@@ -1091,9 +1152,19 @@ def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
     if base_margin is None:
         base_margin = Decimal("0.10")
     a.decomps = list(decomps)
-    lo, lom = synthesize(a, Case.BEAR, base_margin)
-    mid, midm = synthesize(a, Case.BASE, base_margin)
-    hi, him = synthesize(a, Case.BULL, base_margin)
+    # 锚定开启时查的必须是平移后的路径——那才是建模用的。
+    a.margin_bases = margin_bases(a, base_margin, anchor)
+    _check_monotonic(a, base_margin, a.margin_bases)
+
+
+def _check_monotonic(a: AssumptionSet, base_margin: Decimal,
+                     bases: dict | None) -> None:
+    """合成后三档必须严格拉开。check() 与 apply_to 共用：第二阶段的 check()
+    拿不到 calibrate 结果、不做锚定平移，平移发生在 apply_to，那里要再查一次，
+    不能让不合格的路径进工作簿。"""
+    lo, lom = synthesize(a, Case.BEAR, base_margin, bases)
+    mid, midm = synthesize(a, Case.BASE, base_margin, bases)
+    hi, him = synthesize(a, Case.BULL, base_margin, bases)
     for i in range(len(mid)):
         if not (lo[i] < mid[i] < hi[i]):
             raise AssumeFailed(
@@ -1283,7 +1354,8 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
                  ledger: FactLedger, body: str, as_of: date, code: str,
                  max_attempts: int, decomps: list[Decomposition] | None,
                  factor_data: dict | None,
-                 base_margin: Decimal | None) -> AssumptionSet:
+                 base_margin: Decimal | None,
+                 anchor: dict | None = None) -> AssumptionSet:
     """单一模式（因子或两标量）内的重试循环。
 
     只管一种模式，失败就抛 `AssumeFailed`——**模式之间要不要降级，是
@@ -1300,7 +1372,7 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
             a = parse(raw, len(labels), decomps=decomps,
                      factor_data=factor_data, as_of=as_of)
             check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
-                  decomps=decomps, base_margin=base_margin)
+                  decomps=decomps, base_margin=base_margin, anchor=anchor)
         except AssumeFailed as e:
             last = str(e)
             prompt = (f"{prompt}\n\n---\n"
@@ -1328,7 +1400,8 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
            ledger: FactLedger, body: str, as_of: date, code: str = "",
            max_attempts: int = 3, decomps: list[Decomposition] | None = None,
            factor_data: dict | None = None,
-           base_margin: Decimal | None = None) -> AssumptionSet:
+           base_margin: Decimal | None = None,
+           anchor: dict | None = None) -> AssumptionSet:
     """AI 填判断项，因子模式连续失败时回落到两标量路径（I4）。
 
     因子模式要填 N 因子 × Y 年 × 3 档，比两标量模式的 2×5×3 重数倍，
@@ -1345,7 +1418,8 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
         return _decide_once(client, judg, labels, context, ledger=ledger,
                             body=body, as_of=as_of, code=code,
                             max_attempts=max_attempts, decomps=decomps,
-                            factor_data=factor_data, base_margin=base_margin)
+                            factor_data=factor_data, base_margin=base_margin,
+                            anchor=anchor)
     except AssumeFailed as e:
         if not decomps:
             raise
@@ -1558,9 +1632,14 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
     ju = dict(cal["judg"])
     if a.decomps:
         base_margin = _base_margin_of(cal)
+        # 锚定开启时毛利率第 2 年起从各档锚定水平接着走（见 margin_bases）；
+        # 第二阶段的 check() 不做这一步，所以这里要再查一次单调。
+        bases = margin_bases(a, base_margin, anchor_from_cal(cal))
+        if bases:
+            _check_monotonic(a, base_margin, bases)
         growth_scen, gm_scen = {}, {}
         for c in Case:
-            g, m = synthesize(a, c, base_margin)
+            g, m = synthesize(a, c, base_margin, bases)
             growth_scen[c.name.lower()] = [float(x) for x in g]
             gm_scen[c.name.lower()] = [float(x) for x in m]
         ju["growth"] = growth_scen[case.name.lower()]
@@ -1641,5 +1720,11 @@ def to_driver_block(a: AssumptionSet, cal: dict) -> dict:
                  "values": vals}
         if d.target == "gross_margin":
             block["base_level"] = base_margin
+            # 与 apply_to 同一个函数算出的按档按年基期，1b 表公式按它写——否则
+            # 工作簿三档列（跨表引用 1b）与 apply_to 写进 judg 的数就对不上。
+            bases = margin_bases(a, _base_margin_of(cal), anchor_from_cal(cal))
+            if bases:
+                block["base_levels"] = {k: [float(x) for x in v]
+                                        for k, v in bases.items()}
         out[d.target] = block
     return out
