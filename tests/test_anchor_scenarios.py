@@ -112,6 +112,77 @@ def test_毛利率历史过于平稳时三档仍然拉开():
     assert gm3[0] > gm3[1] > gm3[2]
 
 
+# ── I2（final-fix-D 终审）：Bull/Bear 用的 σ 不该混进中报 ────────────────
+#
+# ashare_build.py 写进 F 列给人看的是「Bull/Bear＝±1 个历史年度毛利率
+# 标准差」，但实际喂给 anchor_three 的 σ 此前是 round(np.std(gm_hist), 4)
+# ——gm_hist 最后一项就是本期中报毛利率，σ 因此混进了中报，且把 Base 值
+# 自己（往往正是那个离群的中报数）算进了它自己的离散度。
+#
+# 600183 真实数据（tests/fixtures/cal_600183.pkl）：
+#   gm_hist = [0.2682, 0.2203, 0.1919, 0.2204, 0.2647, 0.3069]（末项=2026H1）
+#   σ(全部6项，此前实际用于三档) = 0.0383
+#   σ(年度5项，F 列文案声称的口径) = 0.0292 —— 宽 31%
+#
+# gm_mean（gm_stats[0]）已经用 `n_ann_gm` 过滤掉中报（见 b13b276），σ 要
+# 复用同一套判据，不新写一份。
+
+_GM_HIST_600183 = [0.2682, 0.2203, 0.1919, 0.2204, 0.2647, 0.3069]
+_ANN_600183 = ["20211231", "20221231", "20231231", "20241231", "20251231"]
+_REV_600183 = {"20211231": 202.74262977869998, "20221231": 180.14442222419999,
+              "20231231": 165.860728088, "20241231": 203.88330213560002,
+              "20251231": 284.3113845944, "20260630": 190.2561176613}
+_COGS_600183 = {p: 1.0 for p in _ANN_600183 + ["20260630"]}  # 只需非空即可，n_ann_gm 只判存在性
+
+
+def test_gm_std按年度序列算不混进中报():
+    """**600183 实跑复现。** `np.std(gm_hist)`（此前实际用于三档的口径）与
+    `np.std(gm_hist[:5])`（F 列文案声称的"历史年度毛利率标准差"）差 31%，
+    只因为 gm_hist 末项是中报，混进了不该混的一项。"""
+    import numpy as np
+    import ashare_calibrate as C
+    sigma_full = round(float(np.std(_GM_HIST_600183)), 4)
+    sigma_ann = round(float(np.std(_GM_HIST_600183[:5])), 4)
+    assert sigma_full == 0.0383, "混进中报的（此前的）口径"
+    assert sigma_ann == 0.0292, "只按年度序列算的（文案声称的）口径"
+    got = C._gm_std_annual(_GM_HIST_600183, _ANN_600183, _REV_600183, _COGS_600183)
+    assert round(got, 4) == 0.0292, "calibrate 实际用的 σ 必须是年度口径，不是混了中报的那个"
+
+
+def test_gm_std_annual与gm_mean用同一套过滤判据():
+    """`gm_mean` 已经用 `n_ann_gm`（数 rev 与 cogs 都有的年度期数）过滤掉
+    中报——近 5 年缺 1 年营业成本时，年度项数会小于 len(ann)，此时 σ 也
+    必须跟着少算这一年，不能自己另开一个"取前 len(ann) 项"的口径。"""
+    import ashare_calibrate as C
+    ann = _ANN_600183
+    rev = dict(_REV_600183)
+    cogs = {p: 1.0 for p in ann[1:] + ["20260630"]}   # 缺最早一年的营业成本
+    gm_hist = [0.20, 0.21, 0.22, 0.23, 0.24, 0.30]     # 只有 4 个年度项 + 1 个中报
+    got = C._gm_std_annual(gm_hist, ann, rev, cogs)
+    import numpy as np
+    assert got == pytest.approx(float(np.std(gm_hist[:4])), abs=1e-9)
+
+
+def test_三档口径改用年度sigma之后前后对比(cal):
+    """**改动会让三档变窄，这是预期结果。** 600183：
+    旧（混中报，σ=0.0383）→ Bull 34.52% / Base 30.69% / Bear 26.86%；
+    新（纯年度，σ≈0.0292）→ Bull 33.61% / Base 30.69% / Bear 27.78%。
+    Base 不变（沿用已披露期毛利率），Bull/Bear 收窄，间距从 ±3.83pp
+    收到 ±2.92pp——约窄 31%。"""
+    import ashare_calibrate as C
+    it = cal["interim"]
+    gm = it["gm"]
+    sigma_old = 0.0383
+    sigma_new = C._gm_std_annual(cal["judg"]["gm_hist"], cal["periods"]["annual"],
+                                 cal["rev"], cal["cogs"])
+    _, gm3_old = C.anchor_three(it["share_hist"], gm, sigma_old)
+    _, gm3_new = C.anchor_three(it["share_hist"], gm, sigma_new)
+    assert gm3_old == (0.3452, 0.3069, 0.2686)
+    assert gm3_new == (0.3361, 0.3069, 0.2778)
+    assert (gm3_new[0] - gm3_new[2]) < (gm3_old[0] - gm3_old[2]), \
+        "改用年度口径之后三档间距应该收窄，不是放宽"
+
+
 def test_calibrate把三档写进中期块(cal):
     it = cal["interim"]
     assert len(it["share3"]) == 3 and len(it["gm_rest3"]) == 3

@@ -68,6 +68,22 @@ def implied_da(inc, bal, cf, periods) -> list[float]:
         out.append(ocf - ni + (nwc(p1) - nwc(p0)))
     return out
 
+def _gm_std_annual(gm_hist, ann, rev, cogs):
+    """历史年度毛利率标准差——按与 gm_mean 相同的过滤条件（`n_ann_gm`）数
+    年度项数，不把 gm_hist 末项（半年报）算进"历史年度"的离散度。
+
+    I2（final-fix-D 终审）：ashare_build.py 写进 F 列给人看的是「Bull/Bear
+    ＝±1 个历史年度毛利率标准差」，实际却一直拿 `round(np.std(gm_hist), 4)`
+    喂给 anchor_three——gm_hist 最后一项就是本期中报毛利率，σ 因此混进了
+    中报，且把 Base 值自己（往往正是那个离群的中报数）算进了它自己的
+    离散度。600183 实跑：σ(全部 6 项) = 0.0383，σ(年度 5 项) = 0.0292，
+    宽 31%。`gm_mean`（`gm_stats[0]`）早就用 `n_ann_gm` 过滤过同一件事
+    （见 b13b276），这里复用同一套判据，不新写一份。
+    """
+    n_ann_gm = sum(1 for p_ in ann if rev.get(p_) and cogs.get(p_))
+    return float(np.std(gm_hist[:n_ann_gm])) if n_ann_gm else float(np.std(gm_hist))
+
+
 def anchor_three(share_hist, gm, gm_std, share_mean=None):
     """锚定两格的三档 (Bull, Base, Bear)：已披露期占全年营收比重、剩余期毛利率。
 
@@ -281,6 +297,8 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     # 完全相同的过滤条件数一遍。
     n_ann_gm = sum(1 for p_ in ann if rev.get(p_) and cogs.get(p_))
     gm_mean = float(np.mean(gm_hist[:n_ann_gm])) if n_ann_gm else float(np.mean(gm_hist))
+    # I2：σ 与 gm_mean 用同一套「只算年度、不含中报」的判据，见 _gm_std_annual。
+    gm_std_ann = _gm_std_annual(gm_hist, ann, rev, cogs)
     gm = [round(gm_last + (gm_mean - gm_last)*(i+1)/nyears, 4) for i in range(nyears)]
     dep_over_rev = (deprate * o["ppe"] + amortrate * rev[last]) / rev[last]
     capex = [round(capex_r + (dep_over_rev - capex_r)*(i)/max(nyears-1,1), 4) for i in range(nyears)]
@@ -303,9 +321,11 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                              share_std=round(float(np.std(sh_hist)), 4),
                              label="半年报" if mmdd=="0630" else ("一季报" if mmdd=="0331" else "三季报"))
             if itm_block["gm"] is not None:
-                # σ 与 gm_stats 同源（round(np.std(gm_hist), 4)），不另起口径。
+                # σ 与 gm_stats 同源（_gm_std_annual，只算年度不含中报），
+                # 不另起口径——I2 之前这里直接 np.std(gm_hist)，把中报也
+                # 算了进去，与 gm_stats[1] 的口径分叉过。
                 itm_block["share3"], itm_block["gm_rest3"] = anchor_three(
-                    sh_hist, itm_block["gm"], round(float(np.std(gm_hist)), 4))
+                    sh_hist, itm_block["gm"], round(gm_std_ann, 4))
     # 债务权重按公司【实际】资本结构算，不能硬编码。
     # 原来固定 1%：生益碰巧接近真值(1.01%)，长电实际 7.23% → WACC 被高估 0.43pp。
     _debt = o["st"] + o["cur"] + o["lt"]
@@ -346,7 +366,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
         judg=dict(growth=growth, gm=gm, capex=capex,
                   g_hist=[round(x,4) for x in g_hist], gm_hist=[round(x,4) for x in gm_hist],
                   g_stats=(round(float(np.mean(g_hist)),4), round(float(np.std(g_hist)),4), round(min(g_hist),4), round(max(g_hist),4)),
-                  gm_stats=(round(gm_mean,4), round(float(np.std(gm_hist)),4), round(min(gm_hist),4), round(max(gm_hist),4)),
+                  gm_stats=(round(gm_mean,4), round(gm_std_ann,4), round(min(gm_hist),4), round(max(gm_hist),4)),
                   cagr3=round(cagr3,4), mish_hist=mish_hist, wc_interim=wc.get("interim_note"),
                   other_op_hist=[round((_other_op(p) or 0)/rev[p],5) for p in a3 if rev.get(p)]),
         # 融资/股本变动模块：默认全部关停（增发股数=0 → 整块对估值无影响）。
