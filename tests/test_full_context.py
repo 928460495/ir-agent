@@ -664,6 +664,46 @@ def test_第二阶段先重建派生事实再校验批准的假设():
         "基期毛利率取自派生层的 gross_margin，也要在重建之后再取"
 
 
+def test_第二阶段check必须与第一阶段用同一个anchor():
+    """**C1（final-fix-D 终审）实跑复现。** `_propose_assumptions`（第一
+    阶段）给 `assume.check()` 传 `anchor=assume.anchor_from_cal(cal)`，
+    查的是锚定平移后的路径；`run_valuation`（第二阶段）此前调 `check()`
+    时漏传 `anchor`，`margin_bases` 因此为 `None`，查的是未平移的年报基期
+    路径。
+
+    600183 真实数据实测：同一组已批准的 `AssumptionSet`（单因子毛利率
+    累计 pp：第 1 年 悲观 0.5/中性 1.3/乐观 2.0，第 2 年 悲观 0.5/中性
+    3.1/乐观 3.0，base_margin=0.2647），第一阶段 PASS，第二阶段却报
+    「第 2 年的毛利率合成后不再单调（悲观 26.97% / 中性 29.57% / 乐观
+    29.47%）」并以 `SystemExit` 拒绝建模——人已经批准的东西下一步就不
+    合法了。数字见 `tests/test_assume.py` 的
+    `test_两阶段用不同anchor会给出相反结论`。
+
+    用源码断言，不跑真流程——真流程要联网抓数、建三表模型，在单测里跑
+    不动（同上一条 `test_第二阶段先重建派生事实再校验批准的假设`）。
+    """
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full.run_valuation)
+    i_check = src.index("assume.check(")
+    call = src[i_check:src.index(")", src.index("base_margin=base_margin", i_check))]
+    assert "anchor=" in call, (
+        "assume.check() 必须传 anchor，否则第二阶段查的是与第一阶段不同的"
+        "（未平移的）毛利率路径"
+    )
+    before_check = src[:i_check]
+    assert "calibrate_only(" in before_check, (
+        "算 anchor 需要先拿到 calibrate 结果——第二阶段此前从未调用过 "
+        "calibrate_only，手里没有 cal，也就传不出正确的 anchor"
+    )
+    assert "anchor_from_cal(" in before_check, (
+        "anchor 必须由 anchor_from_cal(cal) 算出——这与第一阶段 "
+        "_propose_assumptions 同源，两处不能各算一套"
+    )
+
+
 def test_未替换的占位符要进终端产物清单():
     """**文件附录里写了不等于交付了。** 600584 实测那次，整段估值漏成
     未替换的占位符，人是读 report.md 才发现的——而终端的 skipped 清单
@@ -1114,6 +1154,34 @@ def test_只有锚定时附录不谈转述与估计():
     assert "允许转述" not in appendix
 
 
+def test_年份二起基期被替换要进研报附录与提示词():
+    """**I3（final-fix-D 终审）。** `margin_bases` 非空说明毛利率加法链
+    第 2 年起的基期已经从年报基期换成各档锚定后的首年水平——这与「首年
+    被锚定覆盖」（`anchor_note`）是两件不同的事：即便首年批准值恰好与
+    生效值一致（`anchor_note` 为空），第 2 年起的基期替换依然可能发生。
+    此前 `_assumption_caveats` 完全不认 `margin_bases`，这件事在研报里
+    一个字都没有。约束同样是：提示词那句不带数字，附录可以带。"""
+    import re
+    from decimal import Decimal
+    from ir_agent import full
+    a = _plain_set()
+    a.margin_bases = {"base": [Decimal("0.2647"), Decimal("0.3069")]}
+    prompt_line, appendix = full._assumption_caveats(a)
+    assert prompt_line, "只要 margin_bases 非空就该有话要说，不能仍是空串"
+    assert "年报基期" in prompt_line
+    assert not re.search(r"\d", prompt_line), "进提示词的话不能带数字"
+    assert "年报基期" in appendix and "手算" in appendix
+
+
+def test_两件事都没有也没有基期替换时不加任何声明():
+    """三个触发条件（未核验/估计/基期替换）都不成立时，函数仍要能返回
+    空串——不能因为新增了 margin_bases 判据就总是有话可说。"""
+    from ir_agent import full
+    a = _plain_set()
+    assert a.margin_bases is None
+    assert full._assumption_caveats(a) == ("", "")
+
+
 def test_锚定覆盖接进第二阶段且终端不按健全性归类():
     """cd142a1 的锚定说明混在 warnings 里，终端打成「估值健全性：首年被…」。
     它不是健全性问题，是人批准的数没被用上——换个前缀，不另起一条。"""
@@ -1122,6 +1190,24 @@ def test_锚定覆盖接进第二阶段且终端不按健全性归类():
     src = inspect.getsource(full.run_valuation)
     assert "判断项被锚定覆盖：" in src
     assert "anchor_note=" in src
+
+
+def test_第二阶段基期替换也要进终端清单():
+    """**I3（final-fix-D 终审）第三处披露：终端。** `anchor_note` 只报
+    「首年批准值没参与建模」，`margin_bases` 报的是另一件事——第 2 年起
+    的毛利率加法链基期也被换掉了。两者互不包含（`anchor_note` 是标量
+    首年 approved-vs-effective 的比较，`margin_bases` 是因子分解模式下
+    的按档按年基期），终端必须分别能看到，不能指望其中一个顺带把另一个
+    带出来。用源码断言：`run_valuation` 里要有一条独立于 `dcf_res.warnings`
+    循环、只看 `a.margin_bases` 的 skipped 提示。"""
+    import inspect
+    from ir_agent import full
+    src = inspect.getsource(full.run_valuation)
+    assert "a.margin_bases" in src
+    i_margin = src.index("a.margin_bases")
+    # 必须真的写进 skipped，不能只是算出来没处使用
+    tail = src[i_margin:i_margin + 400]
+    assert "skipped.append(" in tail
 
 
 def _cal_with_interim():
@@ -1143,6 +1229,32 @@ def test_批准前就要告诉人首年会被锚定():
     assert "不进模型" in txt
 
 
+def test_横幅不该说后续年份不受影响():
+    """**I3（final-fix-D 终审）。** 因子分解 + 锚定开启时，第 2 年起毛利率
+    加法链的基期也已从年报基期换成各档锚定后的首年水平（`margin_bases`）。
+    此前横幅说「批准时请把注意力放在后续年份」，暗示后续年份没有被锚定
+    影响、只有首年需要留意——这本身就是误导：后续年份的**水平**也被
+    锚定抬走了，清单上会出现「2026 27.77% → 2027 32.09%」这种手算复现
+    不出来的跳变（年报基期 26.47% + 累计 pp 对不上）。
+
+    `rebased=True` 时横幅必须多说一句：第 2 年起的基期已经换过，不能
+    用「年报基期 + 累计 pp」手算复现。"""
+    from ir_agent import full
+    txt = full._anchor_banner(_cal_with_interim(), ["2026E", "2027E"],
+                              rebased=True)
+    assert "第 2 年起" in txt
+    assert "年报基期" in txt
+    assert "手算" in txt or "复现" in txt
+
+
+def test_没有因子分解锚定时横幅维持原文():
+    """两标量模式（或分解式里没有毛利率加法链）不会发生按档按年基期替换，
+    `rebased` 默认 False 时横幅不该无中生有地加这句话。"""
+    from ir_agent import full
+    txt = full._anchor_banner(_cal_with_interim(), ["2026E", "2027E"])
+    assert "第 2 年起" not in txt
+
+
 def test_没有中期数据就不加横幅():
     from ir_agent import full
     cal = _cal_with_interim()
@@ -1153,7 +1265,12 @@ def test_没有中期数据就不加横幅():
 def test_横幅真的写进批准清单顶部():
     import inspect
     from ir_agent import full
-    assert "_anchor_banner(cal, labels)" in inspect.getsource(full._propose_assumptions)
+    src = inspect.getsource(full._propose_assumptions)
+    assert "_anchor_banner(cal, labels" in src
+    # I3：横幅需要知道毛利率加法链是否被按档按年基期替换过（`a.margin_bases`），
+    # 才能决定要不要多说「第 2 年起基期已换」那句话——不能凭 cal/labels 自己
+    # 判断（那是 a.decomps 与 anchor 一起解出来的派生量）。
+    assert "a.margin_bases" in src
 
 
 def test_第一阶段未跑完时目录里残留的旧判断项不能当成本轮的(tmp_path):

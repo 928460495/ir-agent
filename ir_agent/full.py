@@ -842,8 +842,15 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
       600584 实跑里这是 **8 个因子全中**——而第一版声明只写了未核验，
       读者会以为问题仅仅是"出处是转述"，真相更重：这些数字本身就没有
       数据支撑。后者比前者更该被看见。
+    - **第 2 年起毛利率的基期被换过**（I3，final-fix-D 终审）：`a.margin_bases`
+      非空说明因子分解 + 锚定开启，加法链第 2 年起的基期从年报基期换成
+      了各档锚定后的首年水平。这与上面「首年被锚定覆盖」（`anchor_note`）
+      是两件不同的事——即便首年批准值恰好等于生效值（`anchor_note` 为
+      空），第 2 年起的基期替换依然可能发生，不能指望其中一个把另一个
+      带出来。不说这件事，读者会拿「年报基期 + 累计 pp」去手算复现清单
+      上的毛利率，怎么都对不上，却查不到原因。
 
-    两者都只到 `assumptions.md` 与终端是不够的——对外传阅的是
+    三者都只到 `assumptions.md` 与终端是不够的——对外传阅的是
     `report.md`。本仓库自己的标准（`AuditResult.with_sources` 的文档）：
     算出来了不交付，等于没兑现。
 
@@ -859,7 +866,8 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
 
     unverified = assume.unverified_labels(a)
     estimated = assume.estimated_labels(a)
-    if not unverified and not estimated and not anchor_note:
+    rebased = bool(a.margin_bases)
+    if not unverified and not estimated and not anchor_note and not rebased:
         return "", ""
 
     says: list[str] = []
@@ -867,6 +875,12 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
     if anchor_note:
         says.append("**首个预测年由已披露中期锚定**，批准清单上该年的营收增速"
                     "与毛利率不进模型，估值用的是按中期实际反推的全年值")
+    if rebased:
+        # I3：这句不能带阿拉伯数字（进提示词，会被裸数字审计判掉）——
+        # 「第二年」用汉字数字，不写成「第 2 年」。具体数字在
+        # assumptions.md 与下面的 body 附录里给。
+        says.append("**从第二年起，毛利率的合成基期已从年报基期改为各档"
+                    "锚定后的首年水平**，不能用年报基期加累计变化手算复现")
     if unverified:
         says.append("部分 DCF 判断项的依据**未能逐字核验**——出处是转述"
                     "而非原文引用")
@@ -884,6 +898,11 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
         body += [f"**{anchor_note}**", "",
                  "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
                  "第三小节。", ""]
+    if rebased:
+        body += ["**第 2 年起毛利率的加法链基期已改为各档锚定后的首年水平**"
+                 "（不是年报基期），因此合成结果无法用「年报基期 + 累计 pp」"
+                 "手算复现——这是刻意的处理（保留模型判断的逐年变化，起点换成"
+                 "已披露中期反推出的实际水平），不是取值出错。", ""]
     if estimated:
         body += [f"本报告估值所用的驱动因子中，有 {len(estimated)} 个**取值"
                  "没有任何数据支撑、是估计**（模型在待核实清单的「理由」列"
@@ -1060,7 +1079,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
         cost_usd=Decimal(str(cost)), route_reason=reason, phase="analyse")
 
 
-def _anchor_banner(cal: dict, labels: list[str]) -> str:
+def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
     """批准清单顶部的锚定横幅：首个预测年会被已披露中期覆盖。
 
     人在第一阶段批准首年的营收增速与毛利率，要到第二阶段建模时才会被
@@ -1068,6 +1087,15 @@ def _anchor_banner(cal: dict, labels: list[str]) -> str:
     27.77%，生效 39.85% / 30.69%，清单上一个字没提。横幅给 Base 档的
     生效值（占比取历史均值、剩余期毛利率沿用已披露期），Bull/Bear 两档
     见工作簿。反推公式用 `dcf.anchored_year1`，与回读校验、研报附录同源。
+
+    `rebased`（I3，final-fix-D 终审）：因子分解模式下锚定开启时，毛利率
+    加法链第 2 年起的基期也已从年报基期换成各档锚定后的首年水平
+    （`assume.margin_bases`）——不只是首年被覆盖这么简单。此前这里说
+    「批准时请把注意力放在后续年份」，暗示只有首年不可信、后续年份维持
+    原样，恰恰说反了：后续年份的**水平**同样被锚定抬走，清单上会出现
+    「2026 27.77% → 2027 32.09%」这类用「年报基期 + 累计 pp」怎么手算
+    都对不上的跳变。调用方（`_propose_assumptions`）判断项定下来之后
+    从 `a.margin_bases` 是否非空得到这个信号，传进来决定要不要多说这句。
     """
     it = cal.get("interim")
     if not it or not it.get("share") or not it.get("rev") or not it.get("cogs"):
@@ -1080,9 +1108,14 @@ def _anchor_banner(cal: dict, labels: list[str]) -> str:
                                 share=float(it["share"]), gm_rest=float(it["gm"]),
                                 base_rev=float(base_rev))
     first = labels[0] if labels else "首个预测年"
+    rebase_note = (
+        "**第 2 年起毛利率的加法链基期也已从年报基期改为各档锚定后的首年"
+        "水平**，因此这些年份同样不能用「年报基期 + 累计 pp」手算复现——"
+        "批准时请核对下表显示的合成结果本身，而不是自己重新加总；"
+        if rebased else "批准时请把注意力放在后续年份；")
     return (f"> ⚠ **{first} 将由{it.get('label') or '已披露中期'}锚定**：按已披露"
             f"实际反推，Base 档生效营收增速约 {g1:.2%}、毛利率约 {m1:.2%}。"
-            f"下表 {first} 的取值**不进模型**，批准时请把注意力放在后续年份；"
+            f"下表 {first} 的取值**不进模型**，{rebase_note}"
             "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
             "第三小节。\n\n")
 
@@ -1133,7 +1166,7 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         return f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
 
     (out / ASSUMPTIONS_MD).write_text(
-        _anchor_banner(cal, labels) + a.describe()
+        _anchor_banner(cal, labels, rebased=bool(a.margin_bases)) + a.describe()
         + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
         encoding="utf-8")
     (out / ASSUMPTIONS_JSON).write_text(
@@ -1241,13 +1274,38 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     latest_annual = _latest_annual_period(r.ledger, as_of)
     base_margin = (_fact_value(r.ledger, "gross_margin", latest_annual, as_of)
                   if latest_annual else None)
+    # C1（final-fix-D 终审）：check() 必须与第一阶段用同一个 anchor，否则
+    # 查的是两条不同的毛利率路径——`_propose_assumptions` 传
+    # anchor=anchor_from_cal(cal)，查锚定平移后的路径；这里此前压根没取
+    # cal，anchor 恒为 None，查的是未平移的年报基期路径。600183 实跑
+    # 复现：同一组已批准的判断项，第一阶段 PASS，第二阶段却因为查错了
+    # 路径而报「第 2 年的毛利率合成后不再单调」并 SystemExit 拒绝建模——
+    # 人工批准这道关卡因此被架空，见 test_assume.py 的
+    # `test_两阶段用不同anchor会给出相反结论`（数字与实跑现场一致）。
+    # 校准失败时退回 anchor=None（维持未平移路径）：这不是新增的失败
+    # 方式，dcf.run 随后同样会遇到 DcfUnavailable，处置口径要一致。
+    try:
+        cal = dcf.calibrate_only(code, as_of=as_of, ledger=r.ledger)
+        anchor = assume.anchor_from_cal(cal)
+    except dcf.DcfUnavailable:
+        anchor = None
     try:
         # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
         # 漏掉某一年，都会让模型算出一个看起来正常的错数。
         assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of,
-                     decomps=a.decomps or None, base_margin=base_margin)
+                     decomps=a.decomps or None, base_margin=base_margin,
+                     anchor=anchor)
     except assume.AssumeFailed as e:
         raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")
+
+    # I3（final-fix-D 终审）：`check()` 通过后 `a.margin_bases` 就定了——
+    # 非空说明毛利率加法链第 2 年起的基期已从年报基期换成各档锚定后的
+    # 首年水平。这与上面 `dcf_res.anchor_note`（首年批准值没参与建模）
+    # 是两件不同的事，终端要能分别看到，不能指望其中一条捎带上另一条。
+    if a.margin_bases:
+        skipped.append("判断项被锚定覆盖：第 2 年起毛利率的加法链基期已改为"
+                       "各档锚定后的首年水平（不是年报基期），不能用「年报"
+                       "基期 + 累计 pp」手算复现待核实清单上的毛利率")
 
     md = state.get("md") or {}
     pr = state.get("pr") or {}

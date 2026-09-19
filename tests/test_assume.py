@@ -2099,8 +2099,54 @@ def test_工作簿三档列与1b表用同一套按年基期():
 
 
 def test_建模时平移后不单调也要拒绝():
-    """第二阶段的 check() 拿不到 calibrate 结果，不平移；平移发生在 apply_to——
-    所以 apply_to 自己要再查一次单调，不能让不合格的路径进工作簿。"""
+    """`apply_to` 自己要再查一次单调（哪怕调用方已经用同一个 anchor 查过一次），
+    不能让不合格的路径靠"上游肯定查过"这种假设溜进工作簿。"""
     a, _ = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
     with pytest.raises(AssumeFailed, match="毛利率"):
         assume.apply_to(_cal_600183(), a)
+
+
+# ── C1：两阶段 check() 必须用同一个 anchor，否则批准的东西下一步就不合法 ──
+
+def test_两阶段用不同anchor会给出相反结论():
+    """**600183 实跑复现（final-fix-D 审查 C1）。** 单因子毛利率累计 pp：
+    第 1 年 悲观 0.5 / 中性 1.3 / 乐观 2.0，第 2 年 悲观 0.5 / 中性 3.1 /
+    乐观 3.0，base_margin=0.2647。
+
+    第一阶段 `_propose_assumptions` 传 `anchor=assume.anchor_from_cal(cal)`，
+    查的是平移后（锚定水平）的路径——PASS。第二阶段 `run_valuation` 此前
+    调 `check()` 时漏传 `anchor`，`margin_bases` 因此为 `None`，查的是未平移
+    （年报基期）路径——第 2 年悲观 26.97% / 中性 29.57% / 乐观 29.47%，乐观
+    落到中性下面，FAIL。
+
+    同一组 `AssumptionSet`、同一个 `base_margin`，只因为两处调用给不给
+    `anchor` 就得出相反结论——这正是 C1 要修的口径分裂。本测试锁住这个
+    分裂在 `assume.check()` 这一层确实存在，`full.run_valuation` 的修复
+    （见 `test_full_context.py` 里对应用例）则要求它在调用处消失：两阶段
+    必须传同一个 `anchor`。
+    """
+    gm = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="m", label="毛利率因子", unit="pp")])
+
+    def build():
+        a = assume.AssumptionSet(code="600183", labels=["2026E", "2027E"],
+                                 decomps=[gm])
+        for y, (bear, base, bull) in ((1, ("0.5", "1.3", "2.0")),
+                                      (2, ("0.5", "3.1", "3.0"))):
+            a.rows.append(assume.Row(
+                driver="gross_margin", year=y, note="理由", factor_key="m",
+                bear=D(bear), base=D(base), bull=D(bull)))
+        return a
+
+    anchor = _anchor_600183()
+    base_margin = D("0.2647")
+
+    # 第一阶段的口径：带 anchor，查平移后的路径 —— PASS。
+    assume.check(build(), 2, ledger=FactLedger(), body="正文", as_of=AS_OF,
+                decomps=[gm], base_margin=base_margin, anchor=anchor)
+
+    # 第二阶段修复前的口径：不带 anchor，查未平移的路径 —— FAIL，
+    # 且报出的三档数字与实跑现场一致。
+    with pytest.raises(AssumeFailed, match=r"26\.97%.*29\.57%.*29\.47%"):
+        assume.check(build(), 2, ledger=FactLedger(), body="正文", as_of=AS_OF,
+                    decomps=[gm], base_margin=base_margin)

@@ -322,3 +322,72 @@ def test_毛利率加法链里的结构因子不受影响():
     check_closure(Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
         Factor(key="mix", label="产品结构(先进封装收入占比)", unit="pp"),
         Factor(key="cost", label="上游成本", unit="pp")]))
+
+
+# ── I1（final-fix-D 终审）：占比闸门要按量纲收，不能靠一字之差绕开 ──────
+#
+# 审查者实跑发现两个具体问题：
+# 1. 旧的 `_SHARE_OK = re.compile(r"市占|份额")` 在**整条标签**上做豁免，
+#    于是「客户份额占比」这种既含「占比」又含「份额」的写法，量纲错误
+#    分毫未改，仅仅因为字符串里出现了「份额」两个字就被放行。
+# 2. 旧的 `_MIX` 只认「占比|比重|结构」，「比例/构成/渗透率/化率/贡献度」
+#    这类同义写法完全漏网；而「结构件」这种真实产品品类名（如"精密结构件"）
+#    又被「结构」误伤。
+#
+# 8 个应挡下的同义写法 + 3 个不该被误伤的合法标签，每个都验两个方向：
+# ①在营收乘法链里挡对/放对；②同一个标签放进毛利率加法链，这道闸门根本
+# 不该管（`d.op is Op.MULTIPLY` 已经限定了作用范围），不能被误伤。
+
+_MIX_SYNONYMS_SHOULD_REJECT = [
+    "高端产品收入占比",
+    "高端产品收入份额",
+    "客户份额占比",
+    "高端产品收入比例",
+    "高端产品收入构成",
+    "高端产品收入渗透率",
+    "高端产品国产化率",
+    "高端产品收入贡献度",
+]
+
+_SHOULD_NOT_BE_MISFLAGGED = [
+    "市占率",
+    "市场份额",
+    "结构件出货量",
+]
+
+
+@pytest.mark.parametrize("label", _MIX_SYNONYMS_SHOULD_REJECT)
+def test_占比类同义写法在营收乘法链里必须被挡住(label):
+    """一字改名不该绕过量纲闸门——「占比」换成「份额」「比例」「构成」
+    「渗透率」「化率」「贡献度」，说的是同一件事：拿公司自己收入的一部分
+    除以公司自己的总量，不是合法的营收乘数。"""
+    from ir_agent.drivers import Decomposition, DecompositionInvalid, Factor, Op, check_closure
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="cap", label="产能", unit="变化率"),
+        Factor(key="mix", label=label, unit="变化率")])
+    with pytest.raises(DecompositionInvalid):
+        check_closure(d)
+
+
+@pytest.mark.parametrize("label", _SHOULD_NOT_BE_MISFLAGGED)
+def test_市占率与产品品类名不受占比闸门误伤(label):
+    """「市占率/市场份额」分母在公司之外，是合法的营收乘数；「结构件」
+    是真实产品品类名（如"精密结构件"），不是「产品结构」这种组合变量——
+    两者都不该被这道闸门挡下。"""
+    from ir_agent.drivers import Decomposition, Factor, Op, check_closure
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="cap", label="产能", unit="变化率"),
+        Factor(key="ok", label=label, unit="变化率")])
+    check_closure(d)
+
+
+@pytest.mark.parametrize("label", _MIX_SYNONYMS_SHOULD_REJECT + _SHOULD_NOT_BE_MISFLAGGED)
+def test_占比闸门只管营收乘法链不管毛利率加法链(label):
+    """同一个标签放进毛利率加法链，这道闸门根本不该管——它只查
+    `d.op is Op.MULTIPLY` 这一条链，加法链里"结构""份额"这类因子完全
+    合法（毛利率的产品结构因子就是典型用法）。"""
+    from ir_agent.drivers import Decomposition, Factor, Op, check_closure
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[
+        Factor(key="cost", label="上游成本", unit="pp"),
+        Factor(key="mix", label=label, unit="pp")])
+    check_closure(d)
