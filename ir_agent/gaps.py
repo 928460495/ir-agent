@@ -15,6 +15,12 @@
 年报里出现这三个字，可能只是一句「稼动率保持稳定」而没有任何数字。因此命中
 时只标「文字依据，待人工确认」，并把原文片段连同出处一并交出去，不代人下
 结论：不然就是本模块要防的那种失败本身——让一个估计伪装成测量。
+
+③的语料库不再只装券商研报。openweb 分支之后，corpus 里混入了代码抓回来的
+开放网页，其中一部分分级落 `Tier.MEDIA`。`_match_report` 因此跳过 MEDIA
+文档——④（`web.supports_value`）早就在做同一件事（MEDIA 不得单独支撑因子
+取值），③不能绕开这道闸门另开一扇门：把媒体错拔成"研报测算"是危害（一篇
+博客单独支撑了 DCF 里的一个假设），漏判落到④或"无数据"只是召回损失。
 """
 
 from __future__ import annotations
@@ -193,11 +199,25 @@ def _match_report(corpus, label: str) -> tuple[str, Document] | None:
     构造 assume.py 那边可以直接核验的 EXTERNAL 依据：模型引用 note
     里摘出的这段原文时，代码要能把真实出处（而不是模型自己声称的）
     填回去，同一条"模型写引用，代码填事实"的契约。
+
+    **跳过 Tier.MEDIA 文档。** 这个函数写下来的时候语料库里只有券商
+    研报（全部 SELLSIDE），没有分级判断也无妨。openweb 分支之后，
+    corpus 混入了代码抓回来的开放网页，其中相当一部分分级落 MEDIA——
+    ④（`web.supports_value`）早就在做同一件事："MEDIA 级不得单独支撑
+    因子取值"；这里若不补同一道闸门，一篇分级落 MEDIA 的网络博客只要
+    文本命中，就会被当成"研报测算"直接喂给 assume.py 当 EXTERNAL 依据
+    写进 DCF 假设——比④更糟，因为③命中即终止（先近后远，不会再往下
+    走④的门槛检查）。命中该跳过的 MEDIA 文档时不返回 None 就直接结束，
+    而是继续扫描其余文档——同一因子仍可能在别的 SELLSIDE/OFFICIAL
+    文档里正常命中，落空了才退到④或"无数据"，这正是代价不对称原则
+    要求的方向：宁可多退一级，不可把媒体错拔成研报依据。
     """
     if corpus is None:
         return None
     core = _core_label(label)
     for d in corpus.docs:
+        if d.tier is Tier.MEDIA:
+            continue
         hit = _valid_hit(d.text, core)
         if hit is not None:
             return hit, d

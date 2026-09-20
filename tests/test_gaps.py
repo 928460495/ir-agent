@@ -416,6 +416,51 @@ def test_否定语境之外的真实命中不受连坐():
 # 分支，这里补一条 identify() 在 as_of 之前正常可见时不算缺口的对照，
 # 与之前那条构成一对「时点之前可见/之后不可见」的完整守卫测试。）
 
+# ── final-fix-2 Fix 1：openweb 分支之后语料库不再全是 SELLSIDE，
+# ③命中必须跳过 MEDIA 文档，与④（web.supports_value）同一道闸门 ──
+
+def test_MEDIA语料不产生研报测算命中():
+    """语料库里只有一篇 MEDIA 文档、文本命中核心词时，③不能把它判成
+    「研报测算」——那等于一篇网络博客单独支撑了因子取值，是本轮修复
+    要堵的洞。落空后应正常退到④，④命中官方来源则算「外部来源」。"""
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们测算行业稼动率将于下半年回升。", tier=Tier.MEDIA))
+    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
+          "| SEMI | 2026-07-01\n")
+    data = collect(_Client(ok, ""), [_rev()], _led("capacity", "asp"),
+                   corpus, "封测", AS_OF)
+    fd = data["utilization"]
+    assert fd.status != "研报测算"
+    assert fd.status == "外部来源"
+
+
+def test_SELLSIDE语料仍产生研报测算命中():
+    """与上面 MEDIA 那条对照：加了分级闸门后，合格的 SELLSIDE 研报要
+    继续正常命中③，不能被误伤一并挡下。"""
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们测算行业稼动率将于下半年回升。", tier=Tier.SELLSIDE))
+    data = collect(_ExplodingClient(), [_rev()], _led("capacity", "asp"),
+                   corpus, "封测", AS_OF)
+    assert data["utilization"].status == "研报测算"
+
+
+def test_MEDIA先于SELLSIDE入库时仍以SELLSIDE命中():
+    """复现 review 描述的真实隐患：MEDIA 文档若恰好排在 SELLSIDE 前面
+    入库，不做分级过滤时会抢先被 _match_report 命中——"一家合格来源
+    只是靠列表顺序侥幸胜出"。加了闸门后不管顺序如何，命中的必须是
+    SELLSIDE 那篇。"""
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们预计稼动率将持续偏低。", tier=Tier.MEDIA, doc_id="media1"))
+    corpus.add(_doc("我们测算行业稼动率将于下半年回升。",
+                    tier=Tier.SELLSIDE, doc_id="sell1"))
+    data = collect(_ExplodingClient(), [_rev()], _led("capacity", "asp"),
+                   corpus, "封测", AS_OF)
+    fd = data["utilization"]
+    assert fd.status == "研报测算"
+    assert "预计稼动率将持续偏低" not in fd.note
+    assert "测算行业稼动率将于下半年回升" in fd.note
+
+
 def test_时点守卫对照_披露时点早于as_of时不算缺口():
     """与 test_已有该因子但披露时点晚于as_of仍算缺口 相对照：同一个
     因子，披露时点早于/等于 as_of 时应正常被判定为已披露，不是缺口。
