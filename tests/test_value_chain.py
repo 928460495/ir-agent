@@ -217,6 +217,27 @@ def test_财经媒体的可引用范围出现在资料正文之前():
     assert txt.index(rule) < txt.index(media_text)
 
 
+def test_多档来源同时出现时可引用范围按Tier声明顺序排列():
+    """Fix 5c 回归：此前用 `{d.tier for d in corpus.docs}` 这个 set 去
+    遍历可引用范围，迭代顺序取决于 PYTHONHASHSEED。改成 `for t in
+    Tier:` 之后，无论语料库里的文档以什么顺序加入，"可引用范围"这几行
+    必须固定按 OFFICIAL → SELLSIDE → MEDIA 的声明顺序出现。"""
+    from ir_agent.sources.external import TIER_RULE
+
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="板块观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=date(2026, 8, 1), retrieved=AS_OF, text="媒体正文"))
+    c.add(Document(doc_id="R1", url="https://data.eastmoney.com/report/info/R1.html",
+                   title="白酒行业深度", publisher="甲证券", tier=Tier.SELLSIDE,
+                   published=date(2026, 3, 1), retrieved=AS_OF, text=DOC))
+
+    txt = VC.for_prompt(c, _led(), P, AS_OF)
+    sellside_rule = TIER_RULE[Tier.SELLSIDE]
+    media_rule = TIER_RULE[Tier.MEDIA]
+    assert txt.index(sellside_rule) < txt.index(media_rule)
+
+
 def test_驳回后重试并带回原因():
     bad = _out(powers=["议价: 上游 | 强"], size=False)
     c = _Client(bad, _out())

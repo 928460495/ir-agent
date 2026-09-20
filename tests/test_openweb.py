@@ -135,6 +135,15 @@ def test_空前导标签不算gov_cn子域():
     assert tier_of_url("https://.gov.cn/x") is Tier.MEDIA
 
 
+def test_中间空标签不算gov_cn子域():
+    """真实事故：`.gov.cn` 的空标签守卫只特判了「开头是空标签」这一种
+    形态（`host.startswith(".")`）。`"a..gov.cn"` 的空标签在中间——
+    不以 `.` 开头，但 `"a..gov.cn".endswith(".gov.cn")` 同样为真，旧
+    实现会漏过这条守卫、把它判成 gov.cn 的子域从而拔到 OFFICIAL。
+    `all(host.split("."))` 一次性堵住所有空标签形态，不管出现在哪。"""
+    assert tier_of_url("https://a..gov.cn/x") is Tier.MEDIA
+
+
 from ir_agent.sources.openweb import extract_text, meta_date
 
 HTML = """<html><head>
