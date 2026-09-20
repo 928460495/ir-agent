@@ -13,15 +13,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from urllib.parse import urlparse
 
 import requests
 
 from ir_agent.lineparse import keyed
-from ir_agent.sources.external import Tier
+from ir_agent.sources.external import Document, Tier
 from ir_agent.sources.retry import with_retry
 from ir_agent.sources.web import parse_date
 
@@ -362,3 +363,107 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
         raise FetchFailed(f"{url}：正文提取为空")
     return Fetched(final_url=resp.url or url, text=text,
                    meta_published=meta_date(html))
+
+
+# ── 编排 ────────────────────────────────────────────────────────
+
+PER_SLOT = 2
+MAX_DOCS = 10
+
+
+@dataclass
+class OpenWebResult:
+    docs: list[Document] = field(default_factory=list)
+    missing_slots: list[str] = field(default_factory=list)
+    extra_slots: list[str] = field(default_factory=list)
+    fetch_failed: int = 0
+    # 发布日期由模型给出、未经代码核验的篇数。**必须能说出来** ——
+    # 用户决定信模型报的日期，折中是把不可核验的那部分显式标出来，
+    # 而不是让它隐身在一堆看起来一样的引用里。
+    model_dated: int = 0
+
+
+def _doc_id(final_url: str) -> str:
+    return "ow_" + hashlib.sha256(final_url.encode("utf-8")).hexdigest()[:12]
+
+
+def gather(client, *, code: str, company: str, industry: str,
+           as_of: date, corpus) -> OpenWebResult:
+    """模型给网址 → 代码抓正文 → 入语料库。
+
+    **调用方必须传入已显式开启 WebSearch/WebFetch 工具的 client**，
+    例如 `make_client(tools=["WebSearch", "WebFetch"])`。不开不会报错，
+    只会安静地什么都搜不到 —— 与 web.search 同一条前提。
+    """
+    res = OpenWebResult()
+    raw = client(PROMPT.format(company=company or code, code=code,
+                               industry=industry or "未知",
+                               per_slot=PER_SLOT, as_of=as_of.isoformat()))
+    seen = {d.url for d in corpus.docs}
+    per_slot: dict[str, int] = {}
+
+    for cand in parse_candidates(raw):
+        if len(res.docs) >= MAX_DOCS:
+            break
+        if cand.published > as_of:
+            # 时点守卫的第一道：候选阶段就挡，省一次网络请求。
+            # 第二道在 corpus.add_if_visible 里（按最终文档再滤一遍）。
+            corpus.skipped.append(f"{cand.title}（{cand.published}）")
+            continue
+        if per_slot.get(cand.slot, 0) >= PER_SLOT:
+            continue
+        if cand.url in seen:
+            continue
+        try:
+            got = fetch(cand.url)
+        except FetchFailed:
+            res.fetch_failed += 1
+            continue
+        if got.final_url in seen:
+            # 重定向之后才发现撞上已有文档 —— 抓都抓了，但不重复入库。
+            continue
+
+        # 日期：代码能从 meta 提到就**以代码为准**，提不到才用模型报的。
+        # 这不增加丢弃、不损召回，只是让不可核验的那部分可见。
+        published = got.meta_published or cand.published
+        if got.meta_published is None:
+            res.model_dated += 1
+
+        doc = Document(
+            doc_id=_doc_id(got.final_url),
+            url=got.final_url,
+            title=cand.title,
+            publisher=cand.publisher,
+            # **按代码跟完重定向后的最终 URL 分级**，不是模型给的那个。
+            tier=tier_of_url(got.final_url),
+            published=published,
+            retrieved=as_of,
+            text=got.text,
+        )
+        if not corpus.add_if_visible(doc):
+            continue
+        seen.add(doc.url)
+        per_slot[cand.slot] = per_slot.get(cand.slot, 0) + 1
+        res.docs.append(doc)
+        if cand.extra and cand.slot not in res.extra_slots:
+            res.extra_slots.append(cand.slot)
+
+    # 缺口只按固定槽位判定 —— 额外槽位是模型的自由发挥，不能进缺口口径。
+    res.missing_slots = [s for s in SLOTS if not per_slot.get(s)]
+    return res
+
+
+def summary(res: OpenWebResult) -> str:
+    """给人看的采集结果。**缺什么必须说出来** —— 只列取到的部分，
+    读者会以为资料是全的。"""
+    lines = [f"开放网络资料 {len(res.docs)} 篇"]
+    if res.extra_slots:
+        lines.append("  · 额外主题：" + "、".join(res.extra_slots))
+    if res.model_dated:
+        lines.append(f"  ⚠ 其中 {res.model_dated} 篇的发布日期由模型给出，"
+                     "未经代码核验")
+    if res.fetch_failed:
+        lines.append(f"  – {res.fetch_failed} 篇抓取失败")
+    for slot in res.missing_slots:
+        lines.append(f"  – {slot}：未取到")
+    return "\n".join(lines)

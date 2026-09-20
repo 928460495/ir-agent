@@ -304,3 +304,163 @@ def test_容器深度超上限时开放失败():
     # 超过上限时，一些噪声会泄露（这个行为的代价已被明确接受）
     # 此处不做严格检查噪声泄露量，只验证「内容保留 + 可能漏噪声」
     # 这样即使将来嵌套处理方式微调，只要核心保证不变就不会红
+
+
+from ir_agent.sources.external import Corpus
+from ir_agent.sources.openweb import Fetched, OpenWebResult, gather, summary
+
+
+class _Client:
+    """与 tests/test_web_source.py 的 _Client 同一形状：文本进、文本出。"""
+
+    def __init__(self, *replies):
+        self.replies, self.prompts = list(replies), []
+
+    def __call__(self, prompt):
+        self.prompts.append(prompt)
+        return self.replies.pop(0)
+
+
+def _fake_fetch(pages):
+    """pages: {请求URL: Fetched}。缺的抛 FetchFailed。"""
+    import ir_agent.sources.openweb as OW
+
+    def _f(url, *, timeout=OW.TIMEOUT):
+        if url not in pages:
+            raise OW.FetchFailed(f"{url}：404")
+        return pages[url]
+    return _f
+
+
+FOUR = """候选: 行业规模与增速 | 规模 | https://www.semi.org/a | SEMI | 2026-07-01
+候选: 政策与监管 | 政策 | https://www.miit.gov.cn/b | 工信部 | 2026-06-15
+候选: 竞争格局与份额 | 格局 | https://finance.example.com/c | 某财经网 | 2026-08-01
+候选: 覆铜板批价 | 批价 | https://price.example.com/d | 某网 | 2026-08-20
+"""
+
+PAGES = {
+    "https://www.semi.org/a": Fetched("https://www.semi.org/a", "规模约120亿美元", date(2026, 7, 1)),
+    "https://www.miit.gov.cn/b": Fetched("https://www.miit.gov.cn/b", "印发行动方案", None),
+    "https://finance.example.com/c": Fetched("https://finance.example.com/c", "前三大份额", None),
+    "https://price.example.com/d": Fetched("https://price.example.com/d", "报价上涨", None),
+}
+
+
+def test_抓到的文档入语料库并按最终域名分级(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert len(cp.docs) == 4
+    by_url = {d.url: d for d in cp.docs}
+    assert by_url["https://www.semi.org/a"].tier is Tier.OFFICIAL
+    assert by_url["https://www.miit.gov.cn/b"].tier is Tier.OFFICIAL
+    assert by_url["https://finance.example.com/c"].tier is Tier.MEDIA
+    assert len(res.docs) == 4
+
+
+def test_未取到的固定槽位被报成缺口(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert set(res.missing_slots) == {"上下游价格与供需", "公司重大动态"}
+
+
+def test_额外槽位不参与缺口判定(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert res.extra_slots == ["覆铜板批价"]
+    assert "覆铜板批价" not in res.missing_slots
+
+
+def test_重定向后按最终域名分级(monkeypatch):
+    """模型给 gov.cn 链接、实际 302 到博客——必须按博客落 MEDIA。"""
+    import ir_agent.sources.openweb as OW
+    pages = {"https://www.miit.gov.cn/b":
+             Fetched("https://blog.example.com/real", "正文", None)}
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(pages))
+    cp = Corpus(as_of=AS_OF)
+    gather(_Client("候选: 政策与监管 | 政策 | https://www.miit.gov.cn/b | 工信部 | 2026-06-15\n"),
+           code="600183", company="生益科技", industry="电子/元件",
+           as_of=AS_OF, corpus=cp)
+    assert len(cp.docs) == 1
+    assert cp.docs[0].tier is Tier.MEDIA
+    assert cp.docs[0].url == "https://blog.example.com/real"
+
+
+def test_抓取失败不牵连其余(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    partial = {k: v for k, v in PAGES.items() if "semi.org" not in k}
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(partial))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert len(cp.docs) == 3
+    assert res.fetch_failed == 1
+
+
+def test_晚于as_of的候选被挡下(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    late = "候选: 政策与监管 | 政策 | https://www.miit.gov.cn/b | 工信部 | 2026-12-31\n"
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    gather(_Client(late), code="600183", company="生益科技",
+           industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert cp.docs == []
+    assert cp.skipped != []
+
+
+def test_每槽位最多两篇(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    three = "".join(
+        f"候选: 政策与监管 | 政策{i} | https://www.miit.gov.cn/{i} | 工信部 | 2026-06-15\n"
+        for i in range(3))
+    pages = {f"https://www.miit.gov.cn/{i}":
+             Fetched(f"https://www.miit.gov.cn/{i}", f"正文{i}", None)
+             for i in range(3)}
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(pages))
+    cp = Corpus(as_of=AS_OF)
+    gather(_Client(three), code="600183", company="生益科技",
+           industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert len(cp.docs) == 2
+
+
+def test_已在语料库里的URL不重复入库(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Document
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    cp.add(Document(doc_id="x", url="https://www.semi.org/a", title="已有",
+                    publisher="SEMI", tier=Tier.SELLSIDE,
+                    published=date(2026, 5, 1), retrieved=AS_OF, text="已有正文"))
+    gather(_Client(FOUR), code="600183", company="生益科技",
+           industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert [d.url for d in cp.docs].count("https://www.semi.org/a") == 1
+
+
+def test_日期来源统计_meta优先于模型(monkeypatch):
+    """用户定：信模型报的日期；折中是代码能提到就以代码为准，并把
+    「有几篇的日期未经代码核验」说出来。"""
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    # PAGES 里只有 semi.org 那篇带 meta 日期，其余三篇用模型报的
+    assert res.model_dated == 3
+
+
+def test_summary_逐项说出缺口与失败(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    partial = {k: v for k, v in PAGES.items() if "semi.org" not in k}
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(partial))
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    text = summary(res)
+    assert "上下游价格与供需：未取到" in text
+    assert "公司重大动态：未取到" in text
+    assert "1 篇抓取失败" in text
