@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+import requests
 
 from ir_agent.sources.external import Tier
 from ir_agent.sources.openweb import SLOTS, Candidate, parse_candidates, tier_of_url
@@ -279,6 +280,84 @@ class _FakeFetchResp:
 
     def close(self):
         return None
+
+
+class _FlakyBodyResp:
+    """`iter_content()` 前 `fail_times` 次调用抛 `ChunkedEncodingError`，
+    之后才正常吐出正文——用来复现 Fix 1 报的事故：`stream=True` 下正文
+    要等 `iter_content()` 被消费时才读，是惰性的一步，真实世界里这一步
+    发生瞬时网络故障和头部请求发生瞬时网络故障是同一类风险，必须同样
+    被 `with_retry` 覆盖。"""
+
+    def __init__(self, url, body: bytes, fail_times: int = 1):
+        self.url = url
+        self._body = body
+        self._fail_times = fail_times
+        self._calls = 0
+        self.headers = {"Content-Type": "text/html; charset=utf-8"}
+        self.encoding = "utf-8"
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size=65536):
+        self._calls += 1
+        if self._calls <= self._fail_times:
+            def _boom():
+                raise requests.exceptions.ChunkedEncodingError(
+                    "Connection broken: 模拟的中途网络中断")
+                yield  # pragma: no cover — 不会执行到，只为了让这是个生成器
+            return _boom()
+
+        def _ok():
+            for i in range(0, len(self._body), chunk_size):
+                yield self._body[i:i + chunk_size]
+        return _ok()
+
+    def close(self):
+        return None
+
+
+def test_fetch_正文读取阶段的瞬时故障最终转换为FetchFailed不逃逸(monkeypatch):
+    """Fix 1 的核心复现：旧实现只把拿响应头那一步（`with_retry(_get)`）
+    纳入 with_retry + FetchFailed 的双重边界，`resp.iter_content()` 的
+    读取循环留在外面裸跑一个 `try/finally`。`ChunkedEncodingError`
+    （`retry._TRANSIENT` 明确点名要重试的瞬时故障）因此会在读正文时才
+    炸，从这两层保护外面原样冒出去——`gather()` 只接 `FetchFailed`，
+    接不住裸异常，一路冒到 `_load_openweb` 的 `except Exception`，那里
+    会在 `openweb.save()` 执行之前就返回，本轮已经抓到的其余文档全部
+    没能跨阶段存活。这里验证：即便重试次数用尽仍然读不出正文，最终
+    露出来的必须是 `FetchFailed`，不能是裸的 `requests` 异常。"""
+    import ir_agent.sources.openweb as OW
+    import ir_agent.sources.retry as RETRY
+
+    monkeypatch.setattr(RETRY.time, "sleep", lambda s: None)
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    resp = _FlakyBodyResp("https://x.example.com/a",
+                          "<p>正文</p>".encode("utf-8"), fail_times=99)
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://x.example.com/a")
+
+
+def test_fetch_正文读取阶段的瞬时故障重试后成功(monkeypatch):
+    """与上一条对照的正面用例：正文读取现在确实处在 `with_retry` 的
+    重试范围内——不是"重试次数用尽就必然失败"，第一次读正文中途断线、
+    第二次成功时应该正常返回抓到的正文，而不是把第一次的失败当成
+    最终结果。"""
+    import ir_agent.sources.openweb as OW
+    import ir_agent.sources.retry as RETRY
+
+    monkeypatch.setattr(RETRY.time, "sleep", lambda s: None)
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    resp = _FlakyBodyResp("https://x.example.com/a",
+                          "<p>覆铜板报价上涨</p>".encode("utf-8"),
+                          fail_times=1)
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+
+    got = OW.fetch("https://x.example.com/a")
+    assert "覆铜板报价上涨" in got.text
 
 
 def test_fetch_用最终URL并解码中文(monkeypatch):
@@ -579,6 +658,138 @@ def test_抓取失败不牵连其余(monkeypatch):
                  industry="电子/元件", as_of=AS_OF, corpus=cp)
     assert len(cp.docs) == 3
     assert res.fetch_failed == 1
+
+
+def test_gather经历真实ChunkedEncodingError仍计入失败不牵连其余(monkeypatch):
+    """Fix 1 的端到端复现：不 mock `openweb.fetch` 本身，只 mock
+    `requests.get`——让其中一个候选的 `iter_content()` 在读正文时一直
+    抛 `ChunkedEncodingError`（`retry._TRANSIENT` 点名的瞬时故障），
+    走 `fetch()` 真实的重试与转换逻辑。此前这个异常会从 `with_retry`
+    与 `FetchFailed` 的双重边界外面原样冒出去，`gather()` 接不住，
+    连累同一轮其余候选的入库与落盘。这里验证：其余三个候选正常入库，
+    出问题的这一个被计入 `fetch_failed`，不多不少。"""
+    import ir_agent.sources.openweb as OW
+    import ir_agent.sources.retry as RETRY
+
+    monkeypatch.setattr(RETRY.time, "sleep", lambda s: None)
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+
+    good_bodies = {
+        "https://www.miit.gov.cn/b": "印发行动方案",
+        "https://finance.example.com/c": "前三大份额",
+        "https://price.example.com/d": "报价上涨",
+    }
+
+    def _fake_get(url, *a, **k):
+        if "semi.org" in url:
+            return _FlakyBodyResp(url, "<p>不会读到这段</p>".encode("utf-8"),
+                                  fail_times=99)
+        return _FakeFetchResp(url, good_bodies[url].encode("utf-8"))
+
+    monkeypatch.setattr(OW.requests, "get", _fake_get)
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert len(cp.docs) == 3
+    assert len(res.docs) == 3
+    assert res.fetch_failed == 1
+
+
+def test_gather对per_candidate的保护接住任意异常不只接FetchFailed(monkeypatch):
+    """防御纵深：`gather()` 对每个候选的 `fetch()` 调用曾经只接
+    `FetchFailed`，看起来"更精确"，代价是上一次修复正是从这里烂掉的
+    ——`fetch()` 内部一旦有任何疏漏漏出一个非 `FetchFailed` 的裸异常，
+    这道本该是 per-candidate 的防线就直接失效，冒到 `gather()` 外面
+    连累整轮采集。这里不依赖 `fetch()` 本身是否已经堵严实，直接让
+    mock 的 `fetch()` 抛一个裸异常，验证 `gather()` 自己这道防线接得住。
+    """
+    import ir_agent.sources.openweb as OW
+
+    def _boom_then_fetch(pages):
+        inner = _fake_fetch(pages)
+
+        def _f(url, *, timeout=OW.TIMEOUT):
+            if "semi.org" in url:
+                raise RuntimeError("模拟一个从 fetch() 内部逃出来的裸异常")
+            return inner(url, timeout=timeout)
+        return _f
+
+    monkeypatch.setattr(OW, "fetch", _boom_then_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert len(cp.docs) == 3
+    assert res.fetch_failed == 1
+
+
+def test_不同抓取失败原因在结果里去重且可区分(monkeypatch):
+    """Fix 4：`fetch_failed` 曾经是个不透明的计数，「模型给了个 PDF」
+    「这个域名 DNS 解析不出来」等四种截然不同的诊断打印出来长得一模
+    一样——有本机代理时甚至会让全部候选一次性倒在同一个原因上，读者
+    看到的只有一个数字，无从判断该往哪查。这里验证不同原因被分别记下，
+    且能在 `summary()` 里读到具体是哪几种。"""
+    import ir_agent.sources.openweb as OW
+
+    def _mixed_fail(url, *, timeout=OW.TIMEOUT):
+        if "semi.org" in url:
+            raise OW.FetchFailed(f"{url}：DNS 解析失败（模拟代理环境）")
+        if "miit.gov.cn" in url:
+            raise OW.FetchFailed(
+                f"{url}：内容类型不是网页（application/pdf）")
+        return _fake_fetch(PAGES)(url, timeout=timeout)
+
+    monkeypatch.setattr(OW, "fetch", _mixed_fail)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
+    text = summary(res)
+    assert "DNS 解析失败" in text
+    assert "内容类型不是网页" in text
+
+
+def test_同一原因重复出现只记一次(monkeypatch):
+    """去重是这个字段存在的前提——同一种诊断（比如代理环境下所有候选
+    都解析不出 DNS）反复出现十次，读者要看到的是"这一种原因"，不是
+    同一句话被打印十次。"""
+    import ir_agent.sources.openweb as OW
+
+    def _same_fail(url, *, timeout=OW.TIMEOUT):
+        raise OW.FetchFailed(f"{url}：DNS 解析失败（模拟代理环境）")
+
+    monkeypatch.setattr(OW, "fetch", _same_fail)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert res.fetch_failed == 4
+    # 四个候选的失败消息只有 URL 不同、诊断本身相同（DNS 解析失败）——
+    # 这条测试要求诊断层面的去重，因此逐个候选构造消息去掉 URL 前缀，
+    # 而不是断言消息整体唯一。
+    reasons_without_url = {r.split("：", 1)[-1] for r in res.fetch_failed_reasons}
+    assert reasons_without_url == {"DNS 解析失败（模拟代理环境）"}
+
+
+def test_落盘读回后失败原因逐字还原(tmp_path, monkeypatch):
+    """Fix 4 要求 `fetch_failed_reasons` 跟着 `missing_slots`/
+    `extra_slots` 同样的路径跨阶段存活——第二阶段的 `_restore_openweb`
+    读的是落盘文件，不重新采集，读不到这个字段就等于第二阶段的读者
+    看不到第一阶段已经查明的失败原因。"""
+    import ir_agent.sources.openweb as OW
+
+    def _mixed_fail(url, *, timeout=OW.TIMEOUT):
+        if "semi.org" in url:
+            raise OW.FetchFailed(f"{url}：DNS 解析失败（模拟代理环境）")
+        return _fake_fetch(PAGES)(url, timeout=timeout)
+
+    monkeypatch.setattr(OW, "fetch", _mixed_fail)
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    assert res.fetch_failed_reasons  # 确认这条测试真的在测非空列表
+
+    path = tmp_path / OW.OPENWEB_JSON
+    OW.save(res, path)
+    back = OW.load(path, Corpus(as_of=AS_OF))
+    assert back.fetch_failed_reasons == res.fetch_failed_reasons
 
 
 def test_晚于as_of的候选被挡下(monkeypatch):

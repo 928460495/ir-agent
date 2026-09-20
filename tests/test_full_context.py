@@ -1656,3 +1656,37 @@ def test_openweb_notes两阶段措辞一致且不只报model_dated():
     assert "2 篇抓取失败" in joined
     assert "1 篇的发布日期由模型给出" in joined
     assert "竞争格局与份额：未取到" in joined
+
+
+def test_openweb_notes带上具体失败原因区分不同诊断():
+    """Fix 4：`fetch_failed` 曾经是个不透明的计数——「模型给了个 PDF」
+    「这个域名 DNS 解析不出来」等四种截然不同的诊断打印出来长得一模
+    一样，本机代理环境下甚至会让全部候选倒在同一个原因上、读者只看到
+    一个数字。`_openweb_notes` 必须把去重后的具体原因带出来。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(
+        docs=[], fetch_failed=2,
+        fetch_failed_reasons=["https://a.example.com/x：DNS 解析失败（模拟）",
+                              "https://b.example.com/y：内容类型不是网页"
+                              "（application/pdf）"])
+
+    joined = "；".join(full._openweb_notes(res))
+    assert "2 篇抓取失败" in joined
+    assert "DNS 解析失败" in joined
+    assert "内容类型不是网页" in joined
+
+
+def test_openweb_notes没有失败原因时不报多余内容():
+    """回归用例：`fetch_failed_reasons` 为空（旧落盘文件、或
+    `OpenWebResult()` 默认值）时不能凭空多出一个冒号或空段——
+    `test_openweb_notes两阶段措辞一致且不只报model_dated` 已经在断言
+    `"2 篇抓取失败"` 这个精确子串，这里单独补一条更直接的形状断言。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(docs=[], fetch_failed=3)
+    joined = "；".join(full._openweb_notes(res))
+    assert "3 篇抓取失败" in joined
+    assert "3 篇抓取失败：" not in joined

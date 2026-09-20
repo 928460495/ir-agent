@@ -224,7 +224,15 @@ def _openweb_notes(res) -> list[str]:
     """
     notes: list[str] = []
     if res.fetch_failed:
-        notes.append(f"{res.fetch_failed} 篇抓取失败")
+        # `fetch_failed` 曾经是个不透明的数字——「模型给了个 PDF」「模型
+        # 给了个内网地址」「这个域名 DNS 解析不出来」「正文提取为空」
+        # 四种截然不同的诊断，打印出来长得一模一样。带代理的机器上尤其
+        # 会撞见其中一种把全部候选一次性打光（见 openweb.OpenWebResult.
+        # fetch_failed_reasons 的注释），读者必须能分清是哪一种，而不是
+        # 只看到一个数字猜。
+        reasons = ("：" + "；".join(res.fetch_failed_reasons)
+                  if res.fetch_failed_reasons else "")
+        notes.append(f"{res.fetch_failed} 篇抓取失败{reasons}")
     if res.model_dated:
         notes.append(f"{res.model_dated} 篇的发布日期由模型给出，未经代码核验")
     for slot in res.missing_slots:

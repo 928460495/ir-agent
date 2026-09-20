@@ -494,41 +494,69 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
     是 PDF/图片等二进制；读取的字节数有硬顶。三者都只是让抓取本身失败
     （抛 `FetchFailed`），`gather()` 已经把它计进 `fetch_failed`、不会
     连累其余候选——这条契约不变。
+
+    **正文读取必须在 `_get` 内部完成，跟头部一起过 `with_retry`——不能
+    读完头再单独读正文。** 这是本函数曾经出过的一个真实事故：`stream=
+    True` 下 `requests.get()` 一收到响应头就返回，正文是在
+    `resp.iter_content()` 这个生成器被消费时才**惰性**读的。旧代码只把
+    `with_retry(_get)`（即拿到响应头那一步）包进了重试与
+    `FetchFailed` 边界，`iter_content()` 的循环留在外面、只有一个裸
+    `try/finally`。`ReadTimeout`/`ConnectionError`/`ChunkedEncodingError`
+    这类瞬时故障（`retry._TRANSIENT` 明确点名 `ChunkedEncodingError`
+    要重试）因此改在读正文时才炸，从 `with_retry` 的重试范围和
+    `FetchFailed` 的转换边界外面**原样**冒出去——`gather()` 只接
+    `FetchFailed`，接不住裸 `ChunkedEncodingError`，一路冒到
+    `_load_openweb`，那里的 `except Exception` 会在 `openweb.save()`
+    执行**之前**返回，本轮已经抓到、已经进了 `r.corpus` 的其余文档全部
+    没能跨阶段存活，`fetch_failed` 也没能计数——一次抓十篇里的一篇卡在
+    读正文，代价是另外九篇白抓。把整段读取（含 `iter_content` 循环、
+    字节上限、内容类型、跟完重定向后的主机复查）都挪进 `_get`，
+    `with_retry` 失败时会整个重来一次全新的 `requests.get()`——流式响应
+    不能从中断处续读，重试本来就只能是"整次请求重新来过"，这与
+    `_get` 原本对头部请求的重试语义完全一致，只是覆盖范围补全了正文。
     """
     _reject_unsafe_host(url)
 
     def _get():
         r = requests.get(url, headers=_HEADERS, timeout=timeout, stream=True)
-        r.raise_for_status()
-        return r
+        try:
+            r.raise_for_status()
+            final_url = r.url or url
+            # 模型给的域名可能是公网的，但该域名服务端把请求 302 到内网
+            # 地址——只查请求前那一次拦不住这种情况，跟完重定向后必须
+            # 再查一次。
+            _reject_unsafe_host(final_url)
+
+            content_type = (r.headers.get("Content-Type") or "").split(";")[0]
+            content_type = content_type.strip().lower()
+            if content_type not in _ALLOWED_CONTENT_TYPES:
+                raise FetchFailed(
+                    f"{url}：内容类型不是网页（{content_type or '未声明'}）")
+
+            raw = bytearray()
+            for chunk in r.iter_content(chunk_size=65536):
+                raw.extend(chunk)
+                if len(raw) > FETCH_MAX_BYTES:
+                    raise FetchFailed(
+                        f"{url}：正文超过 {FETCH_MAX_BYTES} 字节上限")
+            return final_url, bytes(raw), r.encoding
+        finally:
+            r.close()
 
     try:
-        resp = with_retry(_get)
+        final_url, raw, header_encoding = with_retry(_get)
+    except FetchFailed:
+        # 闸门类失败（内容类型、字节上限、重定向后主机不安全）已经是
+        # 成品 FetchFailed，直接透传——不能被下面那个 `except Exception`
+        # 再包一层，那会把 `内容类型不是网页（application/pdf）` 这种
+        # 已经很明确的消息变成 `FetchFailed: 内容类型不是网页（...）`，
+        # 平白多一层没有信息量的包装。这些也都不是 `is_transient` 认可
+        # 的瞬时故障，`with_retry` 本就不会重试它们，直接失败。
+        raise
     except Exception as e:                                  # noqa: BLE001
         raise FetchFailed(f"{url}：{e.__class__.__name__}: {e}") from e
 
-    try:
-        final_url = resp.url or url
-        # 模型给的域名可能是公网的，但该域名服务端把请求 302 到内网地址
-        # ——只查请求前那一次拦不住这种情况，跟完重定向后必须再查一次。
-        _reject_unsafe_host(final_url)
-
-        content_type = (resp.headers.get("Content-Type") or "").split(";")[0]
-        content_type = content_type.strip().lower()
-        if content_type not in _ALLOWED_CONTENT_TYPES:
-            raise FetchFailed(
-                f"{url}：内容类型不是网页（{content_type or '未声明'}）")
-
-        raw = bytearray()
-        for chunk in resp.iter_content(chunk_size=65536):
-            raw.extend(chunk)
-            if len(raw) > FETCH_MAX_BYTES:
-                raise FetchFailed(
-                    f"{url}：正文超过 {FETCH_MAX_BYTES} 字节上限")
-    finally:
-        resp.close()
-
-    html = _decode(bytes(raw), resp.encoding)
+    html = _decode(raw, header_encoding)
 
     text = extract_text(html)
     if not text.strip():
@@ -541,6 +569,11 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
 
 PER_SLOT = 2
 MAX_DOCS = 10
+# `fetch_failed_reasons` 里单条原因的截断长度。原因字符串里带着完整
+# URL（见 fetch()/`_reject_unsafe_host` 里的 `f"{url}：..."` 格式），
+# 加上异常自带的描述可能很长；与 full.py 里 `str(e)[:120]` 同一量级，
+# 这里再放宽一些余量，因为消息本身就带着 URL 前缀。
+_REASON_LIMIT = 160
 
 
 @dataclass
@@ -549,6 +582,23 @@ class OpenWebResult:
     missing_slots: list[str] = field(default_factory=list)
     extra_slots: list[str] = field(default_factory=list)
     fetch_failed: int = 0
+    # 去重后的失败原因，给人看时用来分清「抓取失败」到底是哪一种。
+    #
+    # `fetch_failed` 曾经只是一个计数，四种截然不同的诊断——模型给的
+    # 是个 PDF、给的是个内网地址、这个域名 DNS 解析不出来、正文提取为
+    # 空——被压成同一个数字，读者拿到「10 篇抓取失败」时无从判断该往哪
+    # 查。在有本机代理的环境下这不是小概率事件：`_reject_unsafe_host`
+    # 在发请求前用 `socket.getaddrinfo` 本地解析主机名，而 `requests`
+    # 一旦检测到 `HTTP_PROXY`/`HTTPS_PROXY` 就会把整个 URL 连主机名一起
+    # 交给代理、自己不再本地解析——于是这道主机安全闸门会在代理环境下
+    # 对**每一个**候选都报「DNS 解析失败」，10 篇全部失败，却仍然只印出
+    # 一行「10 篇抓取失败」，表面上符合「不阻断整轮研究」，实际上正是
+    # 「缺什么必须显式列出来」要防的那种沉默降级。
+    #
+    # 只存**去重后**的原因（`gather()` 按去重后的顺序追加），不是每个
+    # candidate 一条：候选可能有十几个，但失败的根因通常只有个位数种，
+    # 逐条罗列同一句话十次除了刷屏没有更多信息量。
+    fetch_failed_reasons: list[str] = field(default_factory=list)
     # 发布日期由模型给出、未经代码核验的篇数。**必须能说出来** ——
     # 用户决定信模型报的日期，折中是把不可核验的那部分显式标出来，
     # 而不是让它隐身在一堆看起来一样的引用里。
@@ -588,8 +638,21 @@ def gather(client, *, code: str, company: str, industry: str,
             continue
         try:
             got = fetch(cand.url)
-        except FetchFailed:
+        except Exception as e:                              # noqa: BLE001
+            # **必须接 Exception，不能只接 FetchFailed。** `fetch()` 现在
+            # 已经把整段读取（含流式正文）都收进了 with_retry +
+            # FetchFailed 的双重边界，理论上不该再有别的异常类型逃出
+            # 来——但这道 per-candidate 保护正是上一次修复烂掉的地方：
+            # `stream=True` 让正文变成惰性读取，只接 FetchFailed 曾经让
+            # 一个裸 ChunkedEncodingError 从这里原样冒出去，一路冒出
+            # gather()、冒到 `_load_openweb` 的 `except Exception`，在
+            # `openweb.save()` 执行之前就返回，本轮已经抓到的其余文档
+            # 全部没能跨阶段存活。宁可这道防线看起来"不够精确"，也不能
+            # 让未来任何一次疏漏都需要重新证明"这里必须接多宽"。
             res.fetch_failed += 1
+            reason = str(e).strip()[:_REASON_LIMIT] or e.__class__.__name__
+            if reason not in res.fetch_failed_reasons:
+                res.fetch_failed_reasons.append(reason)
             continue
         if got.final_url in seen:
             # 重定向之后才发现撞上已有文档 —— 抓都抓了，但不重复入库。
@@ -638,6 +701,11 @@ def summary(res: OpenWebResult) -> str:
                      "未经代码核验")
     if res.fetch_failed:
         lines.append(f"  – {res.fetch_failed} 篇抓取失败")
+        # 去重后的原因逐条列出——不然「10 篇抓取失败」在 DNS 解析不出
+        # （代理环境）、内容类型不对、正文提取为空这几种诊断之间长得
+        # 一模一样，读者分不出该往哪查。
+        for reason in res.fetch_failed_reasons:
+            lines.append(f"    · {reason}")
     for slot in res.missing_slots:
         lines.append(f"  – {slot}：未取到")
     return "\n".join(lines)
@@ -705,6 +773,7 @@ def save(res: OpenWebResult, path: Path | str) -> None:
         "missing_slots": res.missing_slots,
         "extra_slots": res.extra_slots,
         "fetch_failed": res.fetch_failed,
+        "fetch_failed_reasons": res.fetch_failed_reasons,
         "model_dated": res.model_dated,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -717,9 +786,9 @@ def load(path: Path | str, corpus) -> OpenWebResult:
     - **整份文件损坏**——文件不存在、JSON 语法错误、顶层不是 dict（比如
       手抖写成一个 `[]` 或裸字符串）、或某个头部字段的类型烂到没法安全
       解读（`fetch_failed`/`model_dated` 不是数字、`missing_slots`/
-      `extra_slots` 不是可迭代对象）。这些情况下**整份**退化成空
-      `OpenWebResult()`：任何一处都可能污染后面所有字段的读取，没有
-      「只信一半」这回事。
+      `extra_slots`/`fetch_failed_reasons` 不是可迭代对象）。这些情况下
+      **整份**退化成空 `OpenWebResult()`：任何一处都可能污染后面所有
+      字段的读取，没有「只信一半」这回事。
     - **单条文档损坏**——`docs` 列表本身是合法列表，但其中某一条不是
       合法的 Document JSON（缺字段、字段类型不对、tier 不是已知取值）。
       这种情况下只跳过**这一条**，其余合法条目照常读回、照常入库。
@@ -743,13 +812,15 @@ def load(path: Path | str, corpus) -> OpenWebResult:
             missing_slots=list(raw.get("missing_slots", [])),
             extra_slots=list(raw.get("extra_slots", [])),
             fetch_failed=int(raw.get("fetch_failed", 0)),
+            fetch_failed_reasons=list(raw.get("fetch_failed_reasons", [])),
             model_dated=int(raw.get("model_dated", 0)))
         docs_raw = list(raw.get("docs", []))
     except Exception:                                       # noqa: BLE001
         # 顶层不是 dict（没有 .get）、docs 不是可迭代对象、或
-        # fetch_failed/model_dated/missing_slots/extra_slots 类型烂到
-        # 没法安全解读——任何一种都不是「跳过这一条」能兜住的，整份文件
-        # 的可信度已经不在，退化成空结果。
+        # fetch_failed/model_dated/missing_slots/extra_slots/
+        # fetch_failed_reasons 类型烂到没法安全解读——任何一种都不是
+        # 「跳过这一条」能兜住的，整份文件的可信度已经不在，退化成空
+        # 结果。
         return OpenWebResult()
 
     seen = {d.url for d in corpus.docs}
