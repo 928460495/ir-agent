@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 from datetime import date
 from decimal import Decimal
 
@@ -1393,46 +1396,98 @@ def test_第一阶段填判断项时带上锚定输入():
     assert "anchor=assume.anchor_from_cal(cal)" in inspect.getsource(full._propose_assumptions)
 
 
+def _call_name(node: "ast.Call") -> str:
+    """把一个 `ast.Call` 节点的被调用者还原成点号连接的名字
+    （裸名字如 `"_load_openweb"`，属性访问链如 `"openweb.gather"`）。
+
+    只处理这两种形态——本文件的用法只关心「源码里写的是哪个具名调用」，
+    被调用者本身是另一个表达式的返回值（如 `foo()()`）不在这组测试
+    要覆盖的场景里，返回空串即可，不会被误判成任何一个真实调用名。
+    """
+    f = node.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        parts = [f.attr]
+        cur = f.value
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _calls(fn) -> list[tuple[str, int]]:
+    """`fn` 函数体里每一个调用点的 (被调用者名字, 源码行号)——按**解析出
+    的语法树**取，不按源码文本取。
+
+    **这是这组"调用顺序/调用参数"测试的核心防线。** 这几个测试此前直接
+    对 `inspect.getsource(fn)` 做 `str.index()`，那命中的是源码文本里
+    **任意位置**第一次出现的同名字符串，注释里的一句话就能命中。真实
+    反例（代码评审时验证过）：把 `_load_openweb(...)` 的真实调用挪到
+    `_analyse_qualitative(...)` 之后，只在函数早先的位置留一行提到
+    `_load_openweb` 的注释——`str.index()` 版本量出的仍是那行注释的
+    位置，判「顺序正确」，而真实调用顺序已经错了。
+
+    注释在解析后的语法树里根本不存在节点，`ast.walk` 天然看不见它们，
+    只能走到真正的调用表达式上——顺序错了就是错了，不会被同名注释糊弄。
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    return [(_call_name(n), n.lineno) for n in ast.walk(tree)
+            if isinstance(n, ast.Call)]
+
+
 def test_开放网络采集不在确定性层里():
     """`_analyse_facts` 的不变量是「不调模型，因此两个阶段都要跑」。
     discover 要调模型 —— 放进去会让第二阶段取到与第一阶段不同的文档，
     第一阶段写下的外部引文因此在第二阶段核验不过。"""
-    import inspect
-
     from ir_agent import full
-    src = inspect.getsource(full._analyse_facts)
-    assert "openweb" not in src
-    assert "_load_openweb" not in src
+
+    names = [n for n, _ in _calls(full._analyse_facts)]
+    assert not any(n == "_load_openweb" or n.startswith("openweb.")
+                   for n in names), names
 
 
 def test_第一阶段采集排在定性三节之前():
     """战略/产业链/宏观定性要引用开放网络文档的原文，采集必须更早。"""
-    import inspect
-
     from ir_agent import full
-    src = inspect.getsource(full.run_analysis)
-    assert src.index("_load_openweb") < src.index("_analyse_qualitative")
-    assert src.index("_analyse_facts") < src.index("_load_openweb")
+
+    calls = _calls(full.run_analysis)
+
+    def first(name: str) -> int:
+        lines = [ln for n, ln in calls if n == name]
+        assert lines, f"run_analysis 里没有对 {name} 的真实调用"
+        return min(lines)
+
+    assert first("_analyse_facts") < first("_load_openweb"), \
+        "_load_openweb 必须排在 _analyse_facts 之后"
+    assert first("_load_openweb") < first("_analyse_qualitative"), \
+        "_load_openweb 必须排在 _analyse_qualitative 之前"
 
 
 def test_第二阶段只读回不重新采集():
     """第二阶段不得引入第一阶段没有的文档。"""
-    import inspect
-
     from ir_agent import full
-    src = inspect.getsource(full.run_valuation)
-    assert "_restore_openweb" in src
-    assert "_load_openweb" not in src
-    assert src.index("_analyse_facts") < src.index("_restore_openweb")
+
+    calls = _calls(full.run_valuation)
+    names = [n for n, _ in calls]
+    assert "_restore_openweb" in names
+    assert "_load_openweb" not in names
+    restore_ln = min(ln for n, ln in calls if n == "_restore_openweb")
+    facts_ln = min(ln for n, ln in calls if n == "_analyse_facts")
+    assert facts_ln < restore_ln
 
 
 def test_读回排在完整研报撰写之前():
     """_build_evidence 用 r.corpus 做引文核验，读回必须更早。"""
-    import inspect
-
     from ir_agent import full
-    src = inspect.getsource(full.run_valuation)
-    assert src.index("_restore_openweb") < src.index("_write_full_report")
+
+    calls = _calls(full.run_valuation)
+    restore_ln = min(ln for n, ln in calls if n == "_restore_openweb")
+    write_ln = min(ln for n, ln in calls if n == "_write_full_report")
+    assert restore_ln < write_ln
 
 
 def test_采集用的是开了联网工具的client():
@@ -1440,12 +1495,69 @@ def test_采集用的是开了联网工具的client():
 
     采集必须复用 methodology/gaps 那个已显式开启 WebSearch/WebFetch 的
     `research_client`，不能用默认不开工具的 `qual_client`。
+
+    按语法树取这个调用点**自己**的实参名字，不对源码文本做子串定位——
+    否则同一行/同一段里若有别的地方也写着 research_client 或
+    qual_client，字符串切片式的定位方式分不清那是不是这次调用自己的参数。
     """
-    import inspect
+    from ir_agent import full
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    call = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and _call_name(n) == "_load_openweb")
+    used: set[str] = set()
+    for part in list(call.args) + [kw.value for kw in call.keywords]:
+        used |= {n.id for n in ast.walk(part) if isinstance(n, ast.Name)}
+    assert "research_client" in used
+    assert "qual_client" not in used
+
+
+def test_开放网络落盘失败不阻断整轮研究(tmp_path, monkeypatch):
+    """资料收集的任何失败都不得阻断整轮研究——`openweb.save` 落地是
+    `Path.write_text`，输出目录被回收、磁盘写满、权限被收走都会在这里
+    抛 `OSError`。此前这一行不在 `openweb.gather` 那个 try/except 的
+    保护范围内：一旦炸，异常会一路冒出 `_load_openweb`、冒出
+    `run_analysis`，把已经写好的简报、已经花的钱全部一起带走。
+
+    落盘失败还有一个具体到「跨阶段核验」层面的后果，不是随便一句
+    "保存失败"能概括的：`res.docs` 此刻已经在 `r.corpus` 里、本轮简报
+    仍能引用并核验通过；但 `_restore_openweb` 读的正是这里本该写出的
+    文件，读不到就是空语料库——简报里写下的开放网络引文，到了第二阶段
+    会被自己的核验闸门拒掉。skipped 里必须说清楚这一点，而不是只说
+    "保存失败"。
+    """
+    from datetime import date
 
     from ir_agent import full
-    src = inspect.getsource(full.run_analysis)
-    call = src[src.index("_load_openweb("):]
-    call = call[:call.index(")")]
-    assert "research_client" in call
-    assert "qual_client" not in call
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    doc = Document(doc_id="ow_1", url="https://example.com/a", title="示例",
+                   publisher="示例机构", tier=Tier.MEDIA,
+                   published=date(2026, 1, 1), retrieved=date(2026, 1, 1),
+                   text="正文", prompt_limit=None, date_source="meta")
+    res = openweb.OpenWebResult(docs=[doc])
+
+    monkeypatch.setattr(openweb, "gather",
+                        lambda *a, **k: res)
+
+    def _boom(*_a, **_k):
+        raise OSError("设备已满")
+
+    monkeypatch.setattr(openweb, "save", _boom)
+
+    class _R:
+        corpus = None
+
+    r = _R()
+    # 不能让异常传出 _load_openweb —— 这一行本身就是断言：调用若抛出，
+    # 测试直接因未捕获异常失败，就是本测试要守住的那条不变量。
+    skipped = full._load_openweb("600000", r, date(2026, 1, 1), tmp_path,
+                                 client=None, industry="")
+
+    assert isinstance(r.corpus, Corpus)
+    joined = "；".join(skipped)
+    assert "落盘" in joined or "保存" in joined, skipped
+    # 必须说出具体后果：本阶段的文档还在、但读不回，第二阶段核验可能不过——
+    # 不能只留一句无信息量的"保存失败"。
+    assert "跨阶段" in joined and "核验" in joined, skipped

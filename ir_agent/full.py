@@ -140,10 +140,41 @@ def _load_openweb(code: str, r, as_of: date, out: Path, client,
     except Exception as e:                                  # noqa: BLE001
         return [f"开放网络采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
 
-    openweb.save(res, out / openweb.OPENWEB_JSON)
+    skipped: list[str] = []
+    try:
+        openweb.save(res, out / openweb.OPENWEB_JSON)
+    except Exception as e:                                  # noqa: BLE001
+        # **落盘失败不能连带毁掉本轮研究。** `save()` 底层是
+        # `Path.write_text`，输出目录被回收、磁盘写满、权限被收回都会在
+        # 这里炸——这些是运行环境的事，不是采集失败，不该把整轮 analyse
+        # 一起拖下水。
+        #
+        # 但也不能只说「保存失败」了事：`res.docs` 里的文档此刻已经在
+        # `r.corpus` 里，本轮简报仍能引用它们、核验也能通过；跨阶段却
+        # 存活不了——`_restore_openweb` 读的正是这里本该写出的文件，
+        # 读不到就是空语料库。于是简报正文里写下的开放网络引文，到了
+        # 第二阶段会被自己的核验闸门拒掉。这个具体后果必须说出来，
+        # 不能让读者以为"保存失败"只是无关痛痒的一句话。
+        skipped.append(
+            f"开放网络资料未能落盘（{e.__class__.__name__}: {str(e)[:120]}）"
+            "——本阶段采集到的文档仍在本轮语料库中、可支撑当前简报，"
+            "但不会跨阶段存活：第二阶段读不到这份文件，"
+            "简报中写下的相关外部引文到时可能核验不过")
+
     if not res.docs:
-        return ["开放网络资料：一篇都没取到，"
-                "定性判断的外部依据仍只有券商研报一类来源"]
+        # **「一篇都没取到」不等于「没有可说的细节」。** 候选一个都没
+        # 抓成功、与候选找到了但逐个抓取失败，是两种不同的现场——前者
+        # 该去查采集提示词或联网工具，后者该去查抓取环节；不把
+        # fetch_failed/missing_slots 带出来，两者在终端上长得一模一样。
+        extra: list[str] = []
+        if res.fetch_failed:
+            extra.append(f"{res.fetch_failed} 篇抓取失败")
+        if res.missing_slots:
+            extra.append("缺失主题：" + "、".join(res.missing_slots))
+        detail = "（" + "；".join(extra) + "）" if extra else ""
+        skipped.append(f"开放网络资料：一篇都没取到{detail}，"
+                       "定性判断的外部依据仍只有券商研报一类来源")
+        return skipped
 
     notes: list[str] = []
     if res.fetch_failed:
@@ -153,8 +184,8 @@ def _load_openweb(code: str, r, as_of: date, out: Path, client,
     for slot in res.missing_slots:
         notes.append(f"{slot}：未取到")
     if notes:
-        return ["开放网络资料（" + "；".join(notes) + "）"]
-    return []
+        skipped.append("开放网络资料（" + "；".join(notes) + "）")
+    return skipped
 
 
 def _restore_openweb(r, out: Path) -> list[str]:
@@ -174,8 +205,28 @@ def _restore_openweb(r, out: Path) -> list[str]:
         r.corpus = Corpus(as_of=r.as_of)
     res = openweb.load(path, r.corpus)
     if not res.docs:
-        return ["开放网络资料未跨阶段存活（落盘文件读不出文档），"
-                "外部引文可能核验不过"]
+        # **零文档有两种截然不同的成因，不能用同一句话交代。**
+        #
+        #   (a) 第一阶段 gather() 确实一篇都没采到——这不是本次读取丢了
+        #       什么，语料库从一开始就是空的。
+        #   (b) 落盘文件存在但已损坏/为空——openweb.load() 对结构性损坏
+        #       的 JSON 会整体降级为空 `OpenWebResult()`，这时才是真的
+        #       "跨阶段没存活"，本该在的文档丢了。
+        #
+        # 用 missing_slots 分辨两者：gather() 在零文档时，SLOTS 里每个
+        # 固定槽位都没有命中任何候选，`missing_slots` 因此必然等于
+        # `SLOTS` 全集（见 openweb.gather 末尾的
+        # `res.missing_slots = [s for s in SLOTS if not per_slot.get(s)]`）。
+        # 而 load() 对损坏文件的降级路径构造的是一个全新的
+        # `OpenWebResult()`，其 `missing_slots` 用的是 dataclass 默认值
+        # 空列表——不会凑巧等于 SLOTS 全集。因此
+        # `set(missing_slots) == set(SLOTS)` 是「第一阶段真的什么都没
+        # 采到」独有的信号，损坏文件产生不出这个信号。
+        if set(res.missing_slots) == set(openweb.SLOTS):
+            return ["开放网络资料：第一阶段确实一篇都没采到（并非本次读取"
+                    "丢失），定性判断的外部依据仍只有券商研报一类来源"]
+        return ["开放网络资料未跨阶段存活（落盘文件读不出文档，"
+                "可能已损坏或为空），外部引文可能核验不过"]
     if res.model_dated:
         return [f"开放网络资料（{res.model_dated} 篇的发布日期由模型给出，"
                 "未经代码核验）"]
