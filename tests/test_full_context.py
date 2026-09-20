@@ -1490,6 +1490,25 @@ def test_读回排在完整研报撰写之前():
     assert restore_ln < write_ln
 
 
+def test_因子数据采集之后重渲染外部资料清单():
+    """真实事故（同一类问题的第二个入口）：`gaps.collect` 的④外部网络
+    分支命中时会调 `corpus.add_if_visible` 往 `r.corpus` 里加文档——与
+    `_load_openweb` 是同一类"污染了语料库却没让 md 知道"。`md["外部
+    资料"]` 在 `gaps.collect` 之前就渲染过一次（紧跟在 `_load_openweb`
+    后面），`gaps.collect` 成功之后必须再重渲染一次，否则读者看到的
+    篇数与分级构成停留在这次采集之前那一刻。"""
+    from ir_agent import full
+
+    calls = _calls(full.run_analysis)
+    names = [n for n, _ in calls]
+    assert "gaps.collect" in names, names
+    collect_ln = min(ln for n, ln in calls if n == "gaps.collect")
+    refresh_lns = [ln for n, ln in calls if n == "_refresh_external_md"]
+    assert refresh_lns, "run_analysis 里没有对 _refresh_external_md 的真实调用"
+    assert any(ln > collect_ln for ln in refresh_lns), \
+        "_refresh_external_md 必须在 gaps.collect 成功之后再调一次"
+
+
 def test_采集用的是开了联网工具的client():
     """不开工具不会报错，只会安静地什么都搜不到 —— 比直接失败更难发现。
 

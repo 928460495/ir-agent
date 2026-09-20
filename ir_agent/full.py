@@ -1230,6 +1230,14 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
                 sections=getattr(r, "sections", None),
                 annual_url=getattr(r, "annual_url", ""))
             md["因子数据"] = gaps.summary(factor_data)
+            # **第二处会往同一个 corpus 塞文档的地方，同一条修复要再打
+            # 一遍。** `gaps.collect` 的④外部网络分支命中时会调
+            # `corpus.add_if_visible` 往 `r.corpus` 里加文档（见
+            # gaps.py），与上面 `_load_openweb` 是同一类"污染了语料库
+            # 却没让 md 知道"——`md["外部资料"]` 是在这次采集**之前**
+            # 渲染的，不重渲染，读者看到的篇数与分级构成就还停在采集前
+            # 那一刻，跟这次修复要堵的是同一个洞（见 `_external_md`）。
+            _refresh_external_md(r, md)
         except Exception as e:                              # noqa: BLE001
             skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
 
