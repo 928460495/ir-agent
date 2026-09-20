@@ -1048,6 +1048,18 @@ def _ratios(wb, cal, D_):
     for i in range(2,2+NH+NY): w.column_dimensions[CL(i)].width=12
     w.cell(1,1,f"{M['name']} {M['code']} — 主要财务比率与杜邦分析").font=Font(bold=True,size=14,color=NAVY)
     w.cell(2,1,"全部为活公式，取自三张报表；改「1_假设」本页与下方图表自动重算。历史列为实际、预测列为模型输出。").font=Font(size=9,italic=True)
+    # 中期列年化因子：只对「流量÷平均存量」「存量÷流量×365」这两类比率生效
+    # （ann="num"/"den"，逐行指定，见下方调用），流量÷流量的比率本来就对、不动。
+    # 用已披露期占全年营收比重的倒数，不用固定 ×2——固定 ×2 正是 ashare_calibrate
+    # 里 _wc 注释记录过的做法：收入非均匀分布时会系统性带偏（该处示例：生益 DPO
+    # 126→164），已被回测闸门拒绝过；同一个偏差不能又出现在展示层。
+    _itb=cal.get("interim")
+    ITM_IDX=(NH-1) if (PR.get("interim") and _itb and _itb.get("share")) else None
+    ITM_FACTOR=f"{1.0/_itb['share']:.6f}" if ITM_IDX is not None else None
+    w.cell(3,1,("中期列（本期中报）：ROE/ROA/ROIC 的分子、DSO/DIO/DPO/CCC 的分母已按"
+                "「已披露期占全年营收比重」的倒数年化（非固定×2），单元格批注给出年化前原式；"
+                "毛利率等流量÷流量的比率本来就对，未年化。") if ITM_IDX is not None else
+                "本报表无已披露中期，全部历史列均为整年数据。").font=Font(size=9,color="C00000")
     def hdr(r,title):
         w.cell(r,1,title).font=F_HDR
         for c in range(1,2+NH+NY): w.cell(r,c).fill=P_N
@@ -1057,15 +1069,24 @@ def _ratios(wb, cal, D_):
             cc=w.cell(r,2+i,y); cc.font=F_COL; cc.alignment=Alignment(horizontal="center")
             cc.fill=P_G if i<NH else P_B
         return r+1
-    def line(r,label,fx,fmt=PCT,bold=False,note=None,fill=None):
+    def line(r,label,fx,fmt=PCT,bold=False,note=None,fill=None,ann=None):
         c0=w.cell(r,1,label); c0.font=Font(bold=bold,size=10); c0.border=BX
         if note: c0.comment=Comment(note,"Template")
         for i,c in enumerate(ALL):
             prev = ALL[i-1] if i>0 else None
-            f=fx(c,prev,i)
+            itm = ann is not None and i==ITM_IDX
+            m = ITM_FACTOR if itm else None
+            f=fx(c,prev,i,m)
             cc=w.cell(r,2+i, f if f else None); cc.number_format=fmt
             cc.font=Font(bold=True,size=10) if bold else (F_H if i<NH else F_FX)
             if fill: cc.fill=fill
+            if itm:
+                raw=fx(c,prev,i,None)
+                side="分子" if ann=="num" else "分母"
+                cc.comment=Comment(
+                    f"中期列已年化：对{side}乘以 1/已披露期占全年营收比重={m}"
+                    f"（非固定×2，取自 calibrate 输出 interim.share），与年报列口径可比。\n"
+                    f"年化前（半年直接计算）的原式：{raw}", "Template")
         return r+1
     def avg(sheet,row,c,prev):
         return f"AVERAGE({sheet}!{prev}{row},{sheet}!{c}{row})" if prev else f"{sheet}!{c}{row}"
@@ -1073,80 +1094,97 @@ def _ratios(wb, cal, D_):
     r=4
     r=hdr(r,"一、盈利能力")
     ROWS={}
-    r=line(r,"毛利率",       lambda c,p,i: IE(f"{P}!{c}{RGP}/{P}!{c}{RV}"))
-    r=line(r,"营业利润率",   lambda c,p,i: IE(f"{P}!{c}{ROP}/{P}!{c}{RV}"))
+    r=line(r,"毛利率",       lambda c,p,i,m=None: IE(f"{P}!{c}{RGP}/{P}!{c}{RV}"))
+    r=line(r,"营业利润率",   lambda c,p,i,m=None: IE(f"{P}!{c}{ROP}/{P}!{c}{RV}"))
     ROWS["ebitm"]=r
-    r=line(r,"EBIT 利润率",  lambda c,p,i: IE(f"{P}!{c}{REBIT}/{P}!{c}{RV}"))
+    r=line(r,"EBIT 利润率",  lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}/{P}!{c}{RV}"))
     ROWS["npm"]=r
-    r=line(r,"归母净利率",   lambda c,p,i: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
+    r=line(r,"归母净利率",   lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
     ROWS["roe"]=r
-    r=line(r,"ROE（归母，平均净资产）", lambda c,p,i: IE(f"{P}!{c}{RNIP}/{avg(B_,25,c,p)}"),PCT,True)
+    r=line(r,"ROE（归母，平均净资产）",
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RNIP}{'*'+m if m else ''})/{avg(B_,25,c,p)}"),PCT,True,ann="num")
     ROWS["roa"]=r
-    r=line(r,"ROA（净利润 / 平均总资产）", lambda c,p,i: IE(f"{P}!{c}{RNI}/{avg(B_,16,c,p)}"))
+    r=line(r,"ROA（净利润 / 平均总资产）",
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RNI}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),ann="num")
     ROWS["roic"]=r
     r=line(r,"ROIC（税后 / 投入资本）",
-           lambda c,p,i: IE(f"{P}!{c}{REBIT}*(1-{DS}!$B${D_['TT']})/({B_}!{c}31+{B_}!{c}12)"),PCT,True,
-           "投入资本 = 营运资本 NWC + 固定资产净额；与 DCF 终值 ROIC 同口径")
+           lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}{'*'+m if m else ''}*(1-{DS}!$B${D_['TT']})/({B_}!{c}31+{B_}!{c}12)"),PCT,True,
+           "投入资本 = 营运资本 NWC + 固定资产净额；与 DCF 终值 ROIC 同口径",ann="num")
     ROWS["wacc"]=r
-    r=line(r,"（对照）WACC", lambda c,p,i: f"={DS}!$B${D_['WC']}",PCT,False,"ROIC 持续低于 WACC 即为价值毁灭")
+    r=line(r,"（对照）WACC", lambda c,p,i,m=None: f"={DS}!$B${D_['WC']}",PCT,False,"ROIC 持续低于 WACC 即为价值毁灭")
     r+=1
     r=hdr(r,"二、营运效率")
     ROWS["dso"]=r
-    r=line(r,"应收周转天数 DSO", lambda c,p,i: IE(f"{B_}!{c}8/{P}!{c}{RV}*365"),"0.0")
+    r=line(r,"应收周转天数 DSO",
+           lambda c,p,i,m=None: IE(f"{B_}!{c}8/({P}!{c}{RV}{'*'+m if m else ''})*365"),"0.0",ann="den")
     ROWS["dio"]=r
-    r=line(r,"存货周转天数 DIO", lambda c,p,i: IE(f"{B_}!{c}9/{P}!{c}{RC}*365"),"0.0")
+    r=line(r,"存货周转天数 DIO",
+           lambda c,p,i,m=None: IE(f"{B_}!{c}9/({P}!{c}{RC}{'*'+m if m else ''})*365"),"0.0",ann="den")
     ROWS["dpo"]=r
-    r=line(r,"应付周转天数 DPO", lambda c,p,i: IE(f"{B_}!{c}19/{P}!{c}{RC}*365"),"0.0")
+    r=line(r,"应付周转天数 DPO",
+           lambda c,p,i,m=None: IE(f"{B_}!{c}19/({P}!{c}{RC}{'*'+m if m else ''})*365"),"0.0",ann="den")
     ROWS["ccc"]=r
-    r=line(r,"现金转换周期 CCC", lambda c,p,i: IE(f"{B_}!{c}8/{P}!{c}{RV}*365+{B_}!{c}9/{P}!{c}{RC}*365-{B_}!{c}19/{P}!{c}{RC}*365"),
-           "0.0",True,"DSO + DIO − DPO；为负说明占用上游资金")
+    r=line(r,"现金转换周期 CCC",
+           lambda c,p,i,m=None: IE(f"{B_}!{c}8/({P}!{c}{RV}{'*'+m if m else ''})*365"
+                                    f"+{B_}!{c}9/({P}!{c}{RC}{'*'+m if m else ''})*365"
+                                    f"-{B_}!{c}19/({P}!{c}{RC}{'*'+m if m else ''})*365"),
+           "0.0",True,"DSO + DIO − DPO；为负说明占用上游资金",ann="den")
     ROWS["ato"]=r
-    r=line(r,"总资产周转率", lambda c,p,i: IE(f"{P}!{c}{RV}/{avg(B_,16,c,p)}"),MX)
-    r=line(r,"固定资产周转率", lambda c,p,i: IE(f"{P}!{c}{RV}/{avg(B_,12,c,p)}"),MX)
+    r=line(r,"总资产周转率", lambda c,p,i,m=None: IE(f"{P}!{c}{RV}/{avg(B_,16,c,p)}"),MX)
+    r=line(r,"固定资产周转率", lambda c,p,i,m=None: IE(f"{P}!{c}{RV}/{avg(B_,12,c,p)}"),MX)
     r+=1
     r=hdr(r,"三、偿债与资本结构")
-    r=line(r,"资产负债率", lambda c,p,i: IE(f"{B_}!{c}24/{B_}!{c}16"))
-    r=line(r,"净负债 / 归母权益", lambda c,p,i: IE(f"{B_}!{c}30/{B_}!{c}25"))
-    r=line(r,"有息负债 / EBITDA", lambda c,p,i: IE(f"({B_}!{c}18+{B_}!{c}21+{B_}!{c}22)/({P}!{c}{REBIT}+{K}!{c}7)"),MX)
-    r=line(r,"EBIT 利息保障倍数", lambda c,p,i: IE(f"{P}!{c}{REBIT}/{P}!{c}17"),MX)
+    r=line(r,"资产负债率", lambda c,p,i,m=None: IE(f"{B_}!{c}24/{B_}!{c}16"))
+    r=line(r,"净负债 / 归母权益", lambda c,p,i,m=None: IE(f"{B_}!{c}30/{B_}!{c}25"))
+    r=line(r,"有息负债 / EBITDA", lambda c,p,i,m=None: IE(f"({B_}!{c}18+{B_}!{c}21+{B_}!{c}22)/({P}!{c}{REBIT}+{K}!{c}7)"),MX)
+    # EBIT 为负时这一格最该被看见——不能像别处一样 IFERROR 回退成空白，
+    # 那会让读者以为「没有数据」，真相其实是「利润不够付利息」。
+    r=line(r,"EBIT 利息保障倍数",
+           lambda c,p,i,m=None: f"=IFERROR({P}!{c}{REBIT}/{P}!{c}17,\"利润不足\")",MX)
     ROWS["em"]=r
-    r=line(r,"权益乘数（总资产 / 归母权益）", lambda c,p,i: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
+    r=line(r,"权益乘数（总资产 / 归母权益）", lambda c,p,i,m=None: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
     r+=1
     r=hdr(r,"四、现金流质量")
-    r=line(r,"经营现金流 / 净利润", lambda c,p,i: IE(f"{K}!{c}13/{P}!{c}{RNI}"),MX,False,"持续 <1 说明利润未转化为现金")
-    r=line(r,"自由现金流 / 营收", lambda c,p,i: IE(f"{K}!{c}24/{P}!{c}{RV}"))
-    r=line(r,"资本开支 / 折旧", lambda c,p,i: IE(f"-{K}!{c}14/{K}!{c}7"),MX,False,">1 为扩张，≈1 为维持")
-    r=line(r,"FCFF / 税后EBIT", lambda c,p,i: IE(f"{K}!{c}25/({P}!{c}{REBIT}*(1-{DS}!$B${D_['TT']}))"),MX)
+    r=line(r,"经营现金流 / 净利润", lambda c,p,i,m=None: IE(f"{K}!{c}13/{P}!{c}{RNI}"),MX,False,"持续 <1 说明利润未转化为现金")
+    r=line(r,"自由现金流 / 营收", lambda c,p,i,m=None: IE(f"{K}!{c}24/{P}!{c}{RV}"))
+    r=line(r,"资本开支 / 折旧", lambda c,p,i,m=None: IE(f"-{K}!{c}14/{K}!{c}7"),MX,False,">1 为扩张，≈1 为维持")
+    r=line(r,"FCFF / 税后EBIT", lambda c,p,i,m=None: IE(f"{K}!{c}25/({P}!{c}{REBIT}*(1-{DS}!$B${D_['TT']}))"),MX)
     r+=1
     r=hdr(r,"五、成长性")
-    r=line(r,"营业收入增速", lambda c,p,i: IE(f"{P}!{c}{RV}/{P}!{p}{RV}-1") if p else None)
-    r=line(r,"归母净利增速", lambda c,p,i: IE(f"{P}!{c}{RNIP}/{P}!{p}{RNIP}-1") if p else None)
-    r=line(r,"EBIT 增速",   lambda c,p,i: IE(f"{P}!{c}{REBIT}/{P}!{p}{REBIT}-1") if p else None)
+    r=line(r,"营业收入增速", lambda c,p,i,m=None: IE(f"{P}!{c}{RV}/{P}!{p}{RV}-1") if p else None)
+    r=line(r,"归母净利增速", lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{p}{RNIP}-1") if p else None)
+    r=line(r,"EBIT 增速",   lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}/{P}!{p}{REBIT}-1") if p else None)
     r+=1
     # ---------- 杜邦 ----------
     r=hdr(r,"六、杜邦三因子分解（归母 ROE）")
     d3=r
-    r=line(r,"① 归母净利率 = 归母净利 / 营收", lambda c,p,i: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
-    r=line(r,"② 总资产周转率 = 营收 / 平均总资产", lambda c,p,i: IE(f"{P}!{c}{RV}/{avg(B_,16,c,p)}"),MX)
-    r=line(r,"③ 权益乘数 = 平均总资产 / 平均归母权益", lambda c,p,i: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
-    r=line(r,"① × ② × ③ = 归母 ROE", lambda c,p,i: IE(f"{c}{d3}*{c}{d3+1}*{c}{d3+2}"),PCT,True)
+    r=line(r,"① 归母净利率 = 归母净利 / 营收", lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
+    # 此处的②必须与「ROE（归母，平均净资产）」同步年化——否则①×②×③会与
+    # 已年化的 ROE 行对不上，「★ 三因子恒等式校验」会在中期列报错。二、营运
+    # 效率下的「总资产周转率」独立展示行不受影响，仍按 brief 的分类表不动。
+    r=line(r,"② 总资产周转率 = 营收 / 平均总资产",
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RV}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),MX,ann="num")
+    r=line(r,"③ 权益乘数 = 平均总资产 / 平均归母权益", lambda c,p,i,m=None: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
+    r=line(r,"① × ② × ③ = 归母 ROE", lambda c,p,i,m=None: IE(f"{c}{d3}*{c}{d3+1}*{c}{d3+2}"),PCT,True)
     chk3=r
-    r=line(r,"★ 三因子恒等式校验（连乘 − 直接计算）", lambda c,p,i: IE(f"{c}{d3+3}-{c}{ROWS['roe']}"),Z,True,
+    r=line(r,"★ 三因子恒等式校验（连乘 − 直接计算）", lambda c,p,i,m=None: IE(f"{c}{d3+3}-{c}{ROWS['roe']}"),Z,True,
            "必须为 0",P_O)
     r+=1
     r=hdr(r,"七、杜邦五因子分解")
     d5=r
-    r=line(r,"① 税负比率 = 净利润 / 利润总额", lambda c,p,i: IE(f"{P}!{c}{RNI}/{P}!{c}{RPBT}"),MX)
-    r=line(r,"② 利息负担 = 利润总额 / EBIT", lambda c,p,i: IE(f"{P}!{c}{RPBT}/{P}!{c}{REBIT}"),MX)
-    r=line(r,"③ EBIT 利润率 = EBIT / 营收", lambda c,p,i: IE(f"{P}!{c}{REBIT}/{P}!{c}{RV}"))
-    r=line(r,"④ 总资产周转率", lambda c,p,i: IE(f"{P}!{c}{RV}/{avg(B_,16,c,p)}"),MX)
-    r=line(r,"⑤ 权益乘数", lambda c,p,i: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
-    r=line(r,"⑥ 归母占比 = 归母净利 / 净利润", lambda c,p,i: IE(f"{P}!{c}{RNIP}/{P}!{c}{RNI}"),MX,False,
+    r=line(r,"① 税负比率 = 净利润 / 利润总额", lambda c,p,i,m=None: IE(f"{P}!{c}{RNI}/{P}!{c}{RPBT}"),MX)
+    r=line(r,"② 利息负担 = 利润总额 / EBIT", lambda c,p,i,m=None: IE(f"{P}!{c}{RPBT}/{P}!{c}{REBIT}"),MX)
+    r=line(r,"③ EBIT 利润率 = EBIT / 营收", lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}/{P}!{c}{RV}"))
+    # 同上：④与三因子②同理，必须年化以保持与已年化 ROE 行一致，见上方注释。
+    r=line(r,"④ 总资产周转率",
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RV}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),MX,ann="num")
+    r=line(r,"⑤ 权益乘数", lambda c,p,i,m=None: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
+    r=line(r,"⑥ 归母占比 = 归母净利 / 净利润", lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{c}{RNI}"),MX,False,
            "五因子原式得全口径 ROE，乘此项转为归母口径")
     r=line(r,"①×②×③×④×⑤×⑥ = 归母 ROE",
-           lambda c,p,i: IE(f"{c}{d5}*{c}{d5+1}*{c}{d5+2}*{c}{d5+3}*{c}{d5+4}*{c}{d5+5}"),PCT,True)
+           lambda c,p,i,m=None: IE(f"{c}{d5}*{c}{d5+1}*{c}{d5+2}*{c}{d5+3}*{c}{d5+4}*{c}{d5+5}"),PCT,True)
     chk5=r
-    r=line(r,"★ 五因子恒等式校验（连乘 − 直接计算）", lambda c,p,i: IE(f"{c}{d5+6}-{c}{ROWS['roe']}"),Z,True,
+    r=line(r,"★ 五因子恒等式校验（连乘 − 直接计算）", lambda c,p,i,m=None: IE(f"{c}{d5+6}-{c}{ROWS['roe']}"),Z,True,
            "必须为 0",P_O)
     cal["_ratio_rows"]=dict(ROWS=ROWS,d3=d3,d5=d5,chk3=chk3,chk5=chk5,last=r)
     _charts(w, cal, ROWS, d3, r+2)
