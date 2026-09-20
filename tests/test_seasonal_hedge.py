@@ -55,8 +55,12 @@ def test_费用率三项都走对冲且留下痕迹(monkeypatch):
     """
     import ashare_calibrate as C
     note = {}
+    # gen 必须绑定成变量再传入——如果直接写成内联字面量传给 gen= 参数，
+    # 函数内部对 gen 的就地修改（或漏改）根本没有出口可供测试观察，
+    # 「gen 三项真的被换成对冲值」这件事就无从断言。
+    gen = {"sell": 0.02, "admin": 0.04, "rd": 0.03}
     C._apply_expense_hedge(
-        gen={"sell": 0.02, "admin": 0.04, "rd": 0.03},
+        gen=gen,
         itm_now={"sell": 0.0162, "admin": 0.0341, "rd": 0.0481},
         itm_prev={"sell": 0.0150, "admin": 0.0300, "rd": 0.0450},
         note=note)
@@ -64,6 +68,14 @@ def test_费用率三项都走对冲且留下痕迹(monkeypatch):
     assert abs(note["sell"]["hedged"] - 0.0212) < 1e-9
     assert abs(note["admin"]["hedged"] - 0.0441) < 1e-9
     assert abs(note["rd"]["hedged"] - 0.0331) < 1e-9
+    # 只断言 note 留痕还不够——留痕真实性取决于 gen 三项是否真的被换成了
+    # 对冲值。之前这里没断言 gen，用一份故意漏写 `gen[k] = hedged` 的对照
+    # 实现去跑，四条 note 断言照样全绿：note 显示"已对冲"，gen 却还是原始
+    # 年报均值，正是"交付物说一件没发生的事"。这里直接比对 gen 与 note 记
+    # 录的对冲值，确保两者一致，才算真的验证了"留痕"与"实际生效"没有脱节。
+    assert abs(gen["sell"] - note["sell"]["hedged"]) < 1e-9
+    assert abs(gen["admin"] - note["admin"]["hedged"]) < 1e-9
+    assert abs(gen["rd"] - note["rd"]["hedged"]) < 1e-9
 
 
 def test_中期缺失时费用率退回年报值且不留对冲痕迹():
