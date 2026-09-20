@@ -903,7 +903,20 @@ def test_不同抓取失败原因在结果里去重且可区分(monkeypatch):
 def test_同一原因重复出现只记一次(monkeypatch):
     """去重是这个字段存在的前提——同一种诊断（比如代理环境下所有候选
     都解析不出 DNS）反复出现十次，读者要看到的是"这一种原因"，不是
-    同一句话被打印十次。"""
+    同一句话被打印十次。
+
+    **此前这条测试名不副实，从未真正走到 gather() 的去重分支。** 旧
+    断言是 `{r.split("：", 1)[-1] for r in res.fetch_failed_reasons} ==
+    {...}`——现取现算，先把 URL 前缀切掉再拼集合，测的是"测试自己在
+    事后能不能算出一个只有一个元素的集合"，跟 `gather()` 是否真的把
+    `fetch_failed_reasons` 去重成一条完全无关。旧实现按**整条消息**
+    去重，而每条消息都带着各不相同的 URL 前缀（`f"{url}：DNS 解析
+    失败..."`），四个候选四个不同 URL，实际会原样存下四条一字不差
+    地重复的诊断——旧的断言写法对四条也照样能通过（`split` 之后集合
+    还是只剩一个元素），从未真正触发过"这条测试的名字说的那件事"。
+    现在 `gather()` 改成按去掉 URL 前缀之后的诊断部分去重，这里直接
+    断言 `fetch_failed_reasons` 长度为一，这才是测试名字承诺的东西。
+    """
     import ir_agent.sources.openweb as OW
 
     def _same_fail(url, *, timeout=OW.TIMEOUT):
@@ -913,11 +926,9 @@ def test_同一原因重复出现只记一次(monkeypatch):
     res = gather(_Client(FOUR), code="600183", company="生益科技",
                  industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
     assert res.fetch_failed == 4
-    # 四个候选的失败消息只有 URL 不同、诊断本身相同（DNS 解析失败）——
-    # 这条测试要求诊断层面的去重，因此逐个候选构造消息去掉 URL 前缀，
-    # 而不是断言消息整体唯一。
-    reasons_without_url = {r.split("：", 1)[-1] for r in res.fetch_failed_reasons}
-    assert reasons_without_url == {"DNS 解析失败（模拟代理环境）"}
+    assert len(res.fetch_failed_reasons) == 1
+    assert res.fetch_failed_reasons[0].endswith(
+        "：DNS 解析失败（模拟代理环境）")
 
 
 def test_落盘读回后失败原因逐字还原(tmp_path, monkeypatch):

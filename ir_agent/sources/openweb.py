@@ -759,7 +759,18 @@ class OpenWebResult:
     #
     # 只存**去重后**的原因（`gather()` 按去重后的顺序追加），不是每个
     # candidate 一条：候选可能有十几个，但失败的根因通常只有个位数种，
-    # 逐条罗列同一句话十次除了刷屏没有更多信息量。
+    # 逐条罗列同一句诊断十次除了刷屏没有更多信息量。
+    #
+    # **去重键是诊断部分，不是整条消息。** 每条消息都以
+    # `f"{url}：{诊断}"` 的形式带着自己的 URL 前缀（见 fetch()/
+    # `_reject_unsafe_host` 的写法）——旗舰场景恰恰是"一种诊断、十个不同
+    # URL"（本机代理环境下每个候选各自的域名解析失败），如果拿整条消息
+    # （含各不相同的 URL）去重，这十条永远各不相同，去重形同虚设，一种
+    # 原因照样打印十遍。`gather()` 因此按 `诊断.split("：", 1)[-1]` 取出
+    # 去掉 URL 前缀之后的那部分作为去重键，命中过的诊断不再追加——但
+    # 列表里存的仍是**完整消息**（带着第一次撞见这种诊断时的那个 URL），
+    # 不是把 URL 直接丢掉：读者除了「这是哪一种失败」，往往还想知道
+    # 「至少举一个例子，我该去查哪个网址」，完全抹掉 URL 是过度归并。
     fetch_failed_reasons: list[str] = field(default_factory=list)
     # 发布日期由模型给出、未经代码核验的篇数。**必须能说出来** ——
     # 用户决定信模型报的日期，折中是把不可核验的那部分显式标出来，
@@ -785,6 +796,9 @@ def gather(client, *, code: str, company: str, industry: str,
                                per_slot=PER_SLOT, as_of=as_of.isoformat()))
     seen = {d.url for d in corpus.docs}
     per_slot: dict[str, int] = {}
+    # 去重键集合：存的是去掉 URL 前缀之后的诊断部分，不是完整消息——
+    # 见 `OpenWebResult.fetch_failed_reasons` 字段注释。
+    seen_diagnoses: set[str] = set()
 
     for cand in parse_candidates(raw):
         if len(res.docs) >= MAX_DOCS:
@@ -813,7 +827,17 @@ def gather(client, *, code: str, company: str, industry: str,
             # 让未来任何一次疏漏都需要重新证明"这里必须接多宽"。
             res.fetch_failed += 1
             reason = str(e).strip()[:_REASON_LIMIT] or e.__class__.__name__
-            if reason not in res.fetch_failed_reasons:
+            # 去重必须按诊断部分（去掉 URL 前缀），不能按整条消息——
+            # `reason` 几乎总带着 `f"{url}：..."` 这个各不相同的前缀
+            # （见 fetch()/`_reject_unsafe_host`），十个候选十个不同
+            # URL、同一种诊断，按整条消息去重永远各不相同，去重形同
+            # 虚设。`split("：", 1)[-1]` 没有找到"："时原样返回整条
+            # 字符串，兜住 `reason` 恰好不含"："的边角情况（比如
+            # `e.__class__.__name__` 兜底分支），行为退化成按整条消息
+            # 去重，不会因此报错或漏判。
+            diagnosis = reason.split("：", 1)[-1]
+            if diagnosis not in seen_diagnoses:
+                seen_diagnoses.add(diagnosis)
                 res.fetch_failed_reasons.append(reason)
             continue
         if got.final_url in seen:
