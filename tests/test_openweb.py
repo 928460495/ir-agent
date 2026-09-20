@@ -252,6 +252,31 @@ def test_正文提取剔除HTML注释不留残余文字或定界符():
     assert "-->" not in got
 
 
+def test_正文提取先剥噪声容器再删注释_内联JS里的箭头不会吞掉真内容():
+    """真实事故（这条本身就是对上一次修复的回归）：`extract_text` 曾经
+    先跑 `_COMMENT` 再跑 `_strip_blocks`。`<script>var s = "<!--";</script>`
+    这行内联 JS 字符串字面量里的 `<!--` 只是三个普通字符，不是注释起点，
+    但 `_COMMENT` 不认识 JS 语法，只认「下一个 `-->`」——非贪婪加 re.S
+    会一路吃到文档里**下一处真正的** `-->`，也就是后面那条真注释的
+    收尾，把中间「真实正文二」这段真内容和 `</script>` 一起吞掉；
+    `</script>` 被吞掉后 `<script>` 变成未闭合标签，`_strip_blocks`
+    剥不掉它，`var s = "` 这段 JS 代码反而作为"正文"漏出来——修复注释
+    污染的同时引入了同等严重的反向污染：真内容被删、看不见的代码被admit。
+    正确顺序（先剥噪声容器再删注释）下，三段真实正文必须全部保留，
+    JS 片段与残留的 `-->` 一个字都不能漏出来。"""
+    html = ('<p>正文一：公司2026年净利润将翻倍</p>'
+           '<script>var s = "<!--";</script>'
+           '<p>真实正文二：覆铜板均价上涨12%</p>'
+           '<!-- 真正的注释 -->'
+           '<p>正文三</p>')
+    got = extract_text(html)
+    assert "正文一：公司2026年净利润将翻倍" in got
+    assert "真实正文二：覆铜板均价上涨12%" in got
+    assert "正文三" in got
+    for noise in ("var s", "-->", "<!--"):
+        assert noise not in got, noise
+
+
 def _fake_getaddrinfo_public(host, port):
     """与 fetch() 的主机安全闸门无关的测试用：任何主机名都解析成一个
     公网地址，绕开真实 DNS 调用（不需要网络、结果确定）。"""
