@@ -690,3 +690,79 @@ def test_单条文档损坏不牵连其余仍然入库(tmp_path):
     back = OW.load(path, cp)
     assert [d.doc_id for d in back.docs] == ["ow_good"]
     assert [d.doc_id for d in cp.docs] == ["ow_good"]
+
+
+# ── _doc_from_json 对字段类型的校验 ─────────────────────────────
+#
+# Finding 3：前面几条只覆盖了「缺字段」这一种损坏（bad_doc 直接 KeyError）。
+# 但一个字段齐全、类型却不对的条目（比如 prompt_limit 是字符串、text 是
+# 数字或 None）此前会顺利构造出 Document、混进语料库，直到 phase-2 的
+# for_prompt()/verify() 才崩——已经在 load() 的保护范围之外。这里的三条
+# 用例都拿「一条写坏的条目 + 一条写好的条目」配对，确认坏的那条被
+# _doc_from_json 拦下（进而被 load() 的逐条 try/except 跳过），好的那条
+# 照常入库——而不是随手改一个字段就让整份文件退化成空结果。
+
+
+def _good_doc(doc_id: str = "ow_good") -> dict:
+    return {"doc_id": doc_id, "url": f"https://x.gov.cn/{doc_id}",
+            "title": "标题", "publisher": "某部委", "tier": "official",
+            "published": "2026-06-01", "retrieved": "2026-09-20",
+            "text": "正文", "prompt_limit": 2000, "date_source": "model"}
+
+
+def test_prompt_limit类型不对时该条被跳过其余仍然入库(tmp_path):
+    import json
+
+    import ir_agent.sources.openweb as OW
+    good_doc = _good_doc()
+    bad_doc = {**_good_doc("ow_bad"), "prompt_limit": "notanint"}
+    path = tmp_path / OW.OPENWEB_JSON
+    payload = {"docs": [good_doc, bad_doc], "missing_slots": [],
+               "extra_slots": [], "fetch_failed": 0, "model_dated": 0}
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    cp = Corpus(as_of=AS_OF)
+    back = OW.load(path, cp)
+    assert [d.doc_id for d in back.docs] == ["ow_good"]
+    assert [d.doc_id for d in cp.docs] == ["ow_good"]
+
+
+def test_text类型不对时该条被跳过其余仍然入库(tmp_path):
+    """text=None 或 text=12345 若不在 _doc_from_json 拦下，会一路活到
+    doc.for_prompt()/corpus.verify() 才炸 TypeError——已经在 load() 的
+    保护范围之外。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    for bad_text in (None, 12345):
+        good_doc = _good_doc()
+        bad_doc = {**_good_doc("ow_bad"), "text": bad_text}
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [good_doc, bad_doc], "missing_slots": [],
+                   "extra_slots": [], "fetch_failed": 0, "model_dated": 0}
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert [d.doc_id for d in back.docs] == ["ow_good"], bad_text
+        assert [d.doc_id for d in cp.docs] == ["ow_good"], bad_text
+
+
+def test_字符串字段类型不对时该条被跳过其余仍然入库(tmp_path):
+    """doc_id / url / title / publisher / date_source 里随便哪个被塞了
+    非字符串值，都该在 _doc_from_json 这道边界上拦下，而不是留给
+    调用方在别处撞见 TypeError。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    for field in ("doc_id", "url", "title", "publisher", "date_source"):
+        good_doc = _good_doc()
+        bad_doc = {**_good_doc("ow_bad"), field: 12345}
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [good_doc, bad_doc], "missing_slots": [],
+                   "extra_slots": [], "fetch_failed": 0, "model_dated": 0}
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert [d.doc_id for d in back.docs] == ["ow_good"], field
+        assert [d.doc_id for d in cp.docs] == ["ow_good"], field

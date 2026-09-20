@@ -495,13 +495,38 @@ def _doc_to_json(d: Document) -> dict:
             "prompt_limit": d.prompt_limit, "date_source": d.date_source}
 
 
+def _str_field(raw: dict, key: str) -> str:
+    """取一个字符串字段，类型不对就抛——留给 load() 的逐条 try/except
+    去接。**这是本次修复的核心**：tier/published/retrieved 之外的字段
+    此前直接从 JSON 原样赋值，字段齐全但类型烂掉的条目能顺利构造出
+    Document、混进语料库，直到 phase-2 的 for_prompt()/verify() 才炸——
+    已经在 load() 的保护范围之外。校验必须堵在这道边界上，不能指望
+    crash 现场帮你补。"""
+    v = raw[key]
+    if not isinstance(v, str):
+        raise TypeError(f"{key} 应为 str，实际是 {type(v).__name__}")
+    return v
+
+
 def _doc_from_json(raw: dict) -> Document:
-    return Document(doc_id=raw["doc_id"], url=raw["url"], title=raw["title"],
-                    publisher=raw["publisher"], tier=Tier(raw["tier"]),
+    prompt_limit = raw.get("prompt_limit")
+    if prompt_limit is not None and not isinstance(prompt_limit, int):
+        # bool 是 int 的子类，但落盘数据里不会出现 True/False 当截断长度，
+        # 且即便出现，isinstance(True, int) 为真也不会构造出坏文档——
+        # 不必为这个理论上的边角另设判断。
+        raise TypeError(
+            f"prompt_limit 应为 int 或 None，实际是 {type(prompt_limit).__name__}")
+    return Document(doc_id=_str_field(raw, "doc_id"),
+                    url=_str_field(raw, "url"),
+                    title=_str_field(raw, "title"),
+                    publisher=_str_field(raw, "publisher"),
+                    tier=Tier(raw["tier"]),
                     published=date.fromisoformat(raw["published"]),
                     retrieved=date.fromisoformat(raw["retrieved"]),
-                    text=raw["text"], prompt_limit=raw.get("prompt_limit"),
-                    date_source=raw.get("date_source", ""))
+                    text=_str_field(raw, "text"),
+                    prompt_limit=prompt_limit,
+                    date_source=_str_field(raw, "date_source")
+                    if "date_source" in raw else "")
 
 
 def save(res: OpenWebResult, path: Path | str) -> None:
