@@ -5,9 +5,13 @@
 「总资产周转率」「ROE」这类含流量÷存量的比率会系统性偏低约一半——读者
 看到的是「今年效率腰斩」，实际只是少算了半年。
 
-**问题二**：EBIT 利息保障倍数用 IFERROR 包着，EBIT 为负时返回空白，
-读者看到的是「没有数据」，而真相是「利润不够付利息」——**最该看见的
-那一格恰好被藏起来了**。
+**问题二（I6，final-review-plan2a 终审改写）**：EBIT 利息保障倍数用
+IFERROR 包着，旧注释以为"EBIT 为负时会触发 IFERROR、被藏成空白"，但这个
+前提是假的——IFERROR(-5/2,"")=−2.5，Excel 照常显示负数，EBIT 为负从不
+触发 IFERROR。真正会触发 #DIV/0! 的是【财务费用恰为 0】（现金充裕的公司
+很容易过零），此时旧公式会显示一句反话「利润不足」——利息为零、覆盖倍数
+本应是无穷大，不是"利润不够付利息"。下面两条测试分别构造这两个真实场景
+（用 formulas 引擎真正算一遍，而不是 grep 公式文本）。
 """
 import copy, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -168,20 +172,6 @@ def test_杜邦恒等式中期列成立(tmp_path):
     assert abs(chk5) < 1e-6, f"五因子恒等式在中期列未成立：连乘−直接计算 = {chk5}"
 
 
-def test_利息保障倍数为负时不被藏起来(tmp_path):
-    ws, _ = _wb(tmp_path)
-    ws = ws["7_财务比率与杜邦"]
-    row = [r for r in ws.iter_rows()
-           if r[0].value == "EBIT 利息保障倍数"]
-    assert row, "找不到利息保障倍数行"
-    formulas = [c.value for c in row[0][1:] if c.value]
-    assert formulas, "该行不能整行为空"
-    assert not any('IFERROR' in f and '""' in f for f in formulas if isinstance(f, str)), \
-        "IFERROR 回退成空字符串会把「利润不够付利息」这件事藏起来"
-    assert any('利润不足' in f for f in formulas if isinstance(f, str)), \
-        "应显式回退成「利润不足」，而不是让读者猜"
-
-
 def _interim_col(cal):
     NH = cal["_rows"]["NH"]
     return CL(2 + (NH - 1))
@@ -206,6 +196,53 @@ def _row_of(ws, label):
     row = [r for r in ws.iter_rows() if r[0].value == label]
     assert row, f"找不到「{label}」行"
     return row[0][0].row
+
+
+def test_利息为零时显示无利息支出(tmp_path):
+    """I6 实测复现：现金收益恰好抵消利息支出、财务费用净额为 0 时，IFERROR
+    不会触发（0 不是错误），旧公式 `IFERROR(EBIT/0,"利润不足")` 会真的除以 0
+    触发 IFERROR 从而显示「利润不足」——但真相是"没有净利息支出"，覆盖倍数
+    该是无穷大，不是"利润不够付利息"。这里把有息负债利率与现金收益率都设成
+    0，财务费用公式 `期初有息负债×利率 − 期初现金×现金收益率` 对任意期初值
+    都精确算出 0，构造出真实的 #DIV/0! 场景。
+    """
+    cal = pickle.load(open(FIX, "rb"))
+    cal["gen"]["irate"] = 0.0
+    cal["gen"]["cash_yield"] = 0.0
+    out = str(tmp_path / "t_zero_interest.xlsx")
+    B.build(cal, out)
+    ws = load_workbook(out)["7_财务比率与杜邦"]
+    r_idx = _row_of(ws, "EBIT 利息保障倍数")
+    col = _proj_col(cal, 0)
+    val = _eval_cell(out, "7_财务比率与杜邦", f"{col}{r_idx}")
+    assert val == "无利息支出", f"财务费用为 0 时应显示「无利息支出」，实际算出 {val!r}"
+
+
+def test_EBIT为负时保留负值不显示利润不足(tmp_path):
+    """I6：EBIT 为负从不触发 IFERROR（IFERROR(-5/2,"")=−2.5，Excel 照常显示
+    负数）——这里把毛利率判断项压到 −90%，制造真实的深度亏损年份，同时保留
+    正常的有息负债利率（财务费用 > 0），断言该格直接显示负数，而不是"利润
+    不足"或空字符串。锚定默认开启会覆盖首个预测年的毛利率，这里关掉锚定
+    开关，让判断项在首年也生效。
+    """
+    cal = pickle.load(open(FIX, "rb"))
+    n = len(cal["periods"]["proj"])
+    cal["judg"] = dict(cal["judg"])
+    cal["judg"]["gm"] = [-0.9] * n
+    out = str(tmp_path / "t_neg_ebit.xlsx")
+    B.build(cal, out)
+    wb = load_workbook(out)
+    a = wb["1_假设"]
+    m = {a.cell(rr, 1).value: rr for rr in range(1, a.max_row + 1)
+         if isinstance(a.cell(rr, 1).value, str)}
+    a.cell(m["锚定开关（1=锚定 0=按增速外推）"], 2).value = 0
+    wb.save(out)
+    ws = load_workbook(out)["7_财务比率与杜邦"]
+    r_idx = _row_of(ws, "EBIT 利息保障倍数")
+    col = _proj_col(cal, 0)
+    val = _eval_cell(out, "7_财务比率与杜邦", f"{col}{r_idx}")
+    assert isinstance(val, (int, float)), f"EBIT 为负时应直接显示负数，实际算出 {val!r}"
+    assert val < 0, f"毛利率 −90% 应把 EBIT 打到深度亏损，实际算出 {val}"
 
 
 # ── C3（final-review-plan2a 终审）：成长性三行中期列显示隐含全年增速估计 ──
@@ -245,3 +282,75 @@ def test_成长性三行未年化时是荒谬的负值(tmp_path):
     base_rev = cal["rev"][cal["periods"]["annual"][-1]]
     raw = it["rev"] / base_rev - 1   # 改前公式：半年直接除以上一整年，不年化
     assert raw < 0, f"对照：未年化的半年/整年比值应为负（改前的错误行为），实际={raw}"
+
+
+# ── I3（final-review-plan2a 终审）：有息负债/EBITDA 中期列年化 ──
+
+def test_有息负债EBITDA中期列已年化(tmp_path):
+    """终审实测复现：600183 中期列未年化显示 1.03x，同口径年化后应为
+    0.49x，2025A 为 0.80x——不年化时读者会看到杠杆从 0.80x 跳到 1.03x，
+    年化后其实是降到 0.49x，方向都反了。排除理由曾是"它是存量÷流量而不是
+    流量÷存量"，但 DSO/DIO/DPO/CCC 同样是存量÷流量×365 并且已经被
+    ann="den" 纳入年化，这条理由分不清两者。"""
+    import formulas
+    cal = pickle.load(open(FIX, "rb"))
+    out = str(tmp_path / "t_debt_ebitda.xlsx")
+    B.build(cal, out)
+    ws = load_workbook(out)["7_财务比率与杜邦"]
+    r_idx = _row_of(ws, "有息负债 / EBITDA")
+    NH = cal["_rows"]["NH"]
+    itm_col = _interim_col(cal)
+    f = ws.cell(r_idx, 2 + (NH - 1)).value
+    factor = round(1.0 / cal["interim"]["share"], 6)
+    assert isinstance(f, str) and (str(factor) in f or f"{factor:.6f}" in f), (
+        f"有息负债/EBITDA 中期列未按 1/share={factor} 年化分母，公式为：{f}")
+    val = _eval_cell(out, "7_财务比率与杜邦", f"{itm_col}{r_idx}")
+    assert val == pytest.approx(0.49, abs=0.02), (
+        f"年化后应约为 0.49x（2025A 为 0.80x），实际算出 {val}")
+
+
+# ── I7（final-review-plan2a 终审）：itm_block 为 None 但中期列存在时表头不能说假话 ──
+
+def test_有中期列但缺去年同期时表头如实说明未年化(tmp_path):
+    """`itm_block` 只在 `sh_hist` 非空（有去年同期数据）时才由 calibrate()
+    构造；`periods.interim` 只要有已披露中期就无条件非空——次新股（或缺去年
+    同期）时中期列照样存在于工作表里，但 `cal.get("interim")` 是 None。
+    旧文案此时仍写"本报表无已披露中期，全部历史列均为整年数据"，是一句假话：
+    表里明明有一列中期数据。改后要如实说明"有中期列、但未年化、不可比"。
+    """
+    cal = pickle.load(open(FIX, "rb"))
+    cal = copy.deepcopy(cal)
+    assert cal["periods"].get("interim"), "前提：夹具本身确有已披露中期"
+    cal["interim"] = None   # 模拟 sh_hist 为空（次新股/缺去年同期）时 calibrate 的产出
+    out = str(tmp_path / "t_no_itm_block.xlsx")
+    B.build(cal, out)
+    ws = load_workbook(out)["7_财务比率与杜邦"]
+    hdr_text = str(ws.cell(3, 1).value)
+    assert "无已披露中期" not in hdr_text, (
+        f"中期列明明存在，表头却说'无已披露中期'——遗漏必须可见，不能含糊带过。实际：{hdr_text}")
+    assert "未" in hdr_text and "年化" in hdr_text and "不可比" in hdr_text, (
+        f"应如实说明'有中期列但未年化、与年报列不可比'，实际：{hdr_text}")
+
+
+# ── I8（final-review-plan2a 终审）：ROE 批注不能声称"与年报列口径可比" ──
+
+def test_ROE批注不再声称与年报列口径可比(tmp_path):
+    """年化因子取自【营收】的中期占比，而 ROE 的分子是【利润】——两者的
+    季节性分布不同（年末计提奖金、研发下半年集中，H1 利润率系统性偏高），
+    拿营收进度去年化利润会把这份错配悄悄抹平成一句"口径可比"。600183 实测：
+    ROE 中期列 39.00%，年报量级约 13–15%。批注必须改成如实的"未校正利润的
+    季节性分布"，ROA/ROIC 是同一类错配，一并处理。"""
+    cal = pickle.load(open(FIX, "rb"))
+    out = str(tmp_path / "t_roe_note.xlsx")
+    B.build(cal, out)
+    ws = load_workbook(out)["7_财务比率与杜邦"]
+    NH = cal["_rows"]["NH"]
+    for label in ("ROE（归母，平均净资产）", "ROA（净利润 / 平均总资产）", "ROIC（税后 / 投入资本）"):
+        r_idx = _row_of(ws, label)
+        cell = ws.cell(r_idx, 2 + (NH - 1))
+        assert cell.comment is not None, f"{label} 中期列应有批注"
+        text = cell.comment.text
+        assert "与年报列口径可比" not in text, (
+            f"{label} 批注不应再声称'与年报列口径可比'：{text}")
+        assert "未校正利润" in text or "季节性分布" in text, (
+            f"{label} 批注应如实提示未校正利润/EBIT 的季节性分布：{text}")

@@ -465,7 +465,27 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                 admin=_mean(ratio("管理费用"), default=.04, what="管理费用率"),
                 rd=_mean(ratio("研发费用"), default=.03, what="研发费用率"))
     _hedge_note = {}
-    _apply_expense_hedge(_gen, _itm_now, _itm_prev, _hedge_note)
+    # I4：回测闸门（tests/backtest_hedge.py）只验证过半年报口径——把中期硬编码为
+    # `t[:4]+"0630"`。一季报/三季报的季节性噪声（春节、年初计提节奏、Q3 尚未
+    # 走完全年周期）远大于半年报，闸门对此毫无证据，不能无条件对冲。
+    # 其余期别退回未对冲的年报均值，并在 _hedge_note 留下原因（不写 sell/admin/rd
+    # 键——GEN_SPEC 的说明文字靠"键是否存在"判断是否真的对冲过，见 ashare_build.py C1）。
+    if interim and interim[4:] == "0630":
+        _apply_expense_hedge(_gen, _itm_now, _itm_prev, _hedge_note)
+        # I2：费用率下调的顺周期偏差——留痕同期营收同比，供 F 列说明与读者判断
+        # 这份下调有多少是"经营杠杆摊薄"而非"费用管控改善"。只在真的对冲过时才
+        # 记录，避免未对冲时也挂一句无意义的营收同比。
+        if _hedge_note:
+            _prev_p_rev = str(int(interim[:4]) - 1) + interim[4:]
+            _r_now, _r_prev = rev.get(interim), rev.get(_prev_p_rev)
+            if _r_now and _r_prev:
+                _hedge_note["_rev_yoy"] = round(_r_now / _r_prev - 1, 4)
+    elif interim:
+        _mmdd = interim[4:]
+        _label = "一季报" if _mmdd == "0331" else ("三季报" if _mmdd == "0930" else _mmdd)
+        _hedge_note["_skip_reason"] = (
+            f"中期口径为{_label}（非半年报）——季节性对冲的回测闸门（tests/backtest_hedge.py）"
+            "只验证过半年报口径，一季报/三季报噪声更大，未对冲，费用率仍取近3年年报均值")
 
     return dict(
         meta=dict(code=code, name=q.get("name") or code, price=q["price"],

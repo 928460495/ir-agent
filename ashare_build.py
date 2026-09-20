@@ -236,13 +236,19 @@ def build(cal: dict, path: str) -> dict:
     # _hedge_note 由 calibrate() 产出，没有对应键时说明未对冲（或被 I4 按中期期别
     # 排除），此时说明文字照旧退回「近3年均值」。
     _hn = GEN.get("_hedge_note") or {}
+    _rev_yoy = _hn.get("_rev_yoy")
     def _fee_note(key, base_label):
         h = _hn.get(key)
         if not h:
             return base_label
         delta_pp = (h["hedged"] - h["base"]) * 100
-        return (f"近3年均值 {h['base']*100:.2f}% + 中期同比差分 {delta_pp:+.2f}pp"
-                f" = {h['hedged']*100:.2f}%")
+        txt = (f"近3年均值 {h['base']*100:.2f}% + 中期同比差分 {delta_pp:+.2f}pp"
+               f" = {h['hedged']*100:.2f}%")
+        if _rev_yoy is not None:
+            # I2：顺周期偏差的留痕——费用率被下调的同时，营收本身也在同比高增，
+            # 摊薄效应会被外推到全部预测年+终值，读者必须能看到这层关联。
+            txt += f"｜该调整期营收同比 {_rev_yoy*100:+.1f}%，下调中含营收增长带来的摊薄，是否可持续请自行判断"
+        return txt
     GEN_SPEC=[("销售费用率",GEN["sell"],PCT,_fee_note("sell","近3年均值")),
       ("管理费用率",GEN["admin"],PCT,_fee_note("admin","近3年均值")),
       ("研发费用率",GEN["rd"],PCT,_fee_note("rd","近3年均值｜CAS 全额费用化")),("税金及附加率",GEN["tsur"],PCT,"近3年均值"),
@@ -1107,9 +1113,15 @@ def _ratios(wb, cal, D_):
     ITM_FACTOR=f"{1.0/_itb['share']:.6f}" if ITM_IDX is not None else None
     if ITM_IDX is not None:
         _hdr3 = ("中期列（本期中报）：ROE/ROA/ROIC、总资产周转率、固定资产周转率、成长性三行（营收/归母净利/"
-                 "EBIT 增速）的分子，DSO/DIO/DPO/CCC 的分母，已按「已披露期占全年营收比重」"
+                 "EBIT 增速）的分子，DSO/DIO/DPO/CCC、有息负债/EBITDA 的分母，已按「已披露期占全年营收比重」"
                  "的倒数年化（非固定×2），单元格批注给出年化前原式；毛利率等流量÷流量的比率本来就对，未年化；"
                  "成长性三行年化后是隐含全年增速估计，不是真实同比（本表不呈现去年同期数据）。")
+    elif PR.get("interim"):
+        # I7（final-review-plan2a 终审）：itm_block 只在 sh_hist 非空（有去年同期数据）
+        # 才会被 calibrate 构造出来；periods.interim 只要有已披露中期就无条件非空。
+        # 次新股（或缺去年同期）时中期列照样存在于表里，若沿用"本报表无已披露中期"
+        # 这句话，读者会被明确告知一件假的事——遗漏必须可见，不能含糊带过。
+        _hdr3 = "本报表有已披露中期，但缺去年同期数据，中期列未年化，与年报列不可比。"
     else:
         _hdr3 = "本报表无已披露中期，全部历史列均为整年数据。"
     w.cell(3,1,_hdr3).font=Font(size=9,color="C00000")
@@ -1162,20 +1174,25 @@ def _ratios(wb, cal, D_):
     r=line(r,"EBIT 利润率",  lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}/{P}!{c}{RV}"))
     ROWS["npm"]=r
     r=line(r,"归母净利率",   lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
-    # 下方三行（ROE/ROA/ROIC）中期列年化的分子是利润/EBIT——与 C3 成长性三行
-    # 共用的 ann_caveat 机制在此先只定义常量，供成长性三行使用；ROE/ROA/ROIC
-    # 自身的批注覆盖见后续修复（I8）。
+    # I8（final-review-plan2a 终审）：年化因子取自【营收】的中期占比，而 ROE/ROA/
+    # ROIC 的分子是利润/EBIT——两者的季节性分布不同（年末计提奖金、研发下半年
+    # 集中，H1 利润率系统性偏高），按营收进度年化利润会系统性高估这三个指标的
+    # 中期列（600183 实跑：ROE 中期列 39.00% vs 年报量级 13–15%）。默认文案
+    # 「与年报列口径可比」对这三行不成立，必须显式提示"未校正利润的季节性"。
     _ANN_CAVEAT_PROFIT = "按已披露期营收进度年化，未校正利润/EBIT 的季节性分布。"
     ROWS["roe"]=r
     r=line(r,"ROE（归母，平均净资产）",
-           lambda c,p,i,m=None: IE(f"({P}!{c}{RNIP}{'*'+m if m else ''})/{avg(B_,25,c,p)}"),PCT,True,ann="num")
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RNIP}{'*'+m if m else ''})/{avg(B_,25,c,p)}"),PCT,True,
+           ann="num",ann_caveat=_ANN_CAVEAT_PROFIT)
     ROWS["roa"]=r
     r=line(r,"ROA（净利润 / 平均总资产）",
-           lambda c,p,i,m=None: IE(f"({P}!{c}{RNI}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),ann="num")
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RNI}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),ann="num",
+           ann_caveat=_ANN_CAVEAT_PROFIT)
     ROWS["roic"]=r
     r=line(r,"ROIC（税后 / 投入资本）",
            lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}{'*'+m if m else ''}*(1-{DS}!$B${D_['TT']})/({B_}!{c}31+{B_}!{c}12)"),PCT,True,
-           "投入资本 = 营运资本 NWC + 固定资产净额；与 DCF 终值 ROIC 同口径",ann="num")
+           "投入资本 = 营运资本 NWC + 固定资产净额；与 DCF 终值 ROIC 同口径",ann="num",
+           ann_caveat=_ANN_CAVEAT_PROFIT)
     ROWS["wacc"]=r
     r=line(r,"（对照）WACC", lambda c,p,i,m=None: f"={DS}!$B${D_['WC']}",PCT,False,"ROIC 持续低于 WACC 即为价值毁灭")
     r+=1
@@ -1207,11 +1224,25 @@ def _ratios(wb, cal, D_):
     r=hdr(r,"三、偿债与资本结构")
     r=line(r,"资产负债率", lambda c,p,i,m=None: IE(f"{B_}!{c}24/{B_}!{c}16"))
     r=line(r,"净负债 / 归母权益", lambda c,p,i,m=None: IE(f"{B_}!{c}30/{B_}!{c}25"))
-    r=line(r,"有息负债 / EBITDA", lambda c,p,i,m=None: IE(f"({B_}!{c}18+{B_}!{c}21+{B_}!{c}22)/({P}!{c}{REBIT}+{K}!{c}7)"),MX)
-    # EBIT 为负时这一格最该被看见——不能像别处一样 IFERROR 回退成空白，
-    # 那会让读者以为「没有数据」，真相其实是「利润不够付利息」。
+    # I3（final-review-plan2a 终审）：有息负债（存量）÷ EBITDA（流量）是「存量÷
+    # 流量」，与 DSO/DIO/DPO/CCC 同类——它们都已经用 ann="den" 纳入年化（对分母
+    # EBITDA 乘以 1/已披露期占全年营收比重）。此前排除这一行的理由是「它是存量÷
+    # 流量而不是流量÷存量」，但那条理由同样适用于 DSO 等，区分不出两者：DSO 也是
+    # 存量÷流量×365，一样被纳入了。600183 实跑：中期列未年化显示 1.03x，同口径
+    # 年化后应为 0.49x，2025A 为 0.80x——读者会看到杠杆从 0.80x 跳到 1.03x，
+    # 实际是降到 0.49x，方向都反了。
+    r=line(r,"有息负债 / EBITDA",
+           lambda c,p,i,m=None: IE(f"({B_}!{c}18+{B_}!{c}21+{B_}!{c}22)/(({P}!{c}{REBIT}+{K}!{c}7){'*'+m if m else ''})"),
+           MX,ann="den")
+    # I6（final-review-plan2a 终审）：旧注释称"EBIT 为负时这一格最该被看见"，但
+    # IFERROR 根本不会因 EBIT 为负而触发——IFERROR(-5/2,"")=−2.5，Excel 照常显示
+    # 负数。IFERROR 真正会触发的是 #DIV/0!，即财务费用恰为 0（现金充裕的公司很
+    # 容易过零，ashare_calibrate.py 自己的注释就记着"中免实测 −13.19%"）。旧公式
+    # 因此会把"利息为零、覆盖倍数无穷大"显示成一句反话"利润不足"。改为显式判断：
+    # 利息<=0 时说明没有净利息支出，与 EBIT 正负无关；EBIT 为负则照常算出负数
+    # 直接显示，不再假装"利润不足"专为负 EBIT 服务。
     r=line(r,"EBIT 利息保障倍数",
-           lambda c,p,i,m=None: f"=IFERROR({P}!{c}{REBIT}/{P}!{c}17,\"利润不足\")",MX)
+           lambda c,p,i,m=None: f"=IF(N({P}!{c}17)<=0,\"无利息支出\",IFERROR({P}!{c}{REBIT}/{P}!{c}17,\"—\"))",MX)
     ROWS["em"]=r
     r=line(r,"权益乘数（总资产 / 归母权益）", lambda c,p,i,m=None: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)
     r+=1
