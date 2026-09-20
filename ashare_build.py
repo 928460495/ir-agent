@@ -18,6 +18,7 @@ from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import (Paragraph, ParagraphProperties, CharacterProperties,
                                    RegularTextRun)
 import ashare_data as D
+import ashare_calibrate as _CAL
 
 NAVY="1F4E79"; LBLUE="D9E1F2"; GREY="F2F2F2"; YEL="FFF2CC"; ORG="FCE4D6"
 F_HDR=Font(color="FFFFFF",bold=True,size=11); F_COL=Font(bold=True,size=10)
@@ -108,12 +109,23 @@ def build(cal: dict, path: str) -> dict:
             ws.cell(r,1).comment=Comment("判断项：默认为最近一期毛利率向历史均值线性回归。毛利率对估值的杠杆通常大于营收增速。","Template")
         r+=1
     CX_ROW=r
+    # 资本开支由各档营收增速推出（见 _capex_from_growth）：三档因此自动一致，
+    # 不会出现 Bull 档 45% 增速却配 Base 档资本开支这种「只调有利项」。
+    # base_rev 与下方「五、期初余额」小节的「基期营业总收入」同源（cal["rev"][最近年报]），
+    # 不另算一份——那一节此时还没写到工作表，OR_ 字典要等到那里才建好。
+    OR_base_rev = cal["rev"][PR["annual"][-1]]
+    _cx3 = _CAL._capex_from_growth(
+        growth3={k: [_scen("growth_scen", i, JU["growth"][i])[j] for i in range(len(YE))]
+                 for j, k in enumerate(("bull", "base", "bear"))},
+        base_rev=OR_base_rev, fa_turnover=JU.get("fa_turn", 2.0),
+        maint_rate=JU.get("maint_rate", 0.05))
     for i,y in enumerate(YE):
         ws.cell(r,1,f"{y} 资本开支 / 营收").font=Font(size=10); ws.cell(r,1).border=BX
-        for j in range(3):
-            cc=ws.cell(r,2+j,JU["capex"][i]); cc.font=F_IN; cc.number_format=PCT
+        for j,k in enumerate(("bull","base","bear")):
+            cc=ws.cell(r,2+j,_cx3[k][i]); cc.font=F_IN; cc.number_format=PCT
         cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=PCT
-        if i==0: ws.cell(r,6,"自动：近3年均值，沿预测期向「折旧/营收」衰减（增速降下来后不应继续投扩张性资本开支）").font=Font(size=9,color="808080")
+        if i==0: ws.cell(r,6,"自动：Δ营收÷目标固定资产周转率＋维持性投资（≈折旧），按本档营收增速反推"
+                              "——三档因此自动一致，增速越高、所需投入越大，不再沿时间线性衰减").font=Font(size=9,color="808080")
         r+=1
     DG_ROW=r
     ws.cell(r,1,"营收增速 Δ（敏感性平移，平时保持 0）").font=Font(size=10); ws.cell(r,1).border=BX

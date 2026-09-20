@@ -139,6 +139,31 @@ def _gm_std_annual(gm_hist, ann, rev, cogs):
     return float(np.std(gm_hist[:n_ann_gm])) if n_ann_gm else float(np.std(gm_hist))
 
 
+def _capex_from_growth(growth3, base_rev, fa_turnover, maint_rate):
+    """由各档营收增速推出各档资本开支（以占当年营收比表示）。
+
+    **三档同值是情景分析的作弊方式。** 原实现三档都用「近三年 capex/营收
+    均值线性收敛到折旧率」，于是 Bull 档 45% 的营收增速也配同样的资本
+    开支——等于假设增长不需要投入，只把有利项调高。
+
+    当年资本开支 = Δ营收 ÷ 目标固定资产周转率 + 维持性投资。
+    前一项是扩产所需的新增固定资产，后一项≈折旧（维持现有产能）。
+    营收下滑时增量项归零而非转负：**收缩不等于卖厂房**。
+    """
+    out = {}
+    for case, gs in growth3.items():
+        rev_prev = float(base_rev)
+        seq = []
+        for g in gs:
+            rev_now = rev_prev * (1.0 + float(g))
+            delta = max(rev_now - rev_prev, 0.0)
+            capex = delta / fa_turnover + rev_prev * maint_rate
+            seq.append(round(capex / rev_now, 4) if rev_now else 0.0)
+            rev_prev = rev_now
+        out[case] = seq
+    return out
+
+
 def anchor_three(share_hist, gm, gm_std, share_mean=None):
     """锚定两格的三档 (Bull, Base, Bear)：已披露期占全年营收比重、剩余期毛利率。
 
@@ -372,6 +397,15 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     gm = [round(gm_last + (gm_mean - gm_last)*(i+1)/nyears, 4) for i in range(nyears)]
     dep_over_rev = (deprate * o["ppe"] + amortrate * rev[last]) / rev[last]
     capex = [round(capex_r + (dep_over_rev - capex_r)*(i)/max(nyears-1,1), 4) for i in range(nyears)]
+    # 目标固定资产周转率：近三年实际值的均值。用它把「多长的营收」换算成
+    # 「需要多少固定资产」——比手填三档资本开支更难只调有利项。三档资本
+    # 开支由 build 侧调用 _capex_from_growth 按各档营收增速推出，这里只
+    # 交付 fa_turn / maint_rate 两个参数；上面的 capex 单序列保留不动，
+    # 它是 build 里 _scen 的 fallback，上游没给三档增速时仍要能建表。
+    fa_turn = _mean([rev[p]/_v0(bal, "固定资产净额", p) for p in a3
+                     if rev.get(p) and _v0(bal, "固定资产净额", p)],
+                    lo=0.3, hi=10.0, default=2.0, what="固定资产周转率")
+    maint_rate = round(dep_over_rev, 5)
 
     # 已披露中期：占全年比重（用于锁定首个预测年）
     itm_block = None
@@ -444,7 +478,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                  sweep=round(rev[last]*0.06, 1)),
         xcheck=D.cross_check(st, em, ann),
         da_src=_src, cx_intan=cx_intan, kd_src=kd_src, clamps=list(_CLAMPS), da_detail=[(ann[i+1], _dep[i], _amo[i]) for i in range(len(_dep))],
-        judg=dict(growth=growth, gm=gm, capex=capex,
+        judg=dict(growth=growth, gm=gm, capex=capex, fa_turn=round(fa_turn, 4), maint_rate=round(maint_rate, 5),
                   g_hist=[round(x,4) for x in g_hist], gm_hist=[round(x,4) for x in gm_hist],
                   g_stats=(round(float(np.mean(g_hist)),4), round(float(np.std(g_hist)),4), round(min(g_hist),4), round(max(g_hist),4)),
                   gm_stats=(round(gm_mean,4), round(gm_std_ann,4), round(min(gm_hist),4), round(max(gm_hist),4)),
