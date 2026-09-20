@@ -35,6 +35,13 @@ from ir_agent.ledger import FactLedger, LookAheadError
 _WS = re.compile(r"\s+")
 _URL = re.compile(r"^https?://\S+$")
 
+# 驳回信息必须说清怎么改才能通过 —— 否则同一条驳回会被原样重试到底。
+# 实测踩到的失败模式: 模型引用的是正文里真实存在的一句话，但在中间
+# 自己加了省略号（「…广泛应用于...」），逐字核验因此判不过；三次重试
+# 收到同一句「找不到」，模型无从得知问题出在省略号而不是引文本身。
+_REPORT_GUIDANCE = ("请改引一段更短、连续的原文片段，逐字照抄正文中实际"
+                    "存在的连续文字，引文中间不得出现省略号或其他删改。")
+
 
 class InvalidBasis(Exception):
     """依据本身不合法 —— 缺少可核验的要素。"""
@@ -142,7 +149,8 @@ def validate(
             if _norm(b.quote) not in body_norm:
                 problems.append(
                     f"依据引用的正文片段「{b.quote[:30]}」在正文中找不到 —— "
-                    "与凭空捏造无异。")
+                    "与凭空捏造无异。"
+                    f"{_REPORT_GUIDANCE}")
         elif b.kind is BasisKind.EXTERNAL:
             if corpus is None:
                 # 未提供语料库: 已留下 URL、原文与日期供人复核

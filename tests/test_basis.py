@@ -77,6 +77,16 @@ class TestValidateAgainstEvidence:
                          ledger(), BODY, AS_OF)
         assert probs and "正文" in probs[0]
 
+    def test_report_rejection_says_how_to_fix_it(self):
+        """真实事故: 模型引用的是正文里真实存在的一句话，但自己在中间加了
+        省略号（「…广泛应用于...」），逐字核验因此判不过。同一条驳回信息
+        被原样重试三次，模型都不知道问题出在省略号 —— 驳回信息必须说清
+        怎么改才能通过。"""
+        probs = validate([Basis.report("公司正在高速扩张")],
+                         ledger(), BODY, AS_OF)
+        assert probs and ("更短" in probs[0] and "连续" in probs[0]
+                          and "省略" in probs[0])
+
     def test_report_quote_present_passes(self):
         assert validate([Basis.report("几乎不依赖财务杠杆")],
                         ledger(), BODY, AS_OF) == []
