@@ -221,8 +221,22 @@ def _openweb_notes(res) -> list[str]:
 
     缺口口径是产品承诺的一部分，不是某一个阶段的内部细节，因此单一定义
     放在这里，两个阶段都调它。
+
+    **格式：一行一条，缩进的 `·`，跟 `openweb.summary()` 同构，不是
+    `；` 拼成一整行。** 此前这里把「N 篇抓取失败：原因 1；原因
+    2」「缺口 1：未取到」「缺口 2：未取到」全部揉进同一段用 `；` 连
+    的文字，而失败原因本身也带着 `：`（`f"{url}：{诊断}"`）——三层
+    「用『；』分隔的条目」「条目内部又用『：』分隔的字段」叠在一行，
+    读者（以及任何做字符串切分的下游）分不出「行业规模与增速：未取到」
+    到底是第四条抓取失败原因，还是缺口清单里独立的一条。十条失败原因
+    时这行能长到一千六百字符，直接糊进 md/state.json/看板。`openweb.
+    summary()` 早就用「每行一条、缩进 `·`」的格式解决了同一个问题——
+    这里改成同一种格式，携带的信息一个字都没少，只是换成人和程序都能
+    分清边界的排布。仍然只返回**一个**列表元素（内部用换行分隔），不
+    改变 `_load_openweb`/`_restore_openweb` 把它拼进 `skipped`（每个
+    元素对应清单里一行）的既有语义。
     """
-    notes: list[str] = []
+    lines: list[str] = ["开放网络资料："]
     if res.fetch_failed:
         # `fetch_failed` 曾经是个不透明的数字——「模型给了个 PDF」「模型
         # 给了个内网地址」「这个域名 DNS 解析不出来」「正文提取为空」
@@ -230,16 +244,17 @@ def _openweb_notes(res) -> list[str]:
         # 会撞见其中一种把全部候选一次性打光（见 openweb.OpenWebResult.
         # fetch_failed_reasons 的注释），读者必须能分清是哪一种，而不是
         # 只看到一个数字猜。
-        reasons = ("：" + "；".join(res.fetch_failed_reasons)
-                  if res.fetch_failed_reasons else "")
-        notes.append(f"{res.fetch_failed} 篇抓取失败{reasons}")
+        lines.append(f"  · {res.fetch_failed} 篇抓取失败")
+        for reason in res.fetch_failed_reasons:
+            lines.append(f"    - {reason}")
     if res.model_dated:
-        notes.append(f"{res.model_dated} 篇的发布日期由模型给出，未经代码核验")
+        lines.append(f"  · {res.model_dated} 篇的发布日期由模型给出，"
+                     "未经代码核验")
     for slot in res.missing_slots:
-        notes.append(f"{slot}：未取到")
-    if not notes:
+        lines.append(f"  · {slot}：未取到")
+    if len(lines) == 1:
         return []
-    return ["开放网络资料（" + "；".join(notes) + "）"]
+    return ["\n".join(lines)]
 
 
 def _restore_openweb(r, out: Path) -> list[str]:

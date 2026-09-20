@@ -1709,3 +1709,43 @@ def test_openweb_notes没有失败原因时不报多余内容():
     joined = "；".join(full._openweb_notes(res))
     assert "3 篇抓取失败" in joined
     assert "3 篇抓取失败：" not in joined
+
+
+def test_openweb_notes失败原因与缺失主题分行不会被误读成同一类():
+    """真实事故：`_openweb_notes` 曾经把「N 篇抓取失败：原因1；原因2」
+    「缺口1：未取到」「缺口2：未取到」全部揉进用 `；` 连接的同一行，
+    而失败原因本身又带着 `：`（`f"{url}：{诊断}"`）——三层分隔符叠在
+    一起，读者（以及任何做字符串切分的下游）分不清 "行业规模与增速：
+    未取到" 到底是缺失主题清单里独立的一条，还是被算进了抓取失败的第
+    四条原因。十条失败原因时这一整行能长到约 1600 字符，直接糊进
+    md/state.json/看板。这里用一个刻意让两类信息挨在一起的构造
+    （失败原因列表恰好在最后一条也含"：未取到"字样的诊断），验证修复
+    后两类信息落在互不相邻、可以按行区分的位置，而不是同一段用 "；"
+    分隔的文字。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(
+        docs=[], fetch_failed=1,
+        fetch_failed_reasons=["https://site.example.com/a：内容类型不是"
+                              "网页（application/pdf）"],
+        missing_slots=["行业规模与增速", "政策与监管"])
+
+    notes = full._openweb_notes(res)
+    # 仍然只产出一个 skipped 列表元素——不改变 `_load_openweb`/
+    # `_restore_openweb` 把它拼进 skipped 的既有语义（一个元素对应
+    # 清单里一行/一条）。
+    assert len(notes) == 1
+    lines = notes[0].splitlines()
+    # 失败原因与缺失主题必须落在不同的行上，才谈得上"能分清"。
+    reason_lines = [ln for ln in lines if "内容类型不是网页" in ln]
+    slot_lines = [ln for ln in lines
+                 if ln.strip().startswith("· ") and "：未取到" in ln]
+    assert len(reason_lines) == 1
+    assert {"  · 行业规模与增速：未取到",
+            "  · 政策与监管：未取到"} <= set(slot_lines)
+    # 缺失主题各自独立成行，不与抓取失败那一条挤在同一行、同一段
+    # 用 "；" 连接的文字里。
+    assert reason_lines[0] not in slot_lines
+    for slot_line in slot_lines:
+        assert "内容类型不是网页" not in slot_line
