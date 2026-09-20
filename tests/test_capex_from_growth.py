@@ -92,25 +92,43 @@ def test_calibrate交付fa_turn和maint_rate(cal_dict):
     assert "capex" not in ju
 
 
-def test_夹具与当前calibrate代码同步(cal_dict):
+def test_夹具与当前calibrate代码同步(cal_dict, monkeypatch):
     """夹具是某次 calibrate() 运行的离线快照（pickle），不会跟着代码改动
     自动更新。Task 3 审查时发现它已经滞后两三个提交——季节性对冲
     （cfabb70）与 gm_std_annual 修正（8e96197）落地时都没人重新生成过，
     直到本任务顺手 regenerate 才暴露（task-3-report.md Important 2）。
     没有测试盯着这件事，夹具就会悄悄过期而没人发现。
 
-    这里只断言"当前 calibrate() 一定会产出/删除的字段"是否在夹具里，
-    不断言任何具体数值（行情/beta/σ 都会随时间漂移，断言数值只会
-    让测试变成另一种脆弱）。缺字段或多字段都说明夹具过期。
+    M3（final-review-plan2a 终审）：原实现硬编码「fa_turn/maint_rate 必须在、
+    capex/_hedge_note 必须在/不在」这三四条断言，对未来任何其它字段的增删
+    都无感——加一个新字段、删一个旧字段，只要没人手改这条测试，它照样全绿。
+    改成不预设任何具体字段名：用夹具里已经缓存的 stmts（三张报表）+ meta
+    （行情/beta/无风险利率）离线重放一遍*当前代码*的 calibrate()——不联网、
+    不需要真实调用东财/新浪，只把网络取数函数换成读夹具里存好的值——把
+    重放结果的 judg/gen 键集合与夹具里存的键集合逐一比对。任何一侧多一个键
+    或少一个键，都说明代码已经改了夹具没跟着变，或者反过来。
     """
-    ju = cal_dict["judg"]
-    missing = [k for k in ("fa_turn", "maint_rate") if k not in ju]
+    meta = cal_dict["meta"]
+    monkeypatch.setattr(C.D, "fetch_statements", lambda code: cal_dict["stmts"])
+    monkeypatch.setattr(C.D, "fetch_quote", lambda code: dict(
+        name=meta["name"], price=meta["price"], shares=meta["shares"], source=meta["quote_source"]))
+    monkeypatch.setattr(C.D, "fetch_riskfree", lambda: (meta["rf"], meta["rf_date"]))
+    monkeypatch.setattr(C, "beta_blume", lambda code, years=5: (meta["beta"], meta["beta_raw"], meta["beta_n"]))
+    # 东财折旧摊销明细源置空——calibrate 自带"东财不可用则降级到 OCF 倒推"的
+    # 分支，两条分支产出的 judg/gen 键集合完全相同，只是数值精度不同；这里
+    # 只关心键集合，降级分支足够、也不需要联网。
+    monkeypatch.setattr(C.D, "fetch_eastmoney", lambda code, n=24: {"_errors": []})
+    fresh = C.calibrate(meta["code"], meta["nyears"], stmts=cal_dict["stmts"])
     stale_msg = ("夹具 tests/fixtures/cal_600183.pkl 已落后于当前 "
                  "ashare_calibrate.calibrate()，请重新生成：python3 tests/make_fixture.py 600183")
-    assert not missing, f"缺字段 {missing}——{stale_msg}"
-    assert "capex" not in ju, f"仍带着已删除的 judg['capex']——{stale_msg}"
-    gen = cal_dict.get("gen", {})
-    assert "_hedge_note" in gen, f"gen 缺少季节性对冲留痕 _hedge_note——{stale_msg}"
+    ju_missing = set(fresh["judg"]) - set(cal_dict["judg"])
+    ju_extra = set(cal_dict["judg"]) - set(fresh["judg"])
+    assert not ju_missing and not ju_extra, (
+        f"judg 键集合不一致：当前代码多出 {ju_missing}，夹具多出 {ju_extra}——{stale_msg}")
+    ge_missing = set(fresh["gen"]) - set(cal_dict["gen"])
+    ge_extra = set(cal_dict["gen"]) - set(fresh["gen"])
+    assert not ge_missing and not ge_extra, (
+        f"gen 键集合不一致：当前代码多出 {ge_missing}，夹具多出 {ge_extra}——{stale_msg}")
 
 
 @pytest.fixture(scope="module")

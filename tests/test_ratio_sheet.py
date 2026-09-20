@@ -45,13 +45,14 @@ def test_ROE中期列公式已按share倒数年化(tmp_path):
     fixture 的 share=0.4785 → 年化因子 1/0.4785≈2.0899，而不是固定的 2.0
     （固定 ×2 正是 `_wc` 注释里说会系统性带偏的做法）。
     """
-    cal = pickle.load(open(FIX, "rb"))
-    wb, _ = _wb(tmp_path)
+    wb, cal = _wb(tmp_path)
     ws = wb["7_财务比率与杜邦"]
     row = [r for r in ws.iter_rows() if r[0].value == "ROE（归母，平均净资产）"]
     assert row, "找不到 ROE 行"
-    R = cal["_rows"] if "_rows" in cal else None
-    NH = 6  # 5 个年报 + 1 个中报，来自 fixture periods.labels
+    # M4（final-review-plan2a 终审）：NH 曾硬编码为 6（"5 个年报 + 1 个中报"，
+    # 只在夹具恰好是这个形状时凑巧对），build() 结束后已把真正的 NH 写回
+    # cal["_rows"]["NH"]——本文件其余测试有的已改用这个活的来源，这里统一。
+    NH = cal["_rows"]["NH"]
     itm_cell = row[0][1 + (NH - 1)]  # B=索引1 对应第0列，中期列是第 NH-1 列（0-based）
     f = itm_cell.value
     assert isinstance(f, str) and f.startswith("="), "ROE 中期列必须是活公式"
@@ -69,12 +70,11 @@ def test_DSO中期列分母已年化(tmp_path):
     """DSO 是「存量÷流量×365」，中期列须对分母（营收）乘以 1/share，
     而不是像旧实现那样直接拿半年营收算，导致天数虚高约一倍。
     """
-    cal = pickle.load(open(FIX, "rb"))
-    wb, _ = _wb(tmp_path)
+    wb, cal = _wb(tmp_path)
     ws = wb["7_财务比率与杜邦"]
     row = [r for r in ws.iter_rows() if r[0].value == "应收周转天数 DSO"]
     assert row, "找不到 DSO 行"
-    NH = 6
+    NH = cal["_rows"]["NH"]
     itm_cell = row[0][1 + (NH - 1)]
     f = itm_cell.value
     factor = round(1.0 / cal["interim"]["share"], 6)
@@ -84,14 +84,13 @@ def test_DSO中期列分母已年化(tmp_path):
 
 def test_毛利率等流量比流量不年化(tmp_path):
     """毛利率、营业利润率、EBIT 利润率、归母净利率——本来就对，不能被一刀切年化。"""
-    cal = pickle.load(open(FIX, "rb"))
-    wb, _ = _wb(tmp_path)
+    wb, cal = _wb(tmp_path)
     ws = wb["7_财务比率与杜邦"]
     factor = round(1.0 / cal["interim"]["share"], 6)
+    NH = cal["_rows"]["NH"]
     for label in ("毛利率", "营业利润率", "EBIT 利润率", "归母净利率"):
         row = [r for r in ws.iter_rows() if r[0].value == label]
         assert row, f"找不到 {label} 行"
-        NH = 6
         itm_cell = row[0][1 + (NH - 1)]
         f = itm_cell.value
         assert isinstance(f, str)
