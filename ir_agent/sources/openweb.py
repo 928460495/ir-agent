@@ -18,8 +18,11 @@ from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlparse
 
+import requests
+
 from ir_agent.lineparse import keyed
 from ir_agent.sources.external import Tier
+from ir_agent.sources.retry import with_retry
 from ir_agent.sources.web import parse_date
 
 # ── 来源分级 ────────────────────────────────────────────────────
@@ -222,3 +225,99 @@ PROMPT = """为一份 A 股研究报告采集公司与行业的外部资料。
 
 只输出上述格式的行。
 """
+
+
+# ── 抓取与正文提取 ──────────────────────────────────────────────
+
+TIMEOUT = 20
+# 进提示词的截断长度。**入库存全文，进提示词才截断** —— Corpus.verify()
+# 用的是全文，模型只能引用它看得见的那一段，而那一段必然在全文里，所以
+# 截断不会让核验误杀。
+TEXT_LIMIT = 2000
+
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+_HEADERS = {"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"}
+
+# 整块剔除的噪声容器。研报走东财的 ctx-content 块，噪声天然被框住；
+# 开放网页没有这个便利，导航、页脚、脚本、样式会被 _TAG 剥成一堆散字
+# 混进正文，既污染引文核验也白白吃掉提示词长度。
+_BLOCK = re.compile(
+    r"<(script|style|nav|header|footer|aside|noscript)\b[^>]*>.*?</\1\s*>",
+    re.S | re.I)
+_TAG = re.compile(r"<[^>]+>")
+_SPACE = re.compile(r"[ \t　\xa0]+")
+_ENTITIES = (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
+             ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"))
+
+_META_TAG = re.compile(r"<meta\b[^>]*>", re.I)
+_ATTR = re.compile(r'([\w:-]+)\s*=\s*["\']([^"\']*)["\']')
+# meta 里表示发布时间的键。属性顺序没有标准（content 可能写在 property
+# 前面），所以逐个 meta 标签拆属性，而不是写一条把顺序焊死的正则。
+_DATE_KEYS = ("article:published_time", "og:published_time",
+              "article:published", "publishdate", "pubdate",
+              "publish_date", "date")
+
+
+class FetchFailed(Exception):
+    """抓取或正文提取失败。**不静默返回空** —— 那会让「抓不到」和
+    「抓到一篇空文章」长得一样。"""
+
+
+@dataclass(frozen=True)
+class Fetched:
+    final_url: str              # 跟完重定向后的最终地址，分级用它
+    text: str                   # 全文
+    meta_published: date | None # 页面自己声明的发布时间，没有则 None
+
+
+def extract_text(html: str) -> str:
+    """HTML → 纯文本。与 reports.fetch_text 同构，额外整块剔除噪声容器。
+
+    不引入 bs4/lxml：本仓库没有依赖声明文件，新增 import 意味着别人的
+    环境可能跑不起来。
+    """
+    body = _BLOCK.sub(" ", html or "")
+    body = _TAG.sub("\n", body)
+    for src, dst in _ENTITIES:
+        body = body.replace(src, dst)
+    lines = [_SPACE.sub(" ", ln).strip() for ln in body.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def meta_date(html: str) -> date | None:
+    """从 meta 标签里读页面自己声明的发布时间；读不到返回 None。"""
+    for tag in _META_TAG.finditer(html or ""):
+        attrs = {k.lower(): v for k, v in _ATTR.findall(tag.group(0))}
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        if key not in _DATE_KEYS:
+            continue
+        when = parse_date(attrs.get("content", ""))
+        if when is not None:
+            return when
+    return None
+
+
+def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
+    """代码自己把页面抓回来。**模型不经手正文一个字。**"""
+    def _get():
+        r = requests.get(url, headers=_HEADERS, timeout=timeout)
+        r.raise_for_status()
+        return r
+
+    try:
+        resp = with_retry(_get)
+    except Exception as e:                                  # noqa: BLE001
+        raise FetchFailed(f"{url}：{e.__class__.__name__}: {e}") from e
+
+    # requests 对没有显式 charset 的页面会猜成 ISO-8859-1，中文页面因此
+    # 解出一片乱码——乱码不会报错，只会让正文提取和引文核验静默失效。
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    html = resp.text
+
+    text = extract_text(html)
+    if not text.strip():
+        raise FetchFailed(f"{url}：正文提取为空")
+    return Fetched(final_url=resp.url or url, text=text,
+                   meta_published=meta_date(html))

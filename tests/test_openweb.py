@@ -124,3 +124,99 @@ def test_不变式_白名单条目跨档互不为子域():
 def test_畸形输入不炸():
     for bad in ("", "not a url", "http://", "://x", "ftp://x.gov.cn"):
         assert tier_of_url(bad) is Tier.MEDIA, bad
+
+
+from ir_agent.sources.openweb import extract_text, meta_date
+
+HTML = """<html><head>
+<meta charset="utf-8">
+<meta property="article:published_time" content="2026-07-01T08:30:00+08:00">
+<title>覆铜板市场规模</title>
+</head><body>
+<nav><a href="/">首页</a><a href="/about">关于我们</a></nav>
+<script>var ad = {track: 1};</script>
+<style>.x{color:red}</style>
+<div class="content"><p>2026年上半年全球覆铜板市场规模约 120 亿美元。</p>
+<p>同比增长 8.4%。</p></div>
+<footer>版权所有 &copy; 某站</footer>
+</body></html>"""
+
+
+def test_正文提取剔除脚本样式导航页脚():
+    got = extract_text(HTML)
+    assert "覆铜板市场规模约 120 亿美元" in got
+    assert "同比增长 8.4%" in got
+    for noise in ("var ad", "color:red", "关于我们", "版权所有"):
+        assert noise not in got, noise
+
+
+def test_正文提取还原实体并压掉空白():
+    got = extract_text("<p>A&nbsp;&amp;&nbsp;B</p><p>  C  </p>")
+    assert "A & B" in got
+    assert "  C  " not in got
+    assert "C" in got
+
+
+def test_meta日期_属性在前():
+    assert meta_date(HTML) == date(2026, 7, 1)
+
+
+def test_meta日期_content在前也认():
+    """meta 标签的属性顺序没有标准，两种写法都得认。"""
+    html = ('<meta content="2026-06-15" '
+            'property="article:published_time">')
+    assert meta_date(html) == date(2026, 6, 15)
+
+
+def test_meta日期_没有就返回None():
+    assert meta_date("<html><body>x</body></html>") is None
+
+
+def test_meta日期_认不出的写法返回None():
+    html = '<meta property="article:published_time" content="近期">'
+    assert meta_date(html) is None
+
+
+def test_fetch_用最终URL并解码中文(monkeypatch):
+    """两件事一起验：跟完重定向后的 final_url 必须是最终地址（分级要用
+    它），以及中文页面的编码必须按页面声明解，不能留 ISO-8859-1。"""
+    import ir_agent.sources.openweb as OW
+
+    class _Resp:
+        url = "https://blog.example.com/real"
+        encoding = "ISO-8859-1"
+        apparent_encoding = "utf-8"
+        content = "<p>覆铜板报价上涨</p>".encode("utf-8")
+
+        @property
+        def text(self):
+            return self.content.decode(self.encoding)
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: _Resp())
+    got = OW.fetch("https://www.miit.gov.cn/redirects-away")
+    assert got.final_url == "https://blog.example.com/real"
+    assert "覆铜板报价上涨" in got.text
+
+
+def test_fetch_正文为空则抛(monkeypatch):
+    import ir_agent.sources.openweb as OW
+
+    class _Resp:
+        url = "https://x.example.com/a"
+        encoding = "utf-8"
+        apparent_encoding = "utf-8"
+        content = b"<html><body><script>1</script></body></html>"
+
+        @property
+        def text(self):
+            return self.content.decode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: _Resp())
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://x.example.com/a")
