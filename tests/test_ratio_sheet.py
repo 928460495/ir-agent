@@ -9,10 +9,12 @@
 读者看到的是「没有数据」，而真相是「利润不够付利息」——**最该看见的
 那一格恰好被藏起来了**。
 """
-import os, sys
+import copy, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pickle
+import pytest
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter as CL
 import ashare_build as B
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "cal_600183.pkl")
@@ -178,3 +180,68 @@ def test_利息保障倍数为负时不被藏起来(tmp_path):
         "IFERROR 回退成空字符串会把「利润不够付利息」这件事藏起来"
     assert any('利润不足' in f for f in formulas if isinstance(f, str)), \
         "应显式回退成「利润不足」，而不是让读者猜"
+
+
+def _interim_col(cal):
+    NH = cal["_rows"]["NH"]
+    return CL(2 + (NH - 1))
+
+
+def _proj_col(cal, i=0):
+    NH = cal["_rows"]["NH"]
+    return CL(2 + NH + i)
+
+
+def _eval_cell(path, sheet, cell):
+    import formulas
+    sol = formulas.ExcelModel().loads(path).finish().calculate()
+    fn = os.path.basename(path)
+    v = sol.get(f"'[{fn}]{sheet}'!{cell}")
+    assert v is not None, f"formulas 引擎未能算出 {sheet}!{cell}"
+    val = v.value[0, 0]
+    return val.item() if hasattr(val, "item") else val
+
+
+def _row_of(ws, label):
+    row = [r for r in ws.iter_rows() if r[0].value == label]
+    assert row, f"找不到「{label}」行"
+    return row[0][0].row
+
+
+# ── C3（final-review-plan2a 终审）：成长性三行中期列显示隐含全年增速估计 ──
+
+def test_成长性三行中期列不再是荒谬的半年比全年(tmp_path):
+    """终审实测复现：600183 中期列改前显示 −33.1%/−1.4%（半年直接除以上一
+    整年，分子分母期间长度不同，本来就没意义），而真实 H1 同比其实是
+    +50.0%/+130.4%——一家利润翻 1.3 倍的公司被显示成在萎缩。改用 ann="num"
+    对分子年化后，中期列应变成正的、量级合理的隐含全年增速估计（不是真实
+    同比，但至少方向与量级不再说反话）。用 formulas 引擎实算，不是 grep
+    公式文本。
+    """
+    import formulas
+    cal = pickle.load(open(FIX, "rb"))
+    out = str(tmp_path / "t_growth.xlsx")
+    B.build(cal, out)
+    ws = load_workbook(out)["7_财务比率与杜邦"]
+    col = _interim_col(cal)
+    for label, lo, hi in (("营业收入增速", 0.2, 0.6), ("归母净利增速", 0.3, 2.0),
+                           ("EBIT 增速", 0.3, 2.0)):
+        r_idx = _row_of(ws, label)
+        val = _eval_cell(out, "7_财务比率与杜邦", f"{col}{r_idx}")
+        assert isinstance(val, (int, float)), f"{label} 中期列应算出数值，实际 {val!r}"
+        assert lo < val < hi, (
+            f"{label} 中期列={val:.4f}，改前会显示负值（腰斩/萎缩），"
+            f"改后应是正的、量级合理的隐含全年增速估计")
+
+
+def test_成长性三行未年化时是荒谬的负值(tmp_path):
+    """对照组：证明"改前会显示反话"这件事本身是真的，而不是臆测——直接拿
+    半年数除以上一整年（不年化，即改前的公式），600183 的营业收入增速会
+    算出负值，尽管公司 H1 同比其实是正增长 50%。直接用 cal 里的原始财报
+    数据算，不依赖 Excel 公式引擎，两条测试各自独立地钉住"改前/改后"。
+    """
+    cal = pickle.load(open(FIX, "rb"))
+    it = cal["interim"]
+    base_rev = cal["rev"][cal["periods"]["annual"][-1]]
+    raw = it["rev"] / base_rev - 1   # 改前公式：半年直接除以上一整年，不年化
+    assert raw < 0, f"对照：未年化的半年/整年比值应为负（改前的错误行为），实际={raw}"

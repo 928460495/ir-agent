@@ -114,18 +114,51 @@ def build(cal: dict, path: str) -> dict:
     # base_rev 与下方「五、期初余额」小节的「基期营业总收入」同源（cal["rev"][最近年报]），
     # 不另算一份——那一节此时还没写到工作表，OR_ 字典要等到那里才建好。
     OR_base_rev = cal["rev"][PR["annual"][-1]]
+    # C2（final-review-plan2a 终审）：锚定开启（默认开关=1）时，首个预测年的
+    # 营收由已披露中期反推，上方该年的营收增速判断项被完全覆盖、涂灰并标注
+    # 「本行输入不生效」——但资本开支此前仍然用这个被忽略的判断项去算，两层
+    # 错误：(1) 数值错，用了不生效的增速；(2) 三档 fallback 到同一个单序列
+    # 时，capex 也就三档同值，而三档真正生效的增速其实因 share3 不同而分叉
+    # （600183 实跑：三档都按 13.74% 算 capex，真正生效的是 Bull 50.04% /
+    # Base 39.85% / Bear 28.59%）。
+    # 追加修复（final-review-plan2a 收尾）：share3/gm_rest3 在这里算一次，
+    # 存进 _it_share3/_it_gm_rest3，供本节（资本开支）与下方「三、锚定已披露
+    # 中期」共用——不再各自重算一遍。两处各自现算一份、只靠"同一套输入、同
+    # 一条规则"保证数值一致，这件事本身就是分叉风险的自白：Plan 1（commit
+    # 4049205「锚定三档规则只留一份，挪到 calibrate」）整整一个任务就是为了
+    # 消灭这种重复，理由写在 anchor_three 的 docstring 里——两边各写一遍规则，
+    # 早晚分叉成工作簿一个数、批准清单另一个数。
+    IT = cal.get("interim")
+    _it_share3 = _it_gm_rest3 = None
+    if IT and IT.get("share"):
+        if IT.get("share3") and IT.get("gm_rest3"):
+            _it_share3, _it_gm_rest3 = tuple(IT["share3"]), tuple(IT["gm_rest3"])
+        else:
+            # 旧版 calibrate 的产出（含各处缓存的 pickle）没有这两项：调用同一个
+            # 规则函数现算，不在这里另写一份规则。σ 与 calibrate 同源（gm_stats）。
+            _it_share3, _it_gm_rest3 = _CAL.anchor_three(
+                IT["share_hist"], IT["gm"], JU["gm_stats"][1], share_mean=IT["share"])
+    _growth3_for_cx = {k: [_scen("growth_scen", i, JU["growth"][i])[j] for i in range(len(YE))]
+                        for j, k in enumerate(("bull", "base", "bear"))}
+    if _it_share3 and IT.get("rev"):
+        for j, k in enumerate(("bull", "base", "bear")):
+            _growth3_for_cx[k][0] = float(IT["rev"]) / float(_it_share3[j]) / float(OR_base_rev) - 1.0
     _cx3 = _CAL._capex_from_growth(
-        growth3={k: [_scen("growth_scen", i, JU["growth"][i])[j] for i in range(len(YE))]
-                 for j, k in enumerate(("bull", "base", "bear"))},
-        base_rev=OR_base_rev, fa_turnover=JU.get("fa_turn", 2.0),
+        growth3=_growth3_for_cx, fa_turnover=JU.get("fa_turn", 2.0),
         maint_rate=JU.get("maint_rate", 0.05))
     for i,y in enumerate(YE):
         ws.cell(r,1,f"{y} 资本开支 / 营收").font=Font(size=10); ws.cell(r,1).border=BX
         for j,k in enumerate(("bull","base","bear")):
             cc=ws.cell(r,2+j,_cx3[k][i]); cc.font=F_IN; cc.number_format=PCT
         cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=PCT
-        if i==0: ws.cell(r,6,"自动：Δ营收÷目标固定资产周转率＋维持性投资（≈折旧），按本档营收增速反推"
-                              "——三档因此自动一致，增速越高、所需投入越大，不再沿时间线性衰减").font=Font(size=9,color="808080")
+        if i==0:
+            _cx_note = ("自动：Δ营收÷目标固定资产周转率＋维持性投资（≈折旧），按本档营收增速反推"
+                        "——三档因此自动一致，增速越高、所需投入越大，不再沿时间线性衰减")
+            if _it_share3:
+                _cx_note += ("｜锚定开启（默认）时，本年已改按各档锚定后真正生效的增速反推，"
+                             "不是上方被忽略的判断项——本格为静态值，之后若手改上方增速假设或"
+                             "锚定开关，需重新生成工作簿本格才会跟着变")
+            ws.cell(r,6,_cx_note).font=Font(size=9,color="808080")
         r+=1
     DG_ROW=r
     ws.cell(r,1,"营收增速 Δ（敏感性平移，平时保持 0）").font=Font(size=10); ws.cell(r,1).border=BX
@@ -138,7 +171,6 @@ def build(cal: dict, path: str) -> dict:
     for i in range(len(YE)):
         ws.cell(G_ROW+i,5).value=f"=CHOOSE($B${SCEN},B{G_ROW+i},C{G_ROW+i},D{G_ROW+i})+$B${DG_ROW}"
         ws.cell(M_ROW+i,5).value=f"=CHOOSE($B${SCEN},B{M_ROW+i},C{M_ROW+i},D{M_ROW+i})+$B${DM_ROW}"
-    IT=cal.get("interim")
     IT_ROWS={}
     if IT and IT.get("share"):
         r=sec(r,f"三、锚定已披露中期（{IT['period'][:4]}年{IT['label']}实际已确定，首个预测年不再靠增速假设外推）")
@@ -160,14 +192,10 @@ def build(cal: dict, path: str) -> dict:
         #         年度毛利率标准差（下限 0.5pp，防止历史过于平稳时三档重合）。
         #   规则本身在 ashare_calibrate.anchor_three，这里只读结果——ir-agent 也
         #   读同一份，算各档锚定后的首年毛利率。
-        if IT.get("share3") and IT.get("gm_rest3"):
-            _s3, _g3 = tuple(IT["share3"]), tuple(IT["gm_rest3"])
-        else:
-            # 旧版 calibrate 的产出（含各处缓存的 pickle）没有这两项：调用同一个
-            # 规则函数现算，不在这里另写一份规则。σ 与 calibrate 同源（gm_stats）。
-            import ashare_calibrate as _C
-            _s3, _g3 = _C.anchor_three(IT["share_hist"], IT["gm"], JU["gm_stats"][1],
-                                       share_mean=IT["share"])
+        # 追加修复（final-review-plan2a 收尾）：不在这里重算第二遍——share3/
+        # gm_rest3 已经在上方「资本开支」小节按同一条件算过一次，存进
+        # _it_share3/_it_gm_rest3，这里直接复用同一个值。
+        _s3, _g3 = _it_share3, _it_gm_rest3
         three = {
             "已披露期占全年营收比重": _s3,
             "剩余期毛利率": _g3,
@@ -202,8 +230,22 @@ def build(cal: dict, path: str) -> dict:
         IT_ROWS["fy_cogs"]=r; r+=2
 
     r=sec(r,"四、自动校准假设（从历史推导；可覆盖）")
-    GEN_SPEC=[("销售费用率",GEN["sell"],PCT,"近3年均值"),("管理费用率",GEN["admin"],PCT,"近3年均值"),
-      ("研发费用率",GEN["rd"],PCT,"近3年均值｜CAS 全额费用化"),("税金及附加率",GEN["tsur"],PCT,"近3年均值"),
+    # C1：三项费用率的单元格值可能是「近3年年报均值」，也可能是季节性对冲后的
+    # 值（近3年均值 + 中期同比差分，见 _apply_expense_hedge）——两者取值不同，
+    # F 列说明必须如实反映格子里到底写的是哪一个，不能不论口径一律写「近3年均值」。
+    # _hedge_note 由 calibrate() 产出，没有对应键时说明未对冲（或被 I4 按中期期别
+    # 排除），此时说明文字照旧退回「近3年均值」。
+    _hn = GEN.get("_hedge_note") or {}
+    def _fee_note(key, base_label):
+        h = _hn.get(key)
+        if not h:
+            return base_label
+        delta_pp = (h["hedged"] - h["base"]) * 100
+        return (f"近3年均值 {h['base']*100:.2f}% + 中期同比差分 {delta_pp:+.2f}pp"
+                f" = {h['hedged']*100:.2f}%")
+    GEN_SPEC=[("销售费用率",GEN["sell"],PCT,_fee_note("sell","近3年均值")),
+      ("管理费用率",GEN["admin"],PCT,_fee_note("admin","近3年均值")),
+      ("研发费用率",GEN["rd"],PCT,_fee_note("rd","近3年均值｜CAS 全额费用化")),("税金及附加率",GEN["tsur"],PCT,"近3年均值"),
       ("其他收益 / 营收",GEN["other_inc"],PCT,"近3年均值"),("投资收益 / 营收",GEN["inv_inc"],PCT,"近3年均值"),
       ("有息负债利率",GEN["irate"],PCT,"财务费用 ÷ 期初有息负债，近3年均值"),("现金收益率",GEN["cash_yield"],PCT,"常量"),
       ("实际所得税率",GEN["tax"],PCT,"近3年均值，夹于 5%–25%"),
@@ -1063,10 +1105,14 @@ def _ratios(wb, cal, D_):
     _itb=cal.get("interim")
     ITM_IDX=(NH-1) if (PR.get("interim") and _itb and _itb.get("share")) else None
     ITM_FACTOR=f"{1.0/_itb['share']:.6f}" if ITM_IDX is not None else None
-    w.cell(3,1,("中期列（本期中报）：ROE/ROA/ROIC、总资产周转率、固定资产周转率的分子，"
-                "DSO/DIO/DPO/CCC 的分母，已按「已披露期占全年营收比重」的倒数年化（非固定×2），"
-                "单元格批注给出年化前原式；毛利率等流量÷流量的比率本来就对，未年化。") if ITM_IDX is not None else
-                "本报表无已披露中期，全部历史列均为整年数据。").font=Font(size=9,color="C00000")
+    if ITM_IDX is not None:
+        _hdr3 = ("中期列（本期中报）：ROE/ROA/ROIC、总资产周转率、固定资产周转率、成长性三行（营收/归母净利/"
+                 "EBIT 增速）的分子，DSO/DIO/DPO/CCC 的分母，已按「已披露期占全年营收比重」"
+                 "的倒数年化（非固定×2），单元格批注给出年化前原式；毛利率等流量÷流量的比率本来就对，未年化；"
+                 "成长性三行年化后是隐含全年增速估计，不是真实同比（本表不呈现去年同期数据）。")
+    else:
+        _hdr3 = "本报表无已披露中期，全部历史列均为整年数据。"
+    w.cell(3,1,_hdr3).font=Font(size=9,color="C00000")
     def hdr(r,title):
         w.cell(r,1,title).font=F_HDR
         for c in range(1,2+NH+NY): w.cell(r,c).fill=P_N
@@ -1076,7 +1122,7 @@ def _ratios(wb, cal, D_):
             cc=w.cell(r,2+i,y); cc.font=F_COL; cc.alignment=Alignment(horizontal="center")
             cc.fill=P_G if i<NH else P_B
         return r+1
-    def line(r,label,fx,fmt=PCT,bold=False,note=None,fill=None,ann=None):
+    def line(r,label,fx,fmt=PCT,bold=False,note=None,fill=None,ann=None,ann_caveat=None):
         c0=w.cell(r,1,label); c0.font=Font(bold=bold,size=10); c0.border=BX
         if note: c0.comment=Comment(note,"Template")
         for i,c in enumerate(ALL):
@@ -1090,9 +1136,18 @@ def _ratios(wb, cal, D_):
             if itm:
                 raw=fx(c,prev,i,None)
                 side="分子" if ann=="num" else "分母"
+                # I8（final-review-plan2a 终审）：默认文案「与年报列口径可比」对
+                # ROE/ROA/ROIC 等【利润/EBIT 作分子】的比率不成立——年化因子取自
+                # 【营收】的中期占比，而利润/EBIT 的季节性分布与营收不同（年末
+                # 计提奖金、研发下半年集中，H1 利润率系统性偏高），拿营收进度去
+                # 年化利润会把这份错配悄悄抹平成一句"口径可比"。调用方按行的
+                # 分子性质传入 ann_caveat 覆盖默认文案；未传时保留原文案（适用于
+                # 分子本身就是营收的周转率类指标，年化因子与分子同源，不存在
+                # 这层错配）。
+                caveat = ann_caveat or "与年报列口径可比。"
                 cc.comment=Comment(
                     f"中期列已年化：对{side}乘以 1/已披露期占全年营收比重={m}"
-                    f"（非固定×2，取自 calibrate 输出 interim.share），与年报列口径可比。\n"
+                    f"（非固定×2，取自 calibrate 输出 interim.share）。{caveat}\n"
                     f"年化前（半年直接计算）的原式：{raw}", "Template")
         return r+1
     def avg(sheet,row,c,prev):
@@ -1107,6 +1162,10 @@ def _ratios(wb, cal, D_):
     r=line(r,"EBIT 利润率",  lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}/{P}!{c}{RV}"))
     ROWS["npm"]=r
     r=line(r,"归母净利率",   lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
+    # 下方三行（ROE/ROA/ROIC）中期列年化的分子是利润/EBIT——与 C3 成长性三行
+    # 共用的 ann_caveat 机制在此先只定义常量，供成长性三行使用；ROE/ROA/ROIC
+    # 自身的批注覆盖见后续修复（I8）。
+    _ANN_CAVEAT_PROFIT = "按已披露期营收进度年化，未校正利润/EBIT 的季节性分布。"
     ROWS["roe"]=r
     r=line(r,"ROE（归母，平均净资产）",
            lambda c,p,i,m=None: IE(f"({P}!{c}{RNIP}{'*'+m if m else ''})/{avg(B_,25,c,p)}"),PCT,True,ann="num")
@@ -1163,9 +1222,20 @@ def _ratios(wb, cal, D_):
     r=line(r,"FCFF / 税后EBIT", lambda c,p,i,m=None: IE(f"{K}!{c}25/({P}!{c}{REBIT}*(1-{DS}!$B${D_['TT']}))"),MX)
     r+=1
     r=hdr(r,"五、成长性")
-    r=line(r,"营业收入增速", lambda c,p,i,m=None: IE(f"{P}!{c}{RV}/{P}!{p}{RV}-1") if p else None)
-    r=line(r,"归母净利增速", lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{p}{RNIP}-1") if p else None)
-    r=line(r,"EBIT 增速",   lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}/{P}!{p}{REBIT}-1") if p else None)
+    # C3（final-review-plan2a 终审）：这三行是「流量÷流量」没错，但分子分母
+    # 期间长度不同——中期列的 c 是半年、p（上一列即最近年报）是整年，半年直接
+    # 除以整年会算出一个没有意义的数（600183 实跑：显示 −33.1%/−1.4%，真实
+    # H1 同比其实是 +130.4%/+50.0%，读者会以为利润腰斩的公司在爆发式增长）。
+    # Task 4 的「流量÷流量不年化」分类漏了这第四类：同比/环比增速，本来就该
+    # 归进 ann="num" 那一类——对分子（半年数）先按营收进度年化，再与上一整年
+    # 比，得到的是「隐含全年增速估计」，不是真实同比（本表不呈现去年同期数据，
+    # 算不出真实同比）。
+    r=line(r,"营业收入增速", lambda c,p,i,m=None: IE(f"({P}!{c}{RV}{'*'+m if m else ''})/{P}!{p}{RV}-1") if p else None,
+           ann="num",ann_caveat="本列为按已披露期营收进度年化后的隐含全年增速估计，不是真实同比（本表不呈现去年同期数据）。")
+    r=line(r,"归母净利增速", lambda c,p,i,m=None: IE(f"({P}!{c}{RNIP}{'*'+m if m else ''})/{P}!{p}{RNIP}-1") if p else None,
+           ann="num",ann_caveat=_ANN_CAVEAT_PROFIT+"且为隐含全年增速估计，不是真实同比。")
+    r=line(r,"EBIT 增速",   lambda c,p,i,m=None: IE(f"({P}!{c}{REBIT}{'*'+m if m else ''})/{P}!{p}{REBIT}-1") if p else None,
+           ann="num",ann_caveat=_ANN_CAVEAT_PROFIT+"且为隐含全年增速估计，不是真实同比。")
     r+=1
     # ---------- 杜邦 ----------
     r=hdr(r,"六、杜邦三因子分解（归母 ROE）")

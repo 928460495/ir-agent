@@ -31,8 +31,14 @@ def _mean(xs, lo=None, hi=None, default=None, what=None):
     return m
 
 
-def _yoy_hedge(last_annual, itm_now, itm_prev, lo=None, hi=None, what=None):
-    """季节性对冲：最近年报值 +（本期中期 − 去年同期中期）。
+def _yoy_hedge(base_level, itm_now, itm_prev, lo=None, hi=None, what=None):
+    """季节性对冲：基准水平 +（本期中期 − 去年同期中期）。
+
+    **M2（final-review-plan2a 终审）**：形参曾叫 `last_annual`、这里的文档字符串
+    与调用方 `note` 的键都曾写"最近年报值"——但 `_apply_expense_hedge` 传进来的
+    从来不是单年年报值，而是近3年年报均值（`_mean(ratio(...))` 的结果）。三处
+    改准，不再描述一个没被传进来的东西；`base_level` 具体是什么口径由调用方
+    决定，本函数只管"在这个基准上加一份中期同比差分"。
 
     **为什么不直接用中期值当全年。** 两个方向的季节性都会系统性带偏：
     年末计提奖金、研发集中在下半年，H1 费用率偏低；而中期"×2 年化"会
@@ -43,11 +49,11 @@ def _yoy_hedge(last_annual, itm_now, itm_prev, lo=None, hi=None, what=None):
     任一中期缺失 → 退回年报原值。**缺数据不是"同比没变"**，但在没有更好
     信息时，年报口径本身是可辩护的；而硬凑一个差分会把噪声当增量。
     """
-    if last_annual is None:
+    if base_level is None:
         return None
     if itm_now is None or itm_prev is None:
-        return float(last_annual)
-    m = raw = float(last_annual) + (float(itm_now) - float(itm_prev))
+        return float(base_level)
+    m = raw = float(base_level) + (float(itm_now) - float(itm_prev))
     if lo is not None: m = max(m, lo)
     if hi is not None: m = min(m, hi)
     if what is not None and abs(m - raw) > 1e-12:
@@ -81,7 +87,9 @@ def _apply_expense_hedge(gen, itm_now, itm_prev, note):
                             lo=lo, hi=hi, what=_EXPENSE_LABEL[k])
         if hedged is None:
             continue
-        note[k] = {"annual": base, "hedged": round(hedged, 6)}
+        # M2：键名曾叫 "annual"，但这里的 base 是近3年年报均值，不是单年年报值——
+        # 改叫 "base"，与 _yoy_hedge 的形参改名同步，不再描述一个没被传进来的东西。
+        note[k] = {"base": base, "hedged": round(hedged, 6)}
         gen[k] = hedged
 
 
@@ -139,7 +147,7 @@ def _gm_std_annual(gm_hist, ann, rev, cogs):
     return float(np.std(gm_hist[:n_ann_gm])) if n_ann_gm else float(np.std(gm_hist))
 
 
-def _capex_from_growth(growth3, base_rev, fa_turnover, maint_rate):
+def _capex_from_growth(growth3, fa_turnover, maint_rate):
     """由各档营收增速推出各档资本开支（以占当年营收比表示）。
 
     **三档同值是情景分析的作弊方式。** 原实现三档都用「近三年 capex/营收
@@ -149,17 +157,24 @@ def _capex_from_growth(growth3, base_rev, fa_turnover, maint_rate):
     当年资本开支 = Δ营收 ÷ 目标固定资产周转率 + 维持性投资。
     前一项是扩产所需的新增固定资产，后一项≈折旧（维持现有产能）。
     营收下滑时增量项归零而非转负：**收缩不等于卖厂房**。
+
+    以营收占比表示后代数上化简为：
+        capex_ratio_t = (max(g_t, 0) / fa_turnover + maint_rate) / (1 + g_t)
+    —— **只依赖当年自己的 g_t**，不依赖任何"上一年营收基数"。原实现带着
+    `base_rev` 参数逐年滚动 rev_prev/rev_now 来算 delta，但 delta 与
+    rev_prev*maint_rate 都正比于同一个 rev_prev，分子分母的 rev_prev 恒等
+    约掉——base_rev 取什么值、递推顺序对不对，都不影响输出。I5（final-review-
+    plan2a 终审）：这曾是一个不影响任何输出的"惰性参数"，三条测试对"删掉
+    rev_prev=rev_now""base_rev 写死 1.0"这两个突变体全绿，删掉参数后签名
+    与实现都不再暗示一个不存在的依赖关系。
     """
     out = {}
     for case, gs in growth3.items():
-        rev_prev = float(base_rev)
         seq = []
         for g in gs:
-            rev_now = rev_prev * (1.0 + float(g))
-            delta = max(rev_now - rev_prev, 0.0)
-            capex = delta / fa_turnover + rev_prev * maint_rate
-            seq.append(round(capex / rev_now, 4) if rev_now else 0.0)
-            rev_prev = rev_now
+            g = float(g)
+            capex_ratio = (max(g, 0.0) / fa_turnover + maint_rate) / (1.0 + g)
+            seq.append(round(capex_ratio, 4))
         out[case] = seq
     return out
 

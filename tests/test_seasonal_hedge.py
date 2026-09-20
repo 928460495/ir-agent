@@ -64,7 +64,7 @@ def test_费用率三项都走对冲且留下痕迹(monkeypatch):
         itm_now={"sell": 0.0162, "admin": 0.0341, "rd": 0.0481},
         itm_prev={"sell": 0.0150, "admin": 0.0300, "rd": 0.0450},
         note=note)
-    assert note["sell"]["annual"] == 0.02
+    assert note["sell"]["base"] == 0.02
     assert abs(note["sell"]["hedged"] - 0.0212) < 1e-9
     assert abs(note["admin"]["hedged"] - 0.0441) < 1e-9
     assert abs(note["rd"]["hedged"] - 0.0331) < 1e-9
