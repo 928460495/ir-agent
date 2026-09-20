@@ -302,8 +302,6 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     _cip0 = _v0(bal, "在建工程合计", last_ann) or _v0(bal, "在建工程", last_ann)   # 与 opening_balances 同口径
     _n0 = _v0(bal, "非流动资产合计", last_ann) - _p0 - _cip0
     imp_ppe = round(float(min(max(_p0/(_p0+_n0) if (_p0+_n0) > 0 else 1.0, 0.0), 1.0)), 4)
-    capex_r = _mean([abs(_v0(cf, "购建固定资产、无形资产和其他长期资产所支付的现金", p))/rev[p] for p in a3 if rev.get(p)],
-                    lo=.01, hi=.25, default=.06, what="资本开支 / 营收")
     debt_open = [_v0(bal,"短期借款",ann[i-1])+_v0(bal,"一年内到期的非流动负债",ann[i-1])+_v0(bal,"长期借款",ann[i-1])
                  for i in range(1, len(ann))]
     fin = [_v0(inc, "财务费用", ann[i]) for i in range(1, len(ann))]
@@ -396,12 +394,14 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     gm_std_ann = _gm_std_annual(gm_hist, ann, rev, cogs)
     gm = [round(gm_last + (gm_mean - gm_last)*(i+1)/nyears, 4) for i in range(nyears)]
     dep_over_rev = (deprate * o["ppe"] + amortrate * rev[last]) / rev[last]
-    capex = [round(capex_r + (dep_over_rev - capex_r)*(i)/max(nyears-1,1), 4) for i in range(nyears)]
     # 目标固定资产周转率：近三年实际值的均值。用它把「多长的营收」换算成
     # 「需要多少固定资产」——比手填三档资本开支更难只调有利项。三档资本
     # 开支由 build 侧调用 _capex_from_growth 按各档营收增速推出，这里只
-    # 交付 fa_turn / maint_rate 两个参数；上面的 capex 单序列保留不动，
-    # 它是 build 里 _scen 的 fallback，上游没给三档增速时仍要能建表。
+    # 交付 fa_turn / maint_rate 两个参数。（曾经这里还产出一个 capex 单
+    # 序列，注释说它是 build 里 _scen 的 fallback；那句话不成立——_scen
+    # 的 fallback 只作用于 growth_scen，capex 从未被传给它，三档回退到
+    # 同值是靠增速层面的回退级联到 _capex_from_growth 实现的。该序列
+    # 全仓库无消费方，已删除，见 task-3-report.md。）
     fa_turn = _mean([rev[p]/_v0(bal, "固定资产净额", p) for p in a3
                      if rev.get(p) and _v0(bal, "固定资产净额", p)],
                     lo=0.3, hi=10.0, default=2.0, what="固定资产周转率")
@@ -478,7 +478,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                  sweep=round(rev[last]*0.06, 1)),
         xcheck=D.cross_check(st, em, ann),
         da_src=_src, cx_intan=cx_intan, kd_src=kd_src, clamps=list(_CLAMPS), da_detail=[(ann[i+1], _dep[i], _amo[i]) for i in range(len(_dep))],
-        judg=dict(growth=growth, gm=gm, capex=capex, fa_turn=round(fa_turn, 4), maint_rate=round(maint_rate, 5),
+        judg=dict(growth=growth, gm=gm, fa_turn=round(fa_turn, 4), maint_rate=maint_rate,
                   g_hist=[round(x,4) for x in g_hist], gm_hist=[round(x,4) for x in gm_hist],
                   g_stats=(round(float(np.mean(g_hist)),4), round(float(np.std(g_hist)),4), round(min(g_hist),4), round(max(g_hist),4)),
                   gm_stats=(round(gm_mean,4), round(gm_std_ann,4), round(min(gm_hist),4), round(max(gm_hist),4)),

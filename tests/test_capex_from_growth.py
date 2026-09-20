@@ -46,6 +46,31 @@ def test_负增长不产生负资本开支():
     assert out["bear"][0] >= 0.05, out["bear"][0]
 
 
+def test_连续多年负增长时资本开支比例会回升():
+    """**这不是 bug。** 审查 Task 3 时在真实 Bear 档见过 3.60%→3.71%→3.81%
+    这样逐年上升的资本开支/营收比例，第一眼像是"营收都在萎缩，比例却在
+    涨"的矛盾，但公式决定了这就是对的：
+
+    连续负增长时增量项恒为 0（见 test_负增长不产生负资本开支），资本开支
+    比例退化成 maint_rate × rev_prev / rev_now。分子用的是【上一年】那个
+    还没缩水的营收，分母是【当年】已经缩水的营收——每年衰退幅度越大，
+    rev_prev/rev_now 就越大，比例因此逐年走高。这是"维持性投资不会随
+    营收下滑同步收缩"的合理近似（工厂折旧不会因为订单少了就当月停摆），
+    不是把 rev_prev/rev_now 的更新顺序搞反了。
+
+    若以后有人把这处顺序改错（比如误用同一年的 rev_now 当 rev_prev，
+    或者把 delta 的符号放开），这条测试要能报警。
+    """
+    out = C._capex_from_growth(
+        growth3={"bear": [-0.05, -0.10, -0.15]}, base_rev=100.0, fa_turnover=2.0, maint_rate=0.05)
+    bear = out["bear"]
+    # 逐位核算：手算值见本测试添加时的 commit message
+    assert bear == pytest.approx([0.0526, 0.0556, 0.0588], abs=1e-4)
+    # 营收本身是连续萎缩的（100 → 95 → 85.5 → 72.675），比例却单调走高——
+    # 正是这条测试要钉死的"非单调回升不是 bug"。
+    assert bear[0] < bear[1] < bear[2], bear
+
+
 def test_逐年以上一年营收为基数():
     """第 2 年的 Δ营收要用第 1 年末的营收当基数，不是原始基期。"""
     out = C._capex_from_growth(
@@ -61,8 +86,31 @@ def test_calibrate交付fa_turn和maint_rate(cal_dict):
     assert "fa_turn" in ju and "maint_rate" in ju
     assert 0.3 <= ju["fa_turn"] <= 10.0
     assert ju["maint_rate"] >= 0.0
-    # 原 capex 单序列必须保留——它是 _scen 的 fallback，上游没给三档增速时仍要能建表
-    assert "capex" in ju and len(ju["capex"]) == len(ju["growth"])
+    # 旧的 judg["capex"] 单序列已删除（见 task-3-report.md Important 1）：
+    # _scen 的 fallback 只作用于 growth_scen，capex 从未被传给它，全仓库
+    # 无消费方，留着只会让下一个维护者去找一个不存在的用途。
+    assert "capex" not in ju
+
+
+def test_夹具与当前calibrate代码同步(cal_dict):
+    """夹具是某次 calibrate() 运行的离线快照（pickle），不会跟着代码改动
+    自动更新。Task 3 审查时发现它已经滞后两三个提交——季节性对冲
+    （cfabb70）与 gm_std_annual 修正（8e96197）落地时都没人重新生成过，
+    直到本任务顺手 regenerate 才暴露（task-3-report.md Important 2）。
+    没有测试盯着这件事，夹具就会悄悄过期而没人发现。
+
+    这里只断言"当前 calibrate() 一定会产出/删除的字段"是否在夹具里，
+    不断言任何具体数值（行情、beta、σ 都会随时间漂移，断言数值只会
+    让测试变成另一种脆弱）。缺字段或多字段都说明夹具过期。
+    """
+    ju = cal_dict["judg"]
+    missing = [k for k in ("fa_turn", "maint_rate") if k not in ju]
+    stale_msg = ("夹具 tests/fixtures/cal_600183.pkl 已落后于当前 "
+                 "ashare_calibrate.calibrate()，请重新生成：python3 tests/make_fixture.py 600183")
+    assert not missing, f"缺字段 {missing}——{stale_msg}"
+    assert "capex" not in ju, f"仍带着已删除的 judg['capex']——{stale_msg}"
+    gen = cal_dict.get("gen", {})
+    assert "_hedge_note" in gen, f"gen 缺少季节性对冲留痕 _hedge_note——{stale_msg}"
 
 
 @pytest.fixture(scope="module")
@@ -113,10 +161,11 @@ def test_工作簿里三档资本开支真的拉开(cal_dict, tmp_path):
     assert bear_v == pytest.approx(expect["bear"][0], abs=1e-4)
 
 
-def test_没有三档增速时回退到原capex单序列(cal_dict, tmp_path):
+def test_没有三档增速时回退到同值三档(cal_dict, tmp_path):
     """上游没给 growth_scen 时，_scen 的 fallback 是 JU['growth']（单序列），
-    三档营收增速因此同值，_capex_from_growth 推出的三档资本开支也应同值，
-    且应与旧的 JU['capex'] 同源字段仍然可用（向后兼容，未被本任务删除）。"""
+    三档营收增速因此同值，_capex_from_growth 推出的三档资本开支也应同值——
+    回退是在增速层面级联到新公式的，不经过任何 capex 单序列（那个字段
+    已删除，见 test_calibrate交付fa_turn和maint_rate 与 task-3-report.md）。"""
     cal = copy.deepcopy(cal_dict)
     assert "growth_scen" not in cal["judg"]
     p = tmp_path / "w.xlsx"
