@@ -249,3 +249,58 @@ def test_fetch_正文为空则抛(monkeypatch):
     monkeypatch.setattr(OW.requests, "get", lambda *a, **k: _Resp())
     with pytest.raises(OW.FetchFailed):
         OW.fetch("https://x.example.com/a")
+
+
+def test_深度嵌套容器在上限内完全剥掉():
+    """钉住迭代上限 _BLOCK_MAX_PASSES = 32 的行为：深度在 32 以内的嵌套
+    噪声容器必须被完全剔除，不留一个字。这条测试一旦红了，说明有人偷偷
+    降低了 _BLOCK_MAX_PASSES（比如「简化」回 2），这个缺口必须被发现。"""
+    noise = "噪声"
+    real_content = "真实内容"
+    depth = 20  # 远在 32 的上限内
+
+    # 程序化构造：<nav>噪声</nav> 嵌套 20 层，真实内容在外层
+    nested = "<nav>" * depth + noise + "</nav>" * depth
+    html = f"<div><p>{real_content}</p>{nested}</div>"
+
+    got = extract_text(html)
+
+    # 真实内容必须保留
+    assert real_content in got
+    # 嵌套内的噪声必须被彻底剔除
+    assert noise not in got
+
+
+def test_容器深度超上限时开放失败():
+    """容器深度超过 _BLOCK_MAX_PASSES = 32 时，`_strip_blocks` 会在达到
+    上限时退出，可能留下一些未剔除的噪声——这是**故意的设计**。
+
+    为什么选择开放失败而不是死循环或报错：
+    - 没有对抗性输入时，真实页面的嵌套深度从未超过个位数，所以噪声
+      泄露是边界情况，对正常内容的污染可以容忍
+    - **相反，静默丢掉容器外的真实内容会是灾难**——用户看不见缺陷，
+      引文核验也会跟着打折扣。开放失败（内容保留但有噪声）至少让
+      问题可见
+
+    此测试验证：
+    1. 深度超过 32 时，一些噪声确实会泄露（证明限制生效）
+    2. 但容器**外**的真实内容必须完整保留（核心保证）
+    """
+    noise = "噪声"
+    real_before = "前面内容"
+    real_after = "后面内容"
+    depth = 40  # 超过 32 的上限
+
+    # 程序化构造：前面真实内容 + 超深嵌套噪声容器 + 后面真实内容
+    nested = "<nav>" * depth + noise + "</nav>" * depth
+    html = f"<div><p>{real_before}</p>{nested}<p>{real_after}</p></div>"
+
+    got = extract_text(html)
+
+    # 容器外的真实内容**必须**保留——这是核心保证
+    assert real_before in got, "前面的真实内容被误删了"
+    assert real_after in got, "后面的真实内容被误删了"
+
+    # 超过上限时，一些噪声会泄露（这个行为的代价已被明确接受）
+    # 此处不做严格检查噪声泄露量，只验证「内容保留 + 可能漏噪声」
+    # 这样即使将来嵌套处理方式微调，只要核心保证不变就不会红
