@@ -330,15 +330,34 @@ def extract_text(html: str) -> str:
 
 
 def meta_date(html: str) -> date | None:
-    """从 meta 标签里读页面自己声明的发布时间；读不到返回 None。"""
+    """从 meta 标签里读页面自己声明的发布时间；读不到返回 None。
+
+    **按 `_DATE_KEYS` 的优先级排序取值，不按 meta 标签在文档里出现的
+    顺序。** 同一个页面可能同时带好几个日期相关的 meta 标签——真正的
+    `article:published_time`，也可能有 CMS 模板遗留的、语义含糊的
+    `date`（页面生成时间、模板占位符都可能写在这里）。谁在 HTML 里排
+    在前面是模板/渲染顺序决定的偶然结果，不代表谁更可信；`_DATE_KEYS`
+    这个元组的顺序本身就是可信度排名，只按文档位置取第一个命中，等于
+    完全没用这个排名。
+
+    错认的代价在危害那一侧，而且是双重的：错的日期可能骗过 as_of 的
+    前瞻守卫、放行一篇本不该在这个时点出现的文档；放行之后这篇文档还
+    会被打上 `date_source="meta"`——"代码已核验"，比模型自己给的日期
+    看起来*更*可信，恰好颠倒了 `date_source` 字段存在的意义（把不可
+    核验的部分显式标出来，见 openweb 设计文档 §五）。
+    """
+    hits: dict[str, date] = {}
     for tag in _META_TAG.finditer(html or ""):
         attrs = {k.lower(): v for k, v in _ATTR.findall(tag.group(0))}
         key = (attrs.get("property") or attrs.get("name") or "").lower()
-        if key not in _DATE_KEYS:
+        if key not in _DATE_KEYS or key in hits:
             continue
         when = parse_date(attrs.get("content", ""))
         if when is not None:
-            return when
+            hits[key] = when
+    for key in _DATE_KEYS:
+        if key in hits:
+            return hits[key]
     return None
 
 

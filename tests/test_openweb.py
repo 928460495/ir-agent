@@ -177,6 +177,25 @@ def test_meta日期_认不出的写法返回None():
     assert meta_date(html) is None
 
 
+# ── final-fix-2 Fix 2：meta_date 要按 _DATE_KEYS 的优先级排序取值，
+# 不能按 meta 标签在文档里出现的先后顺序取第一个命中 ──
+
+def test_meta日期_优先级键排在文档靠前时取它():
+    """`date` 排在 `article:published_time` 前面时，仍要按优先级取后者
+    ——不能因为它先出现就先被返回。"""
+    html = ('<meta name="date" content="2020-01-01">'
+            '<meta property="article:published_time" content="2026-09-15">')
+    assert meta_date(html) == date(2026, 9, 15)
+
+
+def test_meta日期_优先级键排在文档靠后时也取它():
+    """与上一条对照：交换两个标签在文档里的先后顺序，结果必须一样——
+    取决于 `_DATE_KEYS` 的排名，不取决于文档位置。"""
+    html = ('<meta property="article:published_time" content="2026-09-15">'
+            '<meta name="date" content="2020-01-01">')
+    assert meta_date(html) == date(2026, 9, 15)
+
+
 def test_正文提取剔除嵌套同类容器不留残余文字():
     """回归用例：`<nav>A<nav>B</nav>C</nav>` 曾经在旧的非贪婪正则下漏出
     `C`——非贪婪只保证匹配尽量短，认的是**第一个**同名闭合标签，不是与
