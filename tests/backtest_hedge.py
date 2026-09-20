@@ -8,17 +8,35 @@ Task 1（费用率：销售/管理/研发）与 Task 2（周转天数：DSO/DIO/
 两类量纲不同（费用率是比率，周转天数是「天」），因此**分别**统计、**分别**
 判定，不合并成一个总 MAE。
 
-回测口径（两个 Task 共用同一个「留出检验」思路）：
-  裸年报法：用 t−1 年度的同一口径值预测 t
-  对冲法：  t−1 年度值 +（t 年中报同口径值 − t−1 年中报同口径值）
-与 t 年实际值比较误差。
+回测口径（两个 Task 各自匹配各自的生产口径，不再共用一句话描述）：
+  Task 1 费用率：
+    近3年均值法：用 t−1（含）之前最近 3 个年度的均值预测 t——I1（final-
+      review-plan2a 终审）之前这里错写成"用 t−1 单年年报值"，与生产代码
+      （ashare_calibrate.py 的 `_mean(ratio(...))`）口径错位：闸门证明的是
+      "t−1 年报 + Δ 比 t−1 年报准"，上线的却是"近3年均值 + Δ"，均值在趋势期
+      天然滞后，补一年的差分补不平这份滞后。改成与生产一致的近3年均值后，
+      两者才是同一件事的验证。
+    对冲法：近3年均值 +（t 年中报同口径值 − t−1 年中报同口径值）
+  Task 2 周转天数：
+    裸年报法：用 t−1 年度的同一口径值预测 t——与生产代码（`_wc(last)`，
+      只用最近一期年报、不取均值）口径一致，不作 I1 式的改动。
+    对冲法：t−1 年度值 +（t 年中报同口径值 − t−1 年中报同口径值）
+  两种口径下都与 t 年实际值比较误差。
 
 周转天数的中报值需要先把「流量」（营收/营业成本）年化——年化因子用「该
 公司近几年中报营收占全年营收比重均值」的倒数，算法与 ashare_calibrate.py
 里 `shr` 保持一致，**不用固定 ×2**：`_wc` 函数上方的注释明写，固定 ×2 会因
 收入非均匀分布系统性抬高天数（生益 DPO 126→164，实测不可用）。对冲法里
-t 与 t−1 两期中报天数用同一个年化因子，因子自身的偏差在做同比差分时会
-相互抵消——这正是「同比差分」比「直接拿年化值当全年值」更可靠的地方。
+t 与 t−1 两期中报天数用同一个年化因子——M1（final-review-plan2a 终审）：
+这个因子是【乘性】进入增量的（Δdays = (365/af)·(S_t/F_t − S_{t−1}/F_{t−1})），
+af 偏 10% 则增量整体偏 10%，并不会"相互抵消"；旧文案说"相互抵消"是错的，
+只是相对【水平项】而言这份偏差是二阶小量。这不足以推翻 Task 2 的 BLOCKED
+结论——af 偏差只缩放增量，缩放不能把"对冲比裸年报更差"缩放成"更好"，
+Task 2 不是被误拦的，见 main() 里的判据与既有回测记录。
+
+108 个样本（Task 1，6 家公司 × ~6 年 × 3 项）里，同一公司同一年的三项共用
+同一个营收分母、高度相关，有效样本量接近 36 甚至 6——main() 按公司拆分
+MAE 一并打印，若改善集中在一两家公司，这道闸门就没有资格通过。
 
 用法：
   python3 tests/backtest_hedge.py 600183 600584 000333 600519
@@ -39,22 +57,31 @@ def _ratio(inc, item, p):
     return (v / rv) if (rv and v is not None) else None
 
 
+def _mean_ratio3(inc, item, periods3):
+    """近3年年报均值——与生产口径 `ashare_calibrate._mean(ratio(item), ...)`
+    一致（那里的 `a3 = ann[-3:]`）。任一年缺失就跳过，不强行凑 3 个。"""
+    xs = [_ratio(inc, item, p) for p in periods3]
+    xs = [x for x in xs if x is not None]
+    return float(np.mean(xs)) if xs else None
+
+
 def backtest(code):
     st = D.fetch_statements(code)
     inc = st["income"]
     ann = D.annual_periods(inc, 8)
     rows = []
-    for i in range(2, len(ann)):
-        t, t1 = ann[i], ann[i - 1]
-        itm_t, itm_t1 = t[:4] + "0630", t1[:4] + "0630"
+    for i in range(3, len(ann)):
+        t = ann[i]
+        a3 = ann[i - 3:i]                      # 预测 t 时手上能有的最近 3 个整年
+        itm_t, itm_t1 = t[:4] + "0630", str(int(t[:4]) - 1) + "0630"
         for item in ITEMS:
             act = _ratio(inc, item, t)
-            base = _ratio(inc, item, t1)
+            base = _mean_ratio3(inc, item, a3)  # I1：近3年年报均值，不是 t-1 单年
             now, prev = _ratio(inc, item, itm_t), _ratio(inc, item, itm_t1)
             if None in (act, base, now, prev):
                 continue
             hedged = C._yoy_hedge(base, now, prev)
-            rows.append((item, t, act, base, hedged))
+            rows.append((item, t, act, base, hedged, code))
     return rows
 
 
@@ -141,26 +168,40 @@ def backtest_wc(code):
             if None in (act, base, now, prev):
                 continue
             hedged = C._yoy_hedge(base, now, prev)
-            rows.append((key, t, act, base, hedged))
+            rows.append((key, t, act, base, hedged, code))
     return rows
 
 
 # ---------- 汇总与判据（两个 Task 各自独立） ----------
-def _report(name, allrows):
+def _report(name, allrows, baseline_label="裸年报法"):
     if not allrows:
         print(f"\n[{name}] 无样本——无法判定")
         return None
-    naive = np.mean([abs(a - b) for _, _, a, b, _ in allrows])
-    hedge = np.mean([abs(a - h) for _, _, a, _, h in allrows])
-    win = sum(1 for _, _, a, b, h in allrows if abs(a - h) < abs(a - b))
+    naive = np.mean([abs(a - b) for _, _, a, b, _, _ in allrows])
+    hedge = np.mean([abs(a - h) for _, _, a, _, h, _ in allrows])
+    win = sum(1 for _, _, a, b, h, _ in allrows if abs(a - h) < abs(a - b))
     n = len(allrows)
     print(f"\n[{name}] 样本 {n} 个")
-    print(f"  裸年报法 MAE = {naive:.5f}")
+    print(f"  {baseline_label} MAE = {naive:.5f}")
     print(f"  对冲法   MAE = {hedge:.5f}")
     print(f"  对冲更准的样本占比 = {win/n:.1%}")
+    # I1（final-review-plan2a 终审）：108 个样本＝6 家×~6 年×3 项，同一公司
+    # 同一年三项共用同一个营收分母、高度相关，有效样本量接近 36 甚至 6——
+    # 按公司拆分 MAE，若改善集中在一两家高增长公司，这道闸门就没有资格通过。
+    by_code = {}
+    for _, _, a, b, h, code in allrows:
+        d = by_code.setdefault(code, {"naive": [], "hedge": []})
+        d["naive"].append(abs(a - b)); d["hedge"].append(abs(a - h))
+    print(f"  按公司拆分 MAE：")
+    by_code_summary = {}
+    for code, d in sorted(by_code.items()):
+        nm, hm = float(np.mean(d["naive"])), float(np.mean(d["hedge"]))
+        verdict = "对冲更优" if hm < nm else "裸法/均值法更优"
+        print(f"    {code}: n={len(d['naive']):>2}  {baseline_label}={nm:.5f}  对冲={hm:.5f}  {verdict}")
+        by_code_summary[code] = dict(n=len(d["naive"]), naive=nm, hedge=hm, better=hm < nm)
     better = hedge < naive
-    print(f"  判据：对冲法 MAE 必须低于裸年报法 → {'通过' if better else '未通过'}")
-    return dict(n=n, naive=naive, hedge=hedge, win_rate=win / n, better=better)
+    print(f"  判据：对冲法 MAE 必须低于{baseline_label} → {'通过' if better else '未通过'}")
+    return dict(n=n, naive=naive, hedge=hedge, win_rate=win / n, better=better, by_code=by_code_summary)
 
 
 def main(codes):
