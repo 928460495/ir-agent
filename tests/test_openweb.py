@@ -233,6 +233,24 @@ def test_正文提取剔除两种不同容器互相嵌套():
         assert noise not in got, noise
 
 
+def test_正文提取剔除HTML注释不留残余文字或定界符():
+    """真实事故：`<!-- <div>草稿标题：...</div> -->` 这类被注释掉的整段
+    标记，人打开网页永远看不到——浏览器不渲染注释——但旧实现只按
+    「< 到下一个 >」剥标签，会把注释体里第一个 `<div>` 当独立标签吃掉，
+    剩下的注释正文和收尾的 `-->` 全部被当纯文本放行，混进
+    Corpus.verify() 逐字核验的正文。真实抓取到的文档里一篇就有 20 个
+    `-->` 残留，其中 7~9 个落在 2000 字的提示词窗口内。"""
+    html = ("<p>真正的正文。</p>"
+           "<!-- <div>草稿标题：公司2026年净利润将翻倍</div> -->"
+           "<p>后续正文。</p>")
+    got = extract_text(html)
+    assert "真正的正文" in got
+    assert "后续正文" in got
+    assert "草稿标题" not in got
+    assert "净利润将翻倍" not in got
+    assert "-->" not in got
+
+
 def test_fetch_用最终URL并解码中文(monkeypatch):
     """两件事一起验：跟完重定向后的 final_url 必须是最终地址（分级要用
     它），以及中文页面的编码必须按页面声明解，不能留 ISO-8859-1。"""
