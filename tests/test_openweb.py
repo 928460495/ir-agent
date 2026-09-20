@@ -1241,3 +1241,35 @@ def test_字符串字段类型不对时该条被跳过其余仍然入库(tmp_pat
         back = OW.load(path, cp)
         assert [d.doc_id for d in back.docs] == ["ow_good"], field
         assert [d.doc_id for d in cp.docs] == ["ow_good"], field
+
+
+# ── final-fix-5 Fix 1：`load()` 对 `fetch_failed_reasons` 只做
+# `list(raw.get(...))`，没有像 `_str_field` 那样逐元素校验类型。
+# `full._openweb_notes` 随后对它做 `"；".join(...)`，混进一个非 str
+# 元素在 phase-2 直接 TypeError——这条崩溃面撞坏了 load() 自己的
+# docstring 承诺（不是「一个坏文件能让整次研究流程崩掉」），且是新引入
+# 的：`missing_slots` 走的是逐个 f-string 拼接，同样的坏元素不会让它崩 ──
+
+
+def test_fetch_failed_reasons混入非字符串元素时过滤该元素其余仍入库(tmp_path):
+    """真实事故复现：`fetch_failed_reasons: ["ok reason", 7]` 这种手改/
+    半写坏的落盘文件此前会被原样 `list(...)` 收下，交给
+    `"；".join(res.fetch_failed_reasons)`（`full._openweb_notes`）时直接
+    `TypeError: sequence item 1: expected str instance, int found`——把
+    phase-2 整个研究流程带崩。这里验证混入的坏元素被丢弃、其余合法
+    字符串与好文档都照常读回，不抛异常、不牵连整份文件。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    good_doc = _good_doc()
+    for bad_element in (7, {"x": 1}):
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [good_doc], "missing_slots": [],
+                   "extra_slots": [], "fetch_failed": 2, "model_dated": 0,
+                   "fetch_failed_reasons": ["ok reason", bad_element]}
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert [d.doc_id for d in back.docs] == ["ow_good"], bad_element
+        assert back.fetch_failed_reasons == ["ok reason"], bad_element

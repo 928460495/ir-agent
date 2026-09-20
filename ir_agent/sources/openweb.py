@@ -850,6 +850,31 @@ def _str_field(raw: dict, key: str) -> str:
     return v
 
 
+def _str_list_field(raw: dict, key: str) -> list[str]:
+    """取一个字符串列表字段，逐元素过滤掉非 str 的——不是整份退化。
+
+    与 `_str_field`（管 `Document` 单条字段：类型不对就抛，交给调用方
+    的逐条 try/except 去跳过整个文档）故意不对称。这里的调用方是
+    `load()` 里解析头部字段那一段，没有逐元素 try/except；容器本身
+    不是列表（`raw.get(key)` 给个 `42`）时，`list(...)` 照样会抛，
+    冒给外层 `except Exception` 按「整份文件退化」处理——这一层不变，
+    与 `missing_slots`/`extra_slots`/`fetch_failed_reasons` 的既有约定
+    一致。变的只是「容器合法、但里面混进一个非 str 元素」这一种：这里
+    选择丢弃那一条脏元素，而不是让全文件陪葬。
+
+    真实事故：`fetch_failed_reasons: ["ok reason", 7]` 这种手改/半写坏
+    的文件此前会被原样 `list(...)` 收下，`full._openweb_notes` 随后对
+    它做 `"；".join(...)`，遇到非 str 元素直接 `TypeError`，把 phase-2
+    整个研究流程带崩——这正是本函数 docstring 里「不是『一个坏文件能
+    让整次研究流程崩掉』」要防的事，而且是上一轮修复才新开的口子（旧
+    实现里这几个字段从未被写过、`missing_slots` 走的是 f-string 拼接
+    不会崩，只有 `fetch_failed_reasons` 走 join）。丢一条脏元素不影响
+    docs 能否正常读回，也不影响时点守卫等核心契约——这个字段本身只是
+    给人看的辅助展示信息，不参与任何判断逻辑。"""
+    items = list(raw.get(key, []))
+    return [v for v in items if isinstance(v, str)]
+
+
 def _doc_from_json(raw: dict) -> Document:
     prompt_limit = raw.get("prompt_limit")
     if prompt_limit is not None and not isinstance(prompt_limit, int):
@@ -892,7 +917,9 @@ def load(path: Path | str, corpus) -> OpenWebResult:
       解读（`fetch_failed`/`model_dated` 不是数字、`missing_slots`/
       `extra_slots`/`fetch_failed_reasons` 不是可迭代对象）。这些情况下
       **整份**退化成空 `OpenWebResult()`：任何一处都可能污染后面所有
-      字段的读取，没有「只信一半」这回事。
+      字段的读取，没有「只信一半」这回事。容器合法但里面混进非 str
+      元素是更细一级的损坏，不算在这一类里——见 `_str_list_field`：
+      丢的是那一条元素，不是整份文件。
     - **单条文档损坏**——`docs` 列表本身是合法列表，但其中某一条不是
       合法的 Document JSON（缺字段、字段类型不对、tier 不是已知取值）。
       这种情况下只跳过**这一条**，其余合法条目照常读回、照常入库。
@@ -913,10 +940,10 @@ def load(path: Path | str, corpus) -> OpenWebResult:
 
     try:
         res = OpenWebResult(
-            missing_slots=list(raw.get("missing_slots", [])),
-            extra_slots=list(raw.get("extra_slots", [])),
+            missing_slots=_str_list_field(raw, "missing_slots"),
+            extra_slots=_str_list_field(raw, "extra_slots"),
             fetch_failed=int(raw.get("fetch_failed", 0)),
-            fetch_failed_reasons=list(raw.get("fetch_failed_reasons", [])),
+            fetch_failed_reasons=_str_list_field(raw, "fetch_failed_reasons"),
             model_dated=int(raw.get("model_dated", 0)))
         docs_raw = list(raw.get("docs", []))
     except Exception:                                       # noqa: BLE001
