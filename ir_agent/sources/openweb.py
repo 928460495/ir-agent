@@ -426,7 +426,24 @@ def _reject_unsafe_host(url: str) -> None:
 # 全文，避免正文里恰好出现一段提到 "charset=" 的技术讨论被误判成页面
 # 自己的声明。
 _META_CHARSET_HEAD = 2048
+# 头部字节里的 HTML 注释必须先去掉，跟 `_COMMENT`/`_strip_blocks` 是
+# 同一类教训：`<!-- <meta charset="iso-8859-1"> legacy -->` 这种被注释
+# 掉的旧声明，浏览器和真实解析器都不会当真，但如果不先剥注释，下面的
+# `_META_TAG_BYTES` 会把它当成一个真实的 `<meta>` 标签，抢在后面那个
+# 真正生效的 `<meta charset="utf-8">` 前面被取到——顺序（先剥注释、
+# 再找标签）不能反过来，理由与本文件 `extract_text` 里那条同名教训
+# 完全一致。
+_COMMENT_BYTES = re.compile(rb"<!--.*?-->", re.S)
 _META_TAG_BYTES = re.compile(rb"<meta\b[^>]*>", re.I)
+# 按 `key="value"` / `key='value'` 拆 `<meta ...>` 标签内的属性——与
+# `meta_date()` 用的字符串版 `_ATTR` 同构。只认带引号的写法：本文件目前
+# 全部已知真实场景（含全部既有测试）都是这种写法，裸值 `charset=utf-8`
+# 没有先例，不为一个没见过的写法多背一条更宽松、更容易被诱导的正则。
+_ATTR_BYTES = re.compile(rb'([\w:-]+)\s*=\s*["\']([^"\']*)["\']')
+# 只用来从**已经确认是老式 http-equiv 写法**的 `content` 属性值里挖出
+# `charset=` 后面那段——不再允许在整个标签、更不允许在任意字节流里裸找
+# 这段子串（那正是本函数要修的洞：`content="see charset=iso-8859-1 for
+# details"` 这种压根不是编码声明的属性值，裸找 "charset=" 会把它当真）。
 _CHARSET_ATTR_BYTES = re.compile(rb'charset\s*=\s*["\']?\s*([a-zA-Z0-9_-]+)',
                                  re.I)
 
@@ -444,21 +461,49 @@ def _meta_charset(raw: bytes) -> str | None:
     因为编码不同而变成别的字节序列，所以可以直接在原始字节上用 ASCII
     正则找，不需要先猜出编码。
 
-    只在 `<meta ...>` 标签内部找 `charset=`，不是在整个头部字节里裸找
-    ——避免 `<script>` 里一句提到 "charset=" 的字符串字面量被误判成
-    页面的声明（与本文件 `_COMMENT`/`_BLOCK` 顺序那条教训是同一类
-    问题：噪声源头不先框定范围，后面的匹配就可能被诱导）。
+    **必须先剥注释、再找 `<meta>` 标签，且必须要求一个真正的声明属性，
+    不是任何含 `charset=` 子串的标签。** 这是本函数被打穿过的两个洞：
 
-    覆盖两种写法：HTML5 短格式 `<meta charset="UTF-8">`，以及老式
-    `<meta http-equiv="Content-Type" content="text/html; charset=GB2312">`
-    ——两者的 `charset=` 都在同一个 `<meta ...>` 标签内，一条不区分
-    写法的正则直接在标签内容里找 `charset=` 后面那段值就够。
+    - 注释：`<!-- <meta charset="iso-8859-1"> legacy -->` 里那个
+      `<meta>` 从未生效过——浏览器根本不渲染、不解析注释体里的标记——
+      但字节层面的 `_META_TAG_BYTES` 认不出"这段在注释里"，会把它当
+      成一个真实标签，抢在后面真正生效的声明前面被取到。
+    - 非声明属性：`<meta name="description" content="see
+      charset=iso-8859-1 for details">` 根本不是编码声明，只是恰好在
+      某个不相关属性的值里提到了这个词——旧实现在整个 `<meta ...>`
+      标签内容里裸找 `charset=` 子串，这类页面会被误判命中。
+
+    两个洞的共同点是同一类教训（与本文件 `_COMMENT`/`_BLOCK` 顺序那条
+    完全一致）：正则没有「区域」的概念，不先框定"这段字节在不在算数的
+    范围里"，后面的匹配就可能被诱导。这里的解法对应两点：先用
+    `_COMMENT_BYTES` 把头部字节里的注释整块剔除，再逐个 `<meta ...>`
+    标签拆出属性（`_ATTR_BYTES`），只认下面两种**真正的声明**形态之一：
+
+    - HTML5 短格式：标签自己带一个字面量 `charset` 属性，
+      `<meta charset="UTF-8">`；
+    - 老式写法：`http-equiv` 属性的值（大小写不敏感）就是
+      `Content-Type`，且 `content` 属性值里带 `charset=...`，
+      `<meta http-equiv="Content-Type" content="text/html; charset=GB2312">`。
+
+    命中即返回那个值，不会再对任意标签、任意属性做裸子串匹配。
     """
-    head = bytes(raw[:_META_CHARSET_HEAD])
+    head = _COMMENT_BYTES.sub(b" ", bytes(raw[:_META_CHARSET_HEAD]))
     for tag in _META_TAG_BYTES.finditer(head):
-        m = _CHARSET_ATTR_BYTES.search(tag.group(0))
-        if m is not None:
-            return m.group(1).decode("ascii", errors="ignore")
+        attrs: dict[str, bytes] = {}
+        for am in _ATTR_BYTES.finditer(tag.group(0)):
+            attrs[am.group(1).decode("ascii", errors="ignore").lower()] = \
+                am.group(2)
+        if "charset" in attrs:
+            value = attrs["charset"].decode("ascii", errors="ignore").strip()
+            if value:
+                return value
+            continue
+        http_equiv = attrs.get("http-equiv", b"").decode(
+            "ascii", errors="ignore").strip().lower()
+        if http_equiv == "content-type":
+            m = _CHARSET_ATTR_BYTES.search(attrs.get("content", b""))
+            if m is not None:
+                return m.group(1).decode("ascii", errors="ignore")
     return None
 
 
@@ -491,6 +536,19 @@ def _decode(raw: bytes, header_encoding: str | None) -> str:
     `<meta charset>` 里的声明是它自报的编码，说错的概率远低于代码去
     猜——先信这个声明，才轮到会把任何字节都吃成"看起来正常"的 GB18030
     兜底。
+
+    **`<meta charset>` 分支必须跟 HTTP 头分支一样排除 ISO-8859-1。**
+    ISO-8859-1 是一个全字节映射（0x00–0xFF 每个字节都有对应字符），
+    `bytes.decode("iso-8859-1")` 因此**永不抛异常**，不管原始字节实际
+    是什么编码。HTTP 头分支三行前已经在排除它——那是 requests 对没有
+    显式声明 charset 的响应给出的默认猜测，几乎总是错的；`<meta>` 里的
+    这个值理论上是页面自己声明的，可信度更高，但页面自己写错、或者
+    `_meta_charset` 误判到一个并非真实生效的声明（比如 `_meta_charset`
+    的判别不够严格的历史版本），后果与 HTTP 头分支一样：一个必然不报
+    错的解码器一旦被选中，不管对不对都会"成功"，把乱码悄悄放进
+    Corpus.verify() 要逐字核验的正文——两个分支的选择器共享同一个
+    "总能解码成功、从不用来当默认猜测"的编码，必须共享同一条排除规则，
+    不能只在其中一个分支写。
     """
     if header_encoding and header_encoding.lower() != "iso-8859-1":
         try:
@@ -498,7 +556,7 @@ def _decode(raw: bytes, header_encoding: str | None) -> str:
         except (LookupError, UnicodeDecodeError):
             pass
     meta_encoding = _meta_charset(raw)
-    if meta_encoding:
+    if meta_encoding and meta_encoding.lower() != "iso-8859-1":
         try:
             return raw.decode(meta_encoding)
         except (LookupError, UnicodeDecodeError):

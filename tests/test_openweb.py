@@ -475,6 +475,72 @@ def test_解码_meta声明写成老式http_equiv形式时也认():
     assert text in OW._decode(raw, None)
 
 
+# ── final-fix-5 Fix 2：`_meta_charset` 曾经在任意含 "charset=" 子串的
+# `<meta>` 标签里裸找这个词，不管它是不是真的编码声明、也不管它是不是
+# 被注释掉的死代码。ISO-8859-1 是全字节映射、`decode` 永不抛异常，一旦
+# 被这类假阳性选中，`_decode` 会"成功"解码出一串乱码，且没有 HTTP 头
+# 分支三行前那道 iso-8859-1 排除兜底——三条真实场景都是先前能正确解码
+# 的 UTF-8 页面，被这个洞重新变成乱码 ──
+
+
+def test_meta声明_非声明属性里恰好含charset子串不误判():
+    """`<meta name="description" content="...charset=iso-8859-1...">` 里
+    的 "charset=" 只是一段与编码声明无关的正文，真正生效的声明在后面
+    那个 `<meta charset="utf-8">`——必须取到后者，不能被前面这个假阳性
+    抢先命中。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "真实正文：覆铜板均价上涨12%"
+    head = ('<meta name="description" content="see charset=iso-8859-1 '
+           'for details"><meta charset="utf-8">').encode("ascii")
+    raw = head + text.encode("utf-8")
+    assert OW._meta_charset(raw) == "utf-8"
+    assert text in OW._decode(raw, None)
+
+
+def test_meta声明_被HTML注释掉的声明不生效():
+    """`<!-- <meta charset="iso-8859-1"> legacy -->` 这段标记在注释体
+    内，浏览器从不渲染、不解析注释——必须先剥注释，再找真正生效的
+    `<meta charset="utf-8">`。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "真实正文：覆铜板均价上涨12%"
+    head = ('<!-- <meta charset="iso-8859-1"> legacy -->'
+           '<meta charset="utf-8">').encode("ascii")
+    raw = head + text.encode("utf-8")
+    assert OW._meta_charset(raw) == "utf-8"
+    assert text in OW._decode(raw, None)
+
+
+def test_meta声明_http_equiv声明iso_8859_1时被排除改用猜测链():
+    """ISO-8859-1 是全字节映射，`decode` 永不抛异常——`<meta
+    http-equiv>` 声明的编码即便就是 iso-8859-1，也必须跟 HTTP 头分支
+    一样被排除，落到 UTF-8/GB18030 猜测链，而不是被这个"从不失败"的
+    解码器直接拿去用，把真实是 UTF-8 的字节解成乱码。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "真实正文：覆铜板均价上涨12%"
+    head = (b'<meta http-equiv="Content-Type" '
+           b'content="text/html; charset=iso-8859-1">')
+    raw = head + text.encode("utf-8")
+    assert OW._meta_charset(raw) == "iso-8859-1"
+    assert text in OW._decode(raw, None)
+
+
+def test_meta声明_真正的Big5声明仍然生效不被误伤():
+    """回归用例：修 Fix 2 的三个假阳性洞，不能连带把 `<meta
+    charset="Big5">` 这种真声明也拦下——这正是 `_meta_charset` 最初
+    存在的理由（CCL/PCB 覆盖点名的台湾一手来源仍有用 Big5 的）。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "報價上漲"
+    body = text.encode("big5")
+    head = b'<meta charset="Big5">'
+    raw = head + body
+    assert OW._meta_charset(raw) == "Big5"
+    assert text in OW._decode(raw, None)
+
+
 # ── final-fix-3 Fix 2：模型选的网址，代码自己去抓——没有主机闸门时，
 # 环回/内网/链路本地/保留地址、非网页内容类型、超大响应体都会被当成
 # 一篇正常文章抓回来入库 ──
