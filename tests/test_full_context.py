@@ -1561,3 +1561,64 @@ def test_开放网络落盘失败不阻断整轮研究(tmp_path, monkeypatch):
     # 必须说出具体后果：本阶段的文档还在、但读不回，第二阶段核验可能不过——
     # 不能只留一句无信息量的"保存失败"。
     assert "跨阶段" in joined and "核验" in joined, skipped
+
+
+def test_外部资料清单按语料库实际内容重渲染():
+    """真实事故（600183 第一阶段）: `_load_external` 渲染完清单之后，
+    `_load_openweb` 又往同一个 Corpus 塞了 10 篇【财经媒体】文档 ——
+    但 `md["外部资料"]` 没有重算，终端与看板停留在旧口径「外部资料 9 篇 /
+    [卖方研究] 9 篇」，而进了三节提示词的实际是 19 篇、其中 10 篇媒体。
+    `_refresh_external_md` 必须让 md 反映语料库此刻的真实内容。"""
+    from ir_agent import full
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    as_of = date(2026, 1, 1)
+    cp = Corpus(as_of=as_of)
+    for i in range(9):
+        cp.add(Document(doc_id=f"s{i}", url=f"https://x.example.com/s{i}",
+                        title=f"研报{i}", publisher="甲证券",
+                        tier=Tier.SELLSIDE, published=as_of, retrieved=as_of,
+                        text="正文"))
+
+    class _R:
+        consensus = None
+
+    r = _R()
+    r.corpus = cp
+    md = {"外部资料": "外部资料 9 篇（截至 2026-01-01）\n  [卖方研究] 9 篇"}
+
+    # 模拟 _load_openweb 又往同一个语料库塞了 10 篇媒体文档，
+    # 但没人告诉 md 这件事发生过。
+    for i in range(10):
+        cp.add(Document(doc_id=f"ow_{i}", url=f"https://news.example.com/{i}",
+                        title=f"报道{i}", publisher="某财经网", tier=Tier.MEDIA,
+                        published=as_of, retrieved=as_of, text="正文"))
+
+    full._refresh_external_md(r, md)
+
+    assert "外部资料 19 篇" in md["外部资料"]
+    assert "[卖方研究] 9 篇" in md["外部资料"]
+    assert "[财经媒体] 10 篇" in md["外部资料"]
+
+
+def test_openweb_notes两阶段措辞一致且不只报model_dated():
+    """真实事故: `_restore_openweb`（第二阶段）此前只报 `model_dated`，
+    把 `missing_slots` 与 `fetch_failed` 整个丢掉 —— 而第二阶段产出的
+    恰恰是 report.md 这个最终交付物。`_openweb_notes` 是两个阶段共用
+    的唯一措辞来源，必须同时带出三样东西，且两次调用（模拟两个阶段）
+    产出完全一样的文案。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(
+        docs=[], missing_slots=["竞争格局与份额"], fetch_failed=2,
+        model_dated=1)
+
+    notes_phase1 = full._openweb_notes(res)
+    notes_phase2 = full._openweb_notes(res)
+
+    assert notes_phase1 == notes_phase2
+    joined = "；".join(notes_phase1)
+    assert "2 篇抓取失败" in joined
+    assert "1 篇的发布日期由模型给出" in joined
+    assert "竞争格局与份额：未取到" in joined
