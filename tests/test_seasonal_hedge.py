@@ -78,6 +78,24 @@ def test_费用率三项都走对冲且留下痕迹(monkeypatch):
     assert abs(gen["rd"] - note["rd"]["hedged"]) < 1e-9
 
 
+def test_只有本期中期没有去年同期时退回年报值():
+    """新上市公司的真实场景：有本期中报，但去年同期还没上市。
+
+    守的是入口那道 `if not itm_now or not itm_prev: return`——若它被误写成
+    `and`，`itm_prev.get(k)` 会在 `itm_prev is None` 时抛 AttributeError，
+    而不是优雅地退回年报值。这类 and/or 打字失误在代码审查里最难看出来。
+    """
+    import ashare_calibrate as C
+    note = {}
+    gen = {"sell": 0.02, "admin": 0.04, "rd": 0.03}
+    C._apply_expense_hedge(gen=gen, itm_now={"sell": 0.0162, "admin": 0.0341,
+                                             "rd": 0.0481},
+                           itm_prev=None, note=note)
+    assert gen == {"sell": 0.02, "admin": 0.04, "rd": 0.03}, \
+        "缺去年同期时必须原样退回年报值，不能当成同比零变化"
+    assert note == {}
+
+
 def test_中期缺失时费用率退回年报值且不留对冲痕迹():
     import ashare_calibrate as C
     note = {}
