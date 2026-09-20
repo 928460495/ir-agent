@@ -25,9 +25,13 @@ def test_未超上限时原样返回():
 
 
 def test_超上限时截断并标注():
+    """final-fix-3 Fix 3：截断标记改成方括号包住的系统批注，不再用领头
+    省略号——省略号本身是模型在"引用必须逐字照抄"这条规矩下可能模仿的
+    引用标点，见 external._TRUNCATED 定义处的注释。"""
     got = _doc("一二三四五六七八九十", 5).for_prompt()
     assert got.startswith("一二三四五")
-    assert "截取" in got
+    assert "截断" in got
+    assert "……" not in got
     assert "六七八九十" not in got
 
 
