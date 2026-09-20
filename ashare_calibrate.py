@@ -55,6 +55,36 @@ def _yoy_hedge(last_annual, itm_now, itm_prev, lo=None, hi=None, what=None):
         _CLAMPS.append(f"{what}（季节性对冲后）：原值 {raw:.4g} 被截断至 {m:.4g}（允许区间 {rng}）")
     return m
 
+
+# 费用率三项**不设上下限**——原 `_mean(ratio("销售费用"), default=.02, ...)` 调用
+# 本来就没有 lo/hi，只有 default。写计划时一度给了 (0, 0.30) 这类区间，那是
+# 凭空引入的新截断：对冲只是换了个估计口径，没有理由顺手给它加一道原先不存在
+# 的闸门。真出现异常值，应该在 _hedge_note 里看得见，而不是被悄悄夹住。
+_EXPENSE_BOUNDS = {"sell": (None, None), "admin": (None, None), "rd": (None, None)}
+_EXPENSE_LABEL = {"sell": "销售费用率", "admin": "管理费用率", "rd": "研发费用率"}
+
+
+def _apply_expense_hedge(gen, itm_now, itm_prev, note):
+    """把 gen 里的 sell/admin/rd 三项就地换成季节性对冲值，并在 note 里留痕。
+
+    **留痕是硬要求。** 交付物写着这些参数「由历史校准」，读者有权知道
+    校准用的是裸年报均值还是对冲后的值——没对冲就不留痕，留了痕就必须
+    是真对冲过，两者不能含糊。
+    """
+    if not itm_now or not itm_prev:
+        return
+    for k, (lo, hi) in _EXPENSE_BOUNDS.items():
+        base = gen.get(k)
+        if base is None or itm_now.get(k) is None or itm_prev.get(k) is None:
+            continue
+        hedged = _yoy_hedge(base, itm_now[k], itm_prev[k],
+                            lo=lo, hi=hi, what=_EXPENSE_LABEL[k])
+        if hedged is None:
+            continue
+        note[k] = {"annual": base, "hedged": round(hedged, 6)}
+        gen[k] = hedged
+
+
 def opening_balances(bal, p) -> dict:
     """最近年报期初余额，8 项资产 + 8 项负债权益，保证恒等。"""
     g = lambda k: _v0(bal, k, p)
@@ -163,6 +193,21 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     cogs = {p: _v(inc, "营业成本", p) for p in hp}
     a3 = ann[-3:]
     ratio = lambda item: [(_v(inc, item, p) or 0)/rev[p] for p in a3 if rev.get(p)]
+
+    # 中期费用率：本期中期与**去年同期**中期，用于季节性对冲（见 _yoy_hedge）。
+    # 去年同期 = 把本期中期的报告日年份换成上一年（如 20260630 → 20250630）。
+    def _ratio_at(p):
+        rv = _v(inc, "营业总收入", p)
+        if not rv:
+            return None
+        return {"sell": (_v(inc, "销售费用", p) or 0)/rv,
+                "admin": (_v(inc, "管理费用", p) or 0)/rv,
+                "rd": (_v(inc, "研发费用", p) or 0)/rv}
+    _itm_now = _ratio_at(interim) if interim else None
+    _itm_prev = None
+    if interim:
+        _prev_p = str(int(interim[:4]) - 1) + interim[4:]
+        _itm_prev = _ratio_at(_prev_p)
 
     gm_hist = [1 - cogs[p]/rev[p] for p in hp if rev.get(p) and cogs.get(p)]
     g_hist = [rev[ann[i]]/rev[ann[i-1]] - 1 for i in range(1, len(ann)) if rev.get(ann[i-1])]
@@ -363,6 +408,16 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     y_end = dt.date(int(last[:4]), 12, 31)
     roll = round((today - y_end).days / 365.0, 3)
 
+    # 销售/管理/研发三项改用季节性对冲（年报 + 本期中期 − 去年同期中期），
+    # 不再只看近三年年报均值——最新半年的费用结构变化能进来了。
+    # _hedge_note 留痕：交付物写着这些参数「由历史校准」，读者有权知道
+    # 用的是裸年报均值还是对冲后的值。
+    _gen = dict(sell=_mean(ratio("销售费用"), default=.02, what="销售费用率"),
+                admin=_mean(ratio("管理费用"), default=.04, what="管理费用率"),
+                rd=_mean(ratio("研发费用"), default=.03, what="研发费用率"))
+    _hedge_note = {}
+    _apply_expense_hedge(_gen, _itm_now, _itm_prev, _hedge_note)
+
     return dict(
         meta=dict(code=code, name=q.get("name") or code, price=q["price"],
                   shares=q.get("shares") if q.get("shares") and np.isfinite(q["shares"]) else np.nan,
@@ -376,8 +431,9 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
         _rho=round(_rho,3), _rho_n=_rho_n,
         interim=itm_block,
         open=o,
-        gen=dict(sell=_mean(ratio("销售费用"), default=.02, what="销售费用率"), admin=_mean(ratio("管理费用"), default=.04, what="管理费用率"),
-                 rd=_mean(ratio("研发费用"), default=.03, what="研发费用率"), tsur=_mean(ratio("营业税金及附加"), default=.005, what="税金及附加率"),
+        gen=dict(sell=_gen["sell"], admin=_gen["admin"], rd=_gen["rd"],
+                 _hedge_note=_hedge_note,
+                 tsur=_mean(ratio("营业税金及附加"), default=.005, what="税金及附加率"),
                  other_inc=_mean(ratio("其他收益"), default=.005, what="其他收益 / 营收"), inv_inc=_mean(ratio("投资收益"), default=.003, what="投资收益 / 营收"),
                  irate=irate, cash_yield=.015, tax=taxr, mi_share=mish,
                  ocap=wc["ocap"], oclp=wc["oclp"],

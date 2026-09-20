@@ -45,3 +45,31 @@ def test_未触发截断时不记CLAMPS():
     C._CLAMPS.clear()
     C._yoy_hedge(0.04, 0.0341, 0.0300, lo=0.0, hi=0.10, what="销售费用率")
     assert C._CLAMPS == []
+
+
+def test_费用率三项都走对冲且留下痕迹(monkeypatch):
+    """sell/admin/rd 三项必须都走对冲，且 `_hedge_note` 要记下年报值与对冲值。
+
+    **留痕是硬要求**：交付物里写着这些是「由历史校准」，读者有权知道
+    校准用的到底是裸年报均值还是对冲后的值。
+    """
+    import ashare_calibrate as C
+    note = {}
+    C._apply_expense_hedge(
+        gen={"sell": 0.02, "admin": 0.04, "rd": 0.03},
+        itm_now={"sell": 0.0162, "admin": 0.0341, "rd": 0.0481},
+        itm_prev={"sell": 0.0150, "admin": 0.0300, "rd": 0.0450},
+        note=note)
+    assert note["sell"]["annual"] == 0.02
+    assert abs(note["sell"]["hedged"] - 0.0212) < 1e-9
+    assert abs(note["admin"]["hedged"] - 0.0441) < 1e-9
+    assert abs(note["rd"]["hedged"] - 0.0331) < 1e-9
+
+
+def test_中期缺失时费用率退回年报值且不留对冲痕迹():
+    import ashare_calibrate as C
+    note = {}
+    gen = {"sell": 0.02, "admin": 0.04, "rd": 0.03}
+    C._apply_expense_hedge(gen=gen, itm_now=None, itm_prev=None, note=note)
+    assert gen == {"sell": 0.02, "admin": 0.04, "rd": 0.03}
+    assert note == {}, "没对冲就不该留痕，否则读者会以为对冲过了"
