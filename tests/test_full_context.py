@@ -1563,6 +1563,40 @@ def test_开放网络落盘失败不阻断整轮研究(tmp_path, monkeypatch):
     assert "跨阶段" in joined and "核验" in joined, skipped
 
 
+def test_开放网络采集失败不阻断整轮研究(monkeypatch, tmp_path):
+    """spec §七 错误对照表：「discover 整体失败 → 研报照常入库，清单记
+    『开放网络采集未执行』」。`_load_openweb` 已经把 `openweb.gather` 包
+    在 try/except 里实现了这一条——它调模型、调网络，比落盘（上一条测试
+    覆盖的姊妹分支）更容易炸：联网工具没开、模型超时、网络本身抽风都会
+    在这里抛异常。但 gather() 本身抛异常这条分支此前一个测试都没有：
+    它是「一次联网故障拖垮整轮付费分析」与「报告照常出、清单里记一笔」
+    之间唯一的防线。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("模型超时")
+
+    monkeypatch.setattr(openweb, "gather", _boom)
+
+    class _R:
+        corpus = None
+
+    r = _R()
+    # 不能让异常传出 _load_openweb —— 这一行本身就是断言：调用若抛出，
+    # 测试直接因未捕获异常失败，就是本测试要守住的那条不变量。
+    skipped = full._load_openweb("600000", r, date(2026, 1, 1), tmp_path,
+                                 client=None, industry="")
+
+    assert isinstance(r.corpus, Corpus)
+    joined = "；".join(skipped)
+    assert "开放网络采集未执行" in joined, skipped
+    assert "RuntimeError" in joined, skipped
+
+
 def test_外部资料清单按语料库实际内容重渲染():
     """真实事故（600183 第一阶段）: `_load_external` 渲染完清单之后，
     `_load_openweb` 又往同一个 Corpus 塞了 10 篇【财经媒体】文档 ——
