@@ -464,3 +464,71 @@ def test_summary_逐项说出缺口与失败(monkeypatch):
     assert "上下游价格与供需：未取到" in text
     assert "公司重大动态：未取到" in text
     assert "1 篇抓取失败" in text
+
+
+def test_候选日期早但页面meta日期晚于as_of则被挡下(monkeypatch):
+    """时点守卫的第二层：候选日期在 as_of 前但页面 meta 日期在 as_of 后。
+
+    候选行给出的日期是模型的声明，页面 meta 里的日期是代码实际观测到的。
+    时点守卫必须在后者起效——模型的日期声明本就不可信，代码抓到的证据才是准。
+    """
+    import ir_agent.sources.openweb as OW
+
+    # 候选日期远早于 as_of，能通过 gather 的早期检查
+    early_cand = (
+        "候选: 政策与监管 | 政策文件 | https://www.example.com/policy | 某部委 | 2026-06-15\n"
+    )
+
+    # 但页面本身声称的 meta 日期在 as_of 之后
+    pages = {
+        "https://www.example.com/policy": Fetched(
+            "https://www.example.com/policy",
+            "这是政策文件的正文内容",
+            date(2026, 9, 25)  # meta_published 在 AS_OF (2026-09-20) 之后
+        )
+    }
+
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(pages))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(early_cand), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+
+    # 应该被 add_if_visible 挡下，不入库
+    assert len(cp.docs) == 0, "页面 meta 日期晚于 as_of 应该被拒绝入库"
+    assert len(res.docs) == 0
+    # 应该在 corpus.skipped 里记录被拒绝的文件
+    assert len(cp.skipped) > 0, "被挡下的文档应该记录在 skipped"
+    # 没有文档入库，所以 model_dated 也应该是 0（这篇文章未被计入）
+    assert res.model_dated == 0
+
+
+def test_两个候选重定向到同一最终网址只入库一次(monkeypatch):
+    """去重：两个不同候选 URL 重定向到同一个最终 URL，不应该重复入库。
+
+    这是代码层面的后置去重——与其他 URL 已在 seen 里的检查不同，这里通过的
+    是不同的候选行（甚至不同的槽位），却在 fetch 时被发现指向同一个最终地址。
+    """
+    import ir_agent.sources.openweb as OW
+
+    two_cands = (
+        "候选: 政策与监管 | 政策文件A | https://www.a.com/page | 某部委A | 2026-06-15\n"
+        "候选: 政策与监管 | 政策文件B | https://www.b.com/page | 某部委B | 2026-06-20\n"
+    )
+
+    # 两个不同的候选 URL 都最终重定向到同一个地址
+    final_url = "https://final.example.com/official-policy"
+    pages = {
+        "https://www.a.com/page": Fetched(final_url, "政策正文第一版", None),
+        "https://www.b.com/page": Fetched(final_url, "政策正文第二版", None),
+    }
+
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(pages))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(two_cands), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+
+    # 应该只在语料库里出现一次，不重复
+    assert len(cp.docs) == 1, f"期望 1 篇文档，实际 {len(cp.docs)} 篇"
+    assert len(res.docs) == 1, f"期望 res.docs 有 1 篇，实际 {len(res.docs)} 篇"
+    # 验证入库的是最终 URL
+    assert cp.docs[0].url == final_url
