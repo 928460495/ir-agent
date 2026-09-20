@@ -596,3 +596,97 @@ def test_文件不存在时返回空结果而不抛(tmp_path):
     back = OW.load(tmp_path / "nope.json", cp)
     assert back.docs == []
     assert cp.docs == []
+
+
+# ── load() 对结构性损坏的容忍 ────────────────────────────────────
+#
+# 前面 test_文件不存在时返回空结果而不抛 只测了「文件不存在」。这里补
+# Finding 1 报的那几种「文件存在、但内容不是我们写的那种形状」的损坏：
+# 语法错误的 JSON、顶层不是 dict、数值字段塞了非数字字符串、列表字段
+# 塞了不可迭代的东西。任何一种都必须退化成空 OpenWebResult()，不能把
+# 异常甩给调用方——调用方的整条契约就是「采不到就是这节缺资料」，不是
+# 「有时候会因为一个坏文件让整次研究流程崩掉」。
+
+
+def test_JSON语法错误返回空结果不抛(tmp_path):
+    import ir_agent.sources.openweb as OW
+    path = tmp_path / OW.OPENWEB_JSON
+    path.write_text("{not valid json", encoding="utf-8")
+    cp = Corpus(as_of=AS_OF)
+    back = OW.load(path, cp)
+    assert back.docs == []
+    assert cp.docs == []
+
+
+def test_顶层不是dict时返回空结果(tmp_path):
+    """`[1,2,3]` / `"hello"` / `42`：都没有 .get，直接构造 OpenWebResult
+    会在 raw.get(...) 上炸 AttributeError。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    for bad_top in ([1, 2, 3], "hello", 42):
+        path = tmp_path / OW.OPENWEB_JSON
+        path.write_text(json.dumps(bad_top), encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert back.docs == [], bad_top
+        assert cp.docs == [], bad_top
+
+
+def test_fetch_failed或model_dated非数字字符串时返回空结果(tmp_path):
+    """`int("abc")` 抛 ValueError——这两个字段本该是采集阶段自己写的
+    计数，但文件被手改坏了就不是。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    for bad_field in ("fetch_failed", "model_dated"):
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [], "missing_slots": [], "extra_slots": [],
+                   "fetch_failed": 0, "model_dated": 0}
+        payload[bad_field] = "abc"
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert back.docs == [], bad_field
+        assert cp.docs == [], bad_field
+
+
+def test_missing_slots或extra_slots不可迭代时返回空结果(tmp_path):
+    """`list(42)` 抛 TypeError——这两个字段本该是字符串列表。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    for bad_field in ("missing_slots", "extra_slots"):
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [], "missing_slots": [], "extra_slots": [],
+                   "fetch_failed": 0, "model_dated": 0}
+        payload[bad_field] = 42
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert back.docs == [], bad_field
+        assert cp.docs == [], bad_field
+
+
+def test_单条文档损坏不牵连其余仍然入库(tmp_path):
+    """回归用例：这条在修复前就已经能过——`_doc_from_json` 早就被单独
+    包了一层 try/except。补上是因为 Finding 2 指出这条路径此前完全没
+    有测试覆盖，修复时很容易在改 load() 时手滑连累它。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    good_doc = {"doc_id": "ow_good", "url": "https://x.gov.cn/good",
+                "title": "标题", "publisher": "某部委", "tier": "official",
+                "published": "2026-06-01", "retrieved": "2026-09-20",
+                "text": "正文", "prompt_limit": 2000, "date_source": "model"}
+    bad_doc = {"doc_id": "ow_bad"}  # 缺字段，_doc_from_json 会 KeyError
+    path = tmp_path / OW.OPENWEB_JSON
+    payload = {"docs": [good_doc, bad_doc], "missing_slots": [],
+               "extra_slots": [], "fetch_failed": 0, "model_dated": 0}
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    cp = Corpus(as_of=AS_OF)
+    back = OW.load(path, cp)
+    assert [d.doc_id for d in back.docs] == ["ow_good"]
+    assert [d.doc_id for d in cp.docs] == ["ow_good"]

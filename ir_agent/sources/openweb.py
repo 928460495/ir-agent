@@ -515,7 +515,22 @@ def save(res: OpenWebResult, path: Path | str) -> None:
 
 
 def load(path: Path | str, corpus) -> OpenWebResult:
-    """读回落盘的文档并入语料库。文件不存在或损坏时返回空结果，不抛。
+    """读回落盘的文档并入语料库。
+
+    容忍两个不同层级的损坏，两者都不抛：
+
+    - **整份文件损坏**——文件不存在、JSON 语法错误、顶层不是 dict（比如
+      手抖写成一个 `[]` 或裸字符串）、或某个头部字段的类型烂到没法安全
+      解读（`fetch_failed`/`model_dated` 不是数字、`missing_slots`/
+      `extra_slots` 不是可迭代对象）。这些情况下**整份**退化成空
+      `OpenWebResult()`：任何一处都可能污染后面所有字段的读取，没有
+      「只信一半」这回事。
+    - **单条文档损坏**——`docs` 列表本身是合法列表，但其中某一条不是
+      合法的 Document JSON（缺字段、字段类型不对、tier 不是已知取值）。
+      这种情况下只跳过**这一条**，其余合法条目照常读回、照常入库。
+
+    两者都不会向上抛异常：调用方的契约是「采不到就是这节缺外部资料」，
+    不是「一个坏文件能让整次研究流程崩掉」。
 
     **时点守卫照样要过一遍**（走 corpus.add_if_visible）：as_of 可能与
     落盘时不同，「这是我们自己存的」不构成放行理由。
@@ -528,13 +543,22 @@ def load(path: Path | str, corpus) -> OpenWebResult:
     except Exception:                                       # noqa: BLE001
         return OpenWebResult()
 
-    res = OpenWebResult(
-        missing_slots=list(raw.get("missing_slots", [])),
-        extra_slots=list(raw.get("extra_slots", [])),
-        fetch_failed=int(raw.get("fetch_failed", 0)),
-        model_dated=int(raw.get("model_dated", 0)))
+    try:
+        res = OpenWebResult(
+            missing_slots=list(raw.get("missing_slots", [])),
+            extra_slots=list(raw.get("extra_slots", [])),
+            fetch_failed=int(raw.get("fetch_failed", 0)),
+            model_dated=int(raw.get("model_dated", 0)))
+        docs_raw = list(raw.get("docs", []))
+    except Exception:                                       # noqa: BLE001
+        # 顶层不是 dict（没有 .get）、docs 不是可迭代对象、或
+        # fetch_failed/model_dated/missing_slots/extra_slots 类型烂到
+        # 没法安全解读——任何一种都不是「跳过这一条」能兜住的，整份文件
+        # 的可信度已经不在，退化成空结果。
+        return OpenWebResult()
+
     seen = {d.url for d in corpus.docs}
-    for item in raw.get("docs", []):
+    for item in docs_raw:
         try:
             doc = _doc_from_json(item)
         except Exception:                                   # noqa: BLE001
