@@ -439,6 +439,7 @@ def gather(client, *, code: str, company: str, industry: str,
             published=published,
             retrieved=as_of,
             text=got.text,
+            prompt_limit=TEXT_LIMIT,
         )
         if not corpus.add_if_visible(doc):
             continue

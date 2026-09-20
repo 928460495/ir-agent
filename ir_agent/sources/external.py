@@ -78,6 +78,9 @@ TIER_RULE = {
 }
 
 
+_TRUNCATED = "\n……（正文过长，以上为截取部分；引用请限于以上内容）"
+
+
 @dataclass(frozen=True)
 class Document:
     doc_id: str
@@ -88,6 +91,13 @@ class Document:
     published: date
     retrieved: date
     text: str
+    # 进提示词时的截断长度。None = 不截断（研报走东财的 ctx-content 块，
+    # 长度天然可控）。开放网页可能几万字，且同一批文档会同时压到战略、
+    # 产业链、宏观定性三个模块的提示词上 —— 撑爆是三倍的。
+    #
+    # **限制跟着文档走，不跟着调用点走。** 在调用点上一刀切会把研报也
+    # 截了，那是一次没人要求过的行为变更。
+    prompt_limit: int | None = None
 
     def cite(self) -> str:
         return (f"{self.publisher}《{self.title}》"
@@ -96,6 +106,18 @@ class Document:
     def head(self, n: int = 600) -> str:
         t = self.text.strip()
         return t[:n] + ("……" if len(t) > n else "")
+
+    def for_prompt(self) -> str:
+        """进提示词的正文。**入库存全文，这里才截断。**
+
+        Corpus.verify() 用的是 self.text（全文），模型只能引用它在提示词
+        里看得见的那一段，而那一段必然是全文的前缀 —— 所以截断不会让引文
+        核验误杀。截断标记要写出来，否则模型不知道后面还有内容，可能凭
+        印象去补。
+        """
+        if self.prompt_limit is None or len(self.text) <= self.prompt_limit:
+            return self.text
+        return self.text[:self.prompt_limit] + _TRUNCATED
 
 
 class OutOfWindow(LookAheadError):

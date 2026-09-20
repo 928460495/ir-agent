@@ -223,7 +223,7 @@ def for_prompt(corpus, macro_prompt: str = "") -> str:
         from ir_agent.sources.external import TIER_LABEL
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
-            lines.append("  " + d.text.replace("\n", "\n  "))
+            lines.append("  " + d.for_prompt().replace("\n", "\n  "))
     else:
         lines.append("  外部宏观资料：本次未取到 —— 政策取向缺少文字依据，"
                      "只能由读数推断，结论强度应相应说明")

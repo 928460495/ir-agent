@@ -244,7 +244,7 @@ def for_prompt(ledger: FactLedger, period: str, as_of: date,
         seen_tiers = set()
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
-            lines.append("  " + d.text.replace("\n", "\n  "))
+            lines.append("  " + d.for_prompt().replace("\n", "\n  "))
             seen_tiers.add(d.tier)
         for t in seen_tiers:
             lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")

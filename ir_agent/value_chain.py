@@ -306,7 +306,7 @@ def for_prompt(corpus, ledger: FactLedger, period: str, as_of: date,
         from ir_agent.sources.external import TIER_LABEL
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
-            lines.append("  " + d.text.replace("\n", "\n  "))
+            lines.append("  " + d.for_prompt().replace("\n", "\n  "))
     else:
         lines.append("  外部资料：本次未取到 —— 产业链只能依据年报自述，"
                      "覆盖面有限，未提及的环节须明说无据")
