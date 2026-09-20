@@ -404,14 +404,66 @@ def test_fetch_用最终URL并解码中文(monkeypatch):
 
 
 def test_fetch_正文为空则抛(monkeypatch):
+    """`match` 钉住具体消息——不然内容类型或大小闸门万一回归成误拒，
+    这条测试会看到别的 FetchFailed 就绿了，形同没在守卫"正文提取为空"
+    这一件事。"""
     import ir_agent.sources.openweb as OW
 
     monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
     body = b"<html><body><script>1</script></body></html>"
     resp = _FakeFetchResp("https://x.example.com/a", body)
     monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
-    with pytest.raises(OW.FetchFailed):
+    with pytest.raises(OW.FetchFailed, match="正文提取为空"):
         OW.fetch("https://x.example.com/a")
+
+
+# ── final-fix-4 Fix 5a：GB18030 是猜测链最后一环、也是个 sink——它是
+# 国标超集，对着 Big5/EUC-JP 的字节硬解八九不离十不会报错，只会**成功**
+# 解出一串看起来正常、实际是乱码的字符串，extract_text 因为它不是空
+# 字符串照样放行。此前 `grep -rn "gb18030|big5" tests/` 一条都没有——
+# 猜测链最后一环、也是这个 sink 的源头，从来没被测试覆盖过 ──
+
+def test_解码_无header声明的GB18030页面正确解码():
+    """header 没给字符集（走 ISO-8859-1 默认分支），页面也没有
+    `<meta charset>` 声明，必须落到猜测链的 gb18030 分支解出正确的
+    中文——而不是意外撞对或撞出乱码却不报错。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "覆铜板报价上涨"
+    raw = text.encode("gb18030")
+    # 先确认这段字节真的不是合法 UTF-8——保证下面的断言测的是 gb18030
+    # 分支被走到，不是 utf-8 侥幸猜对。
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    assert OW._decode(raw, None) == text
+
+
+def test_解码_meta声明Big5时优先按Big5解码():
+    """GB18030 这个 sink 的危害正是"不报错、也不是页面真正的编码"——
+    页面自己在 `<meta charset>` 里声明了 Big5，必须先信这个声明，不能
+    让它落进会把任何字节都吃成"看起来正常"的猜测链。这是本项目的真实
+    使用场景：CCL/PCB 覆盖点名的台湾一手来源现在仍有用 Big5 编码的。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "報價上漲"
+    body = text.encode("big5")
+    head = b'<meta charset="Big5">'
+    raw = head + body
+    assert text in OW._decode(raw, None)
+
+
+def test_解码_meta声明写成老式http_equiv形式时也认():
+    """`<meta http-equiv="Content-Type" content="text/html; charset=...">`
+    这种老式写法把 charset 嵌在 content 属性值里，不是 HTML5 短格式的
+    独立 `charset=` 属性——两种写法都要认，不能只支持其中一种。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "報價上漲"
+    body = text.encode("big5")
+    head = (b'<meta http-equiv="Content-Type" '
+           b'content="text/html; charset=Big5">')
+    raw = head + body
+    assert text in OW._decode(raw, None)
 
 
 # ── final-fix-3 Fix 2：模型选的网址，代码自己去抓——没有主机闸门时，

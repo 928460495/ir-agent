@@ -417,6 +417,47 @@ def _reject_unsafe_host(url: str) -> None:
             raise FetchFailed(f"{url}：解析到禁止访问的地址（{ip_str}）")
 
 
+# <meta charset> 只看原始字节的前这么多字节。HTML5 规范要求这个声明
+# 出现在文档头部（浏览器自己也是这么找的），真实页面确实如此；不通读
+# 全文，避免正文里恰好出现一段提到 "charset=" 的技术讨论被误判成页面
+# 自己的声明。
+_META_CHARSET_HEAD = 2048
+_META_TAG_BYTES = re.compile(rb"<meta\b[^>]*>", re.I)
+_CHARSET_ATTR_BYTES = re.compile(rb'charset\s*=\s*["\']?\s*([a-zA-Z0-9_-]+)',
+                                 re.I)
+
+
+def _meta_charset(raw: bytes) -> str | None:
+    """从原始字节的头部读页面自己声明的字符集；读不到返回 None。
+
+    **必须在字节层面找，不能先解码成字符串再找。** 这个函数的结果是
+    喂给 `_decode` 去尝试解码用的——如果反过来要求先解码出字符串才能
+    找 `<meta charset>`，就是鸡生蛋。好在 `<meta charset=...>` /
+    `<meta http-equiv="Content-Type" content="...charset=...">` 这段
+    标记本身只由 ASCII 字符拼成，而 UTF-8、GB18030、Big5、EUC-JP 这几种
+    目标编码在 ASCII 范围（0x00–0x7F）都与 ASCII 字节一一对应——不管
+    正文实际是哪种编码，`<meta ...>` 这几个字母、等号、引号本身不会
+    因为编码不同而变成别的字节序列，所以可以直接在原始字节上用 ASCII
+    正则找，不需要先猜出编码。
+
+    只在 `<meta ...>` 标签内部找 `charset=`，不是在整个头部字节里裸找
+    ——避免 `<script>` 里一句提到 "charset=" 的字符串字面量被误判成
+    页面的声明（与本文件 `_COMMENT`/`_BLOCK` 顺序那条教训是同一类
+    问题：噪声源头不先框定范围，后面的匹配就可能被诱导）。
+
+    覆盖两种写法：HTML5 短格式 `<meta charset="UTF-8">`，以及老式
+    `<meta http-equiv="Content-Type" content="text/html; charset=GB2312">`
+    ——两者的 `charset=` 都在同一个 `<meta ...>` 标签内，一条不区分
+    写法的正则直接在标签内容里找 `charset=` 后面那段值就够。
+    """
+    head = bytes(raw[:_META_CHARSET_HEAD])
+    for tag in _META_TAG_BYTES.finditer(head):
+        m = _CHARSET_ATTR_BYTES.search(tag.group(0))
+        if m is not None:
+            return m.group(1).decode("ascii", errors="ignore")
+    return None
+
+
 def _decode(raw: bytes, header_encoding: str | None) -> str:
     """把抓回来的字节猜成字符串。
 
@@ -430,13 +471,32 @@ def _decode(raw: bytes, header_encoding: str | None) -> str:
 
     退化方案：先信 HTTP 头声明的编码；头没给、或给的是 requests 对没
     声明 charset 的页面的默认猜测 ISO-8859-1（中文页面几乎必错）时，
+    退而求其次信页面自己在 `<meta charset>` 里的声明（`_meta_charset`）
+    ——这是页面自己说的，比代码瞎猜强；两者都拿不到或都解不出来，才
     依次试 UTF-8、GB18030（覆盖 GBK/GB2312 的国标超集，中文网页最常见
     的两大编码族已经覆盖），全部失败再退到 `errors="replace"`——保证
     一定能拿到字符串，不能因为编码猜错就把整篇正文的抓取当成失败处理。
+
+    **为什么 GB18030 必须排在猜测链的最后、且要有页面自己的声明垫在它
+    前面。** GB18030 是国标超集，字节覆盖面极广，对着一份实际是 Big5
+    或 EUC-JP 的页面硬解，十有八九不会抛异常——它会**成功**解码出一串
+    看起来正常、实际是乱码的字符串，`extract_text` 因为它不是空字符串
+    照样放行，成为一条静默污染 Corpus.verify() 逐字核验的正文，而不是
+    一次可见的失败。这类页面在本项目的真实使用场景里不是假设：CCL/PCB
+    覆盖点名的台湾一手来源现在仍有用 Big5 编码的。页面自己在
+    `<meta charset>` 里的声明是它自报的编码，说错的概率远低于代码去
+    猜——先信这个声明，才轮到会把任何字节都吃成"看起来正常"的 GB18030
+    兜底。
     """
     if header_encoding and header_encoding.lower() != "iso-8859-1":
         try:
             return raw.decode(header_encoding)
+        except (LookupError, UnicodeDecodeError):
+            pass
+    meta_encoding = _meta_charset(raw)
+    if meta_encoding:
+        try:
+            return raw.decode(meta_encoding)
         except (LookupError, UnicodeDecodeError):
             pass
     for enc in ("utf-8", "gb18030"):
