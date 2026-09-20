@@ -242,9 +242,33 @@ _HEADERS = {"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"}
 # 整块剔除的噪声容器。研报走东财的 ctx-content 块，噪声天然被框住；
 # 开放网页没有这个便利，导航、页脚、脚本、样式会被 _TAG 剥成一堆散字
 # 混进正文，既污染引文核验也白白吃掉提示词长度。
+#
+# **`.*?</\1\s*>` 这种写法曾经在这里，删掉后不要再加回来。** 非贪婪只
+# 保证「匹配尽量短」，不保证「匹配到配对的那一个」——它认的是**第一个**
+# 出现的同名闭合标签，不是与当前开标签配对的那一个。真实导航栏常见
+# 同类容器自嵌套（大菜单、面包屑套在 <nav> 里），例如
+# `<nav>A<nav>B</nav>C</nav>`：非贪婪版本会把外层 `<nav>` 和内层
+# `</nav>` 错配成一对，吞掉 `<nav>A<nav>B</nav>`，剩下的 `C</nav>` 里，
+# `C` 不再处于任何被识别的容器里，被当成正文放行——而 `C` 本来就是导航
+# 文字。这不是崩溃也不是丢真内容，是反过来把噪声混进 Corpus.verify()
+# 逐字核验的正文里，比明显报错更难查。
+#
+# 这里改用「内容里不准再出现同名开/闭标签」的写法，逼这条正则只认**最内
+# 层、不含嵌套**的那一对；配上下面 _strip_blocks 的重复应用，从里往外
+# 一层层剥，不管嵌套多少层最终都能剥干净。
 _BLOCK = re.compile(
-    r"<(script|style|nav|header|footer|aside|noscript)\b[^>]*>.*?</\1\s*>",
+    r"<(script|style|nav|header|footer|aside|noscript)\b[^>]*>"
+    r"(?:(?!</?\1\b).)*?"
+    r"</\1\s*>",
     re.S | re.I)
+# 单遍 _BLOCK.sub 只能剥掉一层嵌套（剥完最内层，外层还留着自己的开/闭
+# 标签待下一遍处理），嵌套 N 层就要跑 N 遍。真实页面的导航自嵌套（大菜单
+# 套大菜单、面包屑套在 nav 里）观察到的深度从没见过超过个位数；32 给了
+# 近 4 倍的余量，同时把「构造一个几十万层嵌套的畸形页面」这种对抗输入的
+# 最坏开销钉死在 32 次整页扫描，而不是让它跟嵌套深度线性增长到失控。
+# 跑满上限时循环体自然退出——顶多留一点未剥净的噪声跟着走到 _TAG，不是
+# 「不干净就一直转」的死循环。
+_BLOCK_MAX_PASSES = 32
 _TAG = re.compile(r"<[^>]+>")
 _SPACE = re.compile(r"[ \t　\xa0]+")
 _ENTITIES = (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
@@ -271,13 +295,30 @@ class Fetched:
     meta_published: date | None # 页面自己声明的发布时间，没有则 None
 
 
+def _strip_blocks(html: str) -> str:
+    """反复应用 _BLOCK，从最内层往外一层层剥掉噪声容器。
+
+    _BLOCK 每一遍只吃得掉不含嵌套的最内层那一对（见 _BLOCK 定义处的
+    注释），外层容器要等内层被吃掉、自己变成「不含嵌套」之后才轮到它。
+    所以要重复应用，直到再替换不出东西为止；`_BLOCK_MAX_PASSES` 给这个
+    循环封了顶，避免对抗性输入（人为构造的超深嵌套）把它拖成无限循环。
+    """
+    prev = None
+    passes = 0
+    while html != prev and passes < _BLOCK_MAX_PASSES:
+        prev = html
+        html = _BLOCK.sub(" ", html)
+        passes += 1
+    return html
+
+
 def extract_text(html: str) -> str:
     """HTML → 纯文本。与 reports.fetch_text 同构，额外整块剔除噪声容器。
 
     不引入 bs4/lxml：本仓库没有依赖声明文件，新增 import 意味着别人的
     环境可能跑不起来。
     """
-    body = _BLOCK.sub(" ", html or "")
+    body = _strip_blocks(html or "")
     body = _TAG.sub("\n", body)
     for src, dst in _ENTITIES:
         body = body.replace(src, dst)

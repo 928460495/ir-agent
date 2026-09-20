@@ -177,6 +177,35 @@ def test_meta日期_认不出的写法返回None():
     assert meta_date(html) is None
 
 
+def test_正文提取剔除嵌套同类容器不留残余文字():
+    """回归用例：`<nav>A<nav>B</nav>C</nav>` 曾经在旧的非贪婪正则下漏出
+    `C`——非贪婪只保证匹配尽量短，认的是**第一个**同名闭合标签，不是与
+    当前开标签配对的那一个，于是外层 `<nav>` 和内层 `</nav>` 被错配成
+    一对，`C</nav>` 里的 `C` 就不再处于任何被识别的容器里，被当成正文
+    放行。大菜单、面包屑套在 `<nav>` 里在真实导航栏里很常见，这不是
+    构造出来才会撞到的边界情况。"""
+    html = "<div><p>正文A</p><nav>导航一<nav>导航二</nav>导航三</nav>" \
+           "<p>正文B</p></div>"
+    got = extract_text(html)
+    assert "正文A" in got
+    assert "正文B" in got
+    for noise in ("导航一", "导航二", "导航三"):
+        assert noise not in got, noise
+
+
+def test_正文提取剔除两种不同容器互相嵌套():
+    """同一条修复要同时管住「同类自嵌套」和「异类互嵌套」——异类互嵌套
+    本来就没被旧正则的 bug 命中（\\1 回引把闭合标签锁死成同名），这里
+    补一条覆盖，确认新写法没有反过来把这种情况打坏。"""
+    html = "<div><p>正文C</p><nav>导航<header>页头</header>尾巴</nav>" \
+           "<p>正文D</p></div>"
+    got = extract_text(html)
+    assert "正文C" in got
+    assert "正文D" in got
+    for noise in ("导航", "页头", "尾巴"):
+        assert noise not in got, noise
+
+
 def test_fetch_用最终URL并解码中文(monkeypatch):
     """两件事一起验：跟完重定向后的 final_url 必须是最终地址（分级要用
     它），以及中文页面的编码必须按页面声明解，不能留 ISO-8859-1。"""
