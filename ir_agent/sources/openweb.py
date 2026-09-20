@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
+import socket
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -245,6 +247,22 @@ TIMEOUT = 20
 # 截断不会让核验误杀。
 TEXT_LIMIT = 2000
 
+# fetch() 允许把正文放进语料库的内容类型。**只认网页**——PDF、图片、
+# 任意二进制流经过 `resp.text`/`extract_text` 处理后大概率不是空字符串
+# 就是一坨乱码，乱码不会报错，会当成「抓到了」直接入库，成为一条看似
+# 正常、实则不可能被人类核对出处的引文。只比较分号前的主类型，因为真实
+# 响应几乎总带 `; charset=...` 后缀。
+_ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+
+# 单次抓取允许读取的最大字节数。**卡在读的过程中，不是读完再判断**——
+# 卡读完再判断仍然要求先把对方发来的任意大小的响应体整个吃进内存，等于
+# 没卡。8MB 是这里的选择：真实新闻/研究页面的 HTML 正文（不含图片，
+# `requests` 不会主动拉子资源）几乎不会超过几百 KB，8MB 给了近百倍余量
+# 覆盖异常臃肿但仍是真实文章的页面，同时把「对方开着一个几十 GB 响应体
+# 的连接不断」这种最坏情况的内存占用钉死在 8MB，而不是让它跟对方愿意
+# 发多少字节线性增长。
+FETCH_MAX_BYTES = 8 * 1024 * 1024
+
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 _HEADERS = {"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"}
@@ -316,6 +334,83 @@ _DATE_KEYS = ("article:published_time", "og:published_time",
 class FetchFailed(Exception):
     """抓取或正文提取失败。**不静默返回空** —— 那会让「抓不到」和
     「抓到一篇空文章」长得一样。"""
+
+
+def _is_globally_routable(ip_str: str) -> bool:
+    """这个地址是不是一个货真价实的公网地址。
+
+    解析不出来（理论上不该发生，getaddrinfo 给出的地址字面量一定合法）
+    也当作不可信处理，不放行——「判不出来就拒绝」与本文件 tier_of_url
+    的代价不对称是同一个方向：错误的方向必须落在「多拒一个」而不是
+    「多抓一个不该抓的」。
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return not (ip.is_loopback or ip.is_private or ip.is_link_local
+               or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def _reject_unsafe_host(url: str) -> None:
+    """`url` 的主机必须解析到公网地址，否则抛 `FetchFailed`。
+
+    **为什么要单独查这一步，而不是信任 requests 会自然连不上就报错。**
+    环回（127.0.0.1）、内网（10/8、172.16/12、192.168/16）、链路本地
+    （169.254.0.0/16——云主机上常是元数据服务：AWS/GCP/阿里云的实例
+    凭证、角色临时密钥都挂在 169.254.169.254 上）、以及保留地址，进程
+    自己所在的网络环境里往往*连得通*，不会报错，只会把内网服务的响应
+    当成一篇网页正文抓回来、按 MEDIA 落进语料库。模型给的 URL 是它编出
+    来的字符串，编一个内网地址不比编一个外网地址难——这道闸门必须靠
+    代码主动查，不能指望"连不上就自然失败"兜底。
+
+    **必须调用两次，不能只查一次。** 见调用点：一次查模型给的原始 URL，
+    一次查跟完重定向后的最终 URL。模型给一个公网域名、该域名的服务端
+    再 302 到内网地址，是同一类攻击的另一种写法——只查最初那次拦不住。
+    """
+    host = _host_of(url)
+    if not host:
+        raise FetchFailed(f"{url}：无法识别主机名")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as e:
+        raise FetchFailed(f"{url}：DNS 解析失败（{e}）") from e
+    if not infos:
+        raise FetchFailed(f"{url}：DNS 解析结果为空")
+    for info in infos:
+        ip_str = info[4][0]
+        if not _is_globally_routable(ip_str):
+            raise FetchFailed(f"{url}：解析到禁止访问的地址（{ip_str}）")
+
+
+def _decode(raw: bytes, header_encoding: str | None) -> str:
+    """把抓回来的字节猜成字符串。
+
+    **为什么不用 `resp.apparent_encoding`（旧实现的做法）。** 那是靠
+    `chardet`/`charset_normalizer` 读一遍 `resp.content` 猜出来的，而
+    `resp.content` 要求响应体没被消费过。本模块现在为了卡字节数上限
+    （见 `FETCH_MAX_BYTES`），改成用 `resp.iter_content()` 边读边数，
+    读完之后 requests 会把响应标记成"已消费"，这时候再碰 `resp.content`
+    / `resp.apparent_encoding` 会直接抛 `RuntimeError`——两者天生冲突，
+    只能二选一，这里选了字节上限（保护级别更高的那一项）。
+
+    退化方案：先信 HTTP 头声明的编码；头没给、或给的是 requests 对没
+    声明 charset 的页面的默认猜测 ISO-8859-1（中文页面几乎必错）时，
+    依次试 UTF-8、GB18030（覆盖 GBK/GB2312 的国标超集，中文网页最常见
+    的两大编码族已经覆盖），全部失败再退到 `errors="replace"`——保证
+    一定能拿到字符串，不能因为编码猜错就把整篇正文的抓取当成失败处理。
+    """
+    if header_encoding and header_encoding.lower() != "iso-8859-1":
+        try:
+            return raw.decode(header_encoding)
+        except (LookupError, UnicodeDecodeError):
+            pass
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 @dataclass(frozen=True)
@@ -390,9 +485,20 @@ def meta_date(html: str) -> date | None:
 
 
 def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
-    """代码自己把页面抓回来。**模型不经手正文一个字。**"""
+    """代码自己把页面抓回来。**模型不经手正文一个字。**
+
+    这也是本文件里第一处、也是唯一一处进程自己拿模型编出来的字符串去
+    发网络请求的地方（其余数据源打的都是代码写死的已知接口）。三道闸门
+    缺一不可：主机不能是内网/环回/链路本地/保留地址（见
+    `_reject_unsafe_host`，请求前后各查一次）；内容类型必须像网页，不
+    是 PDF/图片等二进制；读取的字节数有硬顶。三者都只是让抓取本身失败
+    （抛 `FetchFailed`），`gather()` 已经把它计进 `fetch_failed`、不会
+    连累其余候选——这条契约不变。
+    """
+    _reject_unsafe_host(url)
+
     def _get():
-        r = requests.get(url, headers=_HEADERS, timeout=timeout)
+        r = requests.get(url, headers=_HEADERS, timeout=timeout, stream=True)
         r.raise_for_status()
         return r
 
@@ -401,16 +507,33 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
     except Exception as e:                                  # noqa: BLE001
         raise FetchFailed(f"{url}：{e.__class__.__name__}: {e}") from e
 
-    # requests 对没有显式 charset 的页面会猜成 ISO-8859-1，中文页面因此
-    # 解出一片乱码——乱码不会报错，只会让正文提取和引文核验静默失效。
-    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
-        resp.encoding = resp.apparent_encoding or "utf-8"
-    html = resp.text
+    try:
+        final_url = resp.url or url
+        # 模型给的域名可能是公网的，但该域名服务端把请求 302 到内网地址
+        # ——只查请求前那一次拦不住这种情况，跟完重定向后必须再查一次。
+        _reject_unsafe_host(final_url)
+
+        content_type = (resp.headers.get("Content-Type") or "").split(";")[0]
+        content_type = content_type.strip().lower()
+        if content_type not in _ALLOWED_CONTENT_TYPES:
+            raise FetchFailed(
+                f"{url}：内容类型不是网页（{content_type or '未声明'}）")
+
+        raw = bytearray()
+        for chunk in resp.iter_content(chunk_size=65536):
+            raw.extend(chunk)
+            if len(raw) > FETCH_MAX_BYTES:
+                raise FetchFailed(
+                    f"{url}：正文超过 {FETCH_MAX_BYTES} 字节上限")
+    finally:
+        resp.close()
+
+    html = _decode(bytes(raw), resp.encoding)
 
     text = extract_text(html)
     if not text.strip():
         raise FetchFailed(f"{url}：正文提取为空")
-    return Fetched(final_url=resp.url or url, text=text,
+    return Fetched(final_url=final_url, text=text,
                    meta_published=meta_date(html))
 
 

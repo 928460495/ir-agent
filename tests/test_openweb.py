@@ -251,25 +251,49 @@ def test_正文提取剔除HTML注释不留残余文字或定界符():
     assert "-->" not in got
 
 
+def _fake_getaddrinfo_public(host, port):
+    """与 fetch() 的主机安全闸门无关的测试用：任何主机名都解析成一个
+    公网地址，绕开真实 DNS 调用（不需要网络、结果确定）。"""
+    return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+
+class _FakeFetchResp:
+    """`fetch()` 新实现依赖的响应形状：`headers`（内容类型闸门）、
+    `iter_content`（字节上限闸门，流式读）、`close`——不再是旧实现依赖
+    的一次性 `.content`/`.text`/`.apparent_encoding`（那条路径在读完流
+    之后会被 requests 标记为"已消费"，见 openweb._decode 的注释）。"""
+
+    def __init__(self, url, body: bytes,
+                content_type="text/html; charset=utf-8", encoding="utf-8"):
+        self.url = url
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+        self.encoding = encoding
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size=65536):
+        for i in range(0, len(self._body), chunk_size):
+            yield self._body[i:i + chunk_size]
+
+    def close(self):
+        return None
+
+
 def test_fetch_用最终URL并解码中文(monkeypatch):
     """两件事一起验：跟完重定向后的 final_url 必须是最终地址（分级要用
-    它），以及中文页面的编码必须按页面声明解，不能留 ISO-8859-1。"""
+    它），以及中文页面的编码必须按页面声明解，不能留 ISO-8859-1 的默认
+    猜测。主机安全闸门用 monkeypatch 顶掉，两个域名都放行到公网地址，
+    不做真实网络调用。"""
     import ir_agent.sources.openweb as OW
 
-    class _Resp:
-        url = "https://blog.example.com/real"
-        encoding = "ISO-8859-1"
-        apparent_encoding = "utf-8"
-        content = "<p>覆铜板报价上涨</p>".encode("utf-8")
-
-        @property
-        def text(self):
-            return self.content.decode(self.encoding)
-
-        def raise_for_status(self):
-            return None
-
-    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    body = "<p>覆铜板报价上涨</p>".encode("utf-8")
+    resp = _FakeFetchResp("https://blog.example.com/real", body,
+                          content_type="text/html; charset=ISO-8859-1",
+                          encoding="ISO-8859-1")
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
     got = OW.fetch("https://www.miit.gov.cn/redirects-away")
     assert got.final_url == "https://blog.example.com/real"
     assert "覆铜板报价上涨" in got.text
@@ -278,20 +302,129 @@ def test_fetch_用最终URL并解码中文(monkeypatch):
 def test_fetch_正文为空则抛(monkeypatch):
     import ir_agent.sources.openweb as OW
 
-    class _Resp:
-        url = "https://x.example.com/a"
-        encoding = "utf-8"
-        apparent_encoding = "utf-8"
-        content = b"<html><body><script>1</script></body></html>"
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    body = b"<html><body><script>1</script></body></html>"
+    resp = _FakeFetchResp("https://x.example.com/a", body)
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://x.example.com/a")
 
-        @property
-        def text(self):
-            return self.content.decode("utf-8")
 
-        def raise_for_status(self):
-            return None
+# ── final-fix-3 Fix 2：模型选的网址，代码自己去抓——没有主机闸门时，
+# 环回/内网/链路本地/保留地址、非网页内容类型、超大响应体都会被当成
+# 一篇正常文章抓回来入库 ──
 
-    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: _Resp())
+def test_fetch_拒绝环回地址(monkeypatch):
+    """`http://127.0.0.1/...` 这类地址在 fetch 运行的机器上往往连得通、
+    不会报错——必须在发请求前就查出来拦下，不能指望"连不上"兜底。"""
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(
+        OW.socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("127.0.0.1", 0))])
+
+    def _boom(*_a, **_k):
+        raise AssertionError("主机闸门没拦住，不该发起请求")
+    monkeypatch.setattr(OW.requests, "get", _boom)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://internal.example.com/x")
+
+
+def test_fetch_拒绝内网地址(monkeypatch):
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(
+        OW.socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("10.1.2.3", 0))])
+
+    def _boom(*_a, **_k):
+        raise AssertionError("主机闸门没拦住，不该发起请求")
+    monkeypatch.setattr(OW.requests, "get", _boom)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://internal.example.com/x")
+
+
+def test_fetch_拒绝链路本地地址(monkeypatch):
+    """169.254.169.254 是 AWS/GCP/阿里云等云主机的元数据端点，挂着实例
+    凭证——模型编一个这样的 URL，进程不能替它去问。"""
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(
+        OW.socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("169.254.169.254", 0))])
+
+    def _boom(*_a, **_k):
+        raise AssertionError("主机闸门没拦住，不该发起请求")
+    monkeypatch.setattr(OW.requests, "get", _boom)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://metadata.example.com/x")
+
+
+def test_fetch_拒绝保留地址(monkeypatch):
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(
+        OW.socket, "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("240.0.0.1", 0))])
+
+    def _boom(*_a, **_k):
+        raise AssertionError("主机闸门没拦住，不该发起请求")
+    monkeypatch.setattr(OW.requests, "get", _boom)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://reserved.example.com/x")
+
+
+def test_fetch_重定向到内网地址后仍被拒绝(monkeypatch):
+    """模型给的域名本身解析到公网，但该域名的服务端把请求 302 到内网
+    地址——只查请求前那一次拦不住，跟完重定向后必须再查一次。"""
+    import ir_agent.sources.openweb as OW
+
+    def _getaddrinfo(host, port):
+        if host == "public.example.com":
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+        if host == "internal.example.com":
+            return [(2, 1, 6, "", ("10.0.0.5", 0))]
+        raise AssertionError(f"未预期的主机名：{host}")
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _getaddrinfo)
+    resp = _FakeFetchResp("https://internal.example.com/after-redirect",
+                          "<p>不该被读到</p>".encode("utf-8"))
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://public.example.com/x")
+
+
+def test_fetch_拒绝非网页内容类型(monkeypatch):
+    """PDF/二进制经过 `extract_text` 大概率不是空字符串就是乱码——乱码
+    不会报错，会被当成"抓到了"直接入库，成为一条谁都对不出处的引文。"""
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    resp = _FakeFetchResp("https://x.example.com/a", b"%PDF-1.4 ...",
+                          content_type="application/pdf")
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://x.example.com/a")
+
+
+def test_fetch_超过字节上限时拒绝(monkeypatch):
+    """卡在读的过程中，不是读完再判断——不然仍然要求先把对方发来的任意
+    大小的响应体整个吃进内存，等于没卡。"""
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    monkeypatch.setattr(OW, "FETCH_MAX_BYTES", 10)
+    body = ("<p>" + "正文超长" * 10 + "</p>").encode("utf-8")
+    assert len(body) > 10
+    resp = _FakeFetchResp("https://x.example.com/a", body)
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+
     with pytest.raises(OW.FetchFailed):
         OW.fetch("https://x.example.com/a")
 
