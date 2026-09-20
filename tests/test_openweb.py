@@ -7,9 +7,65 @@ from datetime import date
 import pytest
 
 from ir_agent.sources.external import Tier
-from ir_agent.sources.openweb import tier_of_url
+from ir_agent.sources.openweb import SLOTS, Candidate, parse_candidates, tier_of_url
 
 AS_OF = date(2026, 9, 20)
+
+OUT = """候选: 行业规模与增速 | 2026年上半年全球覆铜板市场规模 | https://www.semi.org/a | SEMI | 2026-07-01
+候选: 政策与监管 | 工信部印发电子材料产业行动方案 | https://www.miit.gov.cn/b | 工业和信息化部 | 2026-06-15
+候选: 覆铜板批价跟踪 | 华东地区覆铜板报价周报 | https://finance.example.com/c | 某财经网 | 2026-08-01
+"""
+
+
+def test_解析出槽位标题网址机构日期():
+    got = parse_candidates(OUT)
+    assert len(got) == 3
+    first = got[0]
+    assert first.slot == "行业规模与增速"
+    assert first.title == "2026年上半年全球覆铜板市场规模"
+    assert first.url == "https://www.semi.org/a"
+    assert first.publisher == "SEMI"
+    assert first.published == date(2026, 7, 1)
+    assert first.extra is False
+
+
+def test_不在SLOTS里的槽位收下并标为额外():
+    got = parse_candidates(OUT)
+    extra = [c for c in got if c.extra]
+    assert len(extra) == 1
+    assert extra[0].slot == "覆铜板批价跟踪"
+
+
+def test_少于五段整条丢弃():
+    """与 parse_findings 同一条守卫：不存在「4 段也合法、日期可选」的分支。"""
+    assert parse_candidates(
+        "候选: 政策与监管 | 标题 | https://x.gov.cn/a | 某部委\n") == []
+
+
+def test_没有网址整条丢弃():
+    assert parse_candidates(
+        "候选: 政策与监管 | 标题 | 见官网 | 某部委 | 2026-06-15\n") == []
+
+
+def test_日期解析不出整条丢弃():
+    """这是 Document.published 能保持非空 date 的前提——进到 fetch 的
+    候选一定带着一个可解析的日期，任何路径上都不存在「日期不明」状态。"""
+    for bad in ("2026年7月", "近期", ""):
+        line = f"候选: 政策与监管 | 标题 | https://x.gov.cn/a | 某部委 | {bad}\n"
+        assert parse_candidates(line) == [], bad
+
+
+def test_容忍列表前缀与加粗():
+    """lineparse.keyed 的既有能力，这里确认确实走的是它。"""
+    got = parse_candidates(
+        "1. **候选**: 政策与监管 | 标题 | https://x.gov.cn/a | 某部委 | 2026-06-15\n")
+    assert len(got) == 1
+
+
+def test_提示词逐字含全部固定槽位():
+    from ir_agent.sources.openweb import PROMPT
+    for slot in SLOTS:
+        assert slot in PROMPT, slot
 
 
 def test_gov_cn_后缀落OFFICIAL():

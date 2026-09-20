@@ -297,9 +297,13 @@ class Finding:
     published: date
 
 
-def _parse_date(raw: str) -> date | None:
+def parse_date(raw: str) -> date | None:
     """尝试用几种常见写法解析日期；认不出或者不是合法日期就返回 None，
-    调用方（parse_findings）应将 None 视为「日期不明」并丢弃整条发现。"""
+    调用方（parse_findings）应将 None 视为「日期不明」并丢弃整条发现。
+
+    **公开而非私有**：openweb.parse_candidates 要用同一套日期解析。两处
+    对「日期解析不出就整条丢弃」的处置必须一致，抄一遍迟早会分叉。
+    """
     s = raw.strip()
     for pat in _DATE_PATTERNS:
         m = pat.search(s)
@@ -385,7 +389,7 @@ def parse_findings(text: str) -> list[Finding]:
         # 的证据获得最宽松的时点待遇，静静滑过系统里最关键的一道防线
         # （时点守卫）。这个隐患必须在产生 Finding 的这一步就堵死，
         # 不能指望下游每个调用点都记得防。
-        when = _parse_date(parts[4])
+        when = parse_date(parts[4])
         if when is None:
             continue
         out.append(Finding(factor_key=parts[0], claim=parts[1],

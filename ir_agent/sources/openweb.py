@@ -13,9 +13,14 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+from datetime import date
 from urllib.parse import urlparse
 
+from ir_agent.lineparse import keyed
 from ir_agent.sources.external import Tier
+from ir_agent.sources.web import parse_date
 
 # ── 来源分级 ────────────────────────────────────────────────────
 #
@@ -119,3 +124,101 @@ def tier_of_url(url: str) -> Tier:
         if _matches(host, entry):
             return Tier.OFFICIAL
     return Tier.MEDIA
+
+
+# ── 主题槽位 ────────────────────────────────────────────────────
+#
+# **固定槽位存在的唯一理由是让代码说得出缺了什么。** 这是本项目贯穿始终
+# 的原则（research.py 模块注释、full._load_external 里关于一致预期为空的
+# 那段长注释）：只列已完成的部分，读者会以为资料是全的。没有预期就没有
+# 缺口——主题若全由模型自由发挥，代码永远报不出「这次没取到政策原文」。
+#
+# 代价是覆盖面被槽位限死，Candidate.extra 正是为这个代价留的出口：模型
+# 可按行业特性追加槽位（白酒的批价、半导体的稼动率这类清单预先枚举不完），
+# 追加的收下并标为额外，**但不参与缺口判定**——缺口口径必须固定，不能
+# 随模型每轮的发挥浮动。
+SLOTS: tuple[str, ...] = (
+    "行业规模与增速",
+    "政策与监管",
+    "竞争格局与份额",
+    "上下游价格与供需",
+    "公司重大动态",
+)
+
+_LINE = keyed("候选")
+_URL = re.compile(r"https?://\S+")
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """模型给出的一个候选网址。**注意它不含正文** —— 正文由 fetch 抓。"""
+
+    slot: str
+    title: str
+    url: str
+    publisher: str
+    published: date
+    extra: bool          # 槽位不在 SLOTS 里 → 额外发现，不参与缺口判定
+
+
+def parse_candidates(text: str) -> list[Candidate]:
+    """解析 `候选:` 行。三道守卫与 web.parse_findings 逐条对齐。"""
+    out: list[Candidate] = []
+    for hit in _LINE.finditer(text):
+        parts = [p.strip() for p in hit.group(1).split("|")]
+        # 卡在 5：一行要完整给出 槽位|标题|网址|机构|日期 五段。少任何
+        # 一段都不是「4 段也合法」，而是整条不合规。
+        if len(parts) < 5:
+            continue
+        url_m = _URL.search(parts[2])
+        if not url_m:
+            # 没有网址就无从复核，与凭空捏造无异。
+            continue
+        when = parse_date(parts[4])
+        if when is None:
+            # **这道守卫是 Document.published 能保持非空 date 的前提。**
+            # 放行「日期不明」的候选，下游迟早会写出 `published or as_of`
+            # 那种兜底——而 as_of 恰好是唯一必然不触发 OutOfWindow 的取值，
+            # 等于让最不可信的证据获得时点上最宽松的待遇。见 web.py 的
+            # Finding.published 字段注释，那是同一条教训。
+            continue
+        slot = parts[0]
+        out.append(Candidate(slot=slot, title=parts[1], url=url_m.group(0),
+                             publisher=parts[3], published=when,
+                             extra=slot not in SLOTS))
+    return out
+
+
+PROMPT = """为一份 A 股研究报告采集公司与行业的外部资料。
+
+公司：{company}（{code}）
+行业：{industry}
+
+上网搜索，为下面每个主题各找**最多 {per_slot} 个**具体网页。
+只给网址，不要摘抄正文——正文由我们自己抓取。
+
+必找的主题：
+- 行业规模与增速
+- 政策与监管
+- 竞争格局与份额
+- 上下游价格与供需
+- 公司重大动态
+
+若这个行业还有别的关键外部资料（例如渠道批价、稼动率、库存周期），
+可另起主题名追加。
+
+每条一行：
+
+`候选: <主题> | <网页标题> | <网址> | <发布机构> | <发布日期 YYYY-MM-DD>`
+
+**硬性要求**
+- **必须给出网址**。没有网址的条目会被直接丢弃 —— 无从复核的转述与凭空
+  捏造无异。
+- **必须给出发布日期（YYYY-MM-DD）**。没写日期、或只写到「2026年7月」
+  这种月份粒度以致解析不出来的条目，同样会被直接丢弃。晚于 {as_of} 的
+  会被剔除：拿未来的资料分析过去，与账本的时点守卫是同一件事。
+- 优先统计局、部委、行业协会、一手市场研究机构的原始页面，其次财经媒体。
+- 找不到的主题就不要输出该主题的行，**不要用推测或不相关的网页填充**。
+
+只输出上述格式的行。
+"""
