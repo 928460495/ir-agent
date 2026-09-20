@@ -126,6 +126,14 @@ def test_畸形输入不炸():
         assert tier_of_url(bad) is Tier.MEDIA, bad
 
 
+def test_空前导标签不算gov_cn子域():
+    """`.gov.cn`（空前导标签）不是 gov.cn 的合法子域——DNS 不接受空
+    标签。字符串层面 ".gov.cn".endswith(".gov.cn") 为真，若不特判会被
+    误判成 OFFICIAL。fetch() 今天走不到这里（DNS 解析不出这种主机名），
+    但 tier_of_url 是公开函数，判错的方向落在危害一侧，必须堵。"""
+    assert tier_of_url("https://.gov.cn/x") is Tier.MEDIA
+
+
 from ir_agent.sources.openweb import extract_text, meta_date
 
 HTML = """<html><head>

@@ -109,6 +109,13 @@ def _matches(host: str, registered: str) -> bool:
     tier_of 被打穿的第一种形态：`evil-semi.org` 含子串 `semi.org`，
     `semi.org.evil.com` 也含，两者都不是 SEMI。
     """
+    if host.startswith("."):
+        # 空前导标签（host 形如 ".gov.cn"）不是任何域名的合法子域——
+        # DNS 不接受空标签。字符串层面 ".gov.cn".endswith(".gov.cn") 为
+        # 真，会被误判成 gov.cn 的子域从而拔到 OFFICIAL。fetch() 今天
+        # 走不到这里（这种主机名 DNS 解析不出来），但 tier_of_url 是
+        # 公开函数，判错的方向落在代价不对称里"危害"那一侧，必须堵。
+        return False
     return host == registered or host.endswith("." + registered)
 
 
