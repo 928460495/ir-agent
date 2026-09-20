@@ -98,6 +98,13 @@ class Document:
     # **限制跟着文档走，不跟着调用点走。** 在调用点上一刀切会把研报也
     # 截了，那是一次没人要求过的行为变更。
     prompt_limit: int | None = None
+    # 发布日期的来源：""=不适用（接口给出，如东财研报）/ "meta"=代码从
+    # 页面 meta 标签提取 / "model"=模型给出，未经代码核验。
+    #
+    # 之所以要逐篇记下来而不只统计个数：第二阶段是从落盘文件读回的，
+    # 那时已经没有「当时是怎么拿到这个日期的」这个上下文了。能重算的
+    # 不该存，而这个恰恰重算不出来。
+    date_source: str = ""
 
     def cite(self) -> str:
         return (f"{self.publisher}《{self.title}》"

@@ -532,3 +532,67 @@ def test_两个候选重定向到同一最终网址只入库一次(monkeypatch):
     assert len(res.docs) == 1, f"期望 res.docs 有 1 篇，实际 {len(res.docs)} 篇"
     # 验证入库的是最终 URL
     assert cp.docs[0].url == final_url
+
+
+def test_落盘读回后文档逐字还原(tmp_path, monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client(FOUR), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=cp)
+    path = tmp_path / OW.OPENWEB_JSON
+    OW.save(res, path)
+
+    back_cp = Corpus(as_of=AS_OF)
+    back = OW.load(path, back_cp)
+    assert len(back_cp.docs) == len(cp.docs)
+    for a, b in zip(cp.docs, back_cp.docs):
+        assert (a.doc_id, a.url, a.title, a.publisher) == \
+               (b.doc_id, b.url, b.title, b.publisher)
+        assert a.tier is b.tier
+        assert (a.published, a.retrieved, a.text) == \
+               (b.published, b.retrieved, b.text)
+        assert a.prompt_limit == b.prompt_limit
+        assert a.date_source == b.date_source
+    assert back.missing_slots == res.missing_slots
+    assert back.extra_slots == res.extra_slots
+    assert back.fetch_failed == res.fetch_failed
+    assert back.model_dated == res.model_dated
+
+
+def test_日期来源逐篇记录(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", _fake_fetch(PAGES))
+    cp = Corpus(as_of=AS_OF)
+    gather(_Client(FOUR), code="600183", company="生益科技",
+           industry="电子/元件", as_of=AS_OF, corpus=cp)
+    by_url = {d.url: d for d in cp.docs}
+    assert by_url["https://www.semi.org/a"].date_source == "meta"
+    assert by_url["https://www.miit.gov.cn/b"].date_source == "model"
+
+
+def test_读回时晚于as_of的文档仍被挡下(tmp_path):
+    """时点守卫不能因为「这是我们自己存的」就放行 —— as_of 可能变了。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    path = tmp_path / OW.OPENWEB_JSON
+    path.write_text(json.dumps({
+        "docs": [{"doc_id": "ow_x", "url": "https://x.gov.cn/a",
+                  "title": "标题", "publisher": "某部委", "tier": "official",
+                  "published": "2026-12-31", "retrieved": "2026-09-20",
+                  "text": "正文", "prompt_limit": 2000, "date_source": "model"}],
+        "missing_slots": [], "extra_slots": [], "fetch_failed": 0,
+        "model_dated": 1}, ensure_ascii=False), encoding="utf-8")
+    cp = Corpus(as_of=AS_OF)
+    OW.load(path, cp)
+    assert cp.docs == []
+    assert cp.skipped != []
+
+
+def test_文件不存在时返回空结果而不抛(tmp_path):
+    import ir_agent.sources.openweb as OW
+    cp = Corpus(as_of=AS_OF)
+    back = OW.load(tmp_path / "nope.json", cp)
+    assert back.docs == []
+    assert cp.docs == []

@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
@@ -440,6 +442,7 @@ def gather(client, *, code: str, company: str, industry: str,
             retrieved=as_of,
             text=got.text,
             prompt_limit=TEXT_LIMIT,
+            date_source="meta" if got.meta_published is not None else "model",
         )
         if not corpus.add_if_visible(doc):
             continue
@@ -468,3 +471,76 @@ def summary(res: OpenWebResult) -> str:
     for slot in res.missing_slots:
         lines.append(f"  – {slot}：未取到")
     return "\n".join(lines)
+
+
+# ── 跨阶段存活 ──────────────────────────────────────────────────
+#
+# **discover 调模型，而 _analyse_facts 那一层两个阶段都跑。** 若第二阶段
+# 重跑一次 discover，取到的文档会与第一阶段不同，第一阶段正文里写下的
+# 外部引文因此在第二阶段核验不过 —— 本项目已经吃过这类亏（判断项的依据
+# 没跨阶段存活，第二阶段被自己的闸门拒掉）。
+#
+# 「能重算的就不要存」在这里反向成立：discover 的结果**重算不出来**，
+# 正是该存的那一类。存全文而不只存网址，是因为照网址重抓时页面改一个字
+# 引文核验就挂。
+
+OPENWEB_JSON = "openweb.json"
+
+
+def _doc_to_json(d: Document) -> dict:
+    return {"doc_id": d.doc_id, "url": d.url, "title": d.title,
+            "publisher": d.publisher, "tier": d.tier.value,
+            "published": d.published.isoformat(),
+            "retrieved": d.retrieved.isoformat(), "text": d.text,
+            "prompt_limit": d.prompt_limit, "date_source": d.date_source}
+
+
+def _doc_from_json(raw: dict) -> Document:
+    return Document(doc_id=raw["doc_id"], url=raw["url"], title=raw["title"],
+                    publisher=raw["publisher"], tier=Tier(raw["tier"]),
+                    published=date.fromisoformat(raw["published"]),
+                    retrieved=date.fromisoformat(raw["retrieved"]),
+                    text=raw["text"], prompt_limit=raw.get("prompt_limit"),
+                    date_source=raw.get("date_source", ""))
+
+
+def save(res: OpenWebResult, path: Path | str) -> None:
+    Path(path).write_text(json.dumps({
+        "docs": [_doc_to_json(d) for d in res.docs],
+        "missing_slots": res.missing_slots,
+        "extra_slots": res.extra_slots,
+        "fetch_failed": res.fetch_failed,
+        "model_dated": res.model_dated,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load(path: Path | str, corpus) -> OpenWebResult:
+    """读回落盘的文档并入语料库。文件不存在或损坏时返回空结果，不抛。
+
+    **时点守卫照样要过一遍**（走 corpus.add_if_visible）：as_of 可能与
+    落盘时不同，「这是我们自己存的」不构成放行理由。
+    """
+    p = Path(path)
+    if not p.exists():
+        return OpenWebResult()
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:                                       # noqa: BLE001
+        return OpenWebResult()
+
+    res = OpenWebResult(
+        missing_slots=list(raw.get("missing_slots", [])),
+        extra_slots=list(raw.get("extra_slots", [])),
+        fetch_failed=int(raw.get("fetch_failed", 0)),
+        model_dated=int(raw.get("model_dated", 0)))
+    seen = {d.url for d in corpus.docs}
+    for item in raw.get("docs", []):
+        try:
+            doc = _doc_from_json(item)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if doc.url in seen or not corpus.add_if_visible(doc):
+            continue
+        seen.add(doc.url)
+        res.docs.append(doc)
+    return res
