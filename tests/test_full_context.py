@@ -1391,3 +1391,61 @@ def test_第一阶段填判断项时带上锚定输入():
     import inspect
     from ir_agent import full
     assert "anchor=assume.anchor_from_cal(cal)" in inspect.getsource(full._propose_assumptions)
+
+
+def test_开放网络采集不在确定性层里():
+    """`_analyse_facts` 的不变量是「不调模型，因此两个阶段都要跑」。
+    discover 要调模型 —— 放进去会让第二阶段取到与第一阶段不同的文档，
+    第一阶段写下的外部引文因此在第二阶段核验不过。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full._analyse_facts)
+    assert "openweb" not in src
+    assert "_load_openweb" not in src
+
+
+def test_第一阶段采集排在定性三节之前():
+    """战略/产业链/宏观定性要引用开放网络文档的原文，采集必须更早。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_analysis)
+    assert src.index("_load_openweb") < src.index("_analyse_qualitative")
+    assert src.index("_analyse_facts") < src.index("_load_openweb")
+
+
+def test_第二阶段只读回不重新采集():
+    """第二阶段不得引入第一阶段没有的文档。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_valuation)
+    assert "_restore_openweb" in src
+    assert "_load_openweb" not in src
+    assert src.index("_analyse_facts") < src.index("_restore_openweb")
+
+
+def test_读回排在完整研报撰写之前():
+    """_build_evidence 用 r.corpus 做引文核验，读回必须更早。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_valuation)
+    assert src.index("_restore_openweb") < src.index("_write_full_report")
+
+
+def test_采集用的是开了联网工具的client():
+    """不开工具不会报错，只会安静地什么都搜不到 —— 比直接失败更难发现。
+
+    采集必须复用 methodology/gaps 那个已显式开启 WebSearch/WebFetch 的
+    `research_client`，不能用默认不开工具的 `qual_client`。
+    """
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full.run_analysis)
+    call = src[src.index("_load_openweb("):]
+    call = call[:call.index(")")]
+    assert "research_client" in call
+    assert "qual_client" not in call

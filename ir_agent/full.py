@@ -101,6 +101,87 @@ def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
     return md, C.consensus_prompt(cs), ""
 
 
+def _company_name(code: str) -> str:
+    """公司简称。取不到就退回代码 —— 搜索提示词里写代码也能用。"""
+    try:
+        from ir_agent.sources.taxonomy import fetch_all
+        rows = fetch_all()
+    except Exception:                                       # noqa: BLE001
+        return code
+    me = next((e for e in rows if e.code == code), None)
+    return me.name if me is not None else code
+
+
+def _load_openweb(code: str, r, as_of: date, out: Path, client,
+                  industry: str) -> list[str]:
+    """开放网络文档入语料库。返回要记进产物清单的条目。
+
+    **这里不能放进 `_analyse_facts`。** 那一层的不变量写在它自己的
+    docstring 上：「不调模型，因此两个阶段都要跑」。而本函数要调模型，
+    放进去有两个后果，第二个是致命的：
+
+      1. 成本翻倍 —— 两个阶段各跑一次
+      2. 第二阶段可能取到**与第一阶段不同的文档**，于是第一阶段正文里
+         写下的外部引文，在第二阶段核验不过
+
+    第 2 条是本项目已经吃过的那类亏。根因同一个：**一个不可复现的产物
+    被放在了会被重跑的位置上。** corpus.gather 能待在确定性层，是因为
+    东财接口同 as_of 返回同一批研报；discover 没有这个性质，网页本身
+    也会变。因此第一阶段落盘、第二阶段读回（见 `_restore_openweb`）。
+    """
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus
+
+    if r.corpus is None:
+        r.corpus = Corpus(as_of=as_of)
+    try:
+        res = openweb.gather(client, code=code, company=_company_name(code),
+                             industry=industry, as_of=as_of, corpus=r.corpus)
+    except Exception as e:                                  # noqa: BLE001
+        return [f"开放网络采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
+
+    openweb.save(res, out / openweb.OPENWEB_JSON)
+    if not res.docs:
+        return ["开放网络资料：一篇都没取到，"
+                "定性判断的外部依据仍只有券商研报一类来源"]
+
+    notes: list[str] = []
+    if res.fetch_failed:
+        notes.append(f"{res.fetch_failed} 篇抓取失败")
+    if res.model_dated:
+        notes.append(f"{res.model_dated} 篇的发布日期由模型给出，未经代码核验")
+    for slot in res.missing_slots:
+        notes.append(f"{slot}：未取到")
+    if notes:
+        return ["开放网络资料（" + "；".join(notes) + "）"]
+    return []
+
+
+def _restore_openweb(r, out: Path) -> list[str]:
+    """第二阶段：读回第一阶段落盘的开放网络文档。**不重新采集。**
+
+    落盘文件缺失或损坏时照常继续，只记清单 —— 重跑 discover 会引入第一
+    阶段没有的文档，那正是这套落盘机制要防的事。
+    """
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus
+
+    path = out / openweb.OPENWEB_JSON
+    if not path.exists():
+        return ["开放网络资料未跨阶段存活（未找到 "
+                f"{openweb.OPENWEB_JSON}），外部引文可能核验不过"]
+    if r.corpus is None:
+        r.corpus = Corpus(as_of=r.as_of)
+    res = openweb.load(path, r.corpus)
+    if not res.docs:
+        return ["开放网络资料未跨阶段存活（落盘文件读不出文档），"
+                "外部引文可能核验不过"]
+    if res.model_dated:
+        return [f"开放网络资料（{res.model_dated} 篇的发布日期由模型给出，"
+                "未经代码核验）"]
+    return []
+
+
 def _load_sections(r):
     """年报叙述章节 —— 战略与产业链分析的证据基础。"""
     from ir_agent.sources.annual_sections import extract
@@ -996,10 +1077,10 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 反了就退化成「先收集再解释」，那正是此前的形状: 固定模板 + 填
     # 数据，无论研究什么公司问的都是同一组通用指标。
     #
-    # 预研与随后的因子定向采集都要联网，client 必须提前显式开启
-    # WebSearch/WebFetch 工具 —— 不开的话不会报错，只会安静地什么都
-    # 搜不到，比直接失败更容易被忽略，所以单独开一个 client 而不是
-    # 复用下面 `_analyse_qualitative` 里那个默认不开工具的 client。
+    # 预研、随后的因子定向采集、以及开放网络文档采集都要联网，client
+    # 必须提前显式开启 WebSearch/WebFetch 工具 —— 不开的话不会报错，
+    # 只会安静地什么都搜不到，比直接失败更容易被忽略，所以单独开一个
+    # client，不能用定性三节那个默认不开工具的 client。
     research_client = make_client(model=model, tools=["WebSearch", "WebFetch"])
     # 预研抛 MethodologyFailed（或取不到申万行业分类）时，_research_methodology
     # 返回 (None, 原因) 而不向上抛异常——退回不分解模式，判断项仍按营收增速/
@@ -1012,6 +1093,15 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
 
     md, pr, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
     skipped += facts_skipped
+
+    # ── 开放网络文档入语料库 ────────────────────────────────────
+    # 接在确定性层之后（研报已入库，去重要用）、定性三节之前（战略 /
+    # 产业链 / 宏观定性要引用其中的原文）。**不能并进 _analyse_facts** ——
+    # 理由见 _load_openweb 的 docstring。
+    skipped += _load_openweb(
+        code, r, as_of, out, research_client,
+        industry=(meth.industry if meth is not None else ""))
+
     qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
 
     # ── 按分解式定向采集因子数据 ────────────────────────────────
@@ -1267,6 +1357,9 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     print("重建分析层事实（不调模型）…", file=sys.stderr)
     _, _, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
     skipped += facts_skipped
+    # 开放网络文档：读回第一阶段落盘的，**不重新采集**。重跑 discover
+    # 会引入第一阶段没有的文档，让第一阶段正文里的外部引文核验不过。
+    skipped += _restore_openweb(r, out)
 
     # 基期毛利率也要在重建之后再取——gross_margin 同样来自派生层。
     # I4：取「最近一个完整年度」，不跟着 r.period 走——同一个理由见
