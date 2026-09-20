@@ -303,10 +303,17 @@ def for_prompt(corpus, ledger: FactLedger, period: str, as_of: date,
             lines.append(f"  【年报·{s.label}】")
             lines.append("  " + s.text.replace("\n", "\n  "))
     if corpus is not None and corpus.docs:
-        from ir_agent.sources.external import TIER_LABEL
+        from ir_agent.sources.external import TIER_LABEL, TIER_RULE
+        seen_tiers = {d.tier for d in corpus.docs}
+        # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
+        # 放在资料读完之后才说，等于让它先斩后奏。
+        for t in seen_tiers:
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
             lines.append("  " + d.for_prompt().replace("\n", "\n  "))
+        for t in seen_tiers:
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
     else:
         lines.append("  外部资料：本次未取到 —— 产业链只能依据年报自述，"
                      "覆盖面有限，未提及的环节须明说无据")

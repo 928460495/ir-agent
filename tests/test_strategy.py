@@ -281,6 +281,26 @@ def test_提示词带上外部资料与其可引用范围():
     assert "不得作为本报告任何假设的依据" in txt
 
 
+def test_财经媒体的可引用范围出现在资料正文之前():
+    """媒体资料混进语料库后，模型是先读到「仅作线索，不得作为依据」
+    才看到正文，还是读完正文才补一句规矩 —— 顺序决定这条约束是否
+    真的在起作用。"""
+    from datetime import date as _d
+
+    from ir_agent.sources.external import Corpus, Document, Tier, TIER_RULE
+
+    media_text = "白酒板块情绪回暖，机构调仓迹象明显。"
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="板块观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=_d(2026, 8, 1), retrieved=AS_OF, text=media_text))
+
+    txt = strategy.for_prompt(_led(), P, AS_OF, _sections(), corpus=c)
+    rule = TIER_RULE[Tier.MEDIA]
+    assert rule in txt
+    assert txt.index(rule) < txt.index(media_text)
+
+
 def test_没取到外部资料时明说外部视角缺位():
     """静默地只用年报，读者会以为战略判断有外部印证。"""
     from ir_agent.sources.external import Corpus

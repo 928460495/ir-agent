@@ -241,11 +241,14 @@ def for_prompt(ledger: FactLedger, period: str, as_of: date,
     if corpus is not None and corpus.docs:
         from ir_agent.sources.external import TIER_LABEL, TIER_RULE
         lines.append("\n  公司之外的资料（引用时同样须逐字照抄）：")
-        seen_tiers = set()
+        seen_tiers = {d.tier for d in corpus.docs}
+        # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
+        # 放在资料读完之后才说，等于让它先斩后奏。
+        for t in seen_tiers:
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
             lines.append("  " + d.for_prompt().replace("\n", "\n  "))
-            seen_tiers.add(d.tier)
         for t in seen_tiers:
             lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
     elif corpus is not None:

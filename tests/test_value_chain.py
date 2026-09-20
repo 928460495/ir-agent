@@ -199,6 +199,24 @@ def test_提示词带上可交叉印证的分位数():
     assert "[[payable_days.percentile@2025FY]]" in txt
 
 
+def test_财经媒体的可引用范围出现在资料正文之前():
+    """十篇【财经媒体】文档紧贴在【年报】资料块下面，唯一约束它们
+    用途的是 TIER_RULE —— 必须先于正文出现，模型才是带着这条界线
+    去读，而不是读完才补一句规矩。"""
+    from ir_agent.sources.external import TIER_RULE
+
+    media_text = "白酒板块情绪回暖，机构调仓迹象明显。"
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="板块观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=date(2026, 8, 1), retrieved=AS_OF, text=media_text))
+
+    txt = VC.for_prompt(c, _led(), P, AS_OF)
+    rule = TIER_RULE[Tier.MEDIA]
+    assert rule in txt
+    assert txt.index(rule) < txt.index(media_text)
+
+
 def test_驳回后重试并带回原因():
     bad = _out(powers=["议价: 上游 | 强"], size=False)
     c = _Client(bad, _out())

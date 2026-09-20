@@ -220,10 +220,17 @@ def for_prompt(corpus, macro_prompt: str = "") -> str:
         lines.append("  可引用的宏观读数（占位符）：")
         lines.append("  " + macro_prompt.replace("\n", "\n  "))
     if corpus is not None and corpus.docs:
-        from ir_agent.sources.external import TIER_LABEL
+        from ir_agent.sources.external import TIER_LABEL, TIER_RULE
+        seen_tiers = {d.tier for d in corpus.docs}
+        # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
+        # 放在资料读完之后才说，等于让它先斩后奏。
+        for t in seen_tiers:
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
             lines.append("  " + d.for_prompt().replace("\n", "\n  "))
+        for t in seen_tiers:
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
     else:
         lines.append("  外部宏观资料：本次未取到 —— 政策取向缺少文字依据，"
                      "只能由读数推断，结论强度应相应说明")
