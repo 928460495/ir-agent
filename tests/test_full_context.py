@@ -1509,6 +1509,43 @@ def test_因子数据采集之后重渲染外部资料清单():
         "_refresh_external_md 必须在 gaps.collect 成功之后再调一次"
 
 
+def test_因子采集抛异常时重渲染仍必须发生():
+    """上一条测试只按**行号**判断"之后"，看不见异常路径——`gaps.collect`
+    在循环里逐因子调用 `corpus.add_if_visible`，往 `r.corpus` 塞文档
+    发生在异常抛出**之前**：第 N 个因子已经命中④外部网络分支、写进了
+    语料库，第 N+1 个因子采集时才炸，`gaps.collect` 整体以异常退出。
+    此前的实现把 `_refresh_external_md(r, md)` 放在 try 块内、紧跟在
+    `md["因子数据"] = gaps.summary(factor_data)` 后面——`gaps.collect`
+    一抛异常，这两行都被跳过，第 N 个因子已经污染的语料库从未让
+    `md["外部资料"]` 知道。把行号往后挪到 try 块末尾也能骗过上一条
+    测试（这正是本条要单独存在的理由）。真正堵住这个洞要求刷新落在
+    `finally` 分支——`finally` 是 Python 语义保证"不论 try 块成功、
+    异常退出都会执行"的唯一位置，因此直接在语法树上定位包住
+    `gaps.collect` 调用的 `try` 节点，断言 `_refresh_external_md` 出现
+    在它的 `finally` 分支里，而不是 `try`/`else` 分支——只有落在
+    `finally` 才能对异常路径生效，行号判断天然分不清这个区别。"""
+    from ir_agent import full
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    target = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        body_calls = {_call_name(c) for stmt in node.body
+                     for c in ast.walk(stmt) if isinstance(c, ast.Call)}
+        if "gaps.collect" in body_calls:
+            target = node
+            break
+    assert target is not None, "run_analysis 里没找到包住 gaps.collect 的 try 块"
+
+    finally_calls = {_call_name(c) for stmt in target.finalbody
+                     for c in ast.walk(stmt) if isinstance(c, ast.Call)}
+    assert "_refresh_external_md" in finally_calls, (
+        "_refresh_external_md 必须落在包住 gaps.collect 的 try 块的 "
+        "finally 分支里，否则 gaps.collect 抛异常时会被跳过，读者看到"
+        "的外部资料清单停在这次采集之前那一刻")
+
+
 def test_采集用的是开了联网工具的client():
     """不开工具不会报错，只会安静地什么都搜不到 —— 比直接失败更难发现。
 

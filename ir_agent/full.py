@@ -1245,16 +1245,25 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
                 sections=getattr(r, "sections", None),
                 annual_url=getattr(r, "annual_url", ""))
             md["因子数据"] = gaps.summary(factor_data)
-            # **第二处会往同一个 corpus 塞文档的地方，同一条修复要再打
-            # 一遍。** `gaps.collect` 的④外部网络分支命中时会调
-            # `corpus.add_if_visible` 往 `r.corpus` 里加文档（见
-            # gaps.py），与上面 `_load_openweb` 是同一类"污染了语料库
-            # 却没让 md 知道"——`md["外部资料"]` 是在这次采集**之前**
-            # 渲染的，不重渲染，读者看到的篇数与分级构成就还停在采集前
-            # 那一刻，跟这次修复要堵的是同一个洞（见 `_external_md`）。
-            _refresh_external_md(r, md)
         except Exception as e:                              # noqa: BLE001
             skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
+        finally:
+            # **必须在 finally 里，不能紧跟在 try 块成功路径的末尾。**
+            # `gaps.collect` 按分解出的因子逐个循环，④外部网络分支命中
+            # 时会在循环内部调 `corpus.add_if_visible` 往 `r.corpus` 里
+            # 加文档（见 gaps.py）——这发生在循环体里，早于整个函数
+            # return 或 raise。真实故障形状：第 N 个因子已经把文档塞进
+            # `r.corpus`，第 N+1 个因子采集时才报错，`gaps.collect` 整体
+            # 以异常退出——这条修复此前把 `_refresh_external_md(r, md)`
+            # 放在 try 块内、`md["因子数据"] = ...` 之后，异常一抛，这行
+            # 跟着被跳过，第 N 个因子已经写进语料库的文档，`md["外部
+            # 资料"]` 从未被告知过，读者看到的篇数与分级构成停在这次
+            # 采集之前那一刻——与上面 `_load_openweb` 之后那次重渲染是
+            # 同一类"污染了语料库却没让 md 知道"的洞（见
+            # `_external_md`），只是这次洞出在异常路径上。`finally`
+            # 保证不论 `gaps.collect` 成功、部分成功后抛异常、还是从
+            # 一开始就抛异常，都会重渲染一次。
+            _refresh_external_md(r, md)
 
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, brief=True, **_prompt_bundle(pr))
