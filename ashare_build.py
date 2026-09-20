@@ -1053,12 +1053,19 @@ def _ratios(wb, cal, D_):
     # 用已披露期占全年营收比重的倒数，不用固定 ×2——固定 ×2 正是 ashare_calibrate
     # 里 _wc 注释记录过的做法：收入非均匀分布时会系统性带偏（该处示例：生益 DPO
     # 126→164），已被回测闸门拒绝过；同一个偏差不能又出现在展示层。
+    #
+    # 「流量÷平均存量」这一类不止 ROE/ROA/ROIC：总资产周转率（营收/平均总资产）、
+    # 固定资产周转率（营收/平均固定资产）同属此类，且总资产周转率在本表出现了
+    # 三处（营运效率区块独立展示一次、杜邦三因子②、杜邦五因子④）——若只年化
+    # 杜邦区块里那两处、漏了营运效率区块的独立展示行，会让同一张表里出现两个
+    # 数值不同的「总资产周转率」，恒等式是保住了，但读者看同名两值只会觉得表
+    # 错了。三处必须用同一套 ann="num" 逻辑，公式才会逐字一致。
     _itb=cal.get("interim")
     ITM_IDX=(NH-1) if (PR.get("interim") and _itb and _itb.get("share")) else None
     ITM_FACTOR=f"{1.0/_itb['share']:.6f}" if ITM_IDX is not None else None
-    w.cell(3,1,("中期列（本期中报）：ROE/ROA/ROIC 的分子、DSO/DIO/DPO/CCC 的分母已按"
-                "「已披露期占全年营收比重」的倒数年化（非固定×2），单元格批注给出年化前原式；"
-                "毛利率等流量÷流量的比率本来就对，未年化。") if ITM_IDX is not None else
+    w.cell(3,1,("中期列（本期中报）：ROE/ROA/ROIC、总资产周转率、固定资产周转率的分子，"
+                "DSO/DIO/DPO/CCC 的分母，已按「已披露期占全年营收比重」的倒数年化（非固定×2），"
+                "单元格批注给出年化前原式；毛利率等流量÷流量的比率本来就对，未年化。") if ITM_IDX is not None else
                 "本报表无已披露中期，全部历史列均为整年数据。").font=Font(size=9,color="C00000")
     def hdr(r,title):
         w.cell(r,1,title).font=F_HDR
@@ -1130,8 +1137,13 @@ def _ratios(wb, cal, D_):
                                     f"-{B_}!{c}19/({P}!{c}{RC}{'*'+m if m else ''})*365"),
            "0.0",True,"DSO + DIO − DPO；为负说明占用上游资金",ann="den")
     ROWS["ato"]=r
-    r=line(r,"总资产周转率", lambda c,p,i,m=None: IE(f"{P}!{c}{RV}/{avg(B_,16,c,p)}"),MX)
-    r=line(r,"固定资产周转率", lambda c,p,i,m=None: IE(f"{P}!{c}{RV}/{avg(B_,12,c,p)}"),MX)
+    # 总资产/固定资产周转率＝营收(流量)/平均资产(存量)，与 ROE 同属「流量÷平均
+    # 存量」一类，中期列须对分子年化——否则会与杜邦区块里同名的①总资产周转率
+    # （下方，已年化）显示成两个不同的数字，见文件头注释。
+    r=line(r,"总资产周转率",
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RV}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),MX,ann="num")
+    r=line(r,"固定资产周转率",
+           lambda c,p,i,m=None: IE(f"({P}!{c}{RV}{'*'+m if m else ''})/{avg(B_,12,c,p)}"),MX,ann="num")
     r+=1
     r=hdr(r,"三、偿债与资本结构")
     r=line(r,"资产负债率", lambda c,p,i,m=None: IE(f"{B_}!{c}24/{B_}!{c}16"))
@@ -1161,7 +1173,8 @@ def _ratios(wb, cal, D_):
     r=line(r,"① 归母净利率 = 归母净利 / 营收", lambda c,p,i,m=None: IE(f"{P}!{c}{RNIP}/{P}!{c}{RV}"))
     # 此处的②必须与「ROE（归母，平均净资产）」同步年化——否则①×②×③会与
     # 已年化的 ROE 行对不上，「★ 三因子恒等式校验」会在中期列报错。二、营运
-    # 效率下的「总资产周转率」独立展示行不受影响，仍按 brief 的分类表不动。
+    # 效率下的「总资产周转率」独立展示行同属「流量÷平均存量」，也已同步年化
+    # （见上方该行定义处的注释）——三处必须口径一致，否则同名指标显示两个数。
     r=line(r,"② 总资产周转率 = 营收 / 平均总资产",
            lambda c,p,i,m=None: IE(f"({P}!{c}{RV}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),MX,ann="num")
     r=line(r,"③ 权益乘数 = 平均总资产 / 平均归母权益", lambda c,p,i,m=None: IE(f"{avg(B_,16,c,p)}/{avg(B_,25,c,p)}"),MX)

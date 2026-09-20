@@ -93,6 +93,79 @@ def test_毛利率等流量比流量不年化(tmp_path):
             f"{label} 是流量÷流量，中期列不该被年化，公式为：{f}")
 
 
+def test_总资产周转率三处口径一致(tmp_path):
+    """总资产周转率在本表出现三处：营运效率区块独立展示一次、杜邦三因子②、
+    杜邦五因子④。三处都是「流量÷平均存量」，中期列必须年化，且年化后必须
+    是同一个数——不能出现「杜邦里一个数、营运效率区块另一个数」，那会让
+    读者看到同名指标两个不同的值，只会认为表错了。
+
+    这条测试要能在有人将来只改一处（例如只改了营运效率区块，漏了杜邦区块，
+    或反过来）时变红：断言用的是公式原文的逐字相等，任何一处的年化因子或
+    年化对象（分子/分母）与另外两处不一致都会导致失败。
+    """
+    wb, cal = _wb(tmp_path)
+    ws = wb["7_财务比率与杜邦"]
+    NH = cal["_rows"]["NH"]
+    # 精确匹配三处指标行的标签（不用子串匹配，避免连表头说明文字里提到
+    # 「总资产周转率」的那一整段说明也被算进来）。
+    labels = {"总资产周转率", "② 总资产周转率 = 营收 / 平均总资产", "④ 总资产周转率"}
+    rows = [r for r in ws.iter_rows() if r[0].value in labels]
+    assert len(rows) == 3, f"预期三处「总资产周转率」（营运效率/杜邦三因子②/杜邦五因子④），实际找到 {len(rows)} 处"
+    itm_formulas = [r[1 + (NH - 1)].value for r in rows]
+    assert all(isinstance(f, str) and f.startswith("=") for f in itm_formulas), \
+        f"总资产周转率三处中期列都应是活公式，实际：{itm_formulas}"
+    assert len(set(itm_formulas)) == 1, (
+        "总资产周转率三处中期列公式不一致——同一张表出现了两个数值不同的"
+        f"「总资产周转率」：{itm_formulas}")
+    factor = round(1.0 / cal["interim"]["share"], 6)
+    assert all(str(factor) in f or f"{factor:.6f}" in f for f in itm_formulas), (
+        f"总资产周转率中期列未按 1/share={factor} 年化，公式为：{itm_formulas}")
+
+
+def test_固定资产周转率中期列已年化(tmp_path):
+    """固定资产周转率＝营收(流量)/平均固定资产(存量)，与总资产周转率同类，
+    也必须对分子年化，否则中期列会显示成腰斩的效率。"""
+    wb, cal = _wb(tmp_path)
+    ws = wb["7_财务比率与杜邦"]
+    NH = cal["_rows"]["NH"]
+    row = [r for r in ws.iter_rows() if r[0].value == "固定资产周转率"]
+    assert row, "找不到固定资产周转率行"
+    itm_cell = row[0][1 + (NH - 1)]
+    f = itm_cell.value
+    factor = round(1.0 / cal["interim"]["share"], 6)
+    assert isinstance(f, str) and (str(factor) in f or f"{factor:.6f}" in f), (
+        f"固定资产周转率中期列未按 1/share={factor} 年化，公式为：{f}")
+
+
+def test_杜邦恒等式中期列成立(tmp_path):
+    """杜邦三因子/五因子分解的连乘结果必须与直接计算的 ROE 相等（中期列也不
+    例外）。这是把 brief 里「保住恒等式」这条约束写成可执行断言，而不是只
+    靠人读公式判断——用 formulas 引擎真正把工作簿算一遍，取「★ 恒等式校验」
+    那一行在中期列的数值，断言其等于 0（浮点误差内）。
+    """
+    import formulas
+    cal = pickle.load(open(FIX, "rb"))
+    out = str(tmp_path / "t_dupont.xlsx")
+    B.build(cal, out)
+    rr = cal["_ratio_rows"]
+    NH = cal["_rows"]["NH"]
+    col_idx = 2 + (NH - 1)  # 1-based 列号：B=2 是第一个历史列，中期是第 NH 列
+    from openpyxl.utils import get_column_letter as CL
+    col = CL(col_idx)
+    sol = formulas.ExcelModel().loads(out).finish().calculate()
+    fn = os.path.basename(out)
+
+    def G(sheet, cell):
+        v = sol.get(f"'[{fn}]{sheet}'!{cell}")
+        assert v is not None, f"formulas 引擎未能算出 {sheet}!{cell}"
+        return float(v.value[0, 0])
+
+    chk3 = G("7_财务比率与杜邦", f"{col}{rr['chk3']}")
+    chk5 = G("7_财务比率与杜邦", f"{col}{rr['chk5']}")
+    assert abs(chk3) < 1e-6, f"三因子恒等式在中期列未成立：连乘−直接计算 = {chk3}"
+    assert abs(chk5) < 1e-6, f"五因子恒等式在中期列未成立：连乘−直接计算 = {chk5}"
+
+
 def test_利息保障倍数为负时不被藏起来(tmp_path):
     ws, _ = _wb(tmp_path)
     ws = ws["7_财务比率与杜邦"]
