@@ -30,6 +30,31 @@ def _mean(xs, lo=None, hi=None, default=None, what=None):
         _CLAMPS.append(f"{what}：原值 {raw:.4g} 被截断至 {m:.4g}（允许区间 {rng}，样本 {len(xs)} 个）")
     return m
 
+
+def _yoy_hedge(last_annual, itm_now, itm_prev, lo=None, hi=None, what=None):
+    """季节性对冲：最近年报值 +（本期中期 − 去年同期中期）。
+
+    **为什么不直接用中期值当全年。** 两个方向的季节性都会系统性带偏：
+    年末计提奖金、研发集中在下半年，H1 费用率偏低；而中期"×2 年化"会
+    因收入非均匀分布抬高周转天数（生益 DPO 126→164，见下方 `_wc` 的注释）。
+    同比差分只取"今年比去年同期多/少了多少"这一份增量，加到季节性干净的
+    年报口径上，两种偏差各自抵消。
+
+    任一中期缺失 → 退回年报原值。**缺数据不是"同比没变"**，但在没有更好
+    信息时，年报口径本身是可辩护的；而硬凑一个差分会把噪声当增量。
+    """
+    if last_annual is None:
+        return None
+    if itm_now is None or itm_prev is None:
+        return float(last_annual)
+    m = raw = float(last_annual) + (float(itm_now) - float(itm_prev))
+    if lo is not None: m = max(m, lo)
+    if hi is not None: m = min(m, hi)
+    if what is not None and abs(m - raw) > 1e-12:
+        rng = f"{'' if lo is None else f'{lo:.4g}'}–{'' if hi is None else f'{hi:.4g}'}"
+        _CLAMPS.append(f"{what}（季节性对冲后）：原值 {raw:.4g} 被截断至 {m:.4g}（允许区间 {rng}）")
+    return m
+
 def opening_balances(bal, p) -> dict:
     """最近年报期初余额，8 项资产 + 8 项负债权益，保证恒等。"""
     g = lambda k: _v0(bal, k, p)
