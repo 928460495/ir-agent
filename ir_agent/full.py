@@ -62,6 +62,37 @@ def _load_macro(r, as_of: date) -> tuple[str, str, str]:
     return snap.describe(), snap.for_prompt(), ""
 
 
+def _external_md(corpus, consensus) -> str:
+    """外部资料清单的人读版。**唯一一处渲染口径。**
+
+    此前这段拼接只写在 `_load_external` 里，于是它渲染的是「券商研报入库
+    那一刻」的语料库；`_load_openweb` 随后往**同一个** Corpus 里再加最多
+    10 篇文档，清单却不会重算。实测（600183 第一阶段）终端与看板都写
+    「外部资料 9 篇 / [卖方研究] 9 篇」，而进了战略/产业链/宏观定性三节
+    提示词的是 19 篇、其中 10 篇【财经媒体】——清单于是成了一句**主动的
+    假陈述**：读者据此以为本轮的外部依据全部来自卖方研究。
+
+    这正是本项目「缺什么必须显式列出来」的反面：只列一部分，读者会以为
+    那就是全部。渲染口径收在这一个函数里，两个阶段共用。
+    """
+    from ir_agent import corpus as C
+
+    if corpus is None:
+        return ""
+    return corpus.summary() + "\n\n" + C.consensus_md(consensus)
+
+
+def _refresh_external_md(r, md: dict) -> None:
+    """开放网络文档入库之后，把清单按**语料库的实际内容**重渲染一遍。
+
+    `md` 会原样写进 state.json、进看板、并在第二阶段读回——不重渲染，
+    这三处说的都是采集之前的那个语料库。
+    """
+    if getattr(r, "corpus", None) is None:
+        return
+    md["外部资料"] = _external_md(r.corpus, getattr(r, "consensus", None))
+
+
 def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
     """公司之外的资料入语料库。返回 (给人看的, 给模型看的, 失败说明)。
 
@@ -80,7 +111,7 @@ def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
         from ir_agent.sources.reports import consensus_facts
         for f in consensus_facts(cs):
             r.ledger.put(f)
-    md = cp.summary() + "\n\n" + C.consensus_md(cs)
+    md = _external_md(cp, cs)
     # **缺什么都要说出来，一致预期也不例外。** 原来只为「一篇研报都没
     # 取到」设了话，一致预期为空时直接静默返回——实测（生益科技 600183
     # 第一阶段）研报取到 9 篇、一致预期一条没有，于是 brief.md 里
@@ -176,6 +207,21 @@ def _load_openweb(code: str, r, as_of: date, out: Path, client,
                        "定性判断的外部依据仍只有券商研报一类来源")
         return skipped
 
+    return skipped + _openweb_notes(res)
+
+
+def _openweb_notes(res) -> list[str]:
+    """采集结果里要记进产物清单的条目。**两个阶段共用同一份措辞。**
+
+    两处各写一遍同一组说明，早晚会分叉——而且已经分叉过：
+    `_restore_openweb` 此前只报 `model_dated`，把 `missing_slots` 与
+    `fetch_failed` 整个丢掉，而第二阶段产出的恰恰是 report.md 这个最终
+    交付物。第一阶段说了「竞争格局与份额：未取到」，第二阶段的读者却
+    什么都看不到，只能以为资料是全的。
+
+    缺口口径是产品承诺的一部分，不是某一个阶段的内部细节，因此单一定义
+    放在这里，两个阶段都调它。
+    """
     notes: list[str] = []
     if res.fetch_failed:
         notes.append(f"{res.fetch_failed} 篇抓取失败")
@@ -183,9 +229,9 @@ def _load_openweb(code: str, r, as_of: date, out: Path, client,
         notes.append(f"{res.model_dated} 篇的发布日期由模型给出，未经代码核验")
     for slot in res.missing_slots:
         notes.append(f"{slot}：未取到")
-    if notes:
-        skipped.append("开放网络资料（" + "；".join(notes) + "）")
-    return skipped
+    if not notes:
+        return []
+    return ["开放网络资料（" + "；".join(notes) + "）"]
 
 
 def _restore_openweb(r, out: Path) -> list[str]:
@@ -227,10 +273,11 @@ def _restore_openweb(r, out: Path) -> list[str]:
                     "丢失），定性判断的外部依据仍只有券商研报一类来源"]
         return ["开放网络资料未跨阶段存活（落盘文件读不出文档，"
                 "可能已损坏或为空），外部引文可能核验不过"]
-    if res.model_dated:
-        return [f"开放网络资料（{res.model_dated} 篇的发布日期由模型给出，"
-                "未经代码核验）"]
-    return []
+    # **第一阶段记下的缺口在这里同样要报。** 落盘文件里
+    # `missing_slots`/`fetch_failed` 都在，此前只挑了 `model_dated` 出来讲，
+    # 其余两项读回后被丢掉——第二阶段的产物是 report.md，读者不会再回头
+    # 去看第一阶段的终端输出。措辞与第一阶段同源，见 `_openweb_notes`。
+    return _openweb_notes(res)
 
 
 def _load_sections(r):
@@ -1152,6 +1199,12 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     skipped += _load_openweb(
         code, r, as_of, out, research_client,
         industry=(meth.industry if meth is not None else ""))
+    # **清单要按语料库的实际内容重渲染。** `_load_external` 渲染的是研报
+    # 入库那一刻的语料库；上面这一步往同一个 Corpus 里又加了最多 10 篇
+    # 文档，且它们确实进了下面定性三节的提示词。不重渲染，md（进看板、
+    # 进 state.json、第二阶段读回）说的就是一个与事实不符的篇数与分级
+    # 构成 —— 见 `_external_md`。
+    _refresh_external_md(r, md)
 
     qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
 
@@ -1453,6 +1506,10 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
 
     md = state.get("md") or {}
     pr = state.get("pr") or {}
+    # state.json 里那份清单是第一阶段渲染的；本阶段刚重建了研报语料库、
+    # 又读回了开放网络文档，篇数与分级构成要按**现在**的语料库重算，
+    # 否则看板与终端还在讲第一阶段那个口径（见 `_external_md`）。
+    _refresh_external_md(r, md)
 
     dcf_res = None
     stage = Stage.NOT_APPLICABLE
