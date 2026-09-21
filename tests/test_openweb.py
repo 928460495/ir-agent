@@ -1328,7 +1328,8 @@ def test_fetch_failed或model_dated非数字字符串时返回空结果(tmp_path
 
 
 def test_missing_slots或extra_slots不可迭代时返回空结果(tmp_path):
-    """`list(42)` 抛 TypeError——这两个字段本该是字符串列表。"""
+    """`_str_list_field` 显式判 `isinstance(items, list)`，42 不是 list，
+    直接抛 TypeError——这两个字段本该是字符串列表。"""
     import json
 
     import ir_agent.sources.openweb as OW
@@ -1337,6 +1338,68 @@ def test_missing_slots或extra_slots不可迭代时返回空结果(tmp_path):
         payload = {"docs": [], "missing_slots": [], "extra_slots": [],
                    "fetch_failed": 0, "model_dated": 0}
         payload[bad_field] = 42
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert back.docs == [], bad_field
+        assert cp.docs == [], bad_field
+
+
+# ── 本轮修复 Fix：`_str_list_field` 曾经写成 `list(raw.get(key, []))`，
+# 对任何可迭代对象都来者不拒——字符串、字典都能被 `list()` 接受，悄悄
+# 变成一份类型合法但面目全非的假数据，而不是被拒绝。真实事故：
+# `{"fetch_failed_reasons": "DNS 解析失败"}` 会被 `list(...)` 拆成单
+# 字符列表 `['D','N','S',' ',...]`，每个字符都是合法 str，能顺利通过
+# 后面的 `isinstance` 过滤，安安静静地"成功"——比 42 这种一望而知的
+# 类型错误更隐蔽，因为它不会抛异常、不会被现有测试的 TypeError 断言
+# 覆盖 ──
+
+
+def test_missing_slots类字段是字符串时被拒绝而非拆成单字符列表(tmp_path):
+    """真实事故复现：`fetch_failed_reasons` 的值若是一个字符串（不是
+    列表），旧实现的 `list("DNS 解析失败")` 会把它拆成单字符列表，每个
+    字符都是合法 `str`，安静地"成功"变成一份面目全非的假数据。这不是
+    「容器合法、混进一条脏元素」，是容器本身的类型就不对，必须像
+    `_str_field` 拒绝非 str 值一样显式拒绝，整份文件退化成空结果。
+
+    **`docs` 里必须放一条真实文档，不能是空列表。** 用空 `docs` 测
+    "整份退化"测不出任何东西——退化前后 `back.docs` 都是 `[]`，两种
+    实现看起来一样"通过"。必须放一条能正常读回的文档，只有旧实现让
+    它读回、新实现把它一起拖下水退化掉，这条测试才真的在测两种实现
+    的区别。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    good_doc = _good_doc()
+    for bad_field in ("missing_slots", "extra_slots", "fetch_failed_reasons"):
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [good_doc], "missing_slots": [], "extra_slots": [],
+                   "fetch_failed": 0, "model_dated": 0,
+                   "fetch_failed_reasons": []}
+        payload[bad_field] = "DNS 解析失败"
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        cp = Corpus(as_of=AS_OF)
+        back = OW.load(path, cp)
+        assert back.docs == [], bad_field
+        assert cp.docs == [], bad_field
+
+
+def test_missing_slots类字段是字典时被拒绝而非拆成key列表(tmp_path):
+    """同一个洞的另一种形态：字典值会被 `list(...)` 悄悄取成它的 key
+    列表——同样是容器类型不对，必须显式拒绝，不能被 `list()` 的宽容
+    放过。`docs` 同样必须放一条真实文档，理由见上一条测试。"""
+    import json
+
+    import ir_agent.sources.openweb as OW
+    good_doc = _good_doc()
+    for bad_field in ("missing_slots", "extra_slots", "fetch_failed_reasons"):
+        path = tmp_path / OW.OPENWEB_JSON
+        payload = {"docs": [good_doc], "missing_slots": [], "extra_slots": [],
+                   "fetch_failed": 0, "model_dated": 0,
+                   "fetch_failed_reasons": []}
+        payload[bad_field] = {"行业规模与增速": 1}
         path.write_text(json.dumps(payload, ensure_ascii=False),
                         encoding="utf-8")
         cp = Corpus(as_of=AS_OF)

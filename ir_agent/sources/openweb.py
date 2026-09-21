@@ -1005,8 +1005,22 @@ def _str_list_field(raw: dict, key: str) -> list[str]:
     实现里这几个字段从未被写过、`missing_slots` 走的是 f-string 拼接
     不会崩，只有 `fetch_failed_reasons` 走 join）。丢一条脏元素不影响
     docs 能否正常读回，也不影响时点守卫等核心契约——这个字段本身只是
-    给人看的辅助展示信息，不参与任何判断逻辑。"""
-    items = list(raw.get(key, []))
+    给人看的辅助展示信息，不参与任何判断逻辑。
+
+    **容器本身必须是 list，不能是任何"看起来能被 list() 接受"的东西。**
+    `list(raw.get(key, []))` 曾经对**任何**可迭代对象都来者不拒：
+    `{"fetch_failed_reasons": "DNS 解析失败"}` 里那个值是个字符串，
+    `list("DNS 解析失败")` 不会抛——它会把字符串拆成单字符列表
+    `['D', 'N', 'S', ' ', ...]`，每个单字符都通过下面的 `isinstance(v,
+    str)` 检查，安安静静地"成功"变成一份面目全非但类型合法的假数据；
+    同理一个 dict 值会被 `list()` 悄悄取成它的 key 列表。两种情况都不
+    是「容器合法、混进一条脏元素」，是**容器本身的类型就不对**，必须
+    像 `_str_field` 拒绝非 str 值一样显式拒绝，冒给外层 `except
+    Exception` 按整份文件退化处理——不能让 `list()` 的"宽容"把一次
+    类型错误伪装成一次成功的解析。"""
+    items = raw.get(key, [])
+    if not isinstance(items, list):
+        raise TypeError(f"{key} 应为 list，实际是 {type(items).__name__}")
     return [v for v in items if isinstance(v, str)]
 
 
