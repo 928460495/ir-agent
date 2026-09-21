@@ -257,6 +257,33 @@ def _openweb_notes(res) -> list[str]:
     return ["\n".join(lines)]
 
 
+def _media_tier_note(corpus) -> list[str]:
+    """依据引用了 Tier.MEDIA 级来源、核验仍然通过——不拒绝，但必须在
+    产物清单里说出来。
+
+    `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」，但
+    `Corpus.verify()`（`basis.validate()` 的核验基准）对任何分级的
+    文档一视同仁地放行，只要引文逐字出现——这条分级规矩此前只活在
+    提示词里，代码毫无察觉。两轮评审都指出这个洞。用户的决定是警告、
+    不是硬拒绝：产业链分析已经因为一次引文核验失败整节夭折过三次，
+    「引文找不到」和「引文找得到但来源分级不够格」是两种严重程度
+    截然不同的问题，不能用同一种「拒绝」处置。
+
+    `Corpus.verify()` 每命中一次 MEDIA 文档就往 `corpus.media_cited`
+    追加一条记录（见该字段与 `verify()` 的文档字符串）——`validate()`
+    从 strategy.py/value_chain.py/macro_view.py/assume.py 好几个模块
+    调用，这里不去每个调用点分别处理，只在本阶段研究流程收尾、写
+    `ResearchOutcome.skipped` 之前读一次 `corpus.media_cited` 的总数，
+    与 `_openweb_notes` 汇总 `res.fetch_failed_reasons` 是同一个思路：
+    调用方各自往同一个累加器上记账，产物清单在最后统一渲染一次。
+    """
+    if corpus is None or not corpus.media_cited:
+        return []
+    from ir_agent.sources.external import TIER_RULE, Tier
+    return [f"依据引用财经媒体级来源 {len(corpus.media_cited)} 处，"
+           f"核验通过但分级规则是「{TIER_RULE[Tier.MEDIA]}」"]
+
+
 def _restore_openweb(r, out: Path) -> list[str]:
     """第二阶段：读回第一阶段落盘的开放网络文档。**不重新采集。**
 
@@ -1305,6 +1332,12 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
          "md": md, "pr": pr, "upheld": upheld}, ensure_ascii=False, indent=2),
         encoding="utf-8")
 
+    # 依据核验过、但来源分级是 MEDIA 的记录——警告，不拒绝，见
+    # `_media_tier_note`。放在写产物清单的最后一刻读：本阶段所有会调
+    # `basis.validate()` 的环节（定性三节、DCF 判断项）此时都已跑完，
+    # `r.corpus.media_cited` 已经是本阶段的完整计数。
+    skipped += _media_tier_note(r.corpus)
+
     # **状态按实际产物定，不按预期路径。** 见 `_review_stage`。
     stage, reason = _review_stage(arts)
     return ResearchOutcome(
@@ -1603,6 +1636,11 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
                 skipped.append(note)
     else:
         skipped.append("完整研报（无估值结果，第 8 节无从写起）")
+
+    # 依据核验过、但来源分级是 MEDIA 的记录——警告，不拒绝，见
+    # `_media_tier_note`。本阶段会调 `basis.validate()` 的环节
+    # （`assume.check()`、完整研报的 `audit()`）此时都已跑完。
+    skipped += _media_tier_note(r.corpus)
 
     # **没写出研报就不算做完。** 见 `_report_stage`。
     stage = _report_stage(stage, arts)

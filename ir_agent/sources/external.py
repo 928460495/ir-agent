@@ -159,6 +159,28 @@ class Corpus:
     as_of: date
     docs: list[Document] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # 核验通过、但引文出自 Tier.MEDIA 文档的记录。**警告，不拒绝。**
+    #
+    # `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」，但这条
+    # 规矩此前只是提示词里的一句话——`verify()` 对任何分级的文档一视
+    # 同仁，只要引文逐字出现就放行。两轮评审都指出这个洞：模型完全
+    # 可以拿一篇财经媒体的转述去支撑一条本该有官方/卖方来源的判断，
+    # 代码毫无察觉。
+    #
+    # 用户的决定是警告、不是硬拒绝——产业链分析已经因为一次引文核验
+    # 失败整节夭折过三次，「引文逐字核验不过」和「引文核验过了但来源
+    # 分级不够格」是两种严重程度截然不同的问题，不能用同一种「拒绝」
+    # 处置。但也不能因为不拒绝就让它隐身：读者必须能看到"这条判断的
+    # 依据只是线索级来源"。
+    #
+    # 记在 corpus 对象上、不通过 verify() 的返回值传出去——`verify()`
+    # 从 `basis.validate()` 调用，而 `validate()` 又从 strategy.py/
+    # value_chain.py/macro_view.py/assume.py 好几个模块调用，返回值的
+    # 语义早就固定成"问题描述，空串=通过"；硬塞一个"通过但要注意"的
+    # 中间态会让每一个调用方都要多分支处理。跟 `skipped` 同一个形状：
+    # 调用方（这里是 full.py）在整轮跑完之后统一读一次、汇总成一条
+    # 产物清单条目，而不是每次 verify() 都要单独处理。
+    media_cited: list[str] = field(default_factory=list)
 
     def add(self, doc: Document) -> None:
         if doc.published > self.as_of:
@@ -193,6 +215,15 @@ class Corpus:
 
         URL 也要对上: 引文确实存在、却挂在另一篇文章名下，读者顺着 URL
         去查会查不到，等同于错误归因。
+
+        **引文出自 Tier.MEDIA 文档时仍然通过，但要记下来。**
+        `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」——这是
+        一条关于**分级**的规矩，不是关于「引文是否逐字出现」的规矩，
+        两者是可以分别成立的两件事：一条引文完全可以逐字出自某篇文档
+        （核验该过），但那篇文档的分级决定了它本不该被当作依据。用户
+        决定这里只警告、不拒绝（见 `Corpus.media_cited` 字段注释），
+        所以仍然返回空串，只是顺带记一笔，交给 full.py 在产物清单里
+        统一汇总。
         """
         d = self.find(quote)
         if d is None:
@@ -201,6 +232,8 @@ class Corpus:
         if url and norm(url) != norm(d.url):
             return (f"外部引文「{quote[:20]}」实际出自 {d.cite()}，"
                     f"但依据标注的 URL 是 {url} —— 归因错误。")
+        if d.tier is Tier.MEDIA:
+            self.media_cited.append(d.cite())
         return ""
 
     def summary(self) -> str:

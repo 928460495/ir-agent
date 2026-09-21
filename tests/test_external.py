@@ -68,6 +68,29 @@ def test_空语料库一律不通过():
     assert "找不到" in Corpus(as_of=AS_OF).verify("任何一句话")
 
 
+# ── MEDIA 级来源：警告，不拒绝 ───────────────────────────────
+#
+# `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」，但这是一条
+# 关于分级的规矩，不是关于「引文是否逐字出现」的规矩——verify() 仍然
+# 要对 MEDIA 文档的引文放行（核验该过就该过），只是要把这件事记下来，
+# 交给上层（full.py）去警告，而不是让它隐身。见 Corpus.media_cited
+# 字段注释。
+
+
+def test_引文出自MEDIA文档仍通过但记入media_cited():
+    c = Corpus(as_of=AS_OF)
+    c.add(_doc(tier=Tier.MEDIA, url="https://finance.example.com/x"))
+    assert c.verify("终端库存得到有效去化") == ""
+    assert len(c.media_cited) == 1
+
+
+def test_引文出自非MEDIA文档不记入media_cited():
+    c = Corpus(as_of=AS_OF)
+    c.add(_doc(tier=Tier.SELLSIDE))
+    assert c.verify("终端库存得到有效去化") == ""
+    assert c.media_cited == []
+
+
 # ── 来源分级 ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("t", list(Tier))

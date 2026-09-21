@@ -1786,3 +1786,82 @@ def test_openweb_notes失败原因与缺失主题分行不会被误读成同一�
     assert reason_lines[0] not in slot_lines
     for slot_line in slot_lines:
         assert "内容类型不是网页" not in slot_line
+
+
+# ── _media_tier_note：MEDIA 级引文核验通过，但要在产物清单里警告 ──
+#
+# `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」，`Corpus.
+# verify()` 却对任何分级的文档一视同仁地放行——用户的决定是警告、不是
+# 硬拒绝（产业链分析已经因一次引文核验失败整节夭折过三次）。`verify()`
+# 命中 MEDIA 文档时往 `corpus.media_cited` 记一笔，`full._media_tier_note`
+# 在两处 `ResearchOutcome` 收尾前读一次、汇总成一条 skipped 条目——与
+# `_openweb_notes` 汇总 `fetch_failed_reasons` 是同一个思路。
+
+
+def test_media_tier_note_MEDIA引文产出产物清单条目():
+    from ir_agent import full
+    from ir_agent.sources.external import TIER_RULE, Corpus, Tier
+
+    c = Corpus(as_of=date(2026, 1, 1))
+    c.media_cited = ["某财经网《标题》（2026-01-01，财经媒体）"]
+    notes = full._media_tier_note(c)
+    assert len(notes) == 1
+    assert "1 处" in notes[0]
+    assert TIER_RULE[Tier.MEDIA] in notes[0]
+
+
+def test_media_tier_note_SELLSIDE引文不产出条目():
+    """SELLSIDE/OFFICIAL 引文核验通过时 `verify()` 根本不往
+    `media_cited` 记账——`_media_tier_note` 收到一个空列表，必须
+    产出空的 skipped 附加内容，不能凭空多出一条。"""
+    from ir_agent import full
+    from ir_agent.sources.external import Corpus
+
+    c = Corpus(as_of=date(2026, 1, 1))
+    assert c.media_cited == []
+    assert full._media_tier_note(c) == []
+
+
+def test_media_tier_note_corpus为None时不报():
+    """`r.corpus` 理论上不该是 None（两处调用点之前都已经保证赋值），
+    但 `_media_tier_note` 独立作为一个函数，防御性地接住 None，不炸。"""
+    from ir_agent import full
+
+    assert full._media_tier_note(None) == []
+
+
+def test_MEDIA引文经validate后能在corpus上累计并被full汇总():
+    """端到端串联三层：`Corpus.verify()` 记账 → `basis.validate()`
+    透传 → `full._media_tier_note()` 汇总成产物清单条目。这是测试
+    契约要求的用例：MEDIA 级引文通过 `validate()` 并产出产物清单条目；
+    SELLSIDE 级引文通过 `validate()` 但不产出条目。"""
+    from ir_agent import full
+    from ir_agent.basis import Basis, validate
+    from ir_agent.ledger import FactLedger
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    as_of = date(2026, 1, 1)
+    body = "正文无关紧要"
+
+    media_corpus = Corpus(as_of=as_of)
+    media_corpus.add(Document(
+        doc_id="m1", url="https://finance.example.com/a", title="行业快讯",
+        publisher="某财经网", tier=Tier.MEDIA, published=as_of,
+        retrieved=as_of, text="行业规模约120亿美元"))
+    media_bases = [Basis.external("https://finance.example.com/a",
+                                  "行业规模约120亿美元", as_of)]
+    assert validate(media_bases, FactLedger(), body, as_of,
+                    corpus=media_corpus) == []
+    media_notes = full._media_tier_note(media_corpus)
+    assert len(media_notes) == 1
+
+    sell_corpus = Corpus(as_of=as_of)
+    sell_corpus.add(Document(
+        doc_id="s1", url="https://research.example.com/a", title="行业点评",
+        publisher="某券商", tier=Tier.SELLSIDE, published=as_of,
+        retrieved=as_of, text="行业规模约120亿美元"))
+    sell_bases = [Basis.external("https://research.example.com/a",
+                                 "行业规模约120亿美元", as_of)]
+    assert validate(sell_bases, FactLedger(), body, as_of,
+                    corpus=sell_corpus) == []
+    assert full._media_tier_note(sell_corpus) == []
