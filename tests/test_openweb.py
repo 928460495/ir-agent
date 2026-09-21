@@ -243,6 +243,24 @@ def test_正文提取剔除两种不同容器互相嵌套():
         assert noise not in got, noise
 
 
+def test_未闭合的可见噪声容器不吞掉之后的真实正文():
+    """**本次改写的核心设计决策**（见 `_TextExtractor` 与模块级长注释）：
+    `<nav>`/`<header>`/`<footer>`/`<aside>` 这类可见噪声容器如果一直到
+    文档结尾都没有闭合标签，缓冲区要并入正文，不能丢弃——验证跑里真实
+    出现过手写导航栏漏写 `</nav>` 的页面，旧正则实现的取舍是"匹配不到
+    收尾就整个不剥"，代价是这个容器之后**所有**真实正文都被一并当成
+    "还在容器里"从而被吞掉。
+
+    这里不闭合 `<nav>`，断言其后的 `<p>正文</p>` 必须完整保留——这是
+    不能妥协的核心保证。至于 `<nav>` 自己的"首页 产品 关于我们"这几个
+    导航词是否也跟着漏进来，本条测试不作断言：那是本次改写明确接受的
+    代价（噪声/召回问题，比丢真实正文轻得多），断言了反而会把这个
+    可接受的实现细节焊死成契约。"""
+    html = "<nav>首页 产品 关于我们<p>正文</p>"
+    got = extract_text(html)
+    assert "正文" in got
+
+
 def test_正文提取剔除HTML注释不留残余文字或定界符():
     """真实事故：`<!-- <div>草稿标题：...</div> -->` 这类被注释掉的整段
     标记，人打开网页永远看不到——浏览器不渲染注释——但旧实现只按
@@ -541,6 +559,73 @@ def test_meta声明_真正的Big5声明仍然生效不被误伤():
     assert text in OW._decode(raw, None)
 
 
+# ── 本轮修复 Fix：`_decode` 排除 ISO-8859-1 时按字符串字面量比较
+# （`enc.lower() != "iso-8859-1"`），只堵得住这一种拼法——`latin-1`/
+# `latin1`/`cp819`/`iso8859-1`/`L1` 全部是同一个编码的合法别名，
+# 字面量比较认不出来，会原样放行、把真实是 UTF-8 的字节解成乱码。
+# 必须改成 `codecs.lookup(enc).name` 归一化后比较，两个分支（HTTP 头、
+# meta 声明）都要堵 ──
+
+
+def test_解码_iso_8859_1的常见别名都被排除不直接使用():
+    """header_encoding 给出这些别名中的任意一个，都不能被直接拿去
+    `raw.decode(...)`——它们和 "iso-8859-1" 本身一样，是全字节映射，
+    对着真实是 UTF-8 的字节解码永不失败但会产出乱码。必须落到猜测链，
+    正确解出 UTF-8 中文。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "覆铜板报价上涨"
+    raw = text.encode("utf-8")
+    for alias in ("iso-8859-1", "latin-1", "latin1", "cp819",
+                 "iso8859-1", "L1", "ISO-8859-1"):
+        assert OW._decode(raw, alias) == text, alias
+
+
+def test_解码_meta声明的iso_8859_1别名同样被排除():
+    """与上一条对照：排除规则必须同时管住 `<meta http-equiv>` 分支，
+    不能只改 HTTP 头分支——两个分支面对的是同一类风险（一个必然不
+    报错的解码器一旦被选中就会静默产出乱码）。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "覆铜板报价上涨"
+    head = (b'<meta http-equiv="Content-Type" '
+           b'content="text/html; charset=latin1">')
+    raw = head + text.encode("utf-8")
+    assert text in OW._decode(raw, None)
+
+
+def test_meta声明认不出的编码名时退回猜测链():
+    """页面自己声明了一个压根不存在的编码——`raw.decode(enc)` 会抛
+    `LookupError`，必须被接住退到 UTF-8/GB18030 猜测链，不能让
+    `LookupError` 冒出 `_decode`。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "覆铜板报价上涨"
+    head = b'<meta charset="not-a-real-encoding-xyz">'
+    raw = head + text.encode("utf-8")
+    assert OW._meta_charset(raw) == "not-a-real-encoding-xyz"
+    assert OW._decode(raw, None) == raw.decode("utf-8")
+
+
+def test_解码_header与meta声明冲突时以meta为准():
+    """HTTP 头没有声明真实编码（走 ISO-8859-1 默认猜测分支，被排除），
+    页面自己在 `<meta>` 里声明了另一种——`<meta>` 是页面自己说的，必须
+    优先于 HTTP 头那个"没声明时的默认猜测"，能正确解出 meta 声明的
+    那种编码。"""
+    import ir_agent.sources.openweb as OW
+
+    text = "報價上漲"
+    body = text.encode("big5")
+    head = b'<meta charset="Big5">'
+    raw = head + body
+    # header_encoding 传 None，模拟 HTTP 头没有声明（走 meta 分支）。
+    assert text in OW._decode(raw, None)
+    # 即便 header_encoding 明确给了一个错误的猜测（ISO-8859-1，会被
+    # 排除），也要落到 meta 分支正确解码，而不是被这个错误的头声明
+    # 抢先"成功"解码成乱码。
+    assert text in OW._decode(raw, "ISO-8859-1")
+
+
 # ── final-fix-3 Fix 2：模型选的网址，代码自己去抓——没有主机闸门时，
 # 环回/内网/链路本地/保留地址、非网页内容类型、超大响应体都会被当成
 # 一篇正常文章抓回来入库 ──
@@ -660,15 +745,25 @@ def test_fetch_超过字节上限时拒绝(monkeypatch):
         OW.fetch("https://x.example.com/a")
 
 
-def test_深度嵌套容器在上限内完全剥掉():
-    """钉住迭代上限 _BLOCK_MAX_PASSES = 32 的行为：深度在 32 以内的嵌套
-    噪声容器必须被完全剔除，不留一个字。这条测试一旦红了，说明有人偷偷
-    降低了 _BLOCK_MAX_PASSES（比如「简化」回 2），这个缺口必须被发现。"""
+def test_深度嵌套容器无论多深都能完全剥掉():
+    """**回归改写**：旧实现用正则反复 `sub` 到不再变化为止，靠
+    `_BLOCK_MAX_PASSES = 32` 给这个循环封顶（防止对抗性输入把它拖成
+    死循环）——深度超过这个上限就会带着未剥净的噪声跑到 `_TAG`。改写
+    成 `html.parser` 之后，噪声容器的剔除靠 `_TextExtractor` 的深度
+    计数器，一次线性扫描处理任意嵌套深度，`_BLOCK_MAX_PASSES` 这个概念
+    随旧实现一起被删掉了——不存在"扫描到上限还没剥干净"这种退化状态。
+
+    这条测试原来分成两条：一条测深度 20（"上限内"，噪声必须剥净），
+    一条测深度 40（"超上限"，接受噪声泄露作为已知代价）。上限已经不
+    存在，两条测试的区别本身也不存在了——这里合并成一条，把深度推到
+    1000（远超旧实现的 32），断言噪声必须被**完全**剥掉、真实内容必须
+    完整保留：这正是新实现应该达到、旧实现在深度 40 就已经达不到的
+    保证。"""
     noise = "噪声"
     real_content = "真实内容"
-    depth = 20  # 远在 32 的上限内
+    depth = 1000  # 远超旧实现 _BLOCK_MAX_PASSES = 32 曾经的上限
 
-    # 程序化构造：<nav>噪声</nav> 嵌套 20 层，真实内容在外层
+    # 程序化构造：<nav>噪声</nav> 嵌套 1000 层，真实内容在外层
     nested = "<nav>" * depth + noise + "</nav>" * depth
     html = f"<div><p>{real_content}</p>{nested}</div>"
 
@@ -676,29 +771,20 @@ def test_深度嵌套容器在上限内完全剥掉():
 
     # 真实内容必须保留
     assert real_content in got
-    # 嵌套内的噪声必须被彻底剔除
+    # 嵌套内的噪声必须被彻底剔除——不再有"超过上限就容忍泄露"这一档
     assert noise not in got
 
 
-def test_容器深度超上限时开放失败():
-    """容器深度超过 _BLOCK_MAX_PASSES = 32 时，`_strip_blocks` 会在达到
-    上限时退出，可能留下一些未剔除的噪声——这是**故意的设计**。
-
-    为什么选择开放失败而不是死循环或报错：
-    - 没有对抗性输入时，真实页面的嵌套深度从未超过个位数，所以噪声
-      泄露是边界情况，对正常内容的污染可以容忍
-    - **相反，静默丢掉容器外的真实内容会是灾难**——用户看不见缺陷，
-      引文核验也会跟着打折扣。开放失败（内容保留但有噪声）至少让
-      问题可见
-
-    此测试验证：
-    1. 深度超过 32 时，一些噪声确实会泄露（证明限制生效）
-    2. 但容器**外**的真实内容必须完整保留（核心保证）
-    """
+def test_容器深度极深且真实内容夹在中间仍不丢失():
+    """**回归改写**：旧实现的姊妹测试断言"深度超过 32 时噪声可能泄露，
+    但容器外的真实内容必须保留"——那是给旧实现的遍数上限留的让步。新
+    实现没有遍数上限，这条测试改成断言更强的保证：即使噪声容器深度
+    远超旧上限，前后的真实内容也必须完整保留，且噪声必须被完全剥掉，
+    不再需要"容忍泄露"这个让步。"""
     noise = "噪声"
     real_before = "前面内容"
     real_after = "后面内容"
-    depth = 40  # 超过 32 的上限
+    depth = 1000  # 远超旧实现 _BLOCK_MAX_PASSES = 32 曾经的上限
 
     # 程序化构造：前面真实内容 + 超深嵌套噪声容器 + 后面真实内容
     nested = "<nav>" * depth + noise + "</nav>" * depth
@@ -706,13 +792,11 @@ def test_容器深度超上限时开放失败():
 
     got = extract_text(html)
 
-    # 容器外的真实内容**必须**保留——这是核心保证
+    # 容器外的真实内容必须保留
     assert real_before in got, "前面的真实内容被误删了"
     assert real_after in got, "后面的真实内容被误删了"
-
-    # 超过上限时，一些噪声会泄露（这个行为的代价已被明确接受）
-    # 此处不做严格检查噪声泄露量，只验证「内容保留 + 可能漏噪声」
-    # 这样即使将来嵌套处理方式微调，只要核心保证不变就不会红
+    # 新实现没有遍数上限，噪声必须被完全剥掉，不再容忍泄露
+    assert noise not in got, "噪声不该再泄露——新实现没有遍数上限"
 
 
 from ir_agent.sources.external import Corpus

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import ipaddress
 import json
@@ -20,6 +21,7 @@ import re
 import socket
 from dataclasses import dataclass, field
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -271,97 +273,113 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 _HEADERS = {"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"}
 
-# 整块剔除的噪声容器。研报走东财的 ctx-content 块，噪声天然被框住；
-# 开放网页没有这个便利，导航、页脚、脚本、样式会被 _TAG 剥成一堆散字
-# 混进正文，既污染引文核验也白白吃掉提示词长度。
+# ── 正文提取：标准库 HTMLParser，不再手写正则剥标签 ──────────────
 #
-# **`.*?</\1\s*>` 这种写法曾经在这里，删掉后不要再加回来。** 非贪婪只
-# 保证「匹配尽量短」，不保证「匹配到配对的那一个」——它认的是**第一个**
-# 出现的同名闭合标签，不是与当前开标签配对的那一个。真实导航栏常见
-# 同类容器自嵌套（大菜单、面包屑套在 <nav> 里），例如
-# `<nav>A<nav>B</nav>C</nav>`：非贪婪版本会把外层 `<nav>` 和内层
-# `</nav>` 错配成一对，吞掉 `<nav>A<nav>B</nav>`，剩下的 `C</nav>` 里，
-# `C` 不再处于任何被识别的容器里，被当成正文放行——而 `C` 本来就是导航
-# 文字。这不是崩溃也不是丢真内容，是反过来把噪声混进 Corpus.verify()
-# 逐字核验的正文里，比明显报错更难查。
+# **这一段替换的是什么，以及为什么。** 本文件曾经用一组正则
+# （_BLOCK/_strip_blocks/_COMMENT/_TAG…）手动模拟"标签配对""区域"这些
+# 概念，五轮评审踩出了同一种 bug 的五个变种：正则不知道"区域"是什么，
+# 只认字面量模式，模式一旦出现在不该算数的地方（嵌套标签内部、JS 字符
+# 串字面量里、HTML 注释里、别的属性值里）就会被将计就计。
+# `html.parser.HTMLParser` 是标准库（同一层级的还有 `json`/`re`/
+# `ipaddress`），不是新增第三方依赖；它对"标签边界""CDATA 元素"
+# （`<script>`/`<style>` 内容按规范整体当纯文本，标签内出现的 `<`/`>`
+# 不会被当成标签）"注释体不参与标签解析"这些区域概念是原生的，不需要
+# 我们自己用正则去猜、去为每一种"区域"单独写一条排除规则。
 #
-# 这里改用「内容里不准再出现同名开/闭标签」的写法，逼这条正则只认**最内
-# 层、不含嵌套**的那一对；配上下面 _strip_blocks 的重复应用，从里往外
-# 一层层剥，不管嵌套多少层最终都能剥干净。
+# **两类噪声容器，处置必须不同——这是本次改写唯一需要人工判断、必须
+# 写下来的地方。**
 #
-# **HTML 注释必须在噪声容器剔除**之后**整块去掉——顺序反了会重新引入
-# 被修复过的同一种危害，只是方向倒过来。** `extract_text` 曾经先跑
-# `_COMMENT` 再跑 `_strip_blocks`，理由是「注释里可能藏着未闭合的
-# `<nav>` 会把 _BLOCK 弄糊涂」。这个理由不成立，代价却是真实的：
+#   不可见容器：<script> <style> <noscript>，以及 HTML 注释。
+#     它们的内容人打开网页永远看不到——浏览器根本不渲染。把这类内容
+#     admit 进 Corpus.verify() 逐字核验的语料库是**伪造风险**：一段
+#     从未出现在页面上的文字，被当成"页面上的原文"核验通过。不管容器
+#     是否正常闭合，一律跳过到闭合标签、或者跳到文档结尾为止，没有
+#     例外，不需要权衡：跳到文档结尾本来就是正确行为。
 #
-#   `<script>var s = "<!--";</script><p>真实正文二</p><!-- 真正的注释 -->`
+#   可见容器：<nav> <header> <footer> <aside>。
+#     它们的内容确实渲染在人打开的页面上，只是不是文章正文——admit
+#     进语料库是"噪声/召回"问题（污染核验、浪费提示词长度），不是
+#     伪造问题：读者顺着 URL 打开页面，这段文字真的在那儿能看到。
 #
-# 这行内联 JS 字符串字面量里的 `<!--` 只是三个普通字符，不是注释起点，
-# 但 `_COMMENT` 不认识 JS 语法，只认「下一个 `-->`」——`.*?` 非贪婪加
-# `re.S` 会一路吃到**文档里下一处真正的 `-->`**，也就是后面那条真注释
-# 的收尾。这一整段被当成"一个注释"删掉，连带吞掉了 `</script>`、
-# 「真实正文二」这段真内容、以及后面那条真注释自己。`</script>` 被
-# 吞掉之后 `<script>` 变成未闭合标签，`_BLOCK` 找不到匹配的
-# `</script>`，剥不掉它，`var s = "` 这段 JS 代码反而作为"正文"漏进
-# `_TAG` 之后的纯文本——花一次修复去堵"注释里混进不可见的正文"，
-# 换来一次新的"JS 代码混进正文、真实正文反被删掉"，还更隐蔽：前者
-# 至少留在原文里能被人肉查到，后者是真内容凭空消失。
-#
-# 反过来，**先剥噪声容器**就没有这个问题：`_BLOCK` 匹配的是字面量标签
-# `<script ...>`/`</script>`，不关心标签内部文本长什么样，`<!--` 出现
-# 在 `<script>` 内容里对它而言只是普通字符，整个 `<script>...</script>`
-# 连同那段字符串字面量一起被当作一个不透明的噪声块删除，真实正文与
-# 后面的真注释都不受影响——`_COMMENT` 随后再去删真注释时，面对的已经
-# 是一份不含内联脚本的干净文档。
-#
-# 「注释可能让 _BLOCK 认错」这个担心本身也站不住：_BLOCK 只认**成对**
-# 的开/闭标签。注释里若只有一个不成对的 `<nav>`（没有配对的
-# `</nav>`），_BLOCK 在整份文档里找不到匹配的收尾标签，这次匹配尝试
-# 直接失败，什么也不会被误删——是惰性的，不是危险的；注释里若是一段
-# 完整的 `<nav>…</nav>`，不管剥的顺序如何，这段内容本来就该被剥掉
-# （它本就是噪声容器，只是恰好也被注释包住），两种顺序结果一致。真正
-# 会出错的方向只有「先剥注释、被内联 JS 里的 `<!--` 骗到下一个真注释」
-# 这一种，而这正是这里要堵的。
-#
-# `<!-- <div>草稿标题：...</div> -->` 这种被注释掉的整段标记，人打开网页
-# 永远看不到——浏览器根本不渲染注释——但 _TAG 只认「< 到下一个 >」这一段，
-# 会把注释体内第一个 `<div>` 当独立标签吃掉，剩下的注释正文（包括
-# 「草稿标题」那句）和收尾的 `-->` 全部当纯文本放行，混进
-# Corpus.verify() 逐字核验的正文里——这是 _COMMENT 存在的原因，只是
-# 执行顺序要排在 _strip_blocks 之后，不是之前。
-#
-# `.*?` 非贪婪 + `re.S` 让它能跨行匹配、且只吃到**最近**的 `-->`——注释
-# 语法本身不允许嵌套或自嵌套（浏览器解析 HTML 注释时看到的也是「第一个
-# --> 就是结尾」），不存在 _BLOCK 那种同名标签配对歧义，不需要重复应用。
-#
-# 未闭合的注释（`<!-- 没有收尾`）不会被这条正则匹配到——非贪婪加字面量
-# `-->` 要求真的存在收尾定界符。这与本文件里未闭合噪声容器（`<nav>...`
-# 没有 `</nav>`）是同一类已知缺口：修一个要求识别「没写完的标记」，
-# 本质上是给正则加 HTML 语法推断能力，这正是本模块明确不引入 HTML 解析
-# 依赖所要避免的复杂度。真实页面里手写的、真正未闭合到文档结尾都没有
-# 收尾的注释极其罕见，代价是可以接受的已知限制，不在这次修复范围内。
-_COMMENT = re.compile(r"<!--.*?-->", re.S)
+#     **关键决策：这类容器如果一直到文档结尾都没有闭合标签，怎么办。**
+#     验证跑里真实出现过这种页面：手写的导航栏漏写了 `</nav>`。旧正则
+#     实现的取舍是"匹配不到收尾就整个不剥"，代价是**这个容器之后的
+#     所有真实正文都被一并当成"还在容器里"从而被吞掉**——本模块存在
+#     的理由就是保证语料库里的字可核验，把"一个标签没写完"变成"这篇
+#     文章后一半的真实内容全部消失"，代价远比放行几个导航词条严重
+#     得多。因此这里的选择是：可见噪声容器的内容先缓冲、不立即提交为
+#     正文；标签正常配对闭合时，缓冲区被确认真的是噪声，丢弃；**如果
+#     直到文档结尾都没有等到闭合标签，缓冲区并入正文，而不是丢弃**——
+#     宁可让"首页 产品 关于我们"这几个导航词漏进正文（噪声问题，读者
+#     多看几个词，可以容忍），也不能让紧跟在它后面的真实文章内容凭空
+#     消失（伪造/丢失风险，本模块要不惜代价避免的那一种危害）。不可见
+#     容器没有这个让步：它们从不缓冲，跳过就是永久丢弃，直到文档结尾
+#     也是如此——不可见内容本来就不该出现在语料库里，没有"来不及确认
+#     就先放行"这一说。
 
-_BLOCK = re.compile(
-    r"<(script|style|nav|header|footer|aside|noscript)\b[^>]*>"
-    r"(?:(?!</?\1\b).)*?"
-    r"</\1\s*>",
-    re.S | re.I)
-# 单遍 _BLOCK.sub 只能剥掉一层嵌套（剥完最内层，外层还留着自己的开/闭
-# 标签待下一遍处理），嵌套 N 层就要跑 N 遍。真实页面的导航自嵌套（大菜单
-# 套大菜单、面包屑套在 nav 里）观察到的深度从没见过超过个位数；32 给了
-# 近 4 倍的余量，同时把「构造一个几十万层嵌套的畸形页面」这种对抗输入的
-# 最坏开销钉死在 32 次整页扫描，而不是让它跟嵌套深度线性增长到失控。
-# 跑满上限时循环体自然退出——顶多留一点未剥净的噪声跟着走到 _TAG，不是
-# 「不干净就一直转」的死循环。
-_BLOCK_MAX_PASSES = 32
-_TAG = re.compile(r"<[^>]+>")
+_INVISIBLE_NOISE_TAGS = frozenset({"script", "style", "noscript"})
+_VISIBLE_NOISE_TAGS = frozenset({"nav", "header", "footer", "aside"})
+
+
+class _TextExtractor(HTMLParser):
+    """HTML → 纯文本片段流。两类噪声容器的处置见上方模块级注释。
+
+    用两个深度计数器代替旧实现"反复 sub 直到不再变化"的多遍扫描——
+    html.parser 自己维护标签流的开合顺序，遇到几层嵌套就是几次
+    +1/-1，不存在"非贪婪正则认错闭合标签"那种配对歧义（旧实现里
+    `<nav>A<nav>B</nav>C</nav>` 会被错配的那个洞），也不需要
+    `_BLOCK_MAX_PASSES` 那种防御性的遍数上限：不管文档嵌套多少层，
+    这里都是一次线性扫描，没有"扫描到上限还没剥干净"这种退化状态。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._out: list[str] = []       # 已确认要进正文的片段
+        self._pending: list[str] = []   # 可见噪声容器内、尚未确认归宿的片段
+        self._invisible_depth = 0
+        self._visible_depth = 0
+
+    def _emit(self, chunk: str) -> None:
+        if self._invisible_depth > 0:
+            return  # 不可见噪声：永久丢弃，不缓冲、不等待闭合标签
+        if self._visible_depth > 0:
+            self._pending.append(chunk)
+        else:
+            self._out.append(chunk)
+
+    def handle_starttag(self, tag, attrs) -> None:
+        tag = tag.lower()
+        if tag in _INVISIBLE_NOISE_TAGS:
+            self._invisible_depth += 1
+        elif tag in _VISIBLE_NOISE_TAGS:
+            self._visible_depth += 1
+        self._emit("\n")
+
+    def handle_endtag(self, tag) -> None:
+        tag = tag.lower()
+        self._emit("\n")
+        if tag in _INVISIBLE_NOISE_TAGS:
+            if self._invisible_depth > 0:
+                self._invisible_depth -= 1
+        elif tag in _VISIBLE_NOISE_TAGS:
+            if self._visible_depth > 0:
+                self._visible_depth -= 1
+                if self._visible_depth == 0:
+                    # 正常配对闭合：缓冲区确认是噪声，丢弃。
+                    self._pending.clear()
+
+    def handle_data(self, data) -> None:
+        self._emit(data)
+
+    def result(self) -> str:
+        # 可见噪声容器直到文档结尾都没能配对闭合——见模块级注释：缓冲区
+        # 并入正文而不是丢弃，宁可漏进几个导航词，也不能把它后面真实的
+        # 文章内容一起吞掉。
+        return "".join(self._out + self._pending)
+
+
 _SPACE = re.compile(r"[ \t　\xa0]+")
-_ENTITIES = (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
-             ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"))
 
-_META_TAG = re.compile(r"<meta\b[^>]*>", re.I)
-_ATTR = re.compile(r'([\w:-]+)\s*=\s*["\']([^"\']*)["\']')
 # meta 里表示发布时间的键。属性顺序没有标准（content 可能写在 property
 # 前面），所以逐个 meta 标签拆属性，而不是写一条把顺序焊死的正则。
 _DATE_KEYS = ("article:published_time", "og:published_time",
@@ -426,85 +444,119 @@ def _reject_unsafe_host(url: str) -> None:
 # 全文，避免正文里恰好出现一段提到 "charset=" 的技术讨论被误判成页面
 # 自己的声明。
 _META_CHARSET_HEAD = 2048
-# 头部字节里的 HTML 注释必须先去掉，跟 `_COMMENT`/`_strip_blocks` 是
-# 同一类教训：`<!-- <meta charset="iso-8859-1"> legacy -->` 这种被注释
-# 掉的旧声明，浏览器和真实解析器都不会当真，但如果不先剥注释，下面的
-# `_META_TAG_BYTES` 会把它当成一个真实的 `<meta>` 标签，抢在后面那个
-# 真正生效的 `<meta charset="utf-8">` 前面被取到——顺序（先剥注释、
-# 再找标签）不能反过来，理由与本文件 `extract_text` 里那条同名教训
-# 完全一致。
-_COMMENT_BYTES = re.compile(rb"<!--.*?-->", re.S)
-_META_TAG_BYTES = re.compile(rb"<meta\b[^>]*>", re.I)
-# 按 `key="value"` / `key='value'` 拆 `<meta ...>` 标签内的属性——与
-# `meta_date()` 用的字符串版 `_ATTR` 同构。只认带引号的写法：本文件目前
-# 全部已知真实场景（含全部既有测试）都是这种写法，裸值 `charset=utf-8`
-# 没有先例，不为一个没见过的写法多背一条更宽松、更容易被诱导的正则。
-_ATTR_BYTES = re.compile(rb'([\w:-]+)\s*=\s*["\']([^"\']*)["\']')
+
+
+class _MetaScan(HTMLParser):
+    """只收集 `<meta ...>` 标签的属性（键统一小写）。
+
+    **不用正则裸找 "charset="，用 html.parser 原生的标签流，三类历史
+    假阳性因此天然不成立，不需要额外代码去堵：**
+
+    - 注释体内的标记：html.parser 把 `<!-- ... -->` 整体交给
+      `handle_comment`（这里不覆盖，默认什么也不做），注释体内的文本
+      从不触发 `handle_starttag`——与浏览器"根本不解析注释里的标记"
+      一致，`<!-- <meta charset=...> -->` 里那个 meta 不会被这里收集
+      到。
+    - `<script>`/`<style>` 标签内容：html.parser 按 HTML5 规范把这两个
+      标签的内容整体当 CDATA 纯文本处理，标签内出现的任何
+      `<meta ...>` 字面量文本都只是普通字符，不会被解析成标签。
+    - 裸值属性：`attrs` 由 html.parser 的属性文法给出，HTML5 允许的
+      `charset=Big5`（不带引号）与 `charset="Big5"` 走的是同一条解析
+      路径，不需要为裸值另写一条更宽松的正则。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.metas: list[dict[str, str]] = []
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if tag.lower() == "meta":
+            self.metas.append({k.lower(): (v or "") for k, v in attrs})
+
+
+def _scan_metas(html: str) -> list[dict[str, str]]:
+    """喂一段 HTML（或原始字节头部解出来的字符串），按文档顺序返回每个
+    `<meta>` 标签的属性字典。
+
+    解析失败不向上抛——资料收集的失败不得阻断整轮研究，`_meta_charset`
+    /`meta_date` 本就是"找不到就返回 None"的语义，解析器出错等价于
+    找不到，把已经收集到的部分结果原样返回即可，不需要整个函数跟着炸。
+    """
+    parser = _MetaScan()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:                                       # noqa: BLE001
+        pass
+    return parser.metas
+
+
 # 只用来从**已经确认是老式 http-equiv 写法**的 `content` 属性值里挖出
-# `charset=` 后面那段——不再允许在整个标签、更不允许在任意字节流里裸找
-# 这段子串（那正是本函数要修的洞：`content="see charset=iso-8859-1 for
-# details"` 这种压根不是编码声明的属性值，裸找 "charset=" 会把它当真）。
-_CHARSET_ATTR_BYTES = re.compile(rb'charset\s*=\s*["\']?\s*([a-zA-Z0-9_-]+)',
-                                 re.I)
+# `charset=` 后面那段——不是在整个标签、更不是在任意字节流里裸找这段
+# 子串（那正是 `_meta_charset` 曾经被打穿的洞：`content="see
+# charset=iso-8859-1 for details"` 这种压根不是编码声明的属性值，裸找
+# "charset=" 会把它当真）。这里的输入已经先经过 `_MetaScan` 按标签/
+# 属性边界切好，只在**确认是 Content-Type 声明的那一个 content 属性
+# 值**里找，范围已经收得足够窄，不是在任意文本里裸找。
+_CHARSET_ATTR = re.compile(r'charset\s*=\s*["\']?\s*([a-zA-Z0-9_-]+)', re.I)
 
 
 def _meta_charset(raw: bytes) -> str | None:
     """从原始字节的头部读页面自己声明的字符集；读不到返回 None。
 
-    **必须在字节层面找，不能先解码成字符串再找。** 这个函数的结果是
-    喂给 `_decode` 去尝试解码用的——如果反过来要求先解码出字符串才能
-    找 `<meta charset>`，就是鸡生蛋。好在 `<meta charset=...>` /
-    `<meta http-equiv="Content-Type" content="...charset=...">` 这段
-    标记本身只由 ASCII 字符拼成，而 UTF-8、GB18030、Big5、EUC-JP 这几种
-    目标编码在 ASCII 范围（0x00–0x7F）都与 ASCII 字节一一对应——不管
-    正文实际是哪种编码，`<meta ...>` 这几个字母、等号、引号本身不会
-    因为编码不同而变成别的字节序列，所以可以直接在原始字节上用 ASCII
-    正则找，不需要先猜出编码。
+    **头部字节先按 latin-1 解码成字符串，再喂给 html.parser。** latin-1
+    是全字节映射（0x00–0xFF 每个字节都有对应字符），解码永不失败；且
+    ASCII 范围（0x00–0x7F）在 latin-1 下与 ASCII 逐字节一致——不管页面
+    正文实际是 UTF-8、GB18030 还是 Big5，`<meta charset=...>` 这几个
+    字母、等号、引号本身都会被还原成正确的字符，`_MetaScan` 能正常
+    识别标签结构。头部之外、真正的中文正文字节会被解成 latin-1 意义上
+    的乱码字符，但那些字符从不出现在我们要取的
+    `charset`/`http-equiv`/`content` 属性值里（这几个值本身只由 ASCII
+    字符拼成），不影响结果。
 
-    **必须先剥注释、再找 `<meta>` 标签，且必须要求一个真正的声明属性，
-    不是任何含 `charset=` 子串的标签。** 这是本函数被打穿过的两个洞：
-
-    - 注释：`<!-- <meta charset="iso-8859-1"> legacy -->` 里那个
-      `<meta>` 从未生效过——浏览器根本不渲染、不解析注释体里的标记——
-      但字节层面的 `_META_TAG_BYTES` 认不出"这段在注释里"，会把它当
-      成一个真实标签，抢在后面真正生效的声明前面被取到。
-    - 非声明属性：`<meta name="description" content="see
-      charset=iso-8859-1 for details">` 根本不是编码声明，只是恰好在
-      某个不相关属性的值里提到了这个词——旧实现在整个 `<meta ...>`
-      标签内容里裸找 `charset=` 子串，这类页面会被误判命中。
-
-    两个洞的共同点是同一类教训（与本文件 `_COMMENT`/`_BLOCK` 顺序那条
-    完全一致）：正则没有「区域」的概念，不先框定"这段字节在不在算数的
-    范围里"，后面的匹配就可能被诱导。这里的解法对应两点：先用
-    `_COMMENT_BYTES` 把头部字节里的注释整块剔除，再逐个 `<meta ...>`
-    标签拆出属性（`_ATTR_BYTES`），只认下面两种**真正的声明**形态之一：
+    只认下面两种**真正的声明**形态之一，命中即返回，不会再对任意标签、
+    任意属性做裸子串匹配：
 
     - HTML5 短格式：标签自己带一个字面量 `charset` 属性，
-      `<meta charset="UTF-8">`；
+      `<meta charset="UTF-8">`（或不带引号的 `<meta charset=UTF-8>`，
+      HTML5 允许、html.parser 的属性文法原生支持，不需要额外代码）；
     - 老式写法：`http-equiv` 属性的值（大小写不敏感）就是
       `Content-Type`，且 `content` 属性值里带 `charset=...`，
       `<meta http-equiv="Content-Type" content="text/html; charset=GB2312">`。
-
-    命中即返回那个值，不会再对任意标签、任意属性做裸子串匹配。
     """
-    head = _COMMENT_BYTES.sub(b" ", bytes(raw[:_META_CHARSET_HEAD]))
-    for tag in _META_TAG_BYTES.finditer(head):
-        attrs: dict[str, bytes] = {}
-        for am in _ATTR_BYTES.finditer(tag.group(0)):
-            attrs[am.group(1).decode("ascii", errors="ignore").lower()] = \
-                am.group(2)
+    head = raw[:_META_CHARSET_HEAD].decode("latin-1")
+    for attrs in _scan_metas(head):
         if "charset" in attrs:
-            value = attrs["charset"].decode("ascii", errors="ignore").strip()
+            value = attrs["charset"].strip()
             if value:
                 return value
             continue
-        http_equiv = attrs.get("http-equiv", b"").decode(
-            "ascii", errors="ignore").strip().lower()
-        if http_equiv == "content-type":
-            m = _CHARSET_ATTR_BYTES.search(attrs.get("content", b""))
+        if attrs.get("http-equiv", "").strip().lower() == "content-type":
+            m = _CHARSET_ATTR.search(attrs.get("content", ""))
             if m is not None:
-                return m.group(1).decode("ascii", errors="ignore")
+                return m.group(1)
     return None
+
+
+_ISO_8859_1 = codecs.lookup("iso-8859-1").name
+
+
+def _is_iso_8859_1(enc: str) -> bool:
+    """`enc` 是不是 ISO-8859-1 的某个别名（`latin-1`/`latin1`/`cp819`/
+    `iso8859-1`/`L1`……）。
+
+    按 `codecs.lookup(enc).name` 归一化后比较，不按字符串字面量比较——
+    字面量比较（`enc.lower() != "iso-8859-1"`）只堵得住 "iso-8859-1"
+    这一种拼法，上面列的几个别名全部会原样放行、复现 `_decode` 文档
+    字符串里描述的乱码。`codecs.lookup` 认不出的名字（页面声明了一个
+    压根不存在的编码）不是 ISO-8859-1，返回 False——这不是漏判：
+    `raw.decode(enc)` 随后会自己抛 `LookupError`，被 `_decode` 的
+    try/except 接住退到猜测链，行为不受影响。
+    """
+    try:
+        return codecs.lookup(enc).name == _ISO_8859_1
+    except LookupError:
+        return False
 
 
 def _decode(raw: bytes, header_encoding: str | None) -> str:
@@ -549,14 +601,24 @@ def _decode(raw: bytes, header_encoding: str | None) -> str:
     Corpus.verify() 要逐字核验的正文——两个分支的选择器共享同一个
     "总能解码成功、从不用来当默认猜测"的编码，必须共享同一条排除规则，
     不能只在其中一个分支写。
+
+    **排除时必须按 codec 的规范名比较，不能按字符串字面量比较。**
+    `header_encoding.lower() != "iso-8859-1"` 这种写法只堵得住
+    "iso-8859-1" 这一种拼法——`latin-1`/`latin1`/`cp819`/`iso8859-1`/
+    `L1` 全部是 ISO-8859-1 的合法别名，`codecs.lookup` 认得出它们，
+    `.name` 会全部归一成同一个规范名，但字符串字面量比较认不出这些
+    别名是同一个东西，会原样放行、照样产生上一段描述的乱码。两个分支
+    （HTTP 头声明、`<meta>` 声明）都要用 `_is_iso_8859_1`（内部用
+    `codecs.lookup(enc).name` 比较）判断，不能只改其中一个——两个分支
+    面对的是同一类风险。
     """
-    if header_encoding and header_encoding.lower() != "iso-8859-1":
+    if header_encoding and not _is_iso_8859_1(header_encoding):
         try:
             return raw.decode(header_encoding)
         except (LookupError, UnicodeDecodeError):
             pass
     meta_encoding = _meta_charset(raw)
-    if meta_encoding and meta_encoding.lower() != "iso-8859-1":
+    if meta_encoding and not _is_iso_8859_1(meta_encoding):
         try:
             return raw.decode(meta_encoding)
         except (LookupError, UnicodeDecodeError):
@@ -576,40 +638,26 @@ class Fetched:
     meta_published: date | None # 页面自己声明的发布时间，没有则 None
 
 
-def _strip_blocks(html: str) -> str:
-    """反复应用 _BLOCK，从最内层往外一层层剥掉噪声容器。
-
-    _BLOCK 每一遍只吃得掉不含嵌套的最内层那一对（见 _BLOCK 定义处的
-    注释），外层容器要等内层被吃掉、自己变成「不含嵌套」之后才轮到它。
-    所以要重复应用，直到再替换不出东西为止；`_BLOCK_MAX_PASSES` 给这个
-    循环封了顶，避免对抗性输入（人为构造的超深嵌套）把它拖成无限循环。
-    """
-    prev = None
-    passes = 0
-    while html != prev and passes < _BLOCK_MAX_PASSES:
-        prev = html
-        html = _BLOCK.sub(" ", html)
-        passes += 1
-    return html
-
-
 def extract_text(html: str) -> str:
-    """HTML → 纯文本。与 reports.fetch_text 同构，额外整块剔除噪声容器。
+    """HTML → 纯文本。噪声容器的取舍见 `_TextExtractor` 与模块级注释。
 
-    不引入 bs4/lxml：本仓库没有依赖声明文件，新增 import 意味着别人的
-    环境可能跑不起来。
+    不引入 bs4/lxml：`html.parser.HTMLParser` 是标准库，跟 `re`/`json`/
+    `ipaddress` 同一层级，不违反"不引入任何新的第三方依赖"。
 
-    **顺序：先 `_strip_blocks` 剥噪声容器，再 `_COMMENT` 删注释——不能
-    反过来。** 理由与例子见 `_COMMENT` 定义处的长注释（`<script>var s =
-    "<!--";</script>` 那个真实案例）：反过来会让内联 JS 里一个普通的
-    `<!--` 字符序列被误当注释起点，一路吃到文档里下一个真正的 `-->`，
-    删掉中间的真实正文，还漏出被吞掉 `</script>` 之后残留的 JS 代码。
+    **解析失败不能向上抛。** `html.parser` 本身对畸形输入很宽容（未
+    闭合标签、裸 `<`/`>` 都不会报错，见交互验证），但仍用 try/except
+    兜底：真出现解析器本身抛异常的畸形输入，这里退化成"就当没抓到
+    内容"（返回解析器出错前已收集到的部分），不能让异常一路冒到
+    `fetch()`/`gather()`，连累同一批的其余候选——资料收集的失败不得
+    阻断整轮研究。
     """
-    body = _strip_blocks(html or "")
-    body = _COMMENT.sub(" ", body)
-    body = _TAG.sub("\n", body)
-    for src, dst in _ENTITIES:
-        body = body.replace(src, dst)
+    parser = _TextExtractor()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:                                       # noqa: BLE001
+        pass
+    body = parser.result()
     lines = [_SPACE.sub(" ", ln).strip() for ln in body.splitlines()]
     return "\n".join(ln for ln in lines if ln)
 
@@ -632,8 +680,7 @@ def meta_date(html: str) -> date | None:
     核验的部分显式标出来，见 openweb 设计文档 §五）。
     """
     hits: dict[str, date] = {}
-    for tag in _META_TAG.finditer(html or ""):
-        attrs = {k.lower(): v for k, v in _ATTR.findall(tag.group(0))}
+    for attrs in _scan_metas(html or ""):
         key = (attrs.get("property") or attrs.get("name") or "").lower()
         if key not in _DATE_KEYS or key in hits:
             continue
