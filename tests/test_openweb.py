@@ -1015,6 +1015,45 @@ def test_同一原因重复出现只记一次(monkeypatch):
         "：DNS 解析失败（模拟代理环境）")
 
 
+def test_长URL共享同一诊断仍去重为一条(monkeypatch):
+    """Fix：`gather()` 的去重键此前从**截断后**的 `reason` 里切出来
+    （旧代码是 `str(e).strip()[:_REASON_LIMIT]` 先执行，再
+    `split("：", 1)`）。真实新闻 URL 常有 80~100+ 字符，`f"{url}：
+    {诊断}"` 拼起来轻松超过 `_REASON_LIMIT`（160）——不同长度的 URL
+    被截断后剩下的"诊断尾巴"长度不同，切出来的去重键因此各不相同，
+    去重形同虚设，正是本文件字段注释里说的"代理环境下全部候选一次性
+    倒在同一种诊断上"那个旗舰场景。这里用四个 100+ 字符、长度互不相同
+    的 URL，拼上同一句诊断后总长度都超过 160，验证现在确实只记一条——
+    去重键必须从**未截断**的完整消息里切出来，不能受 URL 长度影响。
+    """
+    import ir_agent.sources.openweb as OW
+
+    diagnosis = "DNS 解析失败（模拟代理环境，跨专线代理转发处理超时且重试耗尽）"
+    urls = [
+        "https://news.example.com/finance/2026/09/21/article-"
+        + "x" * n + "-detail.html?ref=home&utm_source=test"
+        for n in (60, 80, 100, 120)
+    ]
+    assert all(len(u) > 100 for u in urls), urls
+    # 确认拼起来确实会超过 _REASON_LIMIT——旧实现的截断只有在这个条件
+    # 成立时才会被真正触发，不然这条测试测不出旧 bug。
+    assert all(len(f"{u}：{diagnosis}") > OW._REASON_LIMIT for u in urls)
+
+    cands = "".join(
+        f"候选: {slot} | 标题{i} | {u} | 某网 | 2026-08-01\n"
+        for i, (slot, u) in enumerate(zip(SLOTS, urls))
+    )
+
+    def _fail(url, *, timeout=OW.TIMEOUT):
+        raise OW.FetchFailed(f"{url}：{diagnosis}")
+
+    monkeypatch.setattr(OW, "fetch", _fail)
+    res = gather(_Client(cands), code="600183", company="生益科技",
+                 industry="电子/元件", as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert res.fetch_failed == 4
+    assert len(res.fetch_failed_reasons) == 1, res.fetch_failed_reasons
+
+
 def test_落盘读回后失败原因逐字还原(tmp_path, monkeypatch):
     """Fix 4 要求 `fetch_failed_reasons` 跟着 `missing_slots`/
     `extra_slots` 同样的路径跨阶段存活——第二阶段的 `_restore_openweb`

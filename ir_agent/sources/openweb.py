@@ -873,19 +873,25 @@ def gather(client, *, code: str, company: str, industry: str,
             # 全部没能跨阶段存活。宁可这道防线看起来"不够精确"，也不能
             # 让未来任何一次疏漏都需要重新证明"这里必须接多宽"。
             res.fetch_failed += 1
-            reason = str(e).strip()[:_REASON_LIMIT] or e.__class__.__name__
-            # 去重必须按诊断部分（去掉 URL 前缀），不能按整条消息——
-            # `reason` 几乎总带着 `f"{url}：..."` 这个各不相同的前缀
-            # （见 fetch()/`_reject_unsafe_host`），十个候选十个不同
-            # URL、同一种诊断，按整条消息去重永远各不相同，去重形同
-            # 虚设。`split("：", 1)[-1]` 没有找到"："时原样返回整条
-            # 字符串，兜住 `reason` 恰好不含"："的边角情况（比如
-            # `e.__class__.__name__` 兜底分支），行为退化成按整条消息
-            # 去重，不会因此报错或漏判。
-            diagnosis = reason.split("：", 1)[-1]
+            # **去重键必须从截断之前的完整消息里切出来。** 旧实现先
+            # `str(e).strip()[:_REASON_LIMIT]` 截断成 `reason`，再从
+            # `reason` 里切诊断部分——真实新闻 URL 常有 80~100 字符，
+            # `f"{url}：{诊断}"` 拼起来轻松超过 `_REASON_LIMIT`（160），
+            # 于是诊断部分被截断保留的"尾巴"长度取决于 URL 有多长：
+            # 十个不同长度的 URL、同一种诊断，切出来的尾巴各不相同，
+            # 去重形同虚设——这正是本文件开头点名的"代理环境下全部候选
+            # 一次性倒在同一种诊断上"的旗舰场景。这里改成先在
+            # **未截断**的 `msg` 上切出诊断部分作为去重键，`msg` 本身
+            # 才轮到截断、只用于落盘展示。
+            msg = str(e).strip() or e.__class__.__name__
+            # `split("：", 1)[-1]` 没有找到"："时原样返回整条字符串，
+            # 兜住 `msg` 恰好不含"："的边角情况（比如 `e.__class__.
+            # __name__` 兜底分支），行为退化成按整条消息去重，不会因此
+            # 报错或漏判。
+            diagnosis = msg.split("：", 1)[-1]
             if diagnosis not in seen_diagnoses:
                 seen_diagnoses.add(diagnosis)
-                res.fetch_failed_reasons.append(reason)
+                res.fetch_failed_reasons.append(msg[:_REASON_LIMIT])
             continue
         if got.final_url in seen:
             # 重定向之后才发现撞上已有文档 —— 抓都抓了，但不重复入库。
