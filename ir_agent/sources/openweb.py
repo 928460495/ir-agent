@@ -371,6 +371,37 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data) -> None:
         self._emit(data)
 
+    def close(self) -> None:
+        # **未闭合的注释 / CDATA / 声明——`_invisible_depth` 看不见的洞。**
+        # `<!--` 从没触发 `handle_starttag`/`handle_endtag`，注释体的
+        # "不可见"完全靠 CPython `html.parser` 自己在遇到 `-->` 之前不
+        # 调用任何回调来保证；深度计数器只在 `handle_starttag`/
+        # `handle_endtag` 里加减，从未也不需要为注释加过一次。这在
+        # 注释正常闭合时没问题——但一段没有 `-->` 的注释、或没有 `]]>`
+        # 的 `<![CDATA[`，在 `close()`（也就是 `goahead(1)`）里找不到
+        # 收尾定界符时，CPython 的实现会把从声明起点到文档结尾的剩余
+        # `self.rawdata` 原样喂给 `handle_data`，当成普通正文——不可见
+        # 容器"跳到文档结尾也不例外"这条模块级承诺，对这一种情况完全
+        # 落空：从未进过任何回调的文本，混进了 `_out`。
+        #
+        # 这里直接读/清空 `self.rawdata` 拦住它：`rawdata` 是
+        # `html.parser.HTMLParser` 的**实现细节**，不是公开文档承诺的
+        # 属性——标准库文档只保证 `feed`/`close`/各 `handle_*` 回调的
+        # 行为，从未承诺这个字段的名字、或它在 `close()` 触发的最后一次
+        # `goahead` 之前仍然held着"尚未处理的剩余原始输入"这件事，在
+        # 未来 CPython 版本里保持不变。**如果这个内部实现变了**（改名、
+        # 提前清空、或 `close()` 内部处理顺序变了)，下面这行判断会静默
+        # 退化成 no-op——不报错，只是不再生效，未闭合注释/CDATA 泄漏的
+        # 这个洞会原样回归，而不会有任何调用点收到异常提醒。能抓住这种
+        # 回归的探针是测试，不是这段注释：
+        # `test_未闭合的HTML注释不泄漏到文档结尾`和
+        # `test_未闭合的CDATA不泄漏到文档结尾`直接断言"泄漏文本不在
+        # extract_text 的结果里"，不依赖了解 rawdata 这个字段本身，
+        # 一旦这里退化成 no-op，这两条测试会先变红。
+        if self.rawdata.startswith("<!"):
+            self.rawdata = ""
+        super().close()
+
     def result(self) -> str:
         # 可见噪声容器直到文档结尾都没能配对闭合——见模块级注释：缓冲区
         # 并入正文而不是丢弃，宁可漏进几个导航词，也不能把它后面真实的

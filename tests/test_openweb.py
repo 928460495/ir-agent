@@ -304,6 +304,68 @@ def test_正文提取先剥噪声容器再删注释_内联JS里的箭头不会�
         assert noise not in got, noise
 
 
+def test_未闭合的HTML注释不泄漏到文档结尾():
+    """真实事故：`html.parser.HTMLParser` 对没有 `-->` 收尾的注释，只在
+    `feed()` 过程中还没吃到 `close()` 时才会按"不完整，先攒着等下一次
+    feed"处理——但本模块只调用一次 `feed()` 后立刻 `close()`，触发的是
+    `close()`（即 `goahead(1)`）内部找不到收尾定界符时的退化路径：把从
+    `<!--` 起点到文档结尾的剩余原始字节**原样交给 `handle_data`**，当
+    成普通正文。`handle_comment` 根本没被调用，`_TextExtractor` 用来
+    识别"这是不可见内容"的 `_invisible_depth` 计数器也从未加过——这个
+    洞在深度计数器这一层完全看不见。
+
+    `out/600183-openweb/openweb.json` 里存的 10 篇真实抓取页面已经证实
+    这类畸形注释标记不是假设：里面有 62 处孤立的 `-->` 残留，说明这些
+    站点确实会出这种没头没尾的注释。放行到 Corpus 里最致命的后果正是
+    第二个用例：草稿/内部批注里写的数字（"实为 45%，对外口径 30%"）会
+    被当成"页面上真实出现过的文字"通过 `Corpus.verify()` 的逐字核验，
+    而人打开这同一个网址永远看不到这句话——这正是本模块存在的理由
+    （verbatim 可核验）要防止的伪造风险。"""
+    html = "<p>A</p><!-- 草稿：覆铜板均价下跌 30%\n<p>B</p>"
+    got = extract_text(html)
+    assert got == "A"
+    assert "草稿" not in got
+    assert "30%" not in got
+    assert "<!--" not in got
+
+    html2 = "<p>真实正文</p><!-- 内部备注：本季毛利率实为 45%，对外口径 30%"
+    got2 = extract_text(html2)
+    assert got2 == "真实正文"
+    assert "内部备注" not in got2
+    assert "45%" not in got2
+
+
+def test_未闭合的CDATA不泄漏到文档结尾():
+    """与未闭合注释同一个洞的另一种触发方式：`<![CDATA[` 同样以 `<!`
+    开头、同样可能没有 `]]>` 收尾，同样会在 `close()` 里被
+    `html.parser` 当成"找不到收尾，把剩余原始字节整段喂给
+    handle_data"处理，`_invisible_depth` 同样从未加过。"""
+    html = "<p>A</p><![CDATA[内部草稿"
+    got = extract_text(html)
+    assert got == "A"
+    assert "内部草稿" not in got
+    assert "CDATA" not in got
+
+
+def test_正常闭合的注释与doctype声明不受未闭合修复影响():
+    """`_TextExtractor.close()` 的修复只在 `close()` 触发时
+    `self.rawdata` 仍以 `<!` 开头（即 feed() 结束时还剩一段没能在
+    `feed()` 过程中被完整解析掉的 `<!...` 声明）才生效。正常闭合的
+    `<!-- ... -->` 在 `feed()` 期间就已经被 `parse_comment` 完整消费，
+    不会剩在 `rawdata` 里；`<!doctype html>` 同理在 `feed()` 期间就被
+    `parse_html_declaration` 处理掉。这条测试确认修复没有误伤这两种
+    收尾正常的声明。"""
+    html = "<p>正文</p><!-- 正常注释 -->\n<p>后续</p>"
+    got = extract_text(html)
+    assert "正文" in got
+    assert "后续" in got
+    assert "正常注释" not in got
+
+    html2 = "<!doctype html>\n<p>正文</p>"
+    got2 = extract_text(html2)
+    assert got2 == "正文"
+
+
 def _fake_getaddrinfo_public(host, port):
     """与 fetch() 的主机安全闸门无关的测试用：任何主机名都解析成一个
     公网地址，绕开真实 DNS 调用（不需要网络、结果确定）。"""
