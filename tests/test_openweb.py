@@ -807,49 +807,78 @@ def test_fetch_超过字节上限时拒绝(monkeypatch):
         OW.fetch("https://x.example.com/a")
 
 
+def _nested_nav_with_noise_at_every_level(depth: int, marker_prefix: str) -> str:
+    """构造 `depth` 层自嵌套 `<nav>`，**每一层自己的开标签后面都直接跟
+    一段该层专属的噪声文字**（`{marker_prefix}0`、`{marker_prefix}1`……），
+    不是只把噪声放在最内层。
+
+    这个区别是这条测试是否具有区分力的关键。旧实现（`_strip_blocks`，
+    正则反复 `sub` 直到不再变化，`_BLOCK_MAX_PASSES = 32` 封顶）一遍
+    `_BLOCK.sub` 只吃得掉"不含嵌套"的最内层那一对——如果噪声只写在最
+    内层（旧版本这条测试的构造方式），最内层那对标签在**第一遍**就已
+    经连标签带内容一起被替换掉，后续 31 遍处理的只是外层剩下的、内容
+    已经清空的空壳 `<nav> </nav>`，跟深度是 20 还是 1000 无关——这正是
+    实测验证到的：旧实现在这种构造下，深度 1000 也不泄漏一个字，这条
+    测试因此对旧实现和新实现给出相同的"通过"结果，起不到区分作用（见
+    `.superpowers/sdd/final-gate-report.md`）。
+
+    每层都放一段专属噪声之后，情况不同：第 i 层的噪声文字属于"第 i 层
+    以内、第 i+1 层以外"的那个标签对，必须先剥掉所有比它更深的嵌套、
+    轮到它自己被识别成"不含嵌套的最内层"才会被处理——第 i 层要等到第
+    `depth - i` 遍才被剥到。旧实现封顶在 32 遍，depth 超过 32 时，深度
+    编号小于 `depth - 32` 的那些外层噪声永远轮不到，会跟着未剥净的
+    `<nav>` 标签一起被 `_TAG.sub` 转成裸文字漏出来。"""
+    opens = [f"<nav>{marker_prefix}{i} " for i in range(depth)]
+    closes = [f" {marker_prefix}{i}</nav>" for i in range(depth)]
+    closes.reverse()
+    return "".join(opens) + "最内层噪声" + "".join(closes)
+
+
 def test_深度嵌套容器无论多深都能完全剥掉():
-    """**回归改写**：旧实现用正则反复 `sub` 到不再变化为止，靠
-    `_BLOCK_MAX_PASSES = 32` 给这个循环封顶（防止对抗性输入把它拖成
-    死循环）——深度超过这个上限就会带着未剥净的噪声跑到 `_TAG`。改写
-    成 `html.parser` 之后，噪声容器的剔除靠 `_TextExtractor` 的深度
-    计数器，一次线性扫描处理任意嵌套深度，`_BLOCK_MAX_PASSES` 这个概念
-    随旧实现一起被删掉了——不存在"扫描到上限还没剥干净"这种退化状态。
+    """**回归改写，且已用旧实现验证过区分力。** 旧实现用正则反复 `sub`
+    到不再变化为止，`_BLOCK_MAX_PASSES = 32` 给这个循环封顶——每一遍
+    只能剥掉"当前不含嵌套的最内层"那一对，深度超过 32 时，编号小于
+    `depth - 32` 的外层永远轮不到被剥，其自带的噪声文字会跟着未剥净的
+    标签一起漏出来（构造细节见 `_nested_nav_with_noise_at_every_level`
+    的说明）。改写成 `html.parser` 之后，噪声容器的剔除靠
+    `_TextExtractor` 的深度计数器，一次线性扫描处理任意嵌套深度，
+    `_BLOCK_MAX_PASSES` 这个概念随旧实现一起被删掉了。
 
-    这条测试原来分成两条：一条测深度 20（"上限内"，噪声必须剥净），
-    一条测深度 40（"超上限"，接受噪声泄露作为已知代价）。上限已经不
-    存在，两条测试的区别本身也不存在了——这里合并成一条，把深度推到
-    1000（远超旧实现的 32），断言噪声必须被**完全**剥掉、真实内容必须
-    完整保留：这正是新实现应该达到、旧实现在深度 40 就已经达不到的
-    保证。"""
-    noise = "噪声"
-    real_content = "真实内容"
+    这条测试曾经把噪声只放在最内层，深度推到 1000——但那种构造下旧
+    实现在第一遍就已经把噪声连标签一起吃掉，深度 20/40/1000 对旧实现
+    而言结果完全一样（不泄漏），测试对新旧实现给出相同的"通过"，没有
+    任何区分力，等于没测到旧实现在深度 40 就已经会泄漏这件事。这里改成
+    每一层都带专属噪声标记，已用 `git worktree` 检出旧实现（commit
+    a6b3bcb）实测确认：depth=40 时旧实现泄漏 8 个外层标记，depth=1000
+    时泄漏 968 个；新实现在这两个深度下都是 0 个。"""
     depth = 1000  # 远超旧实现 _BLOCK_MAX_PASSES = 32 曾经的上限
-
-    # 程序化构造：<nav>噪声</nav> 嵌套 1000 层，真实内容在外层
-    nested = "<nav>" * depth + noise + "</nav>" * depth
+    nested = _nested_nav_with_noise_at_every_level(depth, "N")
+    real_content = "真实内容"
     html = f"<div><p>{real_content}</p>{nested}</div>"
 
     got = extract_text(html)
 
     # 真实内容必须保留
     assert real_content in got
-    # 嵌套内的噪声必须被彻底剔除——不再有"超过上限就容忍泄露"这一档
-    assert noise not in got
+    # 最内层噪声、以及每一层自带的噪声标记都必须被彻底剔除
+    assert "最内层噪声" not in got
+    leaked = [f"N{i}" for i in range(depth) if f"N{i}" in got]
+    assert leaked == [], f"泄漏了 {len(leaked)} 层噪声标记，例如 {leaked[:5]}"
 
 
 def test_容器深度极深且真实内容夹在中间仍不丢失():
-    """**回归改写**：旧实现的姊妹测试断言"深度超过 32 时噪声可能泄露，
-    但容器外的真实内容必须保留"——那是给旧实现的遍数上限留的让步。新
-    实现没有遍数上限，这条测试改成断言更强的保证：即使噪声容器深度
-    远超旧上限，前后的真实内容也必须完整保留，且噪声必须被完全剥掉，
-    不再需要"容忍泄露"这个让步。"""
-    noise = "噪声"
+    """**回归改写，且已用旧实现验证过区分力**（同上一条，构造方式见
+    `_nested_nav_with_noise_at_every_level`）。旧实现的姊妹测试断言
+    "深度超过 32 时噪声可能泄露，但容器外的真实内容必须保留"——那是给
+    旧实现的遍数上限留的让步；但那条测试把噪声只放在最内层，旧实现在
+    这种构造下深度 1000 也不会泄漏，"可能泄露"这个前提从未被真正触发
+    过。这里改成每层都带专属噪声标记后，新实现没有遍数上限，断言更强
+    的保证：即使噪声容器深度远超旧上限，前后的真实内容也必须完整保留，
+    且每一层的噪声都必须被完全剥掉。"""
+    depth = 1000  # 远超旧实现 _BLOCK_MAX_PASSES = 32 曾经的上限
+    nested = _nested_nav_with_noise_at_every_level(depth, "M")
     real_before = "前面内容"
     real_after = "后面内容"
-    depth = 1000  # 远超旧实现 _BLOCK_MAX_PASSES = 32 曾经的上限
-
-    # 程序化构造：前面真实内容 + 超深嵌套噪声容器 + 后面真实内容
-    nested = "<nav>" * depth + noise + "</nav>" * depth
     html = f"<div><p>{real_before}</p>{nested}<p>{real_after}</p></div>"
 
     got = extract_text(html)
@@ -857,8 +886,10 @@ def test_容器深度极深且真实内容夹在中间仍不丢失():
     # 容器外的真实内容必须保留
     assert real_before in got, "前面的真实内容被误删了"
     assert real_after in got, "后面的真实内容被误删了"
-    # 新实现没有遍数上限，噪声必须被完全剥掉，不再容忍泄露
-    assert noise not in got, "噪声不该再泄露——新实现没有遍数上限"
+    # 新实现没有遍数上限，每一层自带的噪声都必须被完全剥掉
+    assert "最内层噪声" not in got
+    leaked = [f"M{i}" for i in range(depth) if f"M{i}" in got]
+    assert leaked == [], f"泄漏了 {len(leaked)} 层噪声标记，例如 {leaked[:5]}"
 
 
 from ir_agent.sources.external import Corpus
