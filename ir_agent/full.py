@@ -269,13 +269,22 @@ def _media_tier_note(corpus) -> list[str]:
     「引文找不到」和「引文找得到但来源分级不够格」是两种严重程度
     截然不同的问题，不能用同一种「拒绝」处置。
 
-    `Corpus.verify()` 每命中一次 MEDIA 文档就往 `corpus.media_cited`
-    追加一条记录（见该字段与 `verify()` 的文档字符串）——`validate()`
-    从 strategy.py/value_chain.py/macro_view.py/assume.py 好几个模块
-    调用，这里不去每个调用点分别处理，只在本阶段研究流程收尾、写
-    `ResearchOutcome.skipped` 之前读一次 `corpus.media_cited` 的总数，
-    与 `_openweb_notes` 汇总 `res.fetch_failed_reasons` 是同一个思路：
-    调用方各自往同一个累加器上记账，产物清单在最后统一渲染一次。
+    `Corpus.verify()` 每命中一次**此前没见过的** (文档, 引文) 组合就往
+    `corpus.media_cited` 追加一条记录，按这个键去重（见该字段与
+    `verify()` 的文档字符串）——`validate()` 从 strategy.py/
+    value_chain.py/macro_view.py/assume.py 好几个模块调用，且每个模块
+    自己的 `check()` 循环里 `max_attempts=3`，被打回重试的草稿也会
+    重新跑一遍 `validate()`。不去重的话，这里报的「N 处」数的是"重试
+    了几次"，跟读者关心的"最终定稿实际依赖了几条 MEDIA 依据"是两件
+    不同的事，且会随重试次数虚高——这行文案是产物清单里一条肯定性
+    声明，报错比不报更糟。去重之后，`len(corpus.media_cited)` 数的是
+    不同的 (文档, 引文) 组合数，即下文「N 处」里的**处**：同一篇文档
+    的两条不同引文算两处，同一条引文（哪怕来自不同依据对象、不同
+    重试轮次）只算一处。这里不去每个调用点分别处理，只在本阶段研究
+    流程收尾、写 `ResearchOutcome.skipped` 之前读一次
+    `corpus.media_cited` 的总数，与 `_openweb_notes` 汇总
+    `res.fetch_failed_reasons` 是同一个思路：调用方各自往同一个
+    累加器上记账，产物清单在最后统一渲染一次。
     """
     if corpus is None or not corpus.media_cited:
         return []

@@ -91,6 +91,34 @@ def test_引文出自非MEDIA文档不记入media_cited():
     assert c.media_cited == []
 
 
+def test_同一条MEDIA引文被重复核验多次只记一次():
+    """真实触发场景：strategy.assess/value_chain.analyse/macro_view.assess
+    都以 max_attempts=3 重试，每次 check() 都重跑一遍 validate() ——
+    也就是重跑一遍 verify()。模型第一次交的草稿因某个不相关的问题被
+    整体打回重试，第二次交的草稿即便引用的是同一条 MEDIA 引文，也会
+    让 verify() 再命中一次；不去重的话 media_cited 数的是"这条引文
+    经历了几次尝试"，不是"最终定稿依赖了几条 MEDIA 依据"，会随重试
+    次数虚高——这里模拟三次重试全部核验同一句引文，确认只记一次。"""
+    c = Corpus(as_of=AS_OF)
+    c.add(_doc(tier=Tier.MEDIA, url="https://finance.example.com/x"))
+    for _ in range(3):  # 模拟 max_attempts=3 的重试循环
+        assert c.verify("终端库存得到有效去化") == ""
+    assert len(c.media_cited) == 1
+
+
+def test_同一文档两条不同MEDIA引文分别计数不被合并():
+    """去重键必须是 (文档, 引文)，不能只按文档去重。同一篇文档支撑两条
+    不同的判断，是比只支撑一条判断更大的风险敞口——压成按文档去重会把
+    这个差异抹掉，让「N 处」比实际引用条数少报。"""
+    text = ("26H1系列酒实现收入129.3亿元，同比-6%，终端库存得到有效去化。"
+           "次高端价格带持续承压，经销商打款意愿不足。")
+    c = Corpus(as_of=AS_OF)
+    c.add(_doc(tier=Tier.MEDIA, url="https://finance.example.com/x", text=text))
+    assert c.verify("终端库存得到有效去化") == ""
+    assert c.verify("次高端价格带持续承压") == ""
+    assert len(c.media_cited) == 2
+
+
 # ── 来源分级 ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("t", list(Tier))

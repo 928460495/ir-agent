@@ -173,6 +173,16 @@ class Corpus:
     # 处置。但也不能因为不拒绝就让它隐身：读者必须能看到"这条判断的
     # 依据只是线索级来源"。
     #
+    # **计数按 (文档, 规范化引文) 去重，不按 verify() 被调用的次数。**
+    # `validate()` 从 strategy.assess/value_chain.analyse/macro_view.assess
+    # 的重试循环里调用（`max_attempts=3`），同一条 MEDIA 引文可能在被
+    # 打回重试的草稿里、以及最终定稿里各被 verify() 命中一次——不去重，
+    # 这个数字数的是"重试了几次"而不是"最终依赖了几条 MEDIA 依据"，
+    # 会随重试次数虚高，是产物清单里一条会说谎的肯定性声明（比不提
+    # 更糟）。去重键选 (doc_id, 引文) 而不是 (doc_id,)：同一篇文档内
+    # 两条不同的真实引文必须分别计数，压成按文档去重会漏报真实的引用
+    # 条数。见 verify() 里的实现与更详细的说明。
+    #
     # 记在 corpus 对象上、不通过 verify() 的返回值传出去——`verify()`
     # 从 `basis.validate()` 调用，而 `validate()` 又从 strategy.py/
     # value_chain.py/macro_view.py/assume.py 好几个模块调用，返回值的
@@ -181,6 +191,11 @@ class Corpus:
     # 调用方（这里是 full.py）在整轮跑完之后统一读一次、汇总成一条
     # 产物清单条目，而不是每次 verify() 都要单独处理。
     media_cited: list[str] = field(default_factory=list)
+    # `media_cited` 的去重键：(doc_id, 规范化后的引文)。**不暴露给
+    # dataclass 的公开字段名单之外的调用方** —— 纯粹是 verify() 自己
+    # 记账用，见 verify() 里的说明。
+    _media_cited_seen: set[tuple[str, str]] = field(default_factory=set,
+                                                     repr=False)
 
     def add(self, doc: Document) -> None:
         if doc.published > self.as_of:
@@ -233,7 +248,30 @@ class Corpus:
             return (f"外部引文「{quote[:20]}」实际出自 {d.cite()}，"
                     f"但依据标注的 URL 是 {url} —— 归因错误。")
         if d.tier is Tier.MEDIA:
-            self.media_cited.append(d.cite())
+            # **去重，按 (文档, 规范化引文) 计数——"处" 数的是不同的引用，
+            # 不是不同的文档，也不是 verify() 被调用的次数。**
+            #
+            # `validate()` 从 strategy.assess/value_chain.analyse/
+            # macro_view.assess 的重试循环里调用（`max_attempts=3`，每次
+            # `check()` 都会重跑 `validate()`）：模型第一次交的草稿没
+            # 通过某个不相关的核验、被整体打回重试，第二次交的草稿即便
+            # 引用了同一条 MEDIA 引文，也会让 verify() 再命中一次
+            # ——不去重，`media_cited` 数的其实是"这条引文在多少次尝试
+            # 里出现过"，而不是"最终定稿实际依赖了多少条 MEDIA 依据"，
+            # 重试次数越多，报给读者的数字越夸大，且与 `docs`/实际引文
+            # 无关地上涨。
+            #
+            # 键选 (doc_id, 规范化引文) 而不是 (doc_id,)：同一篇文档里
+            # 两个不同的真实引文必须分别计数——"1 篇文档支撑 2 条不同
+            # 判断"和"1 篇文档支撑 1 条判断"是不同的风险敞口，压成
+            # 按文档去重会把前者也报成 1，反而漏报。同一条引文只在
+            # *不同* 依据对象上被重复核验（例如两处依据抄了同一句话）
+            # 也只算一次——它们指向同一个可核验的事实，不是两条独立
+            # 依据。
+            key = (d.doc_id, norm(quote))
+            if key not in self._media_cited_seen:
+                self._media_cited_seen.add(key)
+                self.media_cited.append(d.cite())
         return ""
 
     def summary(self) -> str:
