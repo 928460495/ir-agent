@@ -62,6 +62,37 @@ def _load_macro(r, as_of: date) -> tuple[str, str, str]:
     return snap.describe(), snap.for_prompt(), ""
 
 
+def _external_md(corpus, consensus) -> str:
+    """外部资料清单的人读版。**唯一一处渲染口径。**
+
+    此前这段拼接只写在 `_load_external` 里，于是它渲染的是「券商研报入库
+    那一刻」的语料库；`_load_openweb` 随后往**同一个** Corpus 里再加最多
+    10 篇文档，清单却不会重算。实测（600183 第一阶段）终端与看板都写
+    「外部资料 9 篇 / [卖方研究] 9 篇」，而进了战略/产业链/宏观定性三节
+    提示词的是 19 篇、其中 10 篇【财经媒体】——清单于是成了一句**主动的
+    假陈述**：读者据此以为本轮的外部依据全部来自卖方研究。
+
+    这正是本项目「缺什么必须显式列出来」的反面：只列一部分，读者会以为
+    那就是全部。渲染口径收在这一个函数里，两个阶段共用。
+    """
+    from ir_agent import corpus as C
+
+    if corpus is None:
+        return ""
+    return corpus.summary() + "\n\n" + C.consensus_md(consensus)
+
+
+def _refresh_external_md(r, md: dict) -> None:
+    """开放网络文档入库之后，把清单按**语料库的实际内容**重渲染一遍。
+
+    `md` 会原样写进 state.json、进看板、并在第二阶段读回——不重渲染，
+    这三处说的都是采集之前的那个语料库。
+    """
+    if getattr(r, "corpus", None) is None:
+        return
+    md["外部资料"] = _external_md(r.corpus, getattr(r, "consensus", None))
+
+
 def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
     """公司之外的资料入语料库。返回 (给人看的, 给模型看的, 失败说明)。
 
@@ -80,7 +111,7 @@ def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
         from ir_agent.sources.reports import consensus_facts
         for f in consensus_facts(cs):
             r.ledger.put(f)
-    md = cp.summary() + "\n\n" + C.consensus_md(cs)
+    md = _external_md(cp, cs)
     # **缺什么都要说出来，一致预期也不例外。** 原来只为「一篇研报都没
     # 取到」设了话，一致预期为空时直接静默返回——实测（生益科技 600183
     # 第一阶段）研报取到 9 篇、一致预期一条没有，于是 brief.md 里
@@ -99,6 +130,213 @@ def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
         prompt = "" if not cp.docs else C.consensus_prompt(cs)
         return md, prompt, "外部资料（" + "；".join(notes) + "）"
     return md, C.consensus_prompt(cs), ""
+
+
+def _company_name(code: str) -> str:
+    """公司简称。取不到就退回代码 —— 搜索提示词里写代码也能用。"""
+    try:
+        from ir_agent.sources.taxonomy import fetch_all
+        rows = fetch_all()
+    except Exception:                                       # noqa: BLE001
+        return code
+    me = next((e for e in rows if e.code == code), None)
+    return me.name if me is not None else code
+
+
+def _load_openweb(code: str, r, as_of: date, out: Path, client,
+                  industry: str) -> list[str]:
+    """开放网络文档入语料库。返回要记进产物清单的条目。
+
+    **这里不能放进 `_analyse_facts`。** 那一层的不变量写在它自己的
+    docstring 上：「不调模型，因此两个阶段都要跑」。而本函数要调模型，
+    放进去有两个后果，第二个是致命的：
+
+      1. 成本翻倍 —— 两个阶段各跑一次
+      2. 第二阶段可能取到**与第一阶段不同的文档**，于是第一阶段正文里
+         写下的外部引文，在第二阶段核验不过
+
+    第 2 条是本项目已经吃过的那类亏。根因同一个：**一个不可复现的产物
+    被放在了会被重跑的位置上。** corpus.gather 能待在确定性层，是因为
+    东财接口同 as_of 返回同一批研报；discover 没有这个性质，网页本身
+    也会变。因此第一阶段落盘、第二阶段读回（见 `_restore_openweb`）。
+    """
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus
+
+    if r.corpus is None:
+        r.corpus = Corpus(as_of=as_of)
+    try:
+        res = openweb.gather(client, code=code, company=_company_name(code),
+                             industry=industry, as_of=as_of, corpus=r.corpus)
+    except Exception as e:                                  # noqa: BLE001
+        return [f"开放网络采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
+
+    skipped: list[str] = []
+    try:
+        openweb.save(res, out / openweb.OPENWEB_JSON)
+    except Exception as e:                                  # noqa: BLE001
+        # **落盘失败不能连带毁掉本轮研究。** `save()` 底层是
+        # `Path.write_text`，输出目录被回收、磁盘写满、权限被收回都会在
+        # 这里炸——这些是运行环境的事，不是采集失败，不该把整轮 analyse
+        # 一起拖下水。
+        #
+        # 但也不能只说「保存失败」了事：`res.docs` 里的文档此刻已经在
+        # `r.corpus` 里，本轮简报仍能引用它们、核验也能通过；跨阶段却
+        # 存活不了——`_restore_openweb` 读的正是这里本该写出的文件，
+        # 读不到就是空语料库。于是简报正文里写下的开放网络引文，到了
+        # 第二阶段会被自己的核验闸门拒掉。这个具体后果必须说出来，
+        # 不能让读者以为"保存失败"只是无关痛痒的一句话。
+        skipped.append(
+            f"开放网络资料未能落盘（{e.__class__.__name__}: {str(e)[:120]}）"
+            "——本阶段采集到的文档仍在本轮语料库中、可支撑当前简报，"
+            "但不会跨阶段存活：第二阶段读不到这份文件，"
+            "简报中写下的相关外部引文到时可能核验不过")
+
+    if not res.docs:
+        # **「一篇都没取到」不等于「没有可说的细节」。** 候选一个都没
+        # 抓成功、与候选找到了但逐个抓取失败，是两种不同的现场——前者
+        # 该去查采集提示词或联网工具，后者该去查抓取环节；不把
+        # fetch_failed/missing_slots 带出来，两者在终端上长得一模一样。
+        extra: list[str] = []
+        if res.fetch_failed:
+            extra.append(f"{res.fetch_failed} 篇抓取失败")
+        if res.missing_slots:
+            extra.append("缺失主题：" + "、".join(res.missing_slots))
+        detail = "（" + "；".join(extra) + "）" if extra else ""
+        skipped.append(f"开放网络资料：一篇都没取到{detail}，"
+                       "定性判断的外部依据仍只有券商研报一类来源")
+        return skipped
+
+    return skipped + _openweb_notes(res)
+
+
+def _openweb_notes(res) -> list[str]:
+    """采集结果里要记进产物清单的条目。**两个阶段共用同一份措辞。**
+
+    两处各写一遍同一组说明，早晚会分叉——而且已经分叉过：
+    `_restore_openweb` 此前只报 `model_dated`，把 `missing_slots` 与
+    `fetch_failed` 整个丢掉，而第二阶段产出的恰恰是 report.md 这个最终
+    交付物。第一阶段说了「竞争格局与份额：未取到」，第二阶段的读者却
+    什么都看不到，只能以为资料是全的。
+
+    缺口口径是产品承诺的一部分，不是某一个阶段的内部细节，因此单一定义
+    放在这里，两个阶段都调它。
+
+    **格式：一行一条，缩进的 `·`，跟 `openweb.summary()` 同构，不是
+    `；` 拼成一整行。** 此前这里把「N 篇抓取失败：原因 1；原因
+    2」「缺口 1：未取到」「缺口 2：未取到」全部揉进同一段用 `；` 连
+    的文字，而失败原因本身也带着 `：`（`f"{url}：{诊断}"`）——三层
+    「用『；』分隔的条目」「条目内部又用『：』分隔的字段」叠在一行，
+    读者（以及任何做字符串切分的下游）分不出「行业规模与增速：未取到」
+    到底是第四条抓取失败原因，还是缺口清单里独立的一条。十条失败原因
+    时这行能长到一千六百字符，直接糊进 md/state.json/看板。`openweb.
+    summary()` 早就用「每行一条、缩进 `·`」的格式解决了同一个问题——
+    这里改成同一种格式，携带的信息一个字都没少，只是换成人和程序都能
+    分清边界的排布。仍然只返回**一个**列表元素（内部用换行分隔），不
+    改变 `_load_openweb`/`_restore_openweb` 把它拼进 `skipped`（每个
+    元素对应清单里一行）的既有语义。
+    """
+    lines: list[str] = ["开放网络资料："]
+    if res.fetch_failed:
+        # `fetch_failed` 曾经是个不透明的数字——「模型给了个 PDF」「模型
+        # 给了个内网地址」「这个域名 DNS 解析不出来」「正文提取为空」
+        # 四种截然不同的诊断，打印出来长得一模一样。带代理的机器上尤其
+        # 会撞见其中一种把全部候选一次性打光（见 openweb.OpenWebResult.
+        # fetch_failed_reasons 的注释），读者必须能分清是哪一种，而不是
+        # 只看到一个数字猜。
+        lines.append(f"  · {res.fetch_failed} 篇抓取失败")
+        for reason in res.fetch_failed_reasons:
+            lines.append(f"    - {reason}")
+    if res.model_dated:
+        lines.append(f"  · {res.model_dated} 篇的发布日期由模型给出，"
+                     "未经代码核验")
+    for slot in res.missing_slots:
+        lines.append(f"  · {slot}：未取到")
+    if len(lines) == 1:
+        return []
+    return ["\n".join(lines)]
+
+
+def _media_tier_note(corpus) -> list[str]:
+    """依据引用了 Tier.MEDIA 级来源、核验仍然通过——不拒绝，但必须在
+    产物清单里说出来。
+
+    `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」，但
+    `Corpus.verify()`（`basis.validate()` 的核验基准）对任何分级的
+    文档一视同仁地放行，只要引文逐字出现——这条分级规矩此前只活在
+    提示词里，代码毫无察觉。两轮评审都指出这个洞。用户的决定是警告、
+    不是硬拒绝：产业链分析已经因为一次引文核验失败整节夭折过三次，
+    「引文找不到」和「引文找得到但来源分级不够格」是两种严重程度
+    截然不同的问题，不能用同一种「拒绝」处置。
+
+    `Corpus.verify()` 每命中一次**此前没见过的** (文档, 引文) 组合就往
+    `corpus.media_cited` 追加一条记录，按这个键去重（见该字段与
+    `verify()` 的文档字符串）——`validate()` 从 strategy.py/
+    value_chain.py/macro_view.py/assume.py 好几个模块调用，且每个模块
+    自己的 `check()` 循环里 `max_attempts=3`，被打回重试的草稿也会
+    重新跑一遍 `validate()`。不去重的话，这里报的「N 处」数的是"重试
+    了几次"，跟读者关心的"最终定稿实际依赖了几条 MEDIA 依据"是两件
+    不同的事，且会随重试次数虚高——这行文案是产物清单里一条肯定性
+    声明，报错比不报更糟。去重之后，`len(corpus.media_cited)` 数的是
+    不同的 (文档, 引文) 组合数，即下文「N 处」里的**处**：同一篇文档
+    的两条不同引文算两处，同一条引文（哪怕来自不同依据对象、不同
+    重试轮次）只算一处。这里不去每个调用点分别处理，只在本阶段研究
+    流程收尾、写 `ResearchOutcome.skipped` 之前读一次
+    `corpus.media_cited` 的总数，与 `_openweb_notes` 汇总
+    `res.fetch_failed_reasons` 是同一个思路：调用方各自往同一个
+    累加器上记账，产物清单在最后统一渲染一次。
+    """
+    if corpus is None or not corpus.media_cited:
+        return []
+    from ir_agent.sources.external import TIER_RULE, Tier
+    return [f"依据引用财经媒体级来源 {len(corpus.media_cited)} 处，"
+           f"核验通过但分级规则是「{TIER_RULE[Tier.MEDIA]}」"]
+
+
+def _restore_openweb(r, out: Path) -> list[str]:
+    """第二阶段：读回第一阶段落盘的开放网络文档。**不重新采集。**
+
+    落盘文件缺失或损坏时照常继续，只记清单 —— 重跑 discover 会引入第一
+    阶段没有的文档，那正是这套落盘机制要防的事。
+    """
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus
+
+    path = out / openweb.OPENWEB_JSON
+    if not path.exists():
+        return ["开放网络资料未跨阶段存活（未找到 "
+                f"{openweb.OPENWEB_JSON}），外部引文可能核验不过"]
+    if r.corpus is None:
+        r.corpus = Corpus(as_of=r.as_of)
+    res = openweb.load(path, r.corpus)
+    if not res.docs:
+        # **零文档有两种截然不同的成因，不能用同一句话交代。**
+        #
+        #   (a) 第一阶段 gather() 确实一篇都没采到——这不是本次读取丢了
+        #       什么，语料库从一开始就是空的。
+        #   (b) 落盘文件存在但已损坏/为空——openweb.load() 对结构性损坏
+        #       的 JSON 会整体降级为空 `OpenWebResult()`，这时才是真的
+        #       "跨阶段没存活"，本该在的文档丢了。
+        #
+        # 用 missing_slots 分辨两者：gather() 在零文档时，SLOTS 里每个
+        # 固定槽位都没有命中任何候选，`missing_slots` 因此必然等于
+        # `SLOTS` 全集（见 openweb.gather 末尾的
+        # `res.missing_slots = [s for s in SLOTS if not per_slot.get(s)]`）。
+        # 而 load() 对损坏文件的降级路径构造的是一个全新的
+        # `OpenWebResult()`，其 `missing_slots` 用的是 dataclass 默认值
+        # 空列表——不会凑巧等于 SLOTS 全集。因此
+        # `set(missing_slots) == set(SLOTS)` 是「第一阶段真的什么都没
+        # 采到」独有的信号，损坏文件产生不出这个信号。
+        if set(res.missing_slots) == set(openweb.SLOTS):
+            return ["开放网络资料：第一阶段确实一篇都没采到（并非本次读取"
+                    "丢失），定性判断的外部依据仍只有券商研报一类来源"]
+        return ["开放网络资料未跨阶段存活（落盘文件读不出文档，"
+                "可能已损坏或为空），外部引文可能核验不过"]
+    # **第一阶段记下的缺口在这里同样要报。** 落盘文件里
+    # `missing_slots`/`fetch_failed` 都在，此前只挑了 `model_dated` 出来讲，
+    # 其余两项读回后被丢掉——第二阶段的产物是 report.md，读者不会再回头
+    # 去看第一阶段的终端输出。措辞与第一阶段同源，见 `_openweb_notes`。
+    return _openweb_notes(res)
 
 
 def _load_sections(r):
@@ -996,10 +1234,10 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 反了就退化成「先收集再解释」，那正是此前的形状: 固定模板 + 填
     # 数据，无论研究什么公司问的都是同一组通用指标。
     #
-    # 预研与随后的因子定向采集都要联网，client 必须提前显式开启
-    # WebSearch/WebFetch 工具 —— 不开的话不会报错，只会安静地什么都
-    # 搜不到，比直接失败更容易被忽略，所以单独开一个 client 而不是
-    # 复用下面 `_analyse_qualitative` 里那个默认不开工具的 client。
+    # 预研、随后的因子定向采集、以及开放网络文档采集都要联网，client
+    # 必须提前显式开启 WebSearch/WebFetch 工具 —— 不开的话不会报错，
+    # 只会安静地什么都搜不到，比直接失败更容易被忽略，所以单独开一个
+    # client，不能用定性三节那个默认不开工具的 client。
     research_client = make_client(model=model, tools=["WebSearch", "WebFetch"])
     # 预研抛 MethodologyFailed（或取不到申万行业分类）时，_research_methodology
     # 返回 (None, 原因) 而不向上抛异常——退回不分解模式，判断项仍按营收增速/
@@ -1012,6 +1250,21 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
 
     md, pr, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
     skipped += facts_skipped
+
+    # ── 开放网络文档入语料库 ────────────────────────────────────
+    # 接在确定性层之后（研报已入库，去重要用）、定性三节之前（战略 /
+    # 产业链 / 宏观定性要引用其中的原文）。**不能并进 _analyse_facts** ——
+    # 理由见 _load_openweb 的 docstring。
+    skipped += _load_openweb(
+        code, r, as_of, out, research_client,
+        industry=(meth.industry if meth is not None else ""))
+    # **清单要按语料库的实际内容重渲染。** `_load_external` 渲染的是研报
+    # 入库那一刻的语料库；上面这一步往同一个 Corpus 里又加了最多 10 篇
+    # 文档，且它们确实进了下面定性三节的提示词。不重渲染，md（进看板、
+    # 进 state.json、第二阶段读回）说的就是一个与事实不符的篇数与分级
+    # 构成 —— 见 `_external_md`。
+    _refresh_external_md(r, md)
+
     qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
 
     # ── 按分解式定向采集因子数据 ────────────────────────────────
@@ -1030,6 +1283,23 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             md["因子数据"] = gaps.summary(factor_data)
         except Exception as e:                              # noqa: BLE001
             skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
+        finally:
+            # **必须在 finally 里，不能紧跟在 try 块成功路径的末尾。**
+            # `gaps.collect` 按分解出的因子逐个循环，④外部网络分支命中
+            # 时会在循环内部调 `corpus.add_if_visible` 往 `r.corpus` 里
+            # 加文档（见 gaps.py）——这发生在循环体里，早于整个函数
+            # return 或 raise。真实故障形状：第 N 个因子已经把文档塞进
+            # `r.corpus`，第 N+1 个因子采集时才报错，`gaps.collect` 整体
+            # 以异常退出——这条修复此前把 `_refresh_external_md(r, md)`
+            # 放在 try 块内、`md["因子数据"] = ...` 之后，异常一抛，这行
+            # 跟着被跳过，第 N 个因子已经写进语料库的文档，`md["外部
+            # 资料"]` 从未被告知过，读者看到的篇数与分级构成停在这次
+            # 采集之前那一刻——与上面 `_load_openweb` 之后那次重渲染是
+            # 同一类"污染了语料库却没让 md 知道"的洞（见
+            # `_external_md`），只是这次洞出在异常路径上。`finally`
+            # 保证不论 `gaps.collect` 成功、部分成功后抛异常、还是从
+            # 一开始就抛异常，都会重渲染一次。
+            _refresh_external_md(r, md)
 
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, brief=True, **_prompt_bundle(pr))
@@ -1070,6 +1340,12 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
         {"code": code, "period": r.period, "as_of": as_of.isoformat(),
          "md": md, "pr": pr, "upheld": upheld}, ensure_ascii=False, indent=2),
         encoding="utf-8")
+
+    # 依据核验过、但来源分级是 MEDIA 的记录——警告，不拒绝，见
+    # `_media_tier_note`。放在写产物清单的最后一刻读：本阶段所有会调
+    # `basis.validate()` 的环节（定性三节、DCF 判断项）此时都已跑完，
+    # `r.corpus.media_cited` 已经是本阶段的完整计数。
+    skipped += _media_tier_note(r.corpus)
 
     # **状态按实际产物定，不按预期路径。** 见 `_review_stage`。
     stage, reason = _review_stage(arts)
@@ -1267,6 +1543,9 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     print("重建分析层事实（不调模型）…", file=sys.stderr)
     _, _, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
     skipped += facts_skipped
+    # 开放网络文档：读回第一阶段落盘的，**不重新采集**。重跑 discover
+    # 会引入第一阶段没有的文档，让第一阶段正文里的外部引文核验不过。
+    skipped += _restore_openweb(r, out)
 
     # 基期毛利率也要在重建之后再取——gross_margin 同样来自派生层。
     # I4：取「最近一个完整年度」，不跟着 r.period 走——同一个理由见
@@ -1309,6 +1588,10 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
 
     md = state.get("md") or {}
     pr = state.get("pr") or {}
+    # state.json 里那份清单是第一阶段渲染的；本阶段刚重建了研报语料库、
+    # 又读回了开放网络文档，篇数与分级构成要按**现在**的语料库重算，
+    # 否则看板与终端还在讲第一阶段那个口径（见 `_external_md`）。
+    _refresh_external_md(r, md)
 
     dcf_res = None
     stage = Stage.NOT_APPLICABLE
@@ -1362,6 +1645,11 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
                 skipped.append(note)
     else:
         skipped.append("完整研报（无估值结果，第 8 节无从写起）")
+
+    # 依据核验过、但来源分级是 MEDIA 的记录——警告，不拒绝，见
+    # `_media_tier_note`。本阶段会调 `basis.validate()` 的环节
+    # （`assume.check()`、完整研报的 `audit()`）此时都已跑完。
+    skipped += _media_tier_note(r.corpus)
 
     # **没写出研报就不算做完。** 见 `_report_stage`。
     stage = _report_stage(stage, arts)

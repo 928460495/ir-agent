@@ -239,14 +239,29 @@ def for_prompt(ledger: FactLedger, period: str, as_of: date,
                      "结论强度应相应说明：" + "、".join(f.value for f in missing))
 
     if corpus is not None and corpus.docs:
-        from ir_agent.sources.external import TIER_LABEL, TIER_RULE
+        from ir_agent.sources.external import TIER_LABEL, TIER_RULE, Tier
         lines.append("\n  公司之外的资料（引用时同样须逐字照抄）：")
-        seen_tiers = set()
+        seen_tiers = {d.tier for d in corpus.docs}
+        # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
+        # 放在资料读完之后才说，等于让它先斩后奏。
+        #
+        # **按 `Tier` 的声明顺序遍历，不按 `seen_tiers` 这个 set 的迭代
+        # 顺序。** `Tier` 是个 str-Enum，同一个 set 在不同进程里的迭代
+        # 顺序取决于 PYTHONHASHSEED——「[财经媒体] 的可引用范围：仅作
+        # 线索，不得作为依据」是这几条规则里最要紧的一条，它落在第一、
+        # 第二还是第三条完全是随机的，提示词因此不是跨运行可复现的。
+        # `Corpus.summary()`（见 sources/external.py）已经用
+        # `for t in Tier:` 避开了这个问题，这里跟它保持一致。
+        for t in Tier:
+            if t not in seen_tiers:
+                continue
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
-            lines.append("  " + d.text.replace("\n", "\n  "))
-            seen_tiers.add(d.tier)
-        for t in seen_tiers:
+            lines.append("  " + d.for_prompt().replace("\n", "\n  "))
+        for t in Tier:
+            if t not in seen_tiers:
+                continue
             lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
     elif corpus is not None:
         lines.append("\n  公司之外的资料：本次未取到 —— "

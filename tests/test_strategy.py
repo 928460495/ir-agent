@@ -281,6 +281,51 @@ def test_提示词带上外部资料与其可引用范围():
     assert "不得作为本报告任何假设的依据" in txt
 
 
+def test_财经媒体的可引用范围出现在资料正文之前():
+    """媒体资料混进语料库后，模型是先读到「仅作线索，不得作为依据」
+    才看到正文，还是读完正文才补一句规矩 —— 顺序决定这条约束是否
+    真的在起作用。"""
+    from datetime import date as _d
+
+    from ir_agent.sources.external import Corpus, Document, Tier, TIER_RULE
+
+    media_text = "白酒板块情绪回暖，机构调仓迹象明显。"
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="板块观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=_d(2026, 8, 1), retrieved=AS_OF, text=media_text))
+
+    txt = strategy.for_prompt(_led(), P, AS_OF, _sections(), corpus=c)
+    rule = TIER_RULE[Tier.MEDIA]
+    assert rule in txt
+    assert txt.index(rule) < txt.index(media_text)
+
+
+def test_多档来源同时出现时可引用范围按Tier声明顺序排列():
+    """Fix 5c 回归：此前用 `{d.tier for d in corpus.docs}` 这个 set 去
+    遍历可引用范围，迭代顺序取决于 PYTHONHASHSEED——「[财经媒体] 的
+    可引用范围：仅作线索，不得作为依据」这条最要紧的规则落在第一条
+    还是最后一条是随机的。改成 `for t in Tier:` 之后，无论语料库里的
+    文档以什么顺序加入，"可引用范围"这几行必须固定按 OFFICIAL →
+    SELLSIDE → MEDIA 的声明顺序出现。"""
+    from datetime import date as _d
+
+    from ir_agent.sources.external import Corpus, Document, Tier, TIER_RULE
+
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="板块观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=_d(2026, 8, 1), retrieved=AS_OF, text="媒体正文"))
+    c.add(Document(doc_id="A1", url="https://data.eastmoney.com/report/info/A1.html",
+                   title="2026年中报点评", publisher="西南证券", tier=Tier.SELLSIDE,
+                   published=_d(2026, 8, 21), retrieved=AS_OF, text=EXT))
+
+    txt = strategy.for_prompt(_led(), P, AS_OF, _sections(), corpus=c)
+    sellside_rule = TIER_RULE[Tier.SELLSIDE]
+    media_rule = TIER_RULE[Tier.MEDIA]
+    assert txt.index(sellside_rule) < txt.index(media_rule)
+
+
 def test_没取到外部资料时明说外部视角缺位():
     """静默地只用年报，读者会以为战略判断有外部印证。"""
     from ir_agent.sources.external import Corpus

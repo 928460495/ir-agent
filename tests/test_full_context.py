@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 from datetime import date
 from decimal import Decimal
 
@@ -1391,3 +1394,474 @@ def test_第一阶段填判断项时带上锚定输入():
     import inspect
     from ir_agent import full
     assert "anchor=assume.anchor_from_cal(cal)" in inspect.getsource(full._propose_assumptions)
+
+
+def _call_name(node: "ast.Call") -> str:
+    """把一个 `ast.Call` 节点的被调用者还原成点号连接的名字
+    （裸名字如 `"_load_openweb"`，属性访问链如 `"openweb.gather"`）。
+
+    只处理这两种形态——本文件的用法只关心「源码里写的是哪个具名调用」，
+    被调用者本身是另一个表达式的返回值（如 `foo()()`）不在这组测试
+    要覆盖的场景里，返回空串即可，不会被误判成任何一个真实调用名。
+    """
+    f = node.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        parts = [f.attr]
+        cur = f.value
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _calls(fn) -> list[tuple[str, int]]:
+    """`fn` 函数体里每一个调用点的 (被调用者名字, 源码行号)——按**解析出
+    的语法树**取，不按源码文本取。
+
+    **这是这组"调用顺序/调用参数"测试的核心防线。** 这几个测试此前直接
+    对 `inspect.getsource(fn)` 做 `str.index()`，那命中的是源码文本里
+    **任意位置**第一次出现的同名字符串，注释里的一句话就能命中。真实
+    反例（代码评审时验证过）：把 `_load_openweb(...)` 的真实调用挪到
+    `_analyse_qualitative(...)` 之后，只在函数早先的位置留一行提到
+    `_load_openweb` 的注释——`str.index()` 版本量出的仍是那行注释的
+    位置，判「顺序正确」，而真实调用顺序已经错了。
+
+    注释在解析后的语法树里根本不存在节点，`ast.walk` 天然看不见它们，
+    只能走到真正的调用表达式上——顺序错了就是错了，不会被同名注释糊弄。
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    return [(_call_name(n), n.lineno) for n in ast.walk(tree)
+            if isinstance(n, ast.Call)]
+
+
+def test_开放网络采集不在确定性层里():
+    """`_analyse_facts` 的不变量是「不调模型，因此两个阶段都要跑」。
+    discover 要调模型 —— 放进去会让第二阶段取到与第一阶段不同的文档，
+    第一阶段写下的外部引文因此在第二阶段核验不过。"""
+    from ir_agent import full
+
+    names = [n for n, _ in _calls(full._analyse_facts)]
+    assert not any(n == "_load_openweb" or n.startswith("openweb.")
+                   for n in names), names
+
+
+def test_第一阶段采集排在定性三节之前():
+    """战略/产业链/宏观定性要引用开放网络文档的原文，采集必须更早。"""
+    from ir_agent import full
+
+    calls = _calls(full.run_analysis)
+
+    def first(name: str) -> int:
+        lines = [ln for n, ln in calls if n == name]
+        assert lines, f"run_analysis 里没有对 {name} 的真实调用"
+        return min(lines)
+
+    assert first("_analyse_facts") < first("_load_openweb"), \
+        "_load_openweb 必须排在 _analyse_facts 之后"
+    assert first("_load_openweb") < first("_analyse_qualitative"), \
+        "_load_openweb 必须排在 _analyse_qualitative 之前"
+
+
+def test_第二阶段只读回不重新采集():
+    """第二阶段不得引入第一阶段没有的文档。"""
+    from ir_agent import full
+
+    calls = _calls(full.run_valuation)
+    names = [n for n, _ in calls]
+    assert "_restore_openweb" in names
+    assert "_load_openweb" not in names
+    restore_ln = min(ln for n, ln in calls if n == "_restore_openweb")
+    facts_ln = min(ln for n, ln in calls if n == "_analyse_facts")
+    assert facts_ln < restore_ln
+
+
+def test_读回排在完整研报撰写之前():
+    """_build_evidence 用 r.corpus 做引文核验，读回必须更早。"""
+    from ir_agent import full
+
+    calls = _calls(full.run_valuation)
+    restore_ln = min(ln for n, ln in calls if n == "_restore_openweb")
+    write_ln = min(ln for n, ln in calls if n == "_write_full_report")
+    assert restore_ln < write_ln
+
+
+def test_因子数据采集之后重渲染外部资料清单():
+    """真实事故（同一类问题的第二个入口）：`gaps.collect` 的④外部网络
+    分支命中时会调 `corpus.add_if_visible` 往 `r.corpus` 里加文档——与
+    `_load_openweb` 是同一类"污染了语料库却没让 md 知道"。`md["外部
+    资料"]` 在 `gaps.collect` 之前就渲染过一次（紧跟在 `_load_openweb`
+    后面），`gaps.collect` 成功之后必须再重渲染一次，否则读者看到的
+    篇数与分级构成停留在这次采集之前那一刻。"""
+    from ir_agent import full
+
+    calls = _calls(full.run_analysis)
+    names = [n for n, _ in calls]
+    assert "gaps.collect" in names, names
+    collect_ln = min(ln for n, ln in calls if n == "gaps.collect")
+    refresh_lns = [ln for n, ln in calls if n == "_refresh_external_md"]
+    assert refresh_lns, "run_analysis 里没有对 _refresh_external_md 的真实调用"
+    assert any(ln > collect_ln for ln in refresh_lns), \
+        "_refresh_external_md 必须在 gaps.collect 成功之后再调一次"
+
+
+def test_因子采集抛异常时重渲染仍必须发生():
+    """上一条测试只按**行号**判断"之后"，看不见异常路径——`gaps.collect`
+    在循环里逐因子调用 `corpus.add_if_visible`，往 `r.corpus` 塞文档
+    发生在异常抛出**之前**：第 N 个因子已经命中④外部网络分支、写进了
+    语料库，第 N+1 个因子采集时才炸，`gaps.collect` 整体以异常退出。
+    此前的实现把 `_refresh_external_md(r, md)` 放在 try 块内、紧跟在
+    `md["因子数据"] = gaps.summary(factor_data)` 后面——`gaps.collect`
+    一抛异常，这两行都被跳过，第 N 个因子已经污染的语料库从未让
+    `md["外部资料"]` 知道。把行号往后挪到 try 块末尾也能骗过上一条
+    测试（这正是本条要单独存在的理由）。真正堵住这个洞要求刷新落在
+    `finally` 分支——`finally` 是 Python 语义保证"不论 try 块成功、
+    异常退出都会执行"的唯一位置，因此直接在语法树上定位包住
+    `gaps.collect` 调用的 `try` 节点，断言 `_refresh_external_md` 出现
+    在它的 `finally` 分支里，而不是 `try`/`else` 分支——只有落在
+    `finally` 才能对异常路径生效，行号判断天然分不清这个区别。"""
+    from ir_agent import full
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    target = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        body_calls = {_call_name(c) for stmt in node.body
+                     for c in ast.walk(stmt) if isinstance(c, ast.Call)}
+        if "gaps.collect" in body_calls:
+            target = node
+            break
+    assert target is not None, "run_analysis 里没找到包住 gaps.collect 的 try 块"
+
+    finally_calls = {_call_name(c) for stmt in target.finalbody
+                     for c in ast.walk(stmt) if isinstance(c, ast.Call)}
+    assert "_refresh_external_md" in finally_calls, (
+        "_refresh_external_md 必须落在包住 gaps.collect 的 try 块的 "
+        "finally 分支里，否则 gaps.collect 抛异常时会被跳过，读者看到"
+        "的外部资料清单停在这次采集之前那一刻")
+
+
+def test_采集用的是开了联网工具的client():
+    """不开工具不会报错，只会安静地什么都搜不到 —— 比直接失败更难发现。
+
+    采集必须复用 methodology/gaps 那个已显式开启 WebSearch/WebFetch 的
+    `research_client`，不能用默认不开工具的 `qual_client`。
+
+    按语法树取这个调用点**自己**的实参名字，不对源码文本做子串定位——
+    否则同一行/同一段里若有别的地方也写着 research_client 或
+    qual_client，字符串切片式的定位方式分不清那是不是这次调用自己的参数。
+    """
+    from ir_agent import full
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    call = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and _call_name(n) == "_load_openweb")
+    used: set[str] = set()
+    for part in list(call.args) + [kw.value for kw in call.keywords]:
+        used |= {n.id for n in ast.walk(part) if isinstance(n, ast.Name)}
+    assert "research_client" in used
+    assert "qual_client" not in used
+
+
+def test_开放网络落盘失败不阻断整轮研究(tmp_path, monkeypatch):
+    """资料收集的任何失败都不得阻断整轮研究——`openweb.save` 落地是
+    `Path.write_text`，输出目录被回收、磁盘写满、权限被收走都会在这里
+    抛 `OSError`。此前这一行不在 `openweb.gather` 那个 try/except 的
+    保护范围内：一旦炸，异常会一路冒出 `_load_openweb`、冒出
+    `run_analysis`，把已经写好的简报、已经花的钱全部一起带走。
+
+    落盘失败还有一个具体到「跨阶段核验」层面的后果，不是随便一句
+    "保存失败"能概括的：`res.docs` 此刻已经在 `r.corpus` 里、本轮简报
+    仍能引用并核验通过；但 `_restore_openweb` 读的正是这里本该写出的
+    文件，读不到就是空语料库——简报里写下的开放网络引文，到了第二阶段
+    会被自己的核验闸门拒掉。skipped 里必须说清楚这一点，而不是只说
+    "保存失败"。
+    """
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    doc = Document(doc_id="ow_1", url="https://example.com/a", title="示例",
+                   publisher="示例机构", tier=Tier.MEDIA,
+                   published=date(2026, 1, 1), retrieved=date(2026, 1, 1),
+                   text="正文", prompt_limit=None, date_source="meta")
+    res = openweb.OpenWebResult(docs=[doc])
+
+    monkeypatch.setattr(openweb, "gather",
+                        lambda *a, **k: res)
+
+    def _boom(*_a, **_k):
+        raise OSError("设备已满")
+
+    monkeypatch.setattr(openweb, "save", _boom)
+
+    class _R:
+        corpus = None
+
+    r = _R()
+    # 不能让异常传出 _load_openweb —— 这一行本身就是断言：调用若抛出，
+    # 测试直接因未捕获异常失败，就是本测试要守住的那条不变量。
+    skipped = full._load_openweb("600000", r, date(2026, 1, 1), tmp_path,
+                                 client=None, industry="")
+
+    assert isinstance(r.corpus, Corpus)
+    joined = "；".join(skipped)
+    assert "落盘" in joined or "保存" in joined, skipped
+    # 必须说出具体后果：本阶段的文档还在、但读不回，第二阶段核验可能不过——
+    # 不能只留一句无信息量的"保存失败"。
+    assert "跨阶段" in joined and "核验" in joined, skipped
+
+
+def test_开放网络采集失败不阻断整轮研究(monkeypatch, tmp_path):
+    """spec §七 错误对照表：「discover 整体失败 → 研报照常入库，清单记
+    『开放网络采集未执行』」。`_load_openweb` 已经把 `openweb.gather` 包
+    在 try/except 里实现了这一条——它调模型、调网络，比落盘（上一条测试
+    覆盖的姊妹分支）更容易炸：联网工具没开、模型超时、网络本身抽风都会
+    在这里抛异常。但 gather() 本身抛异常这条分支此前一个测试都没有：
+    它是「一次联网故障拖垮整轮付费分析」与「报告照常出、清单里记一笔」
+    之间唯一的防线。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import openweb
+    from ir_agent.sources.external import Corpus
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("模型超时")
+
+    monkeypatch.setattr(openweb, "gather", _boom)
+
+    class _R:
+        corpus = None
+
+    r = _R()
+    # 不能让异常传出 _load_openweb —— 这一行本身就是断言：调用若抛出，
+    # 测试直接因未捕获异常失败，就是本测试要守住的那条不变量。
+    skipped = full._load_openweb("600000", r, date(2026, 1, 1), tmp_path,
+                                 client=None, industry="")
+
+    assert isinstance(r.corpus, Corpus)
+    joined = "；".join(skipped)
+    assert "开放网络采集未执行" in joined, skipped
+    assert "RuntimeError" in joined, skipped
+
+
+def test_外部资料清单按语料库实际内容重渲染():
+    """真实事故（600183 第一阶段）: `_load_external` 渲染完清单之后，
+    `_load_openweb` 又往同一个 Corpus 塞了 10 篇【财经媒体】文档 ——
+    但 `md["外部资料"]` 没有重算，终端与看板停留在旧口径「外部资料 9 篇 /
+    [卖方研究] 9 篇」，而进了三节提示词的实际是 19 篇、其中 10 篇媒体。
+    `_refresh_external_md` 必须让 md 反映语料库此刻的真实内容。"""
+    from ir_agent import full
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    as_of = date(2026, 1, 1)
+    cp = Corpus(as_of=as_of)
+    for i in range(9):
+        cp.add(Document(doc_id=f"s{i}", url=f"https://x.example.com/s{i}",
+                        title=f"研报{i}", publisher="甲证券",
+                        tier=Tier.SELLSIDE, published=as_of, retrieved=as_of,
+                        text="正文"))
+
+    class _R:
+        consensus = None
+
+    r = _R()
+    r.corpus = cp
+    md = {"外部资料": "外部资料 9 篇（截至 2026-01-01）\n  [卖方研究] 9 篇"}
+
+    # 模拟 _load_openweb 又往同一个语料库塞了 10 篇媒体文档，
+    # 但没人告诉 md 这件事发生过。
+    for i in range(10):
+        cp.add(Document(doc_id=f"ow_{i}", url=f"https://news.example.com/{i}",
+                        title=f"报道{i}", publisher="某财经网", tier=Tier.MEDIA,
+                        published=as_of, retrieved=as_of, text="正文"))
+
+    full._refresh_external_md(r, md)
+
+    assert "外部资料 19 篇" in md["外部资料"]
+    assert "[卖方研究] 9 篇" in md["外部资料"]
+    assert "[财经媒体] 10 篇" in md["外部资料"]
+
+
+def test_openweb_notes两阶段措辞一致且不只报model_dated():
+    """真实事故: `_restore_openweb`（第二阶段）此前只报 `model_dated`，
+    把 `missing_slots` 与 `fetch_failed` 整个丢掉 —— 而第二阶段产出的
+    恰恰是 report.md 这个最终交付物。`_openweb_notes` 是两个阶段共用
+    的唯一措辞来源，必须同时带出三样东西，且两次调用（模拟两个阶段）
+    产出完全一样的文案。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(
+        docs=[], missing_slots=["竞争格局与份额"], fetch_failed=2,
+        model_dated=1)
+
+    notes_phase1 = full._openweb_notes(res)
+    notes_phase2 = full._openweb_notes(res)
+
+    assert notes_phase1 == notes_phase2
+    joined = "；".join(notes_phase1)
+    assert "2 篇抓取失败" in joined
+    assert "1 篇的发布日期由模型给出" in joined
+    assert "竞争格局与份额：未取到" in joined
+
+
+def test_openweb_notes带上具体失败原因区分不同诊断():
+    """Fix 4：`fetch_failed` 曾经是个不透明的计数——「模型给了个 PDF」
+    「这个域名 DNS 解析不出来」等四种截然不同的诊断打印出来长得一模
+    一样，本机代理环境下甚至会让全部候选倒在同一个原因上、读者只看到
+    一个数字。`_openweb_notes` 必须把去重后的具体原因带出来。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(
+        docs=[], fetch_failed=2,
+        fetch_failed_reasons=["https://a.example.com/x：DNS 解析失败（模拟）",
+                              "https://b.example.com/y：内容类型不是网页"
+                              "（application/pdf）"])
+
+    joined = "；".join(full._openweb_notes(res))
+    assert "2 篇抓取失败" in joined
+    assert "DNS 解析失败" in joined
+    assert "内容类型不是网页" in joined
+
+
+def test_openweb_notes没有失败原因时不报多余内容():
+    """回归用例：`fetch_failed_reasons` 为空（旧落盘文件、或
+    `OpenWebResult()` 默认值）时不能凭空多出一个冒号或空段——
+    `test_openweb_notes两阶段措辞一致且不只报model_dated` 已经在断言
+    `"2 篇抓取失败"` 这个精确子串，这里单独补一条更直接的形状断言。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(docs=[], fetch_failed=3)
+    joined = "；".join(full._openweb_notes(res))
+    assert "3 篇抓取失败" in joined
+    assert "3 篇抓取失败：" not in joined
+
+
+def test_openweb_notes失败原因与缺失主题分行不会被误读成同一类():
+    """真实事故：`_openweb_notes` 曾经把「N 篇抓取失败：原因1；原因2」
+    「缺口1：未取到」「缺口2：未取到」全部揉进用 `；` 连接的同一行，
+    而失败原因本身又带着 `：`（`f"{url}：{诊断}"`）——三层分隔符叠在
+    一起，读者（以及任何做字符串切分的下游）分不清 "行业规模与增速：
+    未取到" 到底是缺失主题清单里独立的一条，还是被算进了抓取失败的第
+    四条原因。十条失败原因时这一整行能长到约 1600 字符，直接糊进
+    md/state.json/看板。这里用一个刻意让两类信息挨在一起的构造
+    （失败原因列表恰好在最后一条也含"：未取到"字样的诊断），验证修复
+    后两类信息落在互不相邻、可以按行区分的位置，而不是同一段用 "；"
+    分隔的文字。"""
+    from ir_agent import full
+    from ir_agent.sources import openweb
+
+    res = openweb.OpenWebResult(
+        docs=[], fetch_failed=1,
+        fetch_failed_reasons=["https://site.example.com/a：内容类型不是"
+                              "网页（application/pdf）"],
+        missing_slots=["行业规模与增速", "政策与监管"])
+
+    notes = full._openweb_notes(res)
+    # 仍然只产出一个 skipped 列表元素——不改变 `_load_openweb`/
+    # `_restore_openweb` 把它拼进 skipped 的既有语义（一个元素对应
+    # 清单里一行/一条）。
+    assert len(notes) == 1
+    lines = notes[0].splitlines()
+    # 失败原因与缺失主题必须落在不同的行上，才谈得上"能分清"。
+    reason_lines = [ln for ln in lines if "内容类型不是网页" in ln]
+    slot_lines = [ln for ln in lines
+                 if ln.strip().startswith("· ") and "：未取到" in ln]
+    assert len(reason_lines) == 1
+    assert {"  · 行业规模与增速：未取到",
+            "  · 政策与监管：未取到"} <= set(slot_lines)
+    # 缺失主题各自独立成行，不与抓取失败那一条挤在同一行、同一段
+    # 用 "；" 连接的文字里。
+    assert reason_lines[0] not in slot_lines
+    for slot_line in slot_lines:
+        assert "内容类型不是网页" not in slot_line
+
+
+# ── _media_tier_note：MEDIA 级引文核验通过，但要在产物清单里警告 ──
+#
+# `TIER_RULE[Tier.MEDIA]` 写死「仅作线索，不得作为依据」，`Corpus.
+# verify()` 却对任何分级的文档一视同仁地放行——用户的决定是警告、不是
+# 硬拒绝（产业链分析已经因一次引文核验失败整节夭折过三次）。`verify()`
+# 命中 MEDIA 文档时往 `corpus.media_cited` 记一笔，`full._media_tier_note`
+# 在两处 `ResearchOutcome` 收尾前读一次、汇总成一条 skipped 条目——与
+# `_openweb_notes` 汇总 `fetch_failed_reasons` 是同一个思路。
+
+
+def test_media_tier_note_MEDIA引文产出产物清单条目():
+    from ir_agent import full
+    from ir_agent.sources.external import TIER_RULE, Corpus, Tier
+
+    c = Corpus(as_of=date(2026, 1, 1))
+    c.media_cited = ["某财经网《标题》（2026-01-01，财经媒体）"]
+    notes = full._media_tier_note(c)
+    assert len(notes) == 1
+    assert "1 处" in notes[0]
+    assert TIER_RULE[Tier.MEDIA] in notes[0]
+
+
+def test_media_tier_note_SELLSIDE引文不产出条目():
+    """SELLSIDE/OFFICIAL 引文核验通过时 `verify()` 根本不往
+    `media_cited` 记账——`_media_tier_note` 收到一个空列表，必须
+    产出空的 skipped 附加内容，不能凭空多出一条。"""
+    from ir_agent import full
+    from ir_agent.sources.external import Corpus
+
+    c = Corpus(as_of=date(2026, 1, 1))
+    assert c.media_cited == []
+    assert full._media_tier_note(c) == []
+
+
+def test_media_tier_note_corpus为None时不报():
+    """`r.corpus` 理论上不该是 None（两处调用点之前都已经保证赋值），
+    但 `_media_tier_note` 独立作为一个函数，防御性地接住 None，不炸。"""
+    from ir_agent import full
+
+    assert full._media_tier_note(None) == []
+
+
+def test_MEDIA引文经validate后能在corpus上累计并被full汇总():
+    """端到端串联三层：`Corpus.verify()` 记账 → `basis.validate()`
+    透传 → `full._media_tier_note()` 汇总成产物清单条目。这是测试
+    契约要求的用例：MEDIA 级引文通过 `validate()` 并产出产物清单条目；
+    SELLSIDE 级引文通过 `validate()` 但不产出条目。"""
+    from ir_agent import full
+    from ir_agent.basis import Basis, validate
+    from ir_agent.ledger import FactLedger
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    as_of = date(2026, 1, 1)
+    body = "正文无关紧要"
+
+    media_corpus = Corpus(as_of=as_of)
+    media_corpus.add(Document(
+        doc_id="m1", url="https://finance.example.com/a", title="行业快讯",
+        publisher="某财经网", tier=Tier.MEDIA, published=as_of,
+        retrieved=as_of, text="行业规模约120亿美元"))
+    media_bases = [Basis.external("https://finance.example.com/a",
+                                  "行业规模约120亿美元", as_of)]
+    assert validate(media_bases, FactLedger(), body, as_of,
+                    corpus=media_corpus) == []
+    media_notes = full._media_tier_note(media_corpus)
+    assert len(media_notes) == 1
+
+    sell_corpus = Corpus(as_of=as_of)
+    sell_corpus.add(Document(
+        doc_id="s1", url="https://research.example.com/a", title="行业点评",
+        publisher="某券商", tier=Tier.SELLSIDE, published=as_of,
+        retrieved=as_of, text="行业规模约120亿美元"))
+    sell_bases = [Basis.external("https://research.example.com/a",
+                                 "行业规模约120亿美元", as_of)]
+    assert validate(sell_bases, FactLedger(), body, as_of,
+                    corpus=sell_corpus) == []
+    assert full._media_tier_note(sell_corpus) == []

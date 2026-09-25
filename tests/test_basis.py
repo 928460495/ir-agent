@@ -77,6 +77,16 @@ class TestValidateAgainstEvidence:
                          ledger(), BODY, AS_OF)
         assert probs and "正文" in probs[0]
 
+    def test_report_rejection_says_how_to_fix_it(self):
+        """真实事故: 模型引用的是正文里真实存在的一句话，但自己在中间加了
+        省略号（「…广泛应用于...」），逐字核验因此判不过。同一条驳回信息
+        被原样重试三次，模型都不知道问题出在省略号 —— 驳回信息必须说清
+        怎么改才能通过。"""
+        probs = validate([Basis.report("公司正在高速扩张")],
+                         ledger(), BODY, AS_OF)
+        assert probs and ("更短" in probs[0] and "连续" in probs[0]
+                          and "省略" in probs[0])
+
     def test_report_quote_present_passes(self):
         assert validate([Basis.report("几乎不依赖财务杠杆")],
                         ledger(), BODY, AS_OF) == []
@@ -93,6 +103,42 @@ class TestValidateAgainstEvidence:
 
     def test_empty_basis_list_is_a_problem(self):
         assert validate([], ledger(), BODY, AS_OF)
+
+
+# ── MEDIA 级来源：validate() 仍然通过，但要让 corpus 记下来 ──────
+#
+# TIER_RULE[Tier.MEDIA] 写死「仅作线索，不得作为依据」，此前只是提示词
+# 里的一句话——validate()/verify() 对任何分级的文档一视同仁，只要引文
+# 逐字出现就放行。用户决定这里警告、不拒绝：见
+# ir_agent.sources.external.Corpus.media_cited 字段注释与 verify()
+# 文档字符串。
+
+
+def _corpus_with(tier):
+    from ir_agent.sources.external import Corpus, Document, Tier as T
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="x", url="https://example.com/a", title="标题",
+                   publisher="某来源", tier=tier, published=date(2026, 5, 1),
+                   retrieved=AS_OF, text="行业规模约120亿美元"))
+    return c
+
+
+def test_MEDIA级引文通过validate但记入corpus的media_cited():
+    from ir_agent.sources.external import Tier as T
+    c = _corpus_with(T.MEDIA)
+    bases = [Basis.external("https://example.com/a", "行业规模约120亿美元",
+                            AS_OF)]
+    assert validate(bases, ledger(), BODY, AS_OF, corpus=c) == []
+    assert len(c.media_cited) == 1
+
+
+def test_SELLSIDE级引文通过validate且不记入media_cited():
+    from ir_agent.sources.external import Tier as T
+    c = _corpus_with(T.SELLSIDE)
+    bases = [Basis.external("https://example.com/a", "行业规模约120亿美元",
+                            AS_OF)]
+    assert validate(bases, ledger(), BODY, AS_OF, corpus=c) == []
+    assert c.media_cited == []
 
 
 

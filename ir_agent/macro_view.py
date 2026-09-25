@@ -220,10 +220,28 @@ def for_prompt(corpus, macro_prompt: str = "") -> str:
         lines.append("  可引用的宏观读数（占位符）：")
         lines.append("  " + macro_prompt.replace("\n", "\n  "))
     if corpus is not None and corpus.docs:
-        from ir_agent.sources.external import TIER_LABEL
+        from ir_agent.sources.external import TIER_LABEL, TIER_RULE, Tier
+        seen_tiers = {d.tier for d in corpus.docs}
+        # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
+        # 放在资料读完之后才说，等于让它先斩后奏。
+        #
+        # **按 `Tier` 的声明顺序遍历，不按 `seen_tiers` 这个 set 的迭代
+        # 顺序**——set 的迭代顺序取决于 PYTHONHASHSEED，会让「[财经媒体]
+        # 的可引用范围：仅作线索，不得作为依据」这条最要紧的规则随机
+        # 落在第一/第二/第三条，提示词因此不可复现。与
+        # `Corpus.summary()`（sources/external.py）的 `for t in Tier:`
+        # 保持一致。
+        for t in Tier:
+            if t not in seen_tiers:
+                continue
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
         for d in corpus.docs:
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
-            lines.append("  " + d.text.replace("\n", "\n  "))
+            lines.append("  " + d.for_prompt().replace("\n", "\n  "))
+        for t in Tier:
+            if t not in seen_tiers:
+                continue
+            lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
     else:
         lines.append("  外部宏观资料：本次未取到 —— 政策取向缺少文字依据，"
                      "只能由读数推断，结论强度应相应说明")

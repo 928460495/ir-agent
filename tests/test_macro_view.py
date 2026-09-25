@@ -161,6 +161,45 @@ def test_宏观读数以占位符形式带入():
     assert "[[macro.pmi@2026-08]]" in txt
 
 
+def test_财经媒体的可引用范围出现在资料正文之前():
+    """媒体资料混进语料库后，约束它用途的 TIER_RULE 必须先于正文
+    出现，模型才是带着这条界线去读，而不是读完才补一句规矩。"""
+    from ir_agent.sources.external import TIER_RULE
+
+    media_text = "市场情绪回暖，宽松预期升温。"
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="宏观观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=date(2026, 8, 1), retrieved=AS_OF, text=media_text))
+
+    txt = MV.for_prompt(c)
+    rule = TIER_RULE[Tier.MEDIA]
+    assert rule in txt
+    assert txt.index(rule) < txt.index(media_text)
+
+
+def test_多档来源同时出现时可引用范围按Tier声明顺序排列():
+    """Fix 5c 回归：此前用 `{d.tier for d in corpus.docs}` 这个 set 去
+    遍历可引用范围，迭代顺序取决于 PYTHONHASHSEED。改成 `for t in
+    Tier:` 之后，无论语料库里的文档以什么顺序加入，"可引用范围"这几行
+    必须固定按 OFFICIAL → SELLSIDE → MEDIA 的声明顺序出现。"""
+    from ir_agent.sources.external import TIER_RULE
+
+    c = Corpus(as_of=AS_OF)
+    c.add(Document(doc_id="M1", url="https://news.example.com/m1",
+                   title="宏观观察", publisher="某财经网", tier=Tier.MEDIA,
+                   published=date(2026, 8, 1), retrieved=AS_OF, text="媒体正文"))
+    c.add(Document(doc_id="R1",
+                   url="https://data.eastmoney.com/report/zw_macresearch.jshtml?encodeUrl=y",
+                   title="宏观周报", publisher="甲证券", tier=Tier.SELLSIDE,
+                   published=date(2026, 9, 1), retrieved=AS_OF, text=DOC))
+
+    txt = MV.for_prompt(c)
+    sellside_rule = TIER_RULE[Tier.SELLSIDE]
+    media_rule = TIER_RULE[Tier.MEDIA]
+    assert txt.index(sellside_rule) < txt.index(media_rule)
+
+
 def test_摘要安全无裸数字():
     from ir_agent.citation import audit_bare_numbers
     v, _ = MV.assess(_Client(_out()), _corpus(), _rates("0.020", "0.026"), AS_OF)

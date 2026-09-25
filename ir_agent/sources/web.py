@@ -32,7 +32,7 @@ _URL = re.compile(r"https?://\S+")
 # 常见日期写法，按顺序尝试。模型不一定老实按提示词里的 YYYY-MM-DD 写，
 # "2026年7月1日""2026/07/01""2026.07.01" 都是常见的等价写法 —— 解析
 # 太挑剔会连累大量本来合格的发现被误杀（尤其是配合下面"解析失败即丢弃"
-# 的规则之后）。认不出的一律按「日期不明」处理，见 _parse_date 用法。
+# 的规则之后）。认不出的一律按「日期不明」处理，见 parse_date 用法。
 _DATE_PATTERNS = (
     re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})"),
     re.compile(r"(\d{4})/(\d{1,2})/(\d{1,2})"),
@@ -297,9 +297,13 @@ class Finding:
     published: date
 
 
-def _parse_date(raw: str) -> date | None:
+def parse_date(raw: str) -> date | None:
     """尝试用几种常见写法解析日期；认不出或者不是合法日期就返回 None，
-    调用方（parse_findings）应将 None 视为「日期不明」并丢弃整条发现。"""
+    调用方（parse_findings）应将 None 视为「日期不明」并丢弃整条发现。
+
+    **公开而非私有**：openweb.parse_candidates 要用同一套日期解析。两处
+    对「日期解析不出就整条丢弃」的处置必须一致，抄一遍迟早会分叉。
+    """
     s = raw.strip()
     for pat in _DATE_PATTERNS:
         m = pat.search(s)
@@ -385,7 +389,7 @@ def parse_findings(text: str) -> list[Finding]:
         # 的证据获得最宽松的时点待遇，静静滑过系统里最关键的一道防线
         # （时点守卫）。这个隐患必须在产生 Finding 的这一步就堵死，
         # 不能指望下游每个调用点都记得防。
-        when = _parse_date(parts[4])
+        when = parse_date(parts[4])
         if when is None:
             continue
         out.append(Finding(factor_key=parts[0], claim=parts[1],
