@@ -301,6 +301,40 @@ def _media_tier_note(corpus) -> list[str]:
            f"核验通过但分级规则是「{TIER_RULE[Tier.MEDIA]}」"]
 
 
+def _factor_host_check_note(factor_data: dict) -> list[str]:
+    """`gaps.collect` ④外部网络分支——轮次级主机安全校验降级聚合。
+
+    **与 `_openweb_notes` 里「N 篇入库时主机安全校验降级」说的是同一件
+    事**（`Fetched.host_check_degraded` 的契约，见 openweb.py:770-773：
+    「降级不阻断抓取，但必须一路传到产物清单」），但两条聚合覆盖的是
+    两个不同的 fetch 调用点：`_openweb_notes` 读的是 `openweb.gather`
+    自己记的 `OpenWebResult.host_check_degraded`；`gaps.collect` ④分支
+    走的是 `openweb.verify_finding` 这第二个调用点，从来没有往
+    `OpenWebResult` 记过账，此前因此一直是真实的欠计数（见
+    `gaps.py` 第 394-410 行、`FactorData.host_check_degraded` 字段
+    上的注释）——不是已经解决、只是换了个地方展示。
+
+    **不并进 `_openweb_notes` 那一条，两条分开报。** 那一条数的单位是
+    **文档**（`res.docs` 里入库的篇数）；这里数的单位是**因子**
+    （`gaps.FactorData`，一个因子的证据可能对应好几条 finding/文档，
+    只要其中任意一条降级过，这个因子就算一次）。两种不同的计数单位
+    拼进同一句话，算出来的数字谁都解释不清是「几篇」还是「几个」。
+
+    **只读结构化字段 `FactorData.host_check_degraded`，不碰
+    `note` 文本。** `note` 是拼给人看的展示字符串，`gaps.collect` 已经
+    把同一个谓词写成人话塞进它自己那条 note 里——但这里不能从 note
+    正则反解同一个事实：`assume._match_excerpt` 上面记着这类下游代码
+    从 `note` 里正则反解结构化事实、note 措辞一变就悄悄失效的实跑事故。
+    `host_check_degraded` 这个布尔字段正是为了让这次聚合不必重蹈覆辙
+    才加的（见该字段自己的注释）。
+    """
+    n = sum(1 for fd in factor_data.values() if fd.host_check_degraded)
+    if not n:
+        return []
+    return [f"{n} 个因子采集时主机安全校验降级（本机 DNS 被代理劫持，"
+           "IP 层校验无从进行）——内网地址拦截本轮依赖代理侧"]
+
+
 def _restore_openweb(r, out: Path) -> list[str]:
     """第二阶段：读回第一阶段落盘的开放网络文档。**不重新采集。**
 
@@ -345,6 +379,45 @@ def _restore_openweb(r, out: Path) -> list[str]:
     # 其余两项读回后被丢掉——第二阶段的产物是 report.md，读者不会再回头
     # 去看第一阶段的终端输出。措辞与第一阶段同源，见 `_openweb_notes`。
     return _openweb_notes(res)
+
+
+def _load_announce(code: str, r, as_of: date, client, md: dict,
+                   factors: list[str]) -> list[str]:
+    """公司公告入语料库。返回要记进产物清单的条目。
+
+    **不能放进 `_analyse_facts`。** 那一层的不变量写在它自己的
+    docstring 上：「不调模型，因此两个阶段都要跑」。本函数要调模型从
+    候选清单里挑标题，放进去会让第二阶段挑出**与第一阶段不同的公告**，
+    第一阶段正文里写下的公告引文因此在第二阶段核验不过——与
+    `_load_openweb` 是同一条理由。
+
+    与 `_load_openweb` 不同的是**本函数不需要联网工具的 client**：
+    模型只从代码取回的清单里挑下标，不上网。
+    """
+    from ir_agent.sources import announce
+    from ir_agent.sources.external import Corpus
+
+    if r.corpus is None:
+        r.corpus = Corpus(as_of=as_of)
+    try:
+        res = announce.gather(client, code=code, company=_company_name(code),
+                              factors=factors, as_of=as_of, corpus=r.corpus)
+    except Exception as e:                                  # noqa: BLE001
+        return [f"公司公告采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
+
+    md["公司公告"] = announce.summary(res)
+    if not res.docs:
+        return [f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
+                f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
+
+    notes: list[str] = []
+    if res.fetch_failed:
+        notes.append(f"{res.fetch_failed} 篇取文失败")
+        notes += [f"  - {x}" for x in res.fetch_failed_reasons]
+    notes += [f"忽略了一条挑选：{x}" for x in res.ignored]
+    if not notes:
+        return []
+    return ["公司公告：\n" + "\n".join(f"  · {x}" for x in notes)]
 
 
 def _load_sections(r):
@@ -1273,6 +1346,30 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 构成 —— 见 `_external_md`。
     _refresh_external_md(r, md)
 
+    # ── 公司公告入语料库 ────────────────────────────────────────
+    # 接在开放网络之后、定性三节之前。公告是公司权威披露且由确定性接口
+    # 取回，与 gaps 的 ②.5 一致地排在研报之前；这里的位置只需满足
+    # 「定性三节之前」。
+    #
+    # **不能用 `qual_client`。** 那个变量要等下面 `_analyse_qualitative`
+    # 返回才存在——它在那个函数内部创建、作为返回值交回本层，这里还
+    # 引用不到（brief 原稿假设它已经存在，实际不成立：`grep -n
+    # "qual_client = "` 命中的另一处在 `_analyse_qualitative` 内部，
+    # 是它自己的局部变量，不是 `run_analysis` 这一层的）。但公告采集
+    # 本身也不需要联网工具——模型只从代码取回的候选清单里挑下标，不
+    # 上网（同一条理由见 `_load_announce` 的 docstring）——所以不必像
+    # `_load_openweb` 那样借用已开工具的 `research_client`，单独开一个
+    # 默认不开工具的 client 即可，费用照样累计进下面的 `cost`。
+    announce_client = make_client(model=model)
+    skipped += _load_announce(
+        code, r, as_of, announce_client, md,
+        [f.label for d in (meth.decompositions if meth is not None else [])
+         for f in d.factors])
+    # 公告入的是同一个 Corpus，清单要按语料库的实际内容重渲染一遍
+    # ——不重渲染，md（进看板、进 state.json、第二阶段读回）说的就是
+    # 加公告之前的篇数与分级构成。与子项目 A 终审 C1 是同一个失败模式。
+    _refresh_external_md(r, md)
+
     qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
 
     # ── 按分解式定向采集因子数据 ────────────────────────────────
@@ -1308,10 +1405,18 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             # 保证不论 `gaps.collect` 成功、部分成功后抛异常、还是从
             # 一开始就抛异常，都会重渲染一次。
             _refresh_external_md(r, md)
+        # `gaps.collect` ④分支——轮次级主机安全校验降级聚合。不必放进
+        # 上面的 `finally`：这里读的是已经算好的 `factor_data` 字典，
+        # 异常路径上它维持着函数开头的空字典默认值，`_factor_host_
+        # check_note` 对空字典天然返回空列表——不像 `_refresh_external_md`
+        # 那样需要在异常路径上也执行才能不漏报。详见 `_factor_host_
+        # check_note` 自己的文档字符串。
+        skipped += _factor_host_check_note(factor_data)
 
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, brief=True, **_prompt_bundle(pr))
-    cost += qual_client.total_cost_usd + research_client.total_cost_usd
+    cost += (qual_client.total_cost_usd + research_client.total_cost_usd
+             + announce_client.total_cost_usd)
     if err and body is None:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
         skipped.append("研究简报")

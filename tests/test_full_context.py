@@ -1865,3 +1865,207 @@ def test_MEDIA引文经validate后能在corpus上累计并被full汇总():
     assert validate(sell_bases, FactLedger(), body, as_of,
                     corpus=sell_corpus) == []
     assert full._media_tier_note(sell_corpus) == []
+
+
+# ── _load_announce：公司公告入语料库（Task 7）────────────────────
+#
+# 采集本身（候选发现、模型挑选、PDF 取文）都在 `ir_agent.sources.
+# announce.gather` 里；这里只测接线——调用时机、失败处置、清单措辞，
+# 与 `_load_openweb` 这组测试是同一个思路。
+
+def test_公告采集排在定性三节之前():
+    """战略/产业链/宏观定性要引用公告原文，采集必须更早。"""
+    import ast
+    import inspect
+    import textwrap
+
+    from ir_agent import full
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            names.setdefault(node.func.id, node.lineno)
+    assert "_load_announce" in names, "公告采集没有被调用"
+    assert names["_load_announce"] < names["_analyse_qualitative"]
+    assert names["_analyse_facts"] < names["_load_announce"]
+
+
+def test_公告采集不在确定性层里():
+    """`_analyse_facts` 的不变量是「不调模型，因此两个阶段都要跑」。
+    公告采集要调模型挑标题——放进去会让第二阶段挑出不同的公告，
+    第一阶段写下的公告引文因此在第二阶段核验不过。"""
+    import inspect
+
+    from ir_agent import full
+    src = inspect.getsource(full._analyse_facts)
+    assert "announce" not in src
+    assert "_load_announce" not in src
+
+
+def test_公告采集之后重渲染外部资料清单():
+    """公告入的是同一个 Corpus。不重渲染，清单说的是加公告之前的篇数
+    ——与子项目 A 终审 C1 是同一个失败模式。"""
+    import ast
+    import inspect
+    import textwrap
+
+    from ir_agent import full
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    calls = [(n.func.id, n.lineno) for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    ann = [ln for name, ln in calls if name == "_load_announce"]
+    ref = [ln for name, ln in calls if name == "_refresh_external_md"]
+    qual = [ln for name, ln in calls if name == "_analyse_qualitative"]
+    assert ann and ref and qual
+    assert any(r > ann[0] for r in ref), \
+        "_load_announce 之后必须再重渲染一次外部资料清单"
+    # **上面这条断言本身会通过一个没做这件事的实现**：`gaps.collect`
+    # 的 finally 分支里早就有一次跟公告采集完全无关的
+    # `_refresh_external_md`（Task 4 那次改动留下的），它的行号天然
+    # 大于 `_load_announce`——删掉公告采集后面那次真正的重渲染，
+    # `any(r > ann[0] for r in ref)` 照样为真，测试却应该红。踩过这个
+    # 坑之后（Step 6 逐条验证结构性测试时实测复现），补一条更紧的
+    # 断言：重渲染必须落在「公告采集」与「定性三节」这两个调用点**之间**
+    # ——`gaps.collect` 那次晚于 `_analyse_qualitative`，落不进这个区间，
+    # 不会再帮一个删掉了正确调用的实现蒙混过关。
+    assert any(ann[0] < r < qual[0] for r in ref), \
+        ("_load_announce 与 _analyse_qualitative 之间必须有一次"
+         "_refresh_external_md，不能靠 gaps.collect 那次晚于"
+         "定性三节的重渲染顶替")
+
+
+def test_公告采集失败不阻断整轮研究(monkeypatch):
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources.external import Corpus
+
+    class _R:
+        as_of = date(2026, 9, 30)
+        corpus = Corpus(as_of=date(2026, 9, 30))
+
+    import ir_agent.sources.announce as A
+    monkeypatch.setattr(A, "gather",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("巨潮超时")))
+    skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
+                                  lambda p: "", {}, ["名义产能"])
+    assert skipped and "公司公告采集未执行" in skipped[0]
+    assert "巨潮超时" in skipped[0]
+
+
+# ── ④外部网络分支主机安全校验降级——轮次级聚合（Task 7 附加需求）──
+#
+# `gaps.FactorData.host_check_degraded` 由 Task 5/6 引入，只在 EXTERNAL
+# 分支赋值（该因子的证据里有没有哪条命中时经历过主机安全校验降级），
+# 但从未被聚合进产物清单——`gaps.py:135-146` 的字段注释原话说这件事
+# 属于本任务。`_openweb_notes` 已经有同一件事的文档级聚合（读
+# `OpenWebResult.host_check_degraded`），但那条聚合只覆盖
+# `openweb.gather` 这一个 fetch 调用点；`gaps.collect` ④分支走的是
+# `verify_finding` 这第二个调用点，此前一直没有对应的轮次级汇总，见
+# `gaps.py` 第 394-410 行的注释。
+
+def test_factor_host_check_note_有因子降级时产出条目():
+    """正例：至少一个因子的 `host_check_degraded` 为真时必须产出一条
+    产物清单条目，且措辞与 `_openweb_notes` 那句同源——只换计数单位。"""
+    from ir_agent import full
+    from ir_agent import gaps
+    from ir_agent.drivers import Factor
+
+    fd_ok = gaps.FactorData(factor=Factor(key="capacity", label="产能",
+                                          unit="吨"),
+                            status=gaps.EXTERNAL, host_check_degraded=True)
+    fd_clean = gaps.FactorData(factor=Factor(key="asp", label="单价",
+                                             unit="元"),
+                               status=gaps.EXTERNAL,
+                               host_check_degraded=False)
+    notes = full._factor_host_check_note({"capacity": fd_ok, "asp": fd_clean})
+    assert len(notes) == 1
+    assert "1 个因子" in notes[0]
+    assert "主机安全校验降级" in notes[0]
+    assert "本机 DNS 被代理劫持，IP 层校验无从进行" in notes[0]
+    assert "内网地址拦截本轮依赖代理侧" in notes[0]
+
+
+def test_factor_host_check_note_没有因子降级时不产出条目():
+    """反例（正例的必要配对，防住 `if any(...)` 被改成 `if True`
+    这类突变仍能通过测试）：全部因子 `host_check_degraded` 均为假——
+    哪怕因子数据本身不为空——必须返回空列表，不能凭空多出一条。"""
+    from ir_agent import full
+    from ir_agent import gaps
+    from ir_agent.drivers import Factor
+
+    fd_clean_1 = gaps.FactorData(factor=Factor(key="capacity", label="产能",
+                                               unit="吨"),
+                                 status=gaps.EXTERNAL,
+                                 host_check_degraded=False)
+    fd_clean_2 = gaps.FactorData(factor=Factor(key="asp", label="单价",
+                                               unit="元"),
+                                 status=gaps.MISSING)
+    assert full._factor_host_check_note(
+        {"capacity": fd_clean_1, "asp": fd_clean_2}) == []
+
+
+def test_factor_host_check_note_空字典不报():
+    """`meth is None` 时 `run_analysis` 里 `factor_data` 保持默认的
+    空字典（`gaps.collect` 压根没跑）——防御性地接住空字典，不炸。"""
+    from ir_agent import full
+
+    assert full._factor_host_check_note({}) == []
+
+
+def test_factor_host_check_note_只读结构化字段不碰note文本():
+    """`assume.py` 记录过的事故：下游代码曾经从 `note`（给人看的展示
+    文本）里正则反解结构化事实，note 措辞一变就悄悄失效。
+    `_factor_host_check_note` 必须只读 `FactorData.host_check_degraded`
+    这个布尔字段——构造一个 `note` 里写着「降级」字样、但结构化字段为
+    `False` 的因子，确认不会被误判为降级。"""
+    from ir_agent import full
+    from ir_agent import gaps
+    from ir_agent.drivers import Factor
+
+    fd = gaps.FactorData(factor=Factor(key="capacity", label="产能",
+                                       unit="吨"),
+                         status=gaps.EXTERNAL,
+                         note="其中 3 条命中时主机安全校验降级（本机 DNS "
+                              "被代理劫持，IP 层校验无从进行）",
+                         host_check_degraded=False)
+    assert full._factor_host_check_note({"capacity": fd}) == []
+
+
+def test_gaps_collect调用点会把降级聚合追加进skipped():
+    """接线本身：`run_analysis` 里 `gaps.collect` 那段必须真的调用
+    `_factor_host_check_note` 并把结果拼进 `skipped`——只有
+    `_factor_host_check_note` 自身正确、调用点没接上，效果一样是零。
+    用语法树定位 `gaps.collect` 所在的 `if meth is not None:` 块，
+    确认块内确有对 `_factor_host_check_note` 的真实调用，而不是
+    只在注释里提到这个名字（同一类陷阱见 `_calls` 的文档字符串）。"""
+    import ast
+    import inspect
+    import textwrap
+
+    from ir_agent import full
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    target = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        body_calls = {_call_name(c) for stmt in node.body
+                     for c in ast.walk(stmt) if isinstance(c, ast.Call)}
+        if "gaps.collect" in body_calls:
+            target = node
+            break
+    assert target is not None, "run_analysis 里没找到包住 gaps.collect 的 try 块"
+
+    # `_factor_host_check_note` 的调用点不要求恰好落在 try/finally
+    # 哪个分支——它读的是 factor_data 这个已经算出来的字典，不像
+    # `_refresh_external_md` 那样需要在异常路径上也执行（因子级
+    # 降级信息本就只在 gaps.collect 成功返回时才有意义）。只要求
+    # 调用点在包住 gaps.collect 的这个 try 节点之后。
+    all_calls = _calls(full.run_analysis)
+    try_end_ln = max(n.lineno for n in ast.walk(target)
+                     if hasattr(n, "lineno"))
+    note_lns = [ln for name, ln in all_calls
+               if name == "_factor_host_check_note" and ln > try_end_ln]
+    assert note_lns, ("run_analysis 里没有在 gaps.collect 的 try 块之后"
+                      "对 _factor_host_check_note 的真实调用")
