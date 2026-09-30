@@ -1325,7 +1325,7 @@ class Verified:
     # `openweb.OpenWebResult.host_check_degraded` 那个轮次级汇总——
     # `verify_finding` 从没往 `OpenWebResult` 记过账，`full.py` 里
     # 「N 篇入库时主机安全校验降级」那行今天不包含这里发生的降级。
-    # 接进去是 Task 7（把 gaps 接进 full.py）的范围。
+    # 接进去是 Task 7（接入 full.py）的范围。
     # 没实际抓到东西时（claim 为空、fetch 抛异常）无从谈降级，留默认
     # False。
     host_check_degraded: bool = False

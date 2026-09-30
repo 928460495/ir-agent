@@ -699,14 +699,20 @@ def test_仅媒体支撑的因子在清单上被标注(monkeypatch):
 # 不需要 collect() 另加一层"，如果连 verify_finding 都 stub 掉就什么都
 # 证明不了。
 
-def test_verify_finding抛出非FetchFailed异常不阻断整轮研究(monkeypatch):
+def test_verify_finding抛出非FetchFailed异常不逃出collect(monkeypatch):
     """`collect()` 的④分支在 `verify_finding` 外层没有另加 try/except
-    ——「资料收集的任何失败都不得阻断整轮研究」这条防线，在这一步全靠
-    `verify_finding` 自己接住 `FetchFailed` 之外的异常。这里不 stub
-    `verify_finding`，只 stub 更底层的 `OW.fetch`，走一遍真实的
-    `verify_finding`，证明一个非 `FetchFailed` 的裸异常不会逃出
-    `collect()`、阻断整轮研究——Fix 1 之前，这个异常会原样冒出
-    collect()，这条测试会因为 RuntimeError 而不是断言失败而失败。"""
+    ——这一步全靠 `verify_finding` 自己接住 `FetchFailed` 之外的异常。
+    这里不 stub `verify_finding`，只 stub 更底层的 `OW.fetch`，走一遍
+    真实的 `verify_finding`，证明一个非 `FetchFailed` 的裸异常不会逃出
+    `collect()`——Fix 1 之前，这个异常会原样冒出 collect()，这条测试
+    会因为 RuntimeError 而不是断言失败而失败。
+
+    **代价说准：逃出去不会中止整个研究轮次。** `full.py:1292-1293` 把
+    `gaps.collect()` 包在 `except Exception` 里、记进 `skipped`，整轮
+    继续。真实代价是这一轮的 factor_data 整体拿不到——丢的不是一条
+    finding，是全部因子的采集结果。这条测试原本的名字与说明写的是
+    「阻断整轮研究」，那是审查第一轮的判断，审查者自己在第二轮撤回了；
+    此处与 `openweb.verify_finding` 的 except 注释保持同一个说法。"""
     import ir_agent.gaps as G
     import ir_agent.sources.openweb as OW
 

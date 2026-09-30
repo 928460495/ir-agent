@@ -139,7 +139,7 @@ class FactorData:
     # 只在 EXTERNAL 分支赋值；只赋值，暂无消费者读它——round 级
     # 汇总（`openweb.OpenWebResult.host_check_degraded`／`full.py`
     # 「N 篇入库时主机安全校验降级」那行）今天不聚合这个字段，接
-    # 进去是 Task 7（把 gaps 接进 full.py）的范围，这次改动只做到
+    # 进去是 Task 7（接入 full.py）的范围，这次改动只做到
     # 让事实结构化可取，不做聚合，见 collect() 里对应分支的注释。
     host_check_degraded: bool = False
 
@@ -404,7 +404,7 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     # `full.py`「N 篇入库时主机安全校验降级」那行今天
                     # 不包含这里发生的降级，是真实的欠计数，不是已经
                     # 解决、只是换了个地方展示。把这份事实接进轮次级
-                    # 汇总是 Task 7（把 gaps 接进 full.py）的范围，这次
+                    # 汇总是 Task 7（接入 full.py）的范围，这次
                     # 改动不做聚合，不能声称 `Fetched.host_check_
                     # degraded` 「必须一路传到产物清单」这条契约已经
                     # 在④分支上全部兑现。
