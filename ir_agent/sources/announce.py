@@ -204,6 +204,11 @@ def gather(client, *, code: str, company: str, factors: list[str],
     res.picked = len(picks)
 
     seen = {d.url for d in corpus.docs}
+    # 去重键集合：存的是**未截断**、且已把 URL 挖掉之后的系统性原因
+    # （见 `_cause_key`），跟 `res.fetch_failed_reasons` 里存的（已截断、
+    # 保留原始 URL 的展示用字符串）解耦——与 openweb.gather 的
+    # `seen_diagnoses` 同一处置。
+    seen_failure_keys: set[str] = set()
     for idx in picks:
         a = anns[idx]
         if a.url in seen:
@@ -212,10 +217,11 @@ def gather(client, *, code: str, company: str, factors: list[str],
             data = _download(a.url, cache_dir)
             text = pdf_text(data)
         except Exception as e:                              # noqa: BLE001
-            _note_failure(res, f"{a.ann_id}：{e.__class__.__name__}: {e}")
+            _note_failure(res, seen_failure_keys,
+                          f"{a.ann_id}：{e.__class__.__name__}: {e}")
             continue
         if not text.strip():
-            _note_failure(res, f"{a.ann_id}：PDF 取文为空")
+            _note_failure(res, seen_failure_keys, f"{a.ann_id}：PDF 取文为空")
             continue
         doc = Document(
             doc_id=_doc_id(a.ann_id), url=a.url, title=a.title,
@@ -236,15 +242,52 @@ def gather(client, *, code: str, company: str, factors: list[str],
     return res
 
 
-def _note_failure(res: AnnounceResult, reason: str) -> None:
-    """记一条失败。**按诊断去重，不按整条消息去重**——每条消息都带着
-    自己的 ann_id 前缀，拿整条去重的话「八篇都下载超时」会印八遍。
-    与 openweb.gather 的同名处置一致。
+# `_download` 抛出的真实异常（`requests.HTTPError`/`ConnectionError`/
+# `retry.RetryExhausted`）的 `str(e)` 里嵌着失败的那个 URL——见调用点
+# `f"{a.ann_id}：{e.__class__.__name__}: {e}"`。每篇公告的下载地址都
+# 不一样，同一种系统性原因（巨潮整体挡 PDF 请求、代理宕了、DNS 解不出
+# 来）换一个 ann_id/URL 就长得不一样，靠原样字符串去重形同虚设——旗舰
+# 场景「八篇都下载超时」会印八遍。这里把 `http(s)://` 起始、到下一个
+# 空白为止的这一段换成占位符再当 key：诊断里其余部分（状态码、异常类
+# 名、"Client Error"/"Max retries exceeded" 这类描述错误种类的文字）
+# 原样保留，所以两种真正不同的原因（404 与「PDF 取文为空」、404 与
+# 内容类型问题）依然会留下不同的 key，不会被过度合并——过度合并会把
+# 「这是哪一种失败」这条诊断价值直接抹掉，比没去重更糟。
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _cause_key(diagnosis: str) -> str:
+    """把诊断文本里的 URL 换成占位符，只留下“是哪一种失败”。见上方
+    模块级注释。"""
+    return _URL_RE.sub("<url>", diagnosis)
+
+
+def _note_failure(res: AnnounceResult, seen_keys: set[str], reason: str
+                   ) -> None:
+    """记一条失败。**按系统性原因去重，不按整条消息、也不按已截断的
+    存储副本去重**——两处坑，缺一处不修都会让去重形同虚设：
+
+    1）去重键必须从 `seen_keys`（**未截断**）里查，不能从
+       `res.fetch_failed_reasons`（**已截断**）反推。第一次撞见某种
+       诊断时，被截断保留的尾巴长度取决于当时那个 ann_id 有多长——同
+       一种诊断换一个长度不同的 ann_id，切出来的尾巴就不一样，去重
+       失效。`seen_keys` 是单独维护的一个集合，与「存进
+       `fetch_failed_reasons` 的字符串会被截断」解耦，与
+       openweb.gather 的 `seen_diagnoses` 同一处置。
+
+    2）诊断本身不能拿「原样字符串」当 key——见 `_cause_key`。
+
+    列表里存的仍是**完整消息**（带着第一次撞见这种原因时的那个
+    ann_id/URL，只是显示用的字符串按 `_REASON_LIMIT` 截断），不是把
+    ann_id/URL 直接丢掉：读者除了「这是哪一种失败」，还想「至少举一个
+    例子」——与 openweb 同一条道理。
     """
     res.fetch_failed += 1
-    key = reason.split("：", 1)[-1]
-    if any(r.split("：", 1)[-1] == key for r in res.fetch_failed_reasons):
+    diagnosis = reason.split("：", 1)[-1]
+    key = _cause_key(diagnosis)
+    if key in seen_keys:
         return
+    seen_keys.add(key)
     res.fetch_failed_reasons.append(reason[:_REASON_LIMIT])
 
 

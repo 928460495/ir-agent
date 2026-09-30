@@ -213,12 +213,21 @@ def test_一条公告都没取到时不调模型(monkeypatch):
 
 
 def test_入库文档带截断长度(monkeypatch):
-    from ir_agent.sources.openweb import TEXT_LIMIT
+    """截断长度必须真的读 `openweb.TEXT_LIMIT` 这个名字，不能写死字面量
+    2000——`TEXT_LIMIT` 今天恰好也是 2000，断言 `== TEXT_LIMIT` 对一个
+    硬编码 `prompt_limit=2000` 的实现同样会通过，测不出退化。这里把
+    announce 模块里已经 import 进来的 `TEXT_LIMIT`（`gather` 实际引用
+    的那个名字）改写成一个不等于 2000 的哨兵值：源码若真的动态读它，
+    产物的 `prompt_limit` 会跟着变成哨兵值；若退化成字面量 2000，两者
+    不等，测试变红。"""
+    import ir_agent.sources.announce as A
+    sentinel = 12345
+    monkeypatch.setattr(A, "TEXT_LIMIT", sentinel)
     _patch(monkeypatch, ANNS, PAGES)
     cp = Corpus(as_of=AS_OF)
     gather(_Client("选取: 0\n"), code="600183", company="生益科技",
            factors=["名义产能"], as_of=AS_OF, corpus=cp)
-    assert cp.docs[0].prompt_limit == TEXT_LIMIT
+    assert cp.docs[0].prompt_limit == sentinel
 
 
 def test_已在语料库里的URL不重复入库(monkeypatch):
@@ -234,15 +243,23 @@ def test_已在语料库里的URL不重复入库(monkeypatch):
 
 
 def test_pdf取文按页数上限截断():
-    """多数公告一两页，但定期报告可能两百页以上，全取会挤掉其余篇的额度。"""
+    """多数公告一两页，但定期报告可能两百页以上，全取会挤掉其余篇的额度。
+
+    额外断言 `get_text()` 从未在第 `PDF_MAX_PAGES` 页之后被调用过——只
+    断言输出内容够不够，测不出「先读完全部 100 页、再把拼好的字符串
+    切到上限」这种退化：那种实现和正确实现（读到上限就 `break`，根本
+    不碰后面的页）产出的文本一模一样，区别只在读的工作量，必须直接数
+    调用次数才能分辨。"""
     import ir_agent.sources.announce as A
     pages = []
+    calls: list[int] = []
 
     class _FakePage:
         def __init__(self, i):
             self.i = i
 
         def get_text(self):
+            calls.append(self.i)
             return f"第{self.i}页"
 
     class _FakeDoc:
@@ -263,5 +280,106 @@ def test_pdf取文按页数上限截断():
         assert f"第{A.PDF_MAX_PAGES - 1}页" in got
         assert f"第{A.PDF_MAX_PAGES}页" not in got
         assert pages == ["closed"], "PDF 句柄必须关闭"
+        assert calls == list(range(A.PDF_MAX_PAGES)), (
+            "get_text() 必须只在页数上限之前被调用——调用到了上限之后，"
+            "说明实现先读完了全部页面，只是事后把拼好的文本切短")
     finally:
         del sys.modules["fitz"]
+
+
+def _long_ann(ann_id: str, url: str) -> Announcement:
+    return Announcement(ann_id=ann_id, title="生益科技关于扩产的公告",
+                        ann_date=date(2026, 8, 1), url=url,
+                        code="600183", name="生益科技",
+                        category="其他", source_id=ann_id)
+
+
+def test_相同原因不同URL且均超截断上限只记一条(monkeypatch):
+    """旗舰场景：同一种系统性原因（巨潮整体拒绝 PDF 下载/代理宕了）在
+    不同公告上必须收敛成一条，不能「八篇都下载超时」印八遍。两条消息
+    都刻意造得超过 `_REASON_LIMIT`——如果去重键从『已截断的存储副本』
+    反推（Defect A），或者直接拿带 URL 的原始消息当 key（Defect B），
+    这里都会分别失败、印出两条。"""
+    import ir_agent.sources.announce as A
+
+    url_a = ("http://static.cninfo.com.cn/finalpage/2026-08-01/"
+             + "a" * 100 + ".PDF")
+    url_b = ("http://static.cninfo.com.cn/finalpage/2026-08-02/"
+             + "b" * 100 + ".PDF")
+    anns = [_long_ann("long0", url_a), _long_ann("long1", url_b)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        raise ConnectionError(
+            "HTTPSConnectionPool(host='static.cninfo.com.cn', port=443): "
+            f"Max retries exceeded with url: {url}")
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 1
+    # 存进去的展示串本身确实超过了截断上限（验证「两条都需要截断」这个
+    # 前提成立，不是因为凑巧都很短才合并成功）。
+    stored = res.fetch_failed_reasons[0]
+    assert len(stored) <= A._REASON_LIMIT
+
+
+def test_不同系统性原因分别记录不被合并(monkeypatch):
+    """去重不能矫枉过正：404、PDF 取文为空、内容类型不对是三种真正不同
+    的诊断，必须各自留一条——合并成一条会把『这是哪一种失败』的诊断
+    价值直接抹掉，比不去重更糟。"""
+    import ir_agent.sources.announce as A
+
+    url_404 = "http://static.cninfo.com.cn/finalpage/2026-08-01/notfound.PDF"
+    url_ctype = "http://static.cninfo.com.cn/finalpage/2026-08-02/bad.PDF"
+    url_empty = "http://static.cninfo.com.cn/finalpage/2026-08-03/empty.PDF"
+    anns = [_long_ann("c0", url_404), _long_ann("c1", url_ctype),
+            _long_ann("c2", url_empty)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _fake_download(url, cache_dir=None):
+        if url == url_404:
+            raise OSError(f"404 Client Error: Not Found for url: {url}")
+        if url == url_ctype:
+            raise OSError(f"内容类型不是网页（application/octet-stream）：{url}")
+        return b"EMPTY"
+
+    monkeypatch.setattr(A, "_download", _fake_download)
+    monkeypatch.setattr(
+        A, "pdf_text",
+        lambda data: "" if data == b"EMPTY" else data.decode("utf-8"))
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 3
+    assert len(res.fetch_failed_reasons) == 3
+
+
+def test_fetch_failed计数不受去重影响(monkeypatch):
+    """`fetch_failed` 是「失败了几次」，`fetch_failed_reasons` 是「有
+    几种不同的原因」——两个口径不同，去重只应该影响后者，不能连计数
+    也一起被去重掉。"""
+    import ir_agent.sources.announce as A
+
+    urls = [f"http://static.cninfo.com.cn/finalpage/2026-08-0{i}/x.PDF"
+            for i in range(1, 4)]
+    anns = [_long_ann(f"d{i}", u) for i, u in enumerate(urls)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        raise TimeoutError(f"下载超时：{url}")
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 3
+    assert len(res.fetch_failed_reasons) == 1
