@@ -250,6 +250,14 @@ def _openweb_notes(res) -> list[str]:
     if res.model_dated:
         lines.append(f"  · {res.model_dated} 篇的发布日期由模型给出，"
                      "未经代码核验")
+    if res.host_check_degraded:
+        # 环境决定的降级，不是缺陷——但读者无从从「N 篇入库」里看出
+        # 「这一轮的内网地址拦截靠的是代理、不是本代码」。见
+        # `openweb.OpenWebResult.host_check_degraded` 与
+        # `openweb._reject_unsafe_host` 里那段实跑事故记录。
+        lines.append(f"  · {res.host_check_degraded} 篇入库时主机安全校验"
+                     "降级（本机 DNS 被代理劫持，IP 层校验无从进行）"
+                     "——内网地址拦截本轮依赖代理侧")
     for slot in res.missing_slots:
         lines.append(f"  · {slot}：未取到")
     if len(lines) == 1:

@@ -439,8 +439,84 @@ def _is_globally_routable(ip_str: str) -> bool:
                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
 
-def _reject_unsafe_host(url: str) -> None:
-    """`url` 的主机必须解析到公网地址，否则抛 `FetchFailed`。
+# 代理客户端的 fake-IP 段。Clash/Surge 这一类工具不把域名交给真实 DNS，
+# 而是给每个域名现分配一个保留段里的**占位**地址、自己在那个地址上收
+# 流量，真实解析发生在代理侧。所以本地解析到这种地址时，它与请求实际
+# 去向毫无关系——不是"解析到了一个内网地址"，是"根本没解析到东西"。
+#
+# 198.18.0.0/15 是 RFC 2544 基准测试段，100.64.0.0/10 是 CGNAT 段，
+# 这两个是这类工具最常用的 fake-IP 池。前者在 Python 的 ipaddress 里
+# `is_private` 为 True，于是会被 `_is_globally_routable` 判成禁止访问
+# ——这正是下面那段事故注释说的那个洞。
+_FAKE_IP_NETS = (ipaddress.ip_network("198.18.0.0/15"),
+                 ipaddress.ip_network("100.64.0.0/10"))
+
+# 主机名层面一眼就能判、且**不需要 DNS** 的禁止目标。有代理时 IP 层的
+# 校验必须放弃（理由见 `_reject_unsafe_host`），这一层是那时候唯一还
+# 站得住的闸门，所以它无条件执行。
+_UNSAFE_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+_UNSAFE_HOST_NAMES = ("localhost", "localhost.localdomain")
+
+
+def _is_fake_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(ip in net for net in _FAKE_IP_NETS)
+
+
+def _proxy_in_play(url: str) -> bool:
+    """这个 URL 会不会经由代理发出。
+
+    用 `urllib.request.getproxies()` 而不是自己读 `HTTP_PROXY`：
+    `requests` 自己走的就是这条路（`requests.utils.get_environ_proxies`
+    → `getproxies()`），而且在 macOS 上它还会读系统网络设置里配置的
+    代理——命令行环境变量为空、系统层面开着代理，是这台机器上实际
+    遇到的情形。判据必须和 requests 实际的行为一致，否则会出现
+    「我以为没代理、requests 以为有」的错位。
+    """
+    from urllib.request import getproxies, proxy_bypass
+
+    parsed = urlparse(url)
+    scheme, host = parsed.scheme, (parsed.hostname or "")
+    proxies = getproxies()
+    if scheme not in proxies and "all" not in proxies:
+        return False
+    try:
+        return not (host and proxy_bypass(host))
+    except (TypeError, ValueError, OSError):
+        return True
+
+
+def _reject_unsafe_host(url: str) -> bool:
+    """`url` 的主机必须指向公网，否则抛 `FetchFailed`。
+
+    返回**IP 层校验有没有真的做过**：True = 做过，False = 只做了主机名
+    层的校验、IP 层被跳过（调用方必须把这件事报进产物清单，见
+    `OpenWebResult.host_check_degraded`）。
+
+    ── 为什么 IP 层校验必须是有条件的 ──────────────────────────────
+    实跑打出来的（600183，2026-09-30，`out/600183-ow3/openweb.json`）:
+    11 个候选，11 个被这道闸门拒掉，开放网络采集产出恒为零，而且**不
+    报错**——清单上只有一行「11 篇抓取失败」。原因逐条记着:
+
+        …finance.sina.com.cn/…：解析到禁止访问的地址（198.18.0.103）
+        …wap.miit.gov.cn/…：解析到禁止访问的地址（198.18.0.104）
+
+    本机代理用 fake-IP DNS，每个域名都解析到 198.18.0.x，而那个段在
+    Python 里 `is_private` 为 True。
+
+    关键不在于"判严了"，在于**这道预检同时误拒且无效**：有代理时
+    `requests` 把主机名交给代理、本地压根不解析，真实解析发生在代理侧，
+    我们看不到。所以它拒掉的是合法主机，而它想防的内网地址仍然拦不住。
+    一道既伤好人又抓不住坏人的闸门，不该无条件执行。
+
+    判不出来的方向仍然遵守本文件的代价不对称，只是**换了对象**：DNS
+    结果不可信时，不可信的是"我以为的目标地址"，而不是"这个主机"。
+    此时正确的处置是退回到不依赖 DNS 的那一层（主机名字面量、URL 里
+    直接写的 IP），并把降级说出来——不是拿一个已知无意义的判据去拒绝
+    全部候选。
 
     **为什么要单独查这一步，而不是信任 requests 会自然连不上就报错。**
     环回（127.0.0.1）、内网（10/8、172.16/12、192.168/16）、链路本地
@@ -458,16 +534,41 @@ def _reject_unsafe_host(url: str) -> None:
     host = _host_of(url)
     if not host:
         raise FetchFailed(f"{url}：无法识别主机名")
+
+    # ── 第一层：主机名字面量，不需要 DNS，无条件执行 ──────────────
+    if host in _UNSAFE_HOST_NAMES or host.endswith(_UNSAFE_HOST_SUFFIXES):
+        raise FetchFailed(f"{url}：禁止访问的主机名（{host}）")
+    # URL 里直接写的 IP 就是请求实际要去的地址，不经 DNS，因此这一支
+    # 在有没有代理时都同样可信——代理照样会按这个地址去连。
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not _is_globally_routable(host):
+            raise FetchFailed(f"{url}：禁止访问的地址（{host}）")
+        return True
+
+    # ── 第二层：DNS 解析结果，仅在解析可信时才作为判据 ────────────
+    if _proxy_in_play(url):
+        # 有代理：本地这次解析与请求去向无关（requests 把主机名交给
+        # 代理），拿它做判据既误拒又无效。退回只有第一层。
+        return False
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError as e:
         raise FetchFailed(f"{url}：DNS 解析失败（{e}）") from e
     if not infos:
         raise FetchFailed(f"{url}：DNS 解析结果为空")
-    for info in infos:
-        ip_str = info[4][0]
+    addrs = [info[4][0] for info in infos]
+    if any(_is_fake_ip(a) for a in addrs):
+        # 没有配置代理，但解析结果落在 fake-IP 段——透明代理/本机
+        # 网络工具在劫持 DNS。同上：这个地址是占位符，不是目标。
+        return False
+    for ip_str in addrs:
         if not _is_globally_routable(ip_str):
             raise FetchFailed(f"{url}：解析到禁止访问的地址（{ip_str}）")
+    return True
 
 
 # <meta charset> 只看原始字节的前这么多字节。HTML5 规范要求这个声明
@@ -667,6 +768,11 @@ class Fetched:
     final_url: str              # 跟完重定向后的最终地址，分级用它
     text: str                   # 全文
     meta_published: date | None # 页面自己声明的发布时间，没有则 None
+    # 这次抓取的主机安全校验有没有降级（IP 层被跳过，只做了主机名层）。
+    # 见 `_reject_unsafe_host`：有代理时本地解析拿到的是占位地址，拿它
+    # 当判据既误拒又无效。降级不阻断抓取，但必须一路传到产物清单——
+    # 「内网地址拦截这一轮靠的是代理，不是本代码」是读者有权知道的事。
+    host_check_degraded: bool = False
 
 
 def extract_text(html: str) -> str:
@@ -755,7 +861,10 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
     不能从中断处续读，重试本来就只能是"整次请求重新来过"，这与
     `_get` 原本对头部请求的重试语义完全一致，只是覆盖范围补全了正文。
     """
-    _reject_unsafe_host(url)
+    # 两处校验的降级状态要合并：预检（这里）与跟完重定向后的复检
+    # （`_get` 内部）。用可变容器而不是闭包变量赋值，因为 `_get` 会被
+    # `with_retry` 整次重跑，每次重跑都要重新记一遍。
+    degraded = [not _reject_unsafe_host(url)]
 
     def _get():
         r = requests.get(url, headers=_HEADERS, timeout=timeout, stream=True)
@@ -765,7 +874,8 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
             # 模型给的域名可能是公网的，但该域名服务端把请求 302 到内网
             # 地址——只查请求前那一次拦不住这种情况，跟完重定向后必须
             # 再查一次。
-            _reject_unsafe_host(final_url)
+            if not _reject_unsafe_host(final_url):
+                degraded[0] = True
 
             content_type = (r.headers.get("Content-Type") or "").split(";")[0]
             content_type = content_type.strip().lower()
@@ -802,6 +912,7 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
     if not text.strip():
         raise FetchFailed(f"{url}：正文提取为空")
     return Fetched(final_url=final_url, text=text,
+                   host_check_degraded=degraded[0],
                    meta_published=meta_date(html))
 
 
@@ -854,6 +965,16 @@ class OpenWebResult:
     # 用户决定信模型报的日期，折中是把不可核验的那部分显式标出来，
     # 而不是让它隐身在一堆看起来一样的引用里。
     model_dated: int = 0
+    # 入库时主机安全校验降级（IP 层被跳过）的篇数。
+    #
+    # **必须能说出来。** 这一项的存在本身是一次实跑教训的产物：加
+    # `_reject_unsafe_host` 时那道 IP 层预检在本机代理环境下拒掉了
+    # 11/11 个候选，功能产出恒为零、却只印出一行「11 篇抓取失败」。
+    # 修法是解析不可信时退回主机名层——但那意味着**这一轮的内网地址
+    # 拦截实际靠的是代理，不是本代码**。这不是缺陷，是环境决定的降级，
+    # 可是读者无从从「10 篇入库」里看出来。与 `fetch_failed_reasons`
+    # 同一条道理：静默的降级比报错更难发现。
+    host_check_degraded: int = 0
 
 
 def _doc_id(final_url: str) -> str:
@@ -951,6 +1072,8 @@ def gather(client, *, code: str, company: str, industry: str,
             continue
         seen.add(doc.url)
         per_slot[cand.slot] = per_slot.get(cand.slot, 0) + 1
+        if got.host_check_degraded:
+            res.host_check_degraded += 1
         res.docs.append(doc)
         if cand.extra and cand.slot not in res.extra_slots:
             res.extra_slots.append(cand.slot)
@@ -969,6 +1092,10 @@ def summary(res: OpenWebResult) -> str:
     if res.model_dated:
         lines.append(f"  ⚠ 其中 {res.model_dated} 篇的发布日期由模型给出，"
                      "未经代码核验")
+    if res.host_check_degraded:
+        lines.append(f"  ⚠ 其中 {res.host_check_degraded} 篇入库时主机安全"
+                     "校验降级（本机 DNS 被代理劫持，IP 层校验无从进行）"
+                     "——内网地址拦截本轮依赖代理侧")
     if res.fetch_failed:
         lines.append(f"  – {res.fetch_failed} 篇抓取失败")
         # 去重后的原因逐条列出——不然「10 篇抓取失败」在 DNS 解析不出
@@ -1084,6 +1211,7 @@ def save(res: OpenWebResult, path: Path | str) -> None:
         "fetch_failed": res.fetch_failed,
         "fetch_failed_reasons": res.fetch_failed_reasons,
         "model_dated": res.model_dated,
+        "host_check_degraded": res.host_check_degraded,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1124,7 +1252,8 @@ def load(path: Path | str, corpus) -> OpenWebResult:
             extra_slots=_str_list_field(raw, "extra_slots"),
             fetch_failed=int(raw.get("fetch_failed", 0)),
             fetch_failed_reasons=_str_list_field(raw, "fetch_failed_reasons"),
-            model_dated=int(raw.get("model_dated", 0)))
+            model_dated=int(raw.get("model_dated", 0)),
+            host_check_degraded=int(raw.get("host_check_degraded", 0)))
         docs_raw = list(raw.get("docs", []))
     except Exception:                                       # noqa: BLE001
         # 顶层不是 dict（没有 .get）、docs 不是可迭代对象、或
