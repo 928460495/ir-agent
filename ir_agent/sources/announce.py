@@ -204,9 +204,9 @@ def gather(client, *, code: str, company: str, factors: list[str],
     res.picked = len(picks)
 
     seen = {d.url for d in corpus.docs}
-    # 去重键集合：存的是**未截断**、且已把 URL 挖掉之后的系统性原因
-    # （见 `_cause_key`），跟 `res.fetch_failed_reasons` 里存的（已截断、
-    # 保留原始 URL 的展示用字符串）解耦——与 openweb.gather 的
+    # 去重键集合：存的是**未截断**、由异常结构算出的原因键
+    # （见 `_exception_cause_key`），跟 `res.fetch_failed_reasons` 里存的
+    # （已截断、给人看的展示字符串）解耦——与 openweb.gather 的
     # `seen_diagnoses` 同一处置。
     seen_failure_keys: set[str] = set()
     for idx in picks:
@@ -218,10 +218,12 @@ def gather(client, *, code: str, company: str, factors: list[str],
             text = pdf_text(data)
         except Exception as e:                              # noqa: BLE001
             _note_failure(res, seen_failure_keys,
-                          f"{a.ann_id}：{e.__class__.__name__}: {e}")
+                          f"{a.ann_id}：{e.__class__.__name__}: {e}",
+                          _exception_cause_key(e))
             continue
         if not text.strip():
-            _note_failure(res, seen_failure_keys, f"{a.ann_id}：PDF 取文为空")
+            _note_failure(res, seen_failure_keys, f"{a.ann_id}：PDF 取文为空",
+                          _EMPTY_TEXT_KEY)
             continue
         doc = Document(
             doc_id=_doc_id(a.ann_id), url=a.url, title=a.title,
@@ -242,28 +244,71 @@ def gather(client, *, code: str, company: str, factors: list[str],
     return res
 
 
-# `_download` 抛出的真实异常（`requests.HTTPError`/`ConnectionError`/
-# `retry.RetryExhausted`）的 `str(e)` 里嵌着失败的那个 URL——见调用点
-# `f"{a.ann_id}：{e.__class__.__name__}: {e}"`。每篇公告的下载地址都
-# 不一样，同一种系统性原因（巨潮整体挡 PDF 请求、代理宕了、DNS 解不出
-# 来）换一个 ann_id/URL 就长得不一样，靠原样字符串去重形同虚设——旗舰
-# 场景「八篇都下载超时」会印八遍。这里把 `http(s)://` 起始、到下一个
-# 空白为止的这一段换成占位符再当 key：诊断里其余部分（状态码、异常类
-# 名、"Client Error"/"Max retries exceeded" 这类描述错误种类的文字）
-# 原样保留，所以两种真正不同的原因（404 与「PDF 取文为空」、404 与
-# 内容类型问题）依然会留下不同的 key，不会被过度合并——过度合并会把
-# 「这是哪一种失败」这条诊断价值直接抹掉，比没去重更糟。
-_URL_RE = re.compile(r"https?://\S+")
+# 第五次在这类去重上翻车了：前几轮各自往「剥掉消息文本里的一种模式」
+# 加一条正则（先是整条 URL，后来还想过加 `/\S+\.PDF`），每次都被下一种
+# 没预料到的消息形状打穿。最狠的一例：`annual_pdf._download` 把请求包
+# 在 `with_retry` 里，瞬时网络失败会先变成 `requests.ConnectionError`
+# （由 urllib3 的 `MaxRetryError` 构造），重试三次耗尽后再包一层
+# `retry.RetryExhausted`；这条链子上 `ConnectionError` 的消息里嵌的是
+# **`request.path_url`——只有路径和查询串，没有 scheme、没有 host**
+# （例如 `Max retries exceeded with url: /finalpage/2026-08-01/a0.PDF`），
+# `https?://` 起手的正则在这种消息里永远匹配不到，三次连接失败换三个
+# ann_id/URL 就得到三个互不相同的"字符串"，去重形同虚设。
+#
+# 教训：**别再往消息文本里加一条新模式**，下一个没设防的形状（bare
+# `OSError` 带 errno、代理错误里带端口号、SSL 错误）照样能打穿它。
+# 改成直接读异常对象的**结构**——类型链（`__cause__`/`__context__`，
+# 这条链正是用来把「`RetryExhausted` 包着 `ConnectionError`」和「裸的
+# `HTTPError`」分开的信息）、以及 HTTP 失败时从 `response.status_code`
+# 读到的整数状态码（不是从渲染出的文本里抠数字）。这两样都不经过
+# `str(e)`，因此这个失败模式和以后任何新形状都不会再打穿它。
+#
+# 本模块自己判定的本地条件（目前只有「PDF 取文为空」）没有异常对象，
+# 用一个字面量键（`_EMPTY_TEXT_KEY`）代替——这条件的字符串是我们自己
+# 写的常量，不含每次调用都不同的信息，本身就适合直接当 key。
+_EMPTY_TEXT_KEY = "local:empty_pdf_text"
 
 
-def _cause_key(diagnosis: str) -> str:
-    """把诊断文本里的 URL 换成占位符，只留下“是哪一种失败”。见上方
-    模块级注释。"""
-    return _URL_RE.sub("<url>", diagnosis)
+def _exception_cause_key(e: BaseException) -> str:
+    """从异常对象的**结构**——不是 `str(e)`——算出去重键。见上方模块级
+    注释：这是为了不再重蹈"剥消息文本里的一种模式"的覆辙。
+
+    组成：
+    - 类型链：`e` 自己的类型名，沿 `__cause__`/`__context__` 一路走到
+      链尾，逐个记录类型名。这是把「`RetryExhausted` 包着
+      `ConnectionError` 包着 `MaxRetryError` 包着 `NewConnectionError`」
+      与「裸的 `requests.HTTPError`」区分开的关键信息——单看最外层类型
+      名有时还不够（比如同样是 `RetryExhausted`，包的可能是连接失败也
+      可能是包了个持续 5xx 的 `HTTPError`），把整条链都记下来才稳。
+    - HTTP 状态码：链上第一个带 `.response.status_code` 的节点，读的
+      是 `Response` 对象上的整数字段，不是从消息里拿正则抠出来的
+      "404"/"403" 这类子串。这一项存在，404 和 403 才不会被合并成
+      同一个 key——两者的类型链完全相同（都只是一个 `HTTPError`），
+      不看状态码就区分不出来。
+
+    `str(e)` 里的东西（哪个 ann_id、哪个 URL、"Max retries exceeded"
+    这类描述文字）一个字节都不进这个函数——它们只用来拼**展示用**的
+    `reason` 字符串，由调用方单独处理。
+    """
+    types: list[str] = []
+    status: int | None = None
+    node: BaseException | None = e
+    visited: set[int] = set()
+    while node is not None and id(node) not in visited:
+        visited.add(id(node))
+        types.append(type(node).__name__)
+        if status is None:
+            resp = getattr(node, "response", None)
+            code = getattr(resp, "status_code", None)
+            if code is not None:
+                status = code
+        node = node.__cause__ or node.__context__
+    key = ">".join(types)
+    return f"{key}:{status}" if status is not None else key
 
 
-def _note_failure(res: AnnounceResult, seen_keys: set[str], reason: str
-                   ) -> None:
+def _note_failure(res: AnnounceResult, seen_keys: set[str], reason: str,
+                   key: str) -> None:
     """记一条失败。**按系统性原因去重，不按整条消息、也不按已截断的
     存储副本去重**——两处坑，缺一处不修都会让去重形同虚设：
 
@@ -275,7 +320,11 @@ def _note_failure(res: AnnounceResult, seen_keys: set[str], reason: str
        `fetch_failed_reasons` 的字符串会被截断」解耦，与
        openweb.gather 的 `seen_diagnoses` 同一处置。
 
-    2）诊断本身不能拿「原样字符串」当 key——见 `_cause_key`。
+    2）`key` 由调用方从异常对象的**结构**算出（见
+       `_exception_cause_key`）或是一个本模块自定义的字面量
+       （`_EMPTY_TEXT_KEY`），不是从 `reason` 文本里解析出来的——`reason`
+       只用于展示，`key` 完全独立于它，因此 `reason` 里嵌了什么样的
+       URL/路径都不影响去重是否生效。
 
     列表里存的仍是**完整消息**（带着第一次撞见这种原因时的那个
     ann_id/URL，只是显示用的字符串按 `_REASON_LIMIT` 截断），不是把
@@ -283,8 +332,6 @@ def _note_failure(res: AnnounceResult, seen_keys: set[str], reason: str
     例子」——与 openweb 同一条道理。
     """
     res.fetch_failed += 1
-    diagnosis = reason.split("：", 1)[-1]
-    key = _cause_key(diagnosis)
     if key in seen_keys:
         return
     seen_keys.add(key)

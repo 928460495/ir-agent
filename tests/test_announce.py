@@ -9,9 +9,14 @@ from __future__ import annotations
 
 from datetime import date
 
+import requests
+from urllib3.connectionpool import HTTPConnectionPool
+from urllib3.exceptions import MaxRetryError, NewConnectionError
+
 from ir_agent.sources.announce import (MAX_ANNOUNCEMENTS, PROMPT,
                                        format_candidates, parse_picks)
 from ir_agent.sources.cninfo import Announcement
+from ir_agent.sources.retry import RetryExhausted, with_retry
 
 AS_OF = date(2026, 9, 30)
 
@@ -294,25 +299,127 @@ def _long_ann(ann_id: str, url: str) -> Announcement:
                         category="其他", source_id=ann_id)
 
 
-def test_相同原因不同URL且均超截断上限只记一条(monkeypatch):
-    """旗舰场景：同一种系统性原因（巨潮整体拒绝 PDF 下载/代理宕了）在
-    不同公告上必须收敛成一条，不能「八篇都下载超时」印八遍。两条消息
-    都刻意造得超过 `_REASON_LIMIT`——如果去重键从『已截断的存储副本』
-    反推（Defect A），或者直接拿带 URL 的原始消息当 key（Defect B），
-    这里都会分别失败、印出两条。"""
+# 以下失败构造函数**必须**用真实的 requests/urllib3/retry 对象图，不能
+# 手写消息字符串——这正是本轮修复要堵住的那类假测试（见模块顶部
+# `_exception_cause_key` 的注释：上一轮的同名测试用
+# `ConnectionError(f"...Max retries exceeded with url: {url}")` 手写了
+# 一条真实 requests/urllib3 从不会产出的、带 scheme 的消息，测试本身
+# 才是那个漏洞没被抓到的原因）。
+
+
+def _real_connection_retry_exhausted(url: str) -> RetryExhausted:
+    """复刻 `annual_pdf._download` 在连接被拒绝/DNS 解不出来时真实走的
+    对象图：`HTTPConnectionPool` → `NewConnectionError` → `MaxRetryError`
+    → `requests.ConnectionError` → `with_retry` 耗尽重试后的
+    `RetryExhausted`。用真正的 `with_retry`（`base_delay=0` 只是省测试
+    时间，不改变产生的异常类型/链路）驱动，而不是直接 `raise
+    RetryExhausted(...)`——这样构造出来的 `__cause__` 链和线上代码
+    产生的完全一致。
+
+    关键细节：喂给 `MaxRetryError` 的不是完整 URL，而是
+    `requests.PreparedRequest.path_url`——这正是
+    `requests.adapters.HTTPAdapter.request_url` 在真实请求路径里传给
+    `urllib3` 的值（见 `adapters.py` 的 `request_url`：非代理场景下
+    `url = request.path_url`），**没有 scheme、没有 host**。旧版
+    `_cause_key` 用 `https?://\\S+` 去剥 URL，如果这里像上一轮那样偷懒
+    传完整 URL，正则会把它剥干净、旧代码也会"侥幸"通过——那样测出的
+    就不是 reviewer 指出的真实漏洞。"""
+    pool = HTTPConnectionPool(host="static.cninfo.com.cn", port=443)
+    req = requests.PreparedRequest()
+    req.url = url
+    path_url = req.path_url
+
+    def _always_fail():
+        try:
+            raise NewConnectionError(
+                pool, "Failed to establish a new connection: "
+                "[Errno 61] Connection refused")
+        except NewConnectionError as nce:
+            try:
+                raise MaxRetryError(pool, path_url, reason=nce) from nce
+            except MaxRetryError as mre:
+                raise requests.ConnectionError(mre) from mre
+
+    try:
+        with_retry(_always_fail, attempts=3, base_delay=0)
+    except RetryExhausted as e:
+        return e
+    raise AssertionError("_always_fail 必须触发 RetryExhausted")
+
+
+def _real_timeout_retry_exhausted(url: str) -> RetryExhausted:
+    """同上，但瞬时故障换成读超时（`requests.Timeout`），用来验证
+    "类型链不同则 key 不同"不是靠巧合——这条链路里没有
+    `MaxRetryError`/`NewConnectionError` 这两层。"""
+
+    def _always_timeout():
+        raise requests.Timeout("Read timed out. (read timeout=120)")
+
+    try:
+        with_retry(_always_timeout, attempts=3, base_delay=0)
+    except RetryExhausted as e:
+        return e
+    raise AssertionError("_always_timeout 必须触发 RetryExhausted")
+
+
+def _real_http_error(status: int, url: str) -> requests.HTTPError:
+    """用真实的 `requests.Response.raise_for_status()` 产出 `HTTPError`，
+    而不是手工 `HTTPError("404 ...")`——目的是让 `e.response.status_code`
+    是一个真正来自 `Response` 对象的整数字段，`_exception_cause_key`
+    读的正是这个字段。"""
+    resp = requests.Response()
+    resp.status_code = status
+    resp.reason = {404: "Not Found", 403: "Forbidden"}.get(status, "Error")
+    resp.url = url
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        return e
+    raise AssertionError(f"status={status} 必须触发 HTTPError")
+
+
+def test_三次真实连接失败合并为一条(monkeypatch):
+    """旗舰场景：`RetryExhausted` 包着真实 `requests.ConnectionError`
+    （由 urllib3 `MaxRetryError`/`NewConnectionError` 构造）的三次失败，
+    发生在三篇不同公告、三个不同 URL 上，必须收敛成一条——这正是
+    reviewer 指出旧实现（剥 URL 的正则）失效的那个场景：这条异常链的
+    消息里嵌的是 `request.path_url`（无 scheme、无 host），`https?://`
+    正则永远匹配不到。"""
     import ir_agent.sources.announce as A
 
-    url_a = ("http://static.cninfo.com.cn/finalpage/2026-08-01/"
-             + "a" * 100 + ".PDF")
-    url_b = ("http://static.cninfo.com.cn/finalpage/2026-08-02/"
-             + "b" * 100 + ".PDF")
-    anns = [_long_ann("long0", url_a), _long_ann("long1", url_b)]
+    urls = [f"http://static.cninfo.com.cn/finalpage/2026-08-0{i}/x.PDF"
+            for i in range(1, 4)]
+    anns = [_long_ann(f"e{i}", u) for i, u in enumerate(urls)]
     monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
 
     def _raise(url, cache_dir=None):
-        raise ConnectionError(
-            "HTTPSConnectionPool(host='static.cninfo.com.cn', port=443): "
-            f"Max retries exceeded with url: {url}")
+        raise _real_connection_retry_exhausted(url)
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    # `fetch_failed`（口径：失败了几次）不受去重影响，`reasons`
+    # （口径：有几种不同的原因）才是被去重的那个。
+    assert res.fetch_failed == 3
+    assert len(res.fetch_failed_reasons) == 1
+    # 存的展示串仍然带着一个具体的 ann_id 例子，供人核对。
+    assert "e0" in res.fetch_failed_reasons[0]
+
+
+def test_两个真实404合并为一条(monkeypatch):
+    """两个不同 URL 上的真实 404（同一种原因），必须收敛成一条。"""
+    import ir_agent.sources.announce as A
+
+    urls = ["http://static.cninfo.com.cn/finalpage/2026-08-01/notfound.PDF",
+            "http://static.cninfo.com.cn/finalpage/2026-08-02/gone.PDF"]
+    anns = [_long_ann(f"f{i}", u) for i, u in enumerate(urls)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        raise _real_http_error(404, url)
 
     monkeypatch.setattr(A, "_download", _raise)
 
@@ -322,31 +429,74 @@ def test_相同原因不同URL且均超截断上限只记一条(monkeypatch):
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 1
-    # 存进去的展示串本身确实超过了截断上限（验证「两条都需要截断」这个
-    # 前提成立，不是因为凑巧都很短才合并成功）。
-    stored = res.fetch_failed_reasons[0]
-    assert len(stored) <= A._REASON_LIMIT
 
 
-def test_不同系统性原因分别记录不被合并(monkeypatch):
-    """去重不能矫枉过正：404、PDF 取文为空、内容类型不对是三种真正不同
-    的诊断，必须各自留一条——合并成一条会把『这是哪一种失败』的诊断
-    价值直接抹掉，比不去重更糟。"""
+def test_404与403分别记录(monkeypatch):
+    """404 与 403 是两种真正不同的诊断（权限问题 vs 资源不存在），
+    必须各自留一条——两者的异常类型链完全相同（都只是一个
+    `requests.HTTPError`），区分它们必须靠 `response.status_code`。"""
     import ir_agent.sources.announce as A
 
     url_404 = "http://static.cninfo.com.cn/finalpage/2026-08-01/notfound.PDF"
-    url_ctype = "http://static.cninfo.com.cn/finalpage/2026-08-02/bad.PDF"
-    url_empty = "http://static.cninfo.com.cn/finalpage/2026-08-03/empty.PDF"
-    anns = [_long_ann("c0", url_404), _long_ann("c1", url_ctype),
-            _long_ann("c2", url_empty)]
+    url_403 = "http://static.cninfo.com.cn/finalpage/2026-08-02/denied.PDF"
+    anns = [_long_ann("g0", url_404), _long_ann("g1", url_403)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        status = 404 if url == url_404 else 403
+        raise _real_http_error(status, url)
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
+
+
+def test_404与连接失败分别记录(monkeypatch):
+    """404（`requests.HTTPError`，不经重试直接失败）与连接失败
+    （`RetryExhausted` 包着 `ConnectionError`，重试三次耗尽）是两种
+    结构上完全不同的异常，必须各自留一条。"""
+    import ir_agent.sources.announce as A
+
+    url_404 = "http://static.cninfo.com.cn/finalpage/2026-08-01/notfound.PDF"
+    url_conn = "http://static.cninfo.com.cn/finalpage/2026-08-02/x.PDF"
+    anns = [_long_ann("h0", url_404), _long_ann("h1", url_conn)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        if url == url_404:
+            raise _real_http_error(404, url)
+        raise _real_connection_retry_exhausted(url)
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
+
+
+def test_取文为空与下载失败分别记录(monkeypatch):
+    """本模块自己判定的本地条件（PDF 取文为空）与下载层的异常
+    （连接失败）是两种不同来源的失败，必须各自留一条——不能因为都
+    落在同一个 `except`/判断分支附近就被合并。"""
+    import ir_agent.sources.announce as A
+
+    url_empty = "http://static.cninfo.com.cn/finalpage/2026-08-01/empty.PDF"
+    url_conn = "http://static.cninfo.com.cn/finalpage/2026-08-02/x.PDF"
+    anns = [_long_ann("i0", url_empty), _long_ann("i1", url_conn)]
     monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
 
     def _fake_download(url, cache_dir=None):
-        if url == url_404:
-            raise OSError(f"404 Client Error: Not Found for url: {url}")
-        if url == url_ctype:
-            raise OSError(f"内容类型不是网页（application/octet-stream）：{url}")
-        return b"EMPTY"
+        if url == url_empty:
+            return b"EMPTY"
+        raise _real_connection_retry_exhausted(url)
 
     monkeypatch.setattr(A, "_download", _fake_download)
     monkeypatch.setattr(
@@ -354,32 +504,35 @@ def test_不同系统性原因分别记录不被合并(monkeypatch):
         lambda data: "" if data == b"EMPTY" else data.decode("utf-8"))
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"), code="600183",
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
                  company="生益科技", factors=["名义产能"], as_of=AS_OF,
                  corpus=cp)
-    assert res.fetch_failed == 3
-    assert len(res.fetch_failed_reasons) == 3
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
 
 
-def test_fetch_failed计数不受去重影响(monkeypatch):
-    """`fetch_failed` 是「失败了几次」，`fetch_failed_reasons` 是「有
-    几种不同的原因」——两个口径不同，去重只应该影响后者，不能连计数
-    也一起被去重掉。"""
+def test_不同类型链的重试耗尽异常分别记录(monkeypatch):
+    """`RetryExhausted` 包连接失败与 `RetryExhausted` 包读超时，最外层
+    类型名相同，但内层类型链不同（前者多两层
+    `MaxRetryError`/`NewConnectionError`）——`_exception_cause_key` 记的
+    是整条类型链，不是只看最外层，所以两者不会被误合并。"""
     import ir_agent.sources.announce as A
 
-    urls = [f"http://static.cninfo.com.cn/finalpage/2026-08-0{i}/x.PDF"
-            for i in range(1, 4)]
-    anns = [_long_ann(f"d{i}", u) for i, u in enumerate(urls)]
+    url_conn = "http://static.cninfo.com.cn/finalpage/2026-08-01/x.PDF"
+    url_timeout = "http://static.cninfo.com.cn/finalpage/2026-08-02/y.PDF"
+    anns = [_long_ann("j0", url_conn), _long_ann("j1", url_timeout)]
     monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
 
     def _raise(url, cache_dir=None):
-        raise TimeoutError(f"下载超时：{url}")
+        if url == url_conn:
+            raise _real_connection_retry_exhausted(url)
+        raise _real_timeout_retry_exhausted(url)
 
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"), code="600183",
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
                  company="生益科技", factors=["名义产能"], as_of=AS_OF,
                  corpus=cp)
-    assert res.fetch_failed == 3
-    assert len(res.fetch_failed_reasons) == 1
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
