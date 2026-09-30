@@ -1629,3 +1629,110 @@ def test_fetch_failed_reasons混入非字符串元素时过滤该元素其余仍
         back = OW.load(path, cp)
         assert [d.doc_id for d in back.docs] == ["ow_good"], bad_element
         assert back.fetch_failed_reasons == ["ok reason"], bad_element
+
+
+# ── 主机安全校验在代理环境下的降级 ────────────────────────────────
+#
+# 实跑事故（600183，2026-09-30）：本机代理用 fake-IP DNS，每个域名都
+# 解析到 198.18.0.x（RFC 2544 段，Python 判 is_private=True），于是
+# _reject_unsafe_host 拒掉 11/11 个候选，开放网络采集产出恒为零、且
+# 只印出一行「11 篇抓取失败」。以下这组测试钉住修复后的两个方向：
+# 解析不可信时不得误拒，解析可信时必须照样拒。
+
+def _fake_getaddrinfo(ip):
+    return lambda host, port, *a, **k: [(2, 1, 6, "", (ip, 0))]
+
+
+def test_解析到fakeIP段时不误拒且报告降级(monkeypatch):
+    """代理的 fake-IP 是占位地址，与请求去向无关——拿它当判据既误拒
+    又无效（真实解析在代理侧，本代码看不到）。"""
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW.socket, "getaddrinfo",
+                        _fake_getaddrinfo("198.18.0.103"))
+    assert OW._reject_unsafe_host("https://finance.sina.com.cn/x") is False
+
+
+def test_解析到CGNAT段时同样按占位地址处理(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW.socket, "getaddrinfo",
+                        _fake_getaddrinfo("100.64.1.2"))
+    assert OW._reject_unsafe_host("https://example.com/x") is False
+
+
+def test_配置了代理时跳过IP层校验(monkeypatch):
+    """有代理时 requests 把主机名交给代理，本地这次解析与去向无关。"""
+    import ir_agent.sources.openweb as OW
+
+    def _boom(*a, **k):
+        raise AssertionError("有代理时不该做本地解析")
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _boom)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    assert OW._reject_unsafe_host("https://example.com/x") is False
+
+
+def test_无代理时内网地址仍然照样拒(monkeypatch):
+    """降级只在解析不可信时生效。直连环境下这道闸门一个都不能放过——
+    169.254.169.254 在云主机上是实例凭证的元数据服务。"""
+    import ir_agent.sources.openweb as OW
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    monkeypatch.setattr(OW, "_proxy_in_play", lambda url: False)
+    for ip in ("127.0.0.1", "10.1.2.3", "169.254.169.254", "192.168.1.1"):
+        monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo(ip))
+        with pytest.raises(OW.FetchFailed, match="禁止访问的地址"):
+            OW._reject_unsafe_host("https://evil.example.com/x")
+
+
+def test_不依赖DNS的那一层无条件执行(monkeypatch):
+    """代理下 IP 层放弃之后，这一层是唯一还站得住的闸门，因此它不能
+    受代理与否影响——把解析函数换成会炸的，它也必须拒掉。"""
+    import ir_agent.sources.openweb as OW
+
+    def _boom(*a, **k):
+        raise AssertionError("这一层不该触发 DNS")
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _boom)
+    for url in ("http://localhost/x", "http://foo.local/x",
+                "http://bar.internal/x", "http://127.0.0.1/x",
+                "http://10.0.0.5/x", "http://[::1]/x"):
+        with pytest.raises(OW.FetchFailed):
+            OW._reject_unsafe_host(url)
+
+
+def test_公网字面量IP放行且算作已校验(monkeypatch):
+    """URL 里直接写的 IP 就是请求实际要去的地址，不经 DNS——有没有
+    代理都同样可信，因此这一支返回 True（未降级）。"""
+    import ir_agent.sources.openweb as OW
+
+    def _boom(*a, **k):
+        raise AssertionError("字面量 IP 不该触发 DNS")
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _boom)
+    assert OW._reject_unsafe_host("http://8.8.8.8/x") is True
+
+
+def test_降级篇数进产物清单(monkeypatch):
+    """环境决定的降级不是缺陷，但读者无从从「N 篇入库」里看出
+    「内网拦截这一轮靠代理」——静默降级比报错更难发现。"""
+    from ir_agent import full
+    from ir_agent.sources.openweb import OpenWebResult
+
+    notes = full._openweb_notes(OpenWebResult(host_check_degraded=3))
+    assert notes, "有降级就必须出条目"
+    assert "3 篇" in notes[0] and "主机安全校验" in notes[0]
+    assert full._openweb_notes(OpenWebResult()) == []
+
+
+def test_降级篇数跨阶段存活(tmp_path, monkeypatch):
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Corpus
+    res = OW.OpenWebResult(host_check_degraded=2, fetch_failed=1)
+    path = tmp_path / OW.OPENWEB_JSON
+    OW.save(res, path)
+    back = OW.load(path, Corpus(as_of=AS_OF))
+    assert back.host_check_degraded == 2
