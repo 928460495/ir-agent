@@ -1,0 +1,113 @@
+"""上市公司法定披露入语料库 —— 公司级事实的权威来源。
+
+**为什么需要它。** 实跑（600183，2026-09-30）里 8 个分解式因子有 7 个落
+「无数据」，而其中 6 个**其实搜到了**东西、只是全为财经媒体级被门槛挡下。
+瓶颈不是搜得不够广——搜得更广只会搜到更多财经媒体。本模块往采集阶梯里
+加一个**高等级的确定性来源**，而不是设法让模型搜得更好：模型挑什么网址
+不可核验，一个确定性接口可核验。
+
+**模型只挑下标，正文由代码抓。** 代码先用 `cninfo.search` 取回真实公告
+清单，只把「序号 + 标题 + 披露日」交给模型；模型回一批序号，代码按对应
+的 `Announcement.ann_id`/`url` 去巨潮下载 PDF。模型编不出一条不存在的
+公告，正文的下载地址也不经它的手。
+
+这个契约比 openweb 的 discover/fetch 分工**更强**：那里模型给的还是一个
+它可以凭空构造的 URL，这里给的是指向代码已有列表的下标——可编造的空间
+从「任意网址」缩到「这些条目里的哪几条」。最坏情况是挑了一条不相关的
+公告，代价是浪费提示词长度，不是把假证据放进语料库。
+
+**覆盖面要如实说。** 公告是**公司级事实**的权威来源，不是**行业级数据**
+的来源。扩产公告能给「名义产能」，提价公告能给公司侧的「ASP」，但
+「产能利用率」「良率」A 股基本不披露（见 gaps.py 模块注释），「原材料
+成本冲击」这类上游价格公告不会给。本模块把「七个因子无数据」挪到
+「四五个因子无数据」，剩下那几个属于确实不披露——那种情况下 gaps 标
+「取值为估计、绝不用代理指标顶替」本来就是正确行为。
+"""
+
+from __future__ import annotations
+
+import re
+
+from ir_agent.lineparse import keyed
+from ir_agent.sources.cninfo import Announcement
+
+# 公告检索窗口（月）。比 corpus.gather 的研报窗口（24 个月）短：公告的
+# 时效性更强，两年前的扩产公告对当期因子取值的参考价值已经很低，而条数
+# 会翻倍、把模型要读的候选清单撑长。
+ANNOUNCE_MONTHS = 12
+
+# 单轮最多入库几篇。同一批文档会同时压到战略/产业链/宏观定性三个模块的
+# 提示词上，长度是三倍的。
+MAX_ANNOUNCEMENTS = 8
+
+# PDF 取文的页数上限。多数公告只有一两页，但「定期报告」可能两百页以上，
+# 全文取回既无必要也会让单篇挤掉其余七篇的额度。
+PDF_MAX_PAGES = 30
+
+_LINE = keyed("选取")
+_INT = re.compile(r"^-?\d+$")
+
+
+def format_candidates(anns: list[Announcement]) -> str:
+    """渲染给模型看的候选清单。**只有序号、标题、披露日，没有下载地址。**
+
+    给了 URL 反而让模型有机会把它改掉再交回来——正文的地址必须始终来自
+    `cninfo` 的接口响应，不经模型的手。
+    """
+    return "\n".join(
+        f"{i}. {a.ann_date:%Y-%m-%d}　{a.title}" for i, a in enumerate(anns))
+
+
+def parse_picks(text: str, n_candidates: int) -> tuple[list[int], list[str]]:
+    """解析 `选取:` 行，返回 (下标列表, 被忽略项的说明列表)。
+
+    四道守卫，每一道被触发时都记一条说明——**被忽略的挑选要说得出来**，
+    否则读者看到「入库 3 篇」无从判断模型是只挑了 3 条，还是挑了 8 条
+    但 5 条不合法。
+
+    负数单独拦：`-1` 在 Python 里是合法索引，不拦会静默取到最后一条
+    公告，而那不是模型的意思。
+    """
+    picks: list[int] = []
+    ignored: list[str] = []
+    for hit in _LINE.finditer(text):
+        raw = hit.group(1).split("|")[0].strip()
+        if not _INT.match(raw):
+            ignored.append(f"「{raw[:20]}」不是序号")
+            continue
+        idx = int(raw)
+        if idx < 0 or idx >= n_candidates:
+            ignored.append(f"序号 {idx} 超出候选范围（0~{n_candidates - 1}）")
+            continue
+        if idx in picks:
+            continue
+        if len(picks) >= MAX_ANNOUNCEMENTS:
+            ignored.append(f"序号 {idx} 超出单轮上限 {MAX_ANNOUNCEMENTS} 篇")
+            continue
+        picks.append(idx)
+    return picks, ignored
+
+
+PROMPT = f"""从下面这家公司的法定披露公告里，挑出与本次估值分解式相关的几条。
+
+公司：{{company}}（{{code}}）
+本次分解式关注的驱动因子：{{factors}}
+
+候选公告（代码已从巨潮资讯取回，**只能从这个清单里挑**）：
+{{candidates}}
+
+每条一行，只给序号：
+
+`选取: <序号> | <一句话：与哪个因子相关>`
+
+**硬性要求**
+- **只能给上面清单里的序号**，最多 {MAX_ANNOUNCEMENTS} 条。序号之外的内容会被忽略。
+- 优先挑能给出**具体数字**的：扩产/投产、产能、价格调整、重大合同、
+  对外投资。纯程序性公告（股东大会通知、董事会决议、独立董事声明、
+  会计师事务所改聘）对因子取值没有帮助，不要挑。
+- **不要挑「关于召开业绩说明会的公告」这类只是通知会议将要举行的公告**
+  ——它们没有内容。
+- 一条都不相关就不要输出任何 `选取:` 行，不要为了凑数而挑。
+
+只输出上述格式的行。
+"""
