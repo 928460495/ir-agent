@@ -1736,3 +1736,99 @@ def test_降级篇数跨阶段存活(tmp_path, monkeypatch):
     OW.save(res, path)
     back = OW.load(path, Corpus(as_of=AS_OF))
     assert back.host_check_degraded == 2
+
+
+# ── B2：Finding 引文的代码核验 ────────────────────────────────────
+#
+# 在此之前，一条 Finding 的证明力只有「模型说它在这个网址上见过」：
+# claim 是模型转述、代码从没核实过，tier 来自模型自报的机构名。
+# gaps 甚至把它包成 Document(text=claim) 放进语料库，与代码亲手抓回
+# 的文档躺在一起，Corpus.verify 分不出来。
+
+def _finding(claim, url="https://finance.example.com/a",
+             publisher="某财经网", tier=None):
+    from datetime import date as _d
+
+    from ir_agent.sources.external import Tier as _T
+    from ir_agent.sources.web import Finding
+    return Finding(factor_key="capacity", claim=claim, url=url,
+                   publisher=publisher, tier=tier or _T.MEDIA,
+                   published=_d(2026, 6, 1))
+
+
+def test_claim在原页则核验通过并带回全文(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url=url, text="公司名义产能约 300 万平方米，同比增长 12%。",
+        meta_published=None))
+    got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
+    assert got.ok is True
+    assert "同比增长 12%" in got.text, "入库要用抓回的全文，不是 claim"
+
+
+def test_核验忽略空白差异(monkeypatch):
+    """页面里可能是全角空格或换行——与 Corpus.verify 同一套 norm。"""
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url=url, text="名义产能约　300 万\n平方米", meta_published=None))
+    assert OW.verify_finding(_finding("名义产能约 300 万平方米")).ok is True
+
+
+def test_claim不在原页则核验不通过(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url=url, text="本文讨论覆铜板行业的竞争格局。",
+        meta_published=None))
+    got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
+    assert got.ok is False
+    assert "原页" in got.reason
+
+
+def test_抓不到也算核验不通过(monkeypatch):
+    import ir_agent.sources.openweb as OW
+
+    def _boom(url, **k):
+        raise OW.FetchFailed(f"{url}：内容类型不是网页（application/pdf）")
+
+    monkeypatch.setattr(OW, "fetch", _boom)
+    got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
+    assert got.ok is False
+    assert "application/pdf" in got.reason
+
+
+def test_通过时tier按最终域名重判(monkeypatch):
+    """模型自报 publisher 只能走 tier_of（白名单全称）；抓回来之后
+    域名是代码观测到的，tier_of_url 比它可信。"""
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Tier
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url="https://www.miit.gov.cn/real", text="名义产能 300 万",
+        meta_published=None))
+    got = OW.verify_finding(_finding("名义产能 300 万", publisher="某财经网"))
+    assert got.ok is True
+    assert got.tier is Tier.OFFICIAL, "模型报的是媒体，实际落在 .gov.cn"
+    assert got.final_url == "https://www.miit.gov.cn/real"
+
+
+def test_核验不通过时不改tier也不带正文(monkeypatch):
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Tier
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url="https://www.miit.gov.cn/real", text="无关正文",
+        meta_published=None))
+    got = OW.verify_finding(_finding("名义产能 300 万", tier=Tier.MEDIA))
+    assert got.ok is False
+    assert got.tier is Tier.MEDIA, "没核实的发现不该借重定向拿到升级"
+    assert got.text == ""
+
+
+def test_空claim直接算不通过(monkeypatch):
+    """空串在任何正文里都"找得到"——那是 `in` 的性质，不是证据。"""
+    import ir_agent.sources.openweb as OW
+
+    def _never(url, **k):
+        raise AssertionError("空 claim 不该发请求")
+
+    monkeypatch.setattr(OW, "fetch", _never)
+    assert OW.verify_finding(_finding("")).ok is False
+    assert OW.verify_finding(_finding("   ")).ok is False

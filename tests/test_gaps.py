@@ -69,6 +69,22 @@ def _doc(text, title="行业深度报告", tier=Tier.SELLSIDE, doc_id="d1"):
                     published=date(2026, 6, 1), retrieved=AS_OF, text=text)
 
 
+def _collect_one_factor(G, corpus):
+    """跑一次只有一个因子、且该因子在账本里缺失的 collect。
+
+    ②③②.5 都不会命中（sections=None、corpus 里没有 COMPANY/SELLSIDE
+    文档提到它），所以一定走到 ④。
+    """
+    from ir_agent.drivers import Decomposition, Factor, Op
+    from ir_agent.ledger import FactLedger
+
+    d = Decomposition(target="revenue_growth", op=Op.MULTIPLY,
+                      factors=[Factor(key="capacity", label="名义产能",
+                                      unit="变化率", source_hint="")])
+    return G.collect(lambda p: "", [d], FactLedger(), corpus, "电子/元件",
+                     AS_OF, sections=None, annual_url="")
+
+
 def test_识别账本里没有的因子():
     gaps = identify(_rev(), _led("capacity"), AS_OF)
     assert [f.key for f in gaps] == ["utilization", "asp"]
@@ -87,7 +103,15 @@ def test_采集不到标为无数据():
     assert "估计" in data["utilization"].note
 
 
-def test_采集到官方来源标为外部来源():
+def test_采集到官方来源标为外部来源(monkeypatch):
+    """Task 6 之后④会先核验再判断是否够格（见 web.supports_value 的
+    调用契约），因此这里要把 verify_finding 换成不发真实请求的假实现——
+    否则这条单元测试会真的去抓 https://semi.org/x。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="", text=x.claim,
+        final_url=x.url, tier=x.tier))
     ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
           "| SEMI | 2026-07-01\n")
     data = collect(_Client(ok, ""), [_rev()], _led("capacity"),
@@ -96,23 +120,40 @@ def test_采集到官方来源标为外部来源():
     assert data["utilization"].findings[0].tier is Tier.OFFICIAL
 
 
-def test_仅媒体来源仍算无数据但说明原因():
-    """MEDIA 单源不足以支撑取值 —— 但要说清是「找到了但不够格」
-    而不是「什么都没找到」。"""
+def test_核验不通过的媒体来源仍算无数据但说明原因(monkeypatch):
+    """Task 6 放宽的是"已核实"的 MEDIA，不是 MEDIA 本身——核验不通过时
+    依旧不够格，且要说清是「找到了但没核实住」而不是「什么都没找到」。
+    此前这里断言的是"单一媒体"（旧门槛按来源等级），放宽后来源等级已经
+    不是门槛，这条测试改守新门槛：是否已核实。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=False, reason=f"{x.url}：未能在原页核实",
+        text="", final_url=x.url, tier=x.tier))
     media = ("发现: utilization | 稼动率下滑 | https://a/b "
              "| 某财经网 | 2026-07-01\n")
     data = collect(_Client(media, ""), [_rev()], _led("capacity"),
                    Corpus(as_of=AS_OF), "封测", AS_OF)
     assert data["utilization"].status == "无数据"
-    assert "单一媒体" in data["utilization"].note
+    assert "核实" in data["utilization"].note
 
 
-def test_采集到的进语料库供核验():
+def test_采集到的进语料库供核验(monkeypatch):
+    """入库用的是核验时抓回的全文，不是模型转述的 claim——这里的假
+    verify_finding 特意让 text 与 claim 不同，证明入库确实读的是
+    Verified.text 而不是 Finding.claim（否则改回 text=x.claim 这条也会
+    “碰巧”通过）。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="",
+        text="行业平均稼动率 78%，环比持平。",
+        final_url=x.url, tier=x.tier))
     ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
           "| SEMI | 2026-07-01\n")
     corpus = Corpus(as_of=AS_OF)
     collect(_Client(ok, ""), [_rev()], _led("capacity"), corpus, "封测", AS_OF)
-    assert any("78%" in d.text for d in corpus.docs)
+    assert any("环比持平" in d.text for d in corpus.docs)
 
 
 def test_不可联网时不中断只标无数据():
@@ -186,8 +227,14 @@ def test_年报优先于研报():
     assert data["utilization"].status == "年报披露"
 
 
-def test_年报研报都未命中才落到外部网络():
-    """②③都没命中，现有④的行为不变。"""
+def test_年报研报都未命中才落到外部网络(monkeypatch):
+    """②③都没命中，现有④的行为不变（Task 6 起④先核验，这里用假
+    verify_finding 避免单元测试真的发起网络请求）。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="", text=x.claim,
+        final_url=x.url, tier=x.tier))
     sections = _sections(("core_competency", "核心竞争力分析", "公司专注于主业发展"))
     ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
           "| SEMI | 2026-07-01\n")
@@ -244,10 +291,15 @@ def test_研报命中记下该文档自己的真实url与抓取日期():
     assert fd.source_retrieved == AS_OF          # _doc() 里 retrieved=AS_OF
 
 
-def test_外部来源状态不填source_url():
+def test_外部来源状态不填source_url(monkeypatch):
     """EXTERNAL 状态下证据是 findings 列表，可能有好几条各自的 url，
     没有一个"唯一"来源可以预先填在 source_url 上——这两个字段就该
     保持默认空值，不能塞进某一条 Finding 的 url 造成误导。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="", text=x.claim,
+        final_url=x.url, tier=x.tier))
     ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
           "| SEMI | 2026-07-01\n")
     data = collect(_Client(ok, ""), [_rev()], _led("capacity"),
@@ -419,10 +471,15 @@ def test_否定语境之外的真实命中不受连坐():
 # ── final-fix-2 Fix 1：openweb 分支之后语料库不再全是 SELLSIDE，
 # ③命中必须跳过 MEDIA 文档，与④（web.supports_value）同一道闸门 ──
 
-def test_MEDIA语料不产生研报测算命中():
+def test_MEDIA语料不产生研报测算命中(monkeypatch):
     """语料库里只有一篇 MEDIA 文档、文本命中核心词时，③不能把它判成
     「研报测算」——那等于一篇网络博客单独支撑了因子取值，是本轮修复
     要堵的洞。落空后应正常退到④，④命中官方来源则算「外部来源」。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="", text=x.claim,
+        final_url=x.url, tier=x.tier))
     corpus = Corpus(as_of=AS_OF)
     corpus.add(_doc("我们测算行业稼动率将于下半年回升。", tier=Tier.MEDIA))
     ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
@@ -551,3 +608,69 @@ def test_公告的否定语境不算命中():
 def test_ANNOUNCE_标签文案():
     import ir_agent.gaps as G
     assert G.ANNOUNCE == "公告披露"
+
+
+# ── Task 6：B2 接线到 ④，supports_value 门槛随之从「来源等级」改为
+# 「有没有被代码核实过」。核验不通过的发现降级为线索：不丢弃、不阻断，
+# 但不能撑因子取值——这条契约的落地处是这里，不是 web.supports_value
+# 本身（它已经不知道调用方是不是核实过）。
+
+def test_核验不通过的发现不算合格来源(monkeypatch):
+    """降级为线索：不丢弃、不阻断，但不能撑因子取值。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Corpus, Tier
+    from ir_agent.sources.web import Finding
+
+    f = Finding(factor_key="capacity", claim="产能 300 万",
+                url="https://m.example.com/a", publisher="某财经网",
+                tier=Tier.MEDIA, published=date(2026, 6, 1))
+    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=False, reason="…未能在原页核实", text="",
+        final_url=x.url, tier=x.tier))
+    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
+    fd = data["capacity"]
+    assert fd.status == G.MISSING
+    assert "核实" in fd.note
+
+
+def test_核验通过的发现入库用抓回的全文(monkeypatch):
+    """在此之前入库的 Document.text 是模型转述的一句话，与代码抓回的
+    文档在同一个 Corpus 里分不出来（子项目 A 终审 NEW-3）。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Corpus, Tier
+    from ir_agent.sources.web import Finding
+
+    f = Finding(factor_key="capacity", claim="产能 300 万",
+                url="https://m.example.com/a", publisher="某财经网",
+                tier=Tier.MEDIA, published=date(2026, 6, 1))
+    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="",
+        text="产能 300 万平方米，全年满产。",
+        final_url="https://m.example.com/a", tier=Tier.MEDIA))
+    cp = Corpus(as_of=AS_OF)
+    data = _collect_one_factor(G, corpus=cp)
+    assert data["capacity"].status == G.EXTERNAL
+    doc = next(d for d in cp.docs if d.url == "https://m.example.com/a")
+    assert "全年满产" in doc.text, "入库要用抓回的全文"
+
+
+def test_仅媒体支撑的因子在清单上被标注(monkeypatch):
+    """放宽之后媒体能撑因子，但证据强度要让人在批准时看得见。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Corpus, Tier
+    from ir_agent.sources.web import Finding
+
+    f = Finding(factor_key="capacity", claim="产能 300 万",
+                url="https://m.example.com/a", publisher="某财经网",
+                tier=Tier.MEDIA, published=date(2026, 6, 1))
+    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=True, reason="", text="产能 300 万平方米。",
+        final_url=x.url, tier=Tier.MEDIA))
+    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
+    assert "仅财经媒体支撑" in data["capacity"].note

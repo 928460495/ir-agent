@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 import requests
 
 from ir_agent.lineparse import keyed
-from ir_agent.sources.external import Document, Tier
+from ir_agent.sources.external import Document, Tier, norm
 from ir_agent.sources.retry import with_retry
 from ir_agent.sources.web import parse_date
 
@@ -1274,3 +1274,68 @@ def load(path: Path | str, corpus) -> OpenWebResult:
         seen.add(doc.url)
         res.docs.append(doc)
     return res
+
+
+# ── B2：Finding 引文的代码核验 ────────────────────────────────────
+#
+# 在此之前，一条 `Finding` 的全部证明力是「模型说它在这个网址上见过」：
+# `claim` 是模型转述、代码从没核实过，`tier` 来自 `web.tier_of(模型自报
+# 的机构名)`。`gaps.collect` 甚至把它包成 `Document(text=x.claim)` 放进
+# 语料库，与代码亲手抓回来的文档躺在同一个 `Corpus` 里，`Corpus.verify()`
+# 分不出来。
+#
+# **这也是 `supports_value` 的 MEDIA 门槛真正在防的东西。** 那条门槛的
+# 注释写的是「一条财经媒体报道不该单独决定 DCF 里的产能增速」，但危险
+# 不在「媒体」这个等级——在于那句话无从核实，等级只是不可核验性的一个
+# 代理指标。核验落地之后，「媒体 + 已核实」与「媒体 + 未核实」不是同一
+# 个东西，门槛才可以放宽（见 web.supports_value 与本计划 Task 6）。
+
+
+@dataclass(frozen=True)
+class Verified:
+    """一条 `Finding` 的核验结果。
+
+    `ok=False` 时 `text` 为空串、`tier` 原样保留模型自报的那个：**没被
+    核实的发现不该借重定向拿到升级**。
+    """
+
+    finding: object             # web.Finding；不标注类型以免引入循环导入
+    ok: bool
+    reason: str                 # ok=True 时为空串
+    text: str                   # 代码抓回的全文；ok=False 时为空串
+    final_url: str              # 跟完重定向后的地址；ok=False 时沿用原 URL
+    tier: Tier
+
+
+def verify_finding(finding) -> Verified:
+    """把 `finding.url` 抓回来，核验 `finding.claim` 是否真的在正文里。
+
+    核验用 `external.norm`（去掉所有空白）后做子串判断——与
+    `Corpus.verify()` 同一套规范化，因为页面里可能是全角空格或换行，
+    而模型转述时不会照抄空白。
+
+    **空 claim 直接判不通过，且不发请求。** 空串在任何正文里都「找得
+    到」，那是 `in` 运算的性质，不是证据。
+    """
+    claim = norm(finding.claim or "")
+    if not claim:
+        return Verified(finding=finding, ok=False, reason="转述为空，无从核实",
+                        text="", final_url=finding.url, tier=finding.tier)
+    try:
+        got = fetch(finding.url)
+    except FetchFailed as e:
+        return Verified(finding=finding, ok=False, reason=str(e),
+                        text="", final_url=finding.url, tier=finding.tier)
+    if claim not in norm(got.text):
+        return Verified(
+            finding=finding, ok=False,
+            reason=f"{finding.url}：模型转述「{finding.claim[:30]}」"
+                   "未能在原页核实",
+            text="", final_url=got.final_url, tier=finding.tier)
+    return Verified(
+        finding=finding, ok=True, reason="", text=got.text,
+        final_url=got.final_url,
+        # **分级按代码观测到的最终域名重判。** 模型自报的 publisher 只能
+        # 走 tier_of 的全称白名单；域名是代码亲手请求到的，可信度高一个
+        # 量级——见 tier_of_url 的文档字符串。
+        tier=tier_of_url(got.final_url))

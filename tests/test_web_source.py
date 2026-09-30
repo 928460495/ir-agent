@@ -365,16 +365,22 @@ def test_不变式_白名单条目跨档互不为前缀():
     )
 
 
-# 端到端：单条来源为"证券时报网"的发现走完 search() 后，
-# supports_value() 必须判定不足以支撑取值——这是本模块存在的唯一理由，
-# 分级机制的任何退化最终都要在这一步露馅。
-def test_端到端_证券时报网单源不支撑取值(restore_web_capable):
+# 端到端：单条来源为"证券时报网"的发现走完 search() 后，tier_of 必须
+# 把它判成 MEDIA——分级机制的任何退化最终都要在这一步露馅。
+#
+# Task 6 之前，这条测试断言的是 supports_value(got) is False：那时
+# MEDIA 不够格是门槛本身在看 tier。Task 6 把 supports_value 的门槛
+# 换成了"是否已核实"（见其文档字符串），它不再读 tier，所以"证券时报网
+# 单源不该通过"这件事不再是 supports_value 的职责——现在归 gaps.collect
+# 的 verify_finding 接线管（见 test_gaps.py 的
+# test_核验不通过的媒体来源仍算无数据但说明原因）。这里改为直接钉住
+# tier_of 分级本身没有被退化拔高，这才是分级机制真正可能露馅的地方。
+def test_端到端_证券时报网单源分级仍落MEDIA(restore_web_capable):
     restore_web_capable.WEB_CAPABLE = True
     raw = ("发现: utilization | 稼动率约80% | https://example.com/x | "
            "证券时报网 | 2026-07-01\n")
     got = search(_Client(raw), "稼动率", "utilization", "封测", AS_OF)
-    ok, why = supports_value(got)
-    assert ok is False
+    assert got[0].tier is Tier.MEDIA
 
 
 def test_解析发现():
@@ -422,11 +428,17 @@ def test_日期兼容常见写法():
     assert all(f.published == date(2026, 7, 1) for f in got)
 
 
-def test_全为媒体来源不问数量都不足以支撑取值():
-    """发现四：三条发现分别来自三家不同的财经媒体，仍然全是 MEDIA 级，
-    不该通过 —— 门槛是来源等级，不是数量。措辞里若写"单一媒体来源"，
-    会误导读者以为多找几家媒体互相印证就能过关，而真正的门槛是来源
-    等级，不是数量。"""
+# 以下两条是 Task 6 有意改变的行为：此前 supports_value 的门槛是来源
+# 等级（全 MEDIA 不够格），现在门槛改成"有没有被代码核实过"（见其文档
+# 字符串），本函数不再读 tier。挡住"未核实的 MEDIA"这件事移到了调用方
+# gaps.collect 的 B2 接线上（test_gaps.py 的
+# test_核验不通过的媒体来源仍算无数据但说明原因），不再是这里的职责。
+
+def test_全为媒体来源在放宽后不看数量也够格():
+    """三条发现分别来自三家不同的财经媒体，仍然全是 MEDIA 级——放宽后
+    supports_value 不再区分等级，只要有发现就够格；调用方是否已经核实
+    过这些发现，是 gaps.collect 的责任，本函数无从（也不该）自己检查
+    （见 supports_value 文档字符串里"调用方必须只传已核实的发现"）。"""
     media = [
         Finding("utilization", "稼动率下降", "https://a/1", "第一财经",
                 Tier.MEDIA, date(2026, 1, 1)),
@@ -436,18 +448,17 @@ def test_全为媒体来源不问数量都不足以支撑取值():
                 Tier.MEDIA, date(2026, 1, 3)),
     ]
     ok, why = supports_value(media)
-    assert ok is False
-    assert "单一" not in why
-    assert ("等级" in why or "数量" in why)
+    assert ok is True and why == ""
 
 
-def test_单一媒体来源不足以支撑取值():
-    """现有分级管的是「能不能引用」；因子取值是要进模型算钱的，门槛更高。
-    一条财经媒体报道可以作为线索，不该单独决定 DCF 里的产能增速。"""
+def test_单一媒体来源在放宽后也够格():
+    """同上，单条 MEDIA 发现也一样——这正是 Task 6 要放宽的那道门槛，
+    前提是调用方（gaps.collect）已经用 openweb.verify_finding 核实过，
+    这也是本计划里 Task 5/6 必须同一个提交落地的原因。"""
     media = [Finding("utilization", "稼动率下降", "https://a/b", "某财经网",
                      Tier.MEDIA, date(2026, 1, 1))]
     ok, why = supports_value(media)
-    assert ok is False and "媒体" in why and "单一" not in why
+    assert ok is True and why == ""
 
 
 def test_有官方或卖方佐证则可支撑():
@@ -512,3 +523,39 @@ def test_晚于as_of的发现被剔除(restore_web_capable):
             "发现: utilization | y | https://a/c | SEMI | 2026-01-01\n")
     got = search(_Client(late), "稼动率", "utilization", "封测", AS_OF)
     assert len(got) == 1 and got[0].claim == "y"
+
+
+# ── Task 6：B2 接线之后，supports_value 门槛从「来源等级」改为
+# 「有没有被代码核实过」。call 契约见 web.supports_value 文档字符串：
+# 调用方（gaps.collect）必须只把核验通过的发现传进来，本函数不再自己
+# 判断等级是否够格。
+
+def test_全媒体但都通过核验则够格():
+    """门槛放宽的前提是 B2：核验之后「媒体 + 已核实」与「媒体 + 未核实」
+    不是同一个东西。等级只是不可核验性的代理指标。"""
+    from ir_agent.sources.web import supports_value
+    ok, why = supports_value([
+        Finding(factor_key="k", claim="产能 300 万", url="https://a.example/1",
+                publisher="某财经网", tier=Tier.MEDIA, published=AS_OF),
+    ])
+    assert ok is True and why == ""
+
+
+def test_一条都没有仍然不够格():
+    from ir_agent.sources.web import supports_value
+    ok, why = supports_value([])
+    assert ok is False and "未找到" in why
+
+
+def test_按tier降序排列媒体在末尾():
+    from ir_agent.sources.web import by_tier
+    f = [
+        Finding(factor_key="k", claim="c", url="https://a/1", publisher="p",
+                tier=Tier.MEDIA, published=AS_OF),
+        Finding(factor_key="k", claim="c", url="https://a/2", publisher="p",
+                tier=Tier.OFFICIAL, published=AS_OF),
+        Finding(factor_key="k", claim="c", url="https://a/3", publisher="p",
+                tier=Tier.SELLSIDE, published=AS_OF),
+    ]
+    assert [x.tier for x in by_tier(f)] == [Tier.OFFICIAL, Tier.SELLSIDE,
+                                            Tier.MEDIA]

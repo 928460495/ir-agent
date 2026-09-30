@@ -19,9 +19,12 @@
 
 ③的语料库不再只装券商研报。openweb 分支之后，corpus 里混入了代码抓回来的
 开放网页，其中一部分分级落 `Tier.MEDIA`。`_match_report` 因此跳过 MEDIA
-文档——④（`web.supports_value`）早就在做同一件事（MEDIA 不得单独支撑因子
-取值），③不能绕开这道闸门另开一扇门：把媒体错拔成"研报测算"是危害（一篇
-博客单独支撑了 DCF 里的一个假设），漏判落到④或"无数据"只是召回损失。
+文档——把媒体错拔成"研报测算"是危害（一篇博客单独支撑了 DCF 里的一个假设），
+漏判落到④或"无数据"只是召回损失。**这道闸门只在③自己身上**：Task 6 之后
+④的门槛不再是来源等级（见 `web.supports_value` 文档字符串），而是有没有
+被 `openweb.verify_finding` 核实过——③没有逐条核验 `Finding.claim` 那样的
+动作可做（corpus 里的文档本来就是代码抓回来的全文，不是模型转述），所以
+③继续用它原来那道基于 tier 的闸门，不能因为④换了门槛就跟着卸掉。
 """
 
 from __future__ import annotations
@@ -32,7 +35,8 @@ from datetime import date
 from ir_agent.drivers import Decomposition, Factor
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.sources.external import Document, Tier
-from ir_agent.sources.web import (Finding, WebUnavailable, search,
+from ir_agent.sources.openweb import TEXT_LIMIT, verify_finding
+from ir_agent.sources.web import (Finding, WebUnavailable, by_tier, search,
                                   supports_value)
 
 DISCLOSED = "已披露"
@@ -205,14 +209,17 @@ def _match_report(corpus, label: str) -> tuple[str, Document] | None:
     **跳过 Tier.MEDIA 文档。** 这个函数写下来的时候语料库里只有券商
     研报（全部 SELLSIDE），没有分级判断也无妨。openweb 分支之后，
     corpus 混入了代码抓回来的开放网页，其中相当一部分分级落 MEDIA——
-    ④（`web.supports_value`）早就在做同一件事："MEDIA 级不得单独支撑
-    因子取值"；这里若不补同一道闸门，一篇分级落 MEDIA 的网络博客只要
-    文本命中，就会被当成"研报测算"直接喂给 assume.py 当 EXTERNAL 依据
-    写进 DCF 假设——比④更糟，因为③命中即终止（先近后远，不会再往下
-    走④的门槛检查）。命中该跳过的 MEDIA 文档时不返回 None 就直接结束，
-    而是继续扫描其余文档——同一因子仍可能在别的 SELLSIDE/OFFICIAL
-    文档里正常命中，落空了才退到④或"无数据"，这正是代价不对称原则
-    要求的方向：宁可多退一级，不可把媒体错拔成研报依据。
+    这里若不设一道闸门，一篇分级落 MEDIA 的网络博客只要文本命中，就会
+    被当成"研报测算"直接喂给 assume.py 当 EXTERNAL 依据写进 DCF 假设，
+    且比④更糟：③命中即终止（先近后远，不会再往下走④）。**这道闸门
+    与④（`web.supports_value`）不是同一个机制**——Task 6 之后④的门槛
+    是"有没有被 `openweb.verify_finding` 核实过"，不是来源等级；③这里
+    没有逐条核验 `Finding.claim` 那样的动作可做（corpus 里的文档是代码
+    抓回来的全文本身），所以继续按 tier 把关，两道闸门各自成立，不是
+    互为依据。命中该跳过的 MEDIA 文档时不返回 None 就直接结束，而是
+    继续扫描其余文档——同一因子仍可能在别的 SELLSIDE/OFFICIAL 文档里
+    正常命中，落空了才退到④或"无数据"，这正是代价不对称原则要求的
+    方向：宁可多退一级，不可把媒体错拔成研报依据。
     """
     if corpus is None:
         return None
@@ -320,39 +327,56 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
                 continue
 
+            # ── B2：每条发现都回原页核实 ────────────────────────────
+            # 核验不通过的**降级为线索**：不丢弃、不阻断，但不算进
+            # supports_value。这是门槛得以放宽到 MEDIA 的前提——
+            # 见 web.supports_value 的文档字符串。
+            verified = [verify_finding(x) for x in found]
+            passed = [v for v in verified if v.ok]
+            unverified = [v for v in verified if not v.ok]
+            found = by_tier([v.finding for v in passed])
+
             ok, why = supports_value(found)
             if ok:
-                for x in found:
+                for v in passed:
+                    x = v.finding
                     corpus.add_if_visible(Document(
-                        doc_id=f"web_{f.key}_{len(corpus.docs)}", url=x.url,
-                        title=f"{f.label}：{x.claim[:30]}",
-                        publisher=x.publisher, tier=x.tier,
-                        # Finding.published 永远是真实日期（日期不明的发现
-                        # 在 web.parse_findings 里已被丢弃），这里直接用，
-                        # 不写 `x.published or as_of` 这类兜底 —— as_of 恰好
-                        # 是唯一必然不触发时点守卫的取值，一旦用它顶替，就
-                        # 等于把"日期不明"洗成"时点上最合规"，是在编排层
-                        # 重新打开 Task 5 刚堵掉的那个坑。
+                        doc_id=f"web_{f.key}_{len(corpus.docs)}",
+                        url=v.final_url, title=f"{f.label}：{x.claim[:30]}",
+                        publisher=x.publisher,
+                        # 核验通过后分级按**代码观测到的最终域名**重判，
+                        # 不用模型自报的机构名。
+                        tier=v.tier,
                         published=x.published, retrieved=as_of,
-                        text=x.claim))
+                        # **入库的是代码抓回的全文，不是模型转述的那句话。**
+                        # 此前这里是 text=x.claim——一句从没被抓取过的
+                        # 转述，和代码亲手抓回来的文档躺在同一个 Corpus
+                        # 里，Corpus.verify() 分不出来（子项目 A 终审
+                        # NEW-3 记的就是这条）。
+                        text=v.text, prompt_limit=TEXT_LIMIT))
+                note = ""
+                if all(v.tier is Tier.MEDIA for v in passed):
+                    # 放宽的是门槛，不是知情：仅靠媒体支撑时证据强度
+                    # 要让人在批准时看得见。
+                    note = "仅财经媒体支撑（已在原页逐字核实）"
+                if unverified:
+                    note += ("；" if note else "") + \
+                        f"另有 {len(unverified)} 条模型转述未能在原页核实，" \
+                        "已降级为线索"
                 out[f.key] = FactorData(factor=f, status=EXTERNAL,
-                                        findings=found)
+                                        findings=found, note=note)
             else:
-                # 「找到了但不够格」与「什么都没找到」要分开说：前者对
-                # 读者的含义是"证据链已经起步，只是等级不够"，后者是
-                # "连线索都没有"。找到的发现若恰好只有一条 MEDIA 来源，
-                # 如实说明"单一媒体"；若已经是多条却仍全为 MEDIA，
-                # 沿用 supports_value 的措辞——不能写"单一"，那会误导
-                # 读者以为多凑几家媒体互相印证就能过关，而这正是本模块
-                # 要挡住的事（门槛是来源等级，不是数量）。
-                if (len(found) == 1
-                        and found[0].tier is Tier.MEDIA):
-                    note = (f"仅单一媒体来源（{found[0].publisher}）—— "
-                            "不足以支撑因子取值，取值为估计")
+                if unverified and not passed:
+                    # 「搜到了但核实不过」与「什么都没搜到」对读者的含义
+                    # 不同：前者是证据链起步了但站不住，后者是连线索都
+                    # 没有。
+                    note = (f"{len(unverified)} 条模型转述均未能在原页核实"
+                            f"（{unverified[0].reason[:60]}）—— 取值为估计")
                 else:
                     note = f"{why} —— 取值为估计"
                 out[f.key] = FactorData(
-                    factor=f, status=MISSING, findings=found, note=note)
+                    factor=f, status=MISSING,
+                    findings=[v.finding for v in verified], note=note)
     return out
 
 
