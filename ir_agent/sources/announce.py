@@ -26,10 +26,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
 
 from ir_agent.lineparse import keyed
+from ir_agent.sources.annual_pdf import _download
 from ir_agent.sources.cninfo import Announcement
+from ir_agent.sources.cninfo import search as _search
+from ir_agent.sources.external import Document, Tier
+from ir_agent.sources.openweb import TEXT_LIMIT
 
 # 公告检索窗口（月）。比 corpus.gather 的研报窗口（24 个月）短：公告的
 # 时效性更强，两年前的扩产公告对当期因子取值的参考价值已经很低，而条数
@@ -128,3 +136,126 @@ PROMPT = f"""从下面这家公司的法定披露公告里，挑出与本次估�
 
 只输出上述格式的行。
 """
+
+# 失败原因单条的存储上限，与 openweb 的同名约定一致：清单是给人看的，
+# 一条原因长到几百字就没人读了。
+_REASON_LIMIT = 160
+
+
+@dataclass
+class AnnounceResult:
+    docs: list[Document] = field(default_factory=list)
+    # 巨潮取回的候选条数。**必须能说出来**：读者看到「入库 3 篇」时，
+    # 「候选 220 条里挑了 3 条」与「候选 3 条全挑了」含义完全不同。
+    candidates: int = 0
+    picked: int = 0
+    fetch_failed: int = 0
+    fetch_failed_reasons: list[str] = field(default_factory=list)
+    # 模型给了但不合法的挑选（越界/非数字/超上限）。不说出来的话，
+    # 读者无从判断是模型只挑了几条，还是挑了很多但大半不合法。
+    ignored: list[str] = field(default_factory=list)
+
+
+def pdf_text(data: bytes) -> str:
+    """公告 PDF → 纯文本。页数上限见 `PDF_MAX_PAGES`。
+
+    `fitz` 在函数内惰性 import，与 `annual_pdf.py`/`annual_sections.py`
+    的既有写法一致。
+    """
+    import fitz                                   # PyMuPDF
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    try:
+        parts: list[str] = []
+        for i, page in enumerate(doc):
+            if i >= PDF_MAX_PAGES:
+                break
+            parts.append(page.get_text())
+    finally:
+        doc.close()
+    lines = [ln.strip() for ln in "\n".join(parts).splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _doc_id(ann_id: str) -> str:
+    return "ann_" + hashlib.sha256(ann_id.encode("utf-8")).hexdigest()[:12]
+
+
+def gather(client, *, code: str, company: str, factors: list[str],
+           as_of: date, corpus, cache_dir: Path | str | None = None
+           ) -> AnnounceResult:
+    """公告入语料库：代码取清单 → 模型挑下标 → 代码抓 PDF。
+
+    `client` 不需要联网工具——模型只从代码给的清单里挑，不上网。
+    """
+    res = AnnounceResult()
+    start = as_of - timedelta(days=int(ANNOUNCE_MONTHS * 30.5))
+    anns = _search(code, start, as_of)
+    res.candidates = len(anns)
+    if not anns:
+        # 没有候选就没有可挑的，省一次模型调用。
+        return res
+
+    raw = client(PROMPT.format(
+        company=company or code, code=code,
+        factors="、".join(factors) or "（未产出分解式）",
+        candidates=format_candidates(anns)))
+    picks, res.ignored = parse_picks(raw, len(anns))
+    res.picked = len(picks)
+
+    seen = {d.url for d in corpus.docs}
+    for idx in picks:
+        a = anns[idx]
+        if a.url in seen:
+            continue
+        try:
+            data = _download(a.url, cache_dir)
+            text = pdf_text(data)
+        except Exception as e:                              # noqa: BLE001
+            _note_failure(res, f"{a.ann_id}：{e.__class__.__name__}: {e}")
+            continue
+        if not text.strip():
+            _note_failure(res, f"{a.ann_id}：PDF 取文为空")
+            continue
+        doc = Document(
+            doc_id=_doc_id(a.ann_id), url=a.url, title=a.title,
+            publisher=a.name or company or code,
+            # **分级由取回方式决定，不由名字决定。** 这条路径是代码
+            # 亲手请求的巨潮接口，因此可以硬编码 COMPANY——与
+            # reports.to_document 硬编码 SELLSIDE 同一个道理。
+            # 绝不把公司名加进 web.tier_of 的白名单让它去"判"，
+            # 那条路上模型自报一个名字就能拔级。
+            tier=Tier.COMPANY,
+            # **时点用披露日**（announcementTime），不是抓取日。
+            published=a.ann_date, retrieved=as_of,
+            text=text, prompt_limit=TEXT_LIMIT)
+        if not corpus.add_if_visible(doc):
+            continue
+        seen.add(doc.url)
+        res.docs.append(doc)
+    return res
+
+
+def _note_failure(res: AnnounceResult, reason: str) -> None:
+    """记一条失败。**按诊断去重，不按整条消息去重**——每条消息都带着
+    自己的 ann_id 前缀，拿整条去重的话「八篇都下载超时」会印八遍。
+    与 openweb.gather 的同名处置一致。
+    """
+    res.fetch_failed += 1
+    key = reason.split("：", 1)[-1]
+    if any(r.split("：", 1)[-1] == key for r in res.fetch_failed_reasons):
+        return
+    res.fetch_failed_reasons.append(reason[:_REASON_LIMIT])
+
+
+def summary(res: AnnounceResult) -> str:
+    """给人看的采集结果。**缺什么必须说出来。**"""
+    lines = [f"公司公告 {len(res.docs)} 篇"
+             f"（候选 {res.candidates} 条，模型挑 {res.picked} 条）"]
+    if res.fetch_failed:
+        lines.append(f"  – {res.fetch_failed} 篇取文失败")
+        for r in res.fetch_failed_reasons:
+            lines.append(f"    · {r}")
+    for x in res.ignored:
+        lines.append(f"  – 忽略了一条挑选：{x}")
+    return "\n".join(lines)
