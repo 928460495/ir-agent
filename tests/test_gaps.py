@@ -474,10 +474,11 @@ def test_时点守卫对照_披露时点早于as_of时不算缺口():
     assert "capacity" not in [f.key for f in gaps]
 
 
-def test_公告命中排在研报之前并标公告披露(monkeypatch):
-    """②.5 排在 ③ 之前：公告是公司权威披露且由确定性接口取回，比两级
-    模型中介的来源更近。状态标签不能沿用「研报测算」——那会把一份公司
-    公告说成券商测算，是错误归因。"""
+def test_公告命中取出COMPANY文档的摘录():
+    """这里直接调用 `_match_announce`，不经过 `collect()` 的调度——验证
+    的是它能从 `Tier.COMPANY` 文档里取出摘录本身，不是 ②.5 与 ③ 谁先谁后
+    （调度顺序由 `test_公告优先于研报` 通过 `collect()` 验证）。状态标签
+    不能沿用「研报测算」——那会把一份公司公告说成券商测算，是错误归因。"""
     import ir_agent.gaps as G
     from ir_agent.sources.external import Corpus, Document, Tier
 
@@ -496,6 +497,27 @@ def test_公告命中排在研报之前并标公告披露(monkeypatch):
     excerpt, doc = hit
     assert doc.tier is Tier.COMPANY
     assert "300 万平方米" in excerpt
+
+
+def test_公告优先于研报():
+    """②.5 与 ③ 都命中时用公告，不用研报——公告是公司权威披露、由确定性
+    接口取回，比两级模型中介的来源更近（`gaps._match_announce` 文档字符
+    串同一理由）。与 `test_年报优先于研报` 同一模式：经过 `collect()`
+    走完整调度，而不是像 `test_公告命中取出COMPANY文档的摘录` 那样直接
+    调用 `_match_announce`——只有经过 `collect()` 才钉得住"②.5 排在 ③
+    之前被调用"这件事本身：把 collect() 里两次调用的先后顺序对调，这
+    条测试会变红（`_match_report` 不跳过 COMPANY 文档，只跳 MEDIA，
+    对调后会先命中研报文档或公告文档中语料库里排在前面的那一份，判成
+    「研报测算」）。"""
+    import ir_agent.gaps as G
+
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们测算行业产能将维持平稳", tier=Tier.SELLSIDE, doc_id="r1"))
+    corpus.add(_doc("本次公告披露产能维持平稳", title="产能公告",
+                    tier=Tier.COMPANY, doc_id="a1"))
+    data = collect(_ExplodingClient(), [_rev()], _led("utilization", "asp"),
+                   corpus, "封测", AS_OF)
+    assert data["capacity"].status == G.ANNOUNCE
 
 
 def test_公告命中只看COMPANY文档():

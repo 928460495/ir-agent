@@ -1513,6 +1513,40 @@ def test_引用研报摘录片段代码自动补上研报文档的真实url():
         "研报的抓取日期应是该 Document 自己的 retrieved，不是这一轮的 as_of"
 
 
+def test_引用公告摘录片段代码自动补上公司公告的真实url():
+    """②.5 公司公告命中同理——出处是那篇 Document（cninfo 公告本身）
+    自己的 url/retrieved（由 `gaps._match_announce` 带回给 `collect`），
+    不是年报也不是研报的。
+
+    回归动机：`_match_excerpt` 的状态白名单曾经只有 `(gaps.ANNUAL,
+    gaps.REPORT)` 两项，`gaps.ANNOUNCE` 不在其中——ANNOUNCE 状态的
+    因子即使摘录逐字匹配，也会被 `_match_excerpt` 直接判 False，
+    落到下面的 `Basis.report(quote)` 出口：那条出口按"简报正文"校验，
+    公告原文根本不在正文里，真实的 cninfo URL 也被丢弃。这条测试要
+    锁住的就是"公告摘录命中 → EXTERNAL 且 ref 是公告的真实 url"，
+    而不是"退化成 REPORT"。"""
+    d = _one_factor_decomp()
+    excerpt = "本次投产新增名义产能 300 万平方米"
+    fd = {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.ANNOUNCE,
+        note=f"「{excerpt}」——生益科技《扩产投产公告》"
+            "（2026-08-01，公司公告）"
+            "（文字依据，是否给出具体数值待人工确认）",
+        source_url="http://static.cninfo.com.cn/a.PDF",
+        source_retrieved=date(2026, 8, 1), source_excerpt=excerpt)}
+    body = "公司持续推进降本增效。"
+    raw = ("假设: 稼动率 | 第1年 | 1% | 3% | 5% | "
+          "「本次投产新增名义产能 300 万平方米」，参照公告披露的新增产能")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body=body, as_of=AS_OF, decomps=[d])
+    basis = a.rows[0].bases[0]
+    assert basis.kind.value == "external", \
+        "ANNOUNCE 命中的摘录应该走 EXTERNAL 出口，不能退化成 report"
+    assert basis.ref == "http://static.cninfo.com.cn/a.PDF"
+    assert basis.retrieved == date(2026, 8, 1), \
+        "公告的抓取日期应是该 Document 自己的 retrieved，不是这一轮的 as_of"
+
+
 def test_年报摘录引文对不上原文片段时掉回正文核验并被标注():
     """模型引的话跟 `fd.source_excerpt` 对不上（比如编了数字或改了
     表述）——不能被 `_match_excerpt` 放过，应当掉回"当作正文引用"这条
