@@ -76,18 +76,22 @@ _DATE_PATTERNS = (
 #     判不出来落 MEDIA 是正确行为，不是缺陷。
 #
 # 这条路径安全，靠的是 tier_of 产出的 Tier 不管走哪条读取路径都遵循
-# 同一条代价不对称：openweb.verify_finding 核验不通过时原样保留这个
-# Tier 供展示（不借失败的核验偷偷升级），ir_agent/gaps.py 的 collect()
-# 也用它拼"仅财经媒体支撑"那处提示文案——注意 tier_of 的下游不止一处。
-# **Task 6 之后 supports_value()（本文件）本身不再读 tier**：门槛换成
-# 了"有没有被 verify_finding 核实过"，见其文档字符串；判断"是否只有
-# 媒体支撑"的职责整个搬去了 gaps.collect 的④分支。但只要 tier_of 的
-# 输出还会展示给人看、还会喂进"仅媒体支撑"这类文案，拔高就仍然是
-# 危害而不只是过时的顾虑。两处（曾经的 supports_value 与现在的
-# gaps.collect）判断都对"拔高"极端保守、对"压低"从容：把媒体错拔成
-# SELLSIDE/OFFICIAL，等于一篇博客单独决定了 DCF 里的因子取值，是危害；
-# 把真官方/卖方错压成 MEDIA，只是需要再凑一条来源互相印证，是召回
-# 损失。这正是白名单机制的方向，不是缺省地各打五十大板。
+# 同一条代价不对称。**tier_of 的输出（Finding.tier）如今只剩一条读取
+# 路径：`openweb.verify_finding` 核验不通过（或 claim 为空、抓取失败）
+# 时原样保留这个 Tier 供展示——不借失败的核验偷偷升级。** `gaps.py`
+# 拼"仅财经媒体支撑"那处提示文案，用的是 `openweb.Verified.tier`——
+# `verify_finding` 核验通过后按 `tier_of_url`（代码观测到的最终域名）
+# 重判出来的分级，不是这里产出的、模型自报的 `Finding.tier`；`gaps.py`
+# 不直接读 `Finding.tier`，见 `web.by_tier` 的说明与 gaps.py 模块顶部
+# 注释。
+# **Task 6 之后 supports_value()（本文件）本身也不再读 tier**：门槛
+# 换成了"有没有被 verify_finding 核实过"，见其文档字符串；判断"是否
+# 只有媒体支撑"的职责整个搬去了 gaps.collect 的④分支。但只要 tier_of
+# 的输出还会在核验失败时原样展示给人看，拔高就仍然是危害而不只是过时
+# 的顾虑：判不出来落 MEDIA 是安全的；错拔成 SELLSIDE/OFFICIAL，会让一条
+# 从没被核实过的转述带着虚高的分级摆在人面前，等于一篇博客单独决定了
+# DCF 里的因子取值；把真官方/卖方错压成 MEDIA，只是需要再凑一条来源
+# 互相印证，是召回损失。这正是白名单机制的方向，不是缺省地各打五十大板。
 
 # ── 归一化：让"国家统计局官网"和"国家统计局　官网"命中同一个前缀 ──
 # 只做三件事：去空白（含全角空格）、剔除常见全/半角标点、把 ASCII 字母
@@ -341,8 +345,8 @@ def tier_of(publisher: str) -> Tier:
     要支持新来源，往 `_SELLSIDE_CN`/`_SELLSIDE_ASCII`/`_OFFICIAL_CN`/
     `_OFFICIAL_ASCII` 加全称，或往 `_MODIFIERS` 加修饰词——不要碰这个
     函数的判别逻辑本身。**判不出来落 MEDIA 是正确行为，不是缺陷**：
-    见本节顶部注释里 tier_of 产出的 Tier 在 supports_value()（本文件）
-    与 gaps.py（直接读 Finding.tier）两处读取路径共享的代价不对称——
+    见本节顶部注释——tier_of 产出的 Tier 如今只在 `openweb.verify_finding`
+    核验失败时原样保留展示这一条读取路径上，仍然遵循同一条代价不对称：
     拔高是危害，压低只是召回损失。
     """
     name = _normalize(publisher or "")
@@ -468,13 +472,25 @@ _TIER_ORDER = {Tier.OFFICIAL: 0, Tier.COMPANY: 1, Tier.SELLSIDE: 2,
                Tier.MEDIA: 3}
 
 
-def by_tier(findings: list[Finding]) -> list[Finding]:
+def by_tier(items):
     """按来源等级降序排列，媒体排末尾。**只影响呈现顺序。**
+
+    接受任何带 `.tier` 属性的对象，不限于 `Finding`——`gaps.collect`
+    的④分支传的是 `openweb.Verified` 列表：核验通过后 `Verified.tier`
+    是代码观测到的最终域名分级，比 `Finding.tier`（模型自报的机构名）
+    可信一个量级，排序应该按前者、不是后者（见 gaps.py 里的调用点）。
+    两种对象共用一个函数，是因为排序逻辑本身与"装的是什么"无关，只看
+    `.tier`；只保留一份 `_TIER_ORDER`，不为 `Verified` 另起一份。
 
     放宽门槛之后媒体级发现也能撑因子取值，但读者（以及读提示词的模型）
     应该先看到证明力强的那几条。稳定排序：同级内保留原有先后。
+
+    See also: `external.Corpus.by_tier`——同名但不是同一件事：那个方法
+    按 tier **过滤** 一份 `Document` 列表，这个函数给任意带 `.tier` 的
+    对象**排序**、不丢弃任何一条。两者都从 `gaps.collect` 可达，别把
+    调用点搞混。
     """
-    return sorted(findings, key=lambda f: _TIER_ORDER.get(f.tier, 99))
+    return sorted(items, key=lambda x: _TIER_ORDER.get(x.tier, 99))
 
 
 def supports_value(findings: list[Finding]) -> tuple[bool, str]:
@@ -491,7 +507,13 @@ def supports_value(findings: list[Finding]) -> tuple[bool, str]:
     的职责。
 
     **调用方必须只把核验通过的发现传进来。** 核验不通过的已在
-    `gaps.collect` 里降级为线索、不进这个列表——否则这条放宽就是裸的。
+    `gaps.collect` 里降级为线索——不管因子最终判定落 EXTERNAL 还是
+    MISSING，都不进 `FactorData.findings`，因而也不进这个函数的入参，
+    否则这条放宽就是裸的。这一点不只是本函数自己的门槛：
+    `assume._match_finding` 按 `fd.findings` 逐字匹配 `Finding.claim`，
+    不看核验状态，一条发现只要留在 `findings` 里就会被判定为该因子的
+    `Basis.external`——未核实的发现如果漏留在 MISSING 分支的
+    `findings` 里，会被同等对待，等于让"核验不通过"这件事白核验了。
     这个契约在 `gaps` 那一侧，本函数无从自己检查：见本计划 Task 6 的
     「不得拆开提交」一段。
 

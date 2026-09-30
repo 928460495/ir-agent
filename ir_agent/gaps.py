@@ -331,10 +331,20 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
             # 核验不通过的**降级为线索**：不丢弃、不阻断，但不算进
             # supports_value。这是门槛得以放宽到 MEDIA 的前提——
             # 见 web.supports_value 的文档字符串。
+            #
+            # **排序在这里做，按 Verified.tier（代码观测到的最终域名），
+            # 不是 Finding.tier（模型自报的机构名）。** 一条发现的
+            # publisher 可以随便写「国家统计局」，但核验通过后落地的
+            # 是它实际请求到的域名——呈现顺序理应服从后者，否则
+            # by_tier 排出来的"证明力强的排前面"就是在用模型的自称
+            # 排序，恰是这次改动要停止相信的东西。`passed` 本身在这里
+            # 排好序，不是排一份派生列表：这样入库顺序、note 判断
+            # （下面 `all(...)`）与最终交给 supports_value/FactorData
+            # 的列表三者用的是同一份顺序，不会各说各话。
             verified = [verify_finding(x) for x in found]
-            passed = [v for v in verified if v.ok]
+            passed = by_tier([v for v in verified if v.ok])
             unverified = [v for v in verified if not v.ok]
-            found = by_tier([v.finding for v in passed])
+            found = [v.finding for v in passed]
 
             ok, why = supports_value(found)
             if ok:
@@ -347,6 +357,11 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                         # 核验通过后分级按**代码观测到的最终域名**重判，
                         # 不用模型自报的机构名。
                         tier=v.tier,
+                        # 不用 `x.published or as_of` 兜底——那等于把
+                        # "日期不明"洗成"时点上最合规"，把最不可信的
+                        # 证据换成时点守卫最宽松放行的取值。理由详见
+                        # `web.Finding.published` 字段上的注释，两处
+                        # 必须遵循同一条规矩，不能各改各的。
                         published=x.published, retrieved=as_of,
                         # **入库的是代码抓回的全文，不是模型转述的那句话。**
                         # 此前这里是 text=x.claim——一句从没被抓取过的
@@ -359,6 +374,17 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     # 放宽的是门槛，不是知情：仅靠媒体支撑时证据强度
                     # 要让人在批准时看得见。
                     note = "仅财经媒体支撑（已在原页逐字核实）"
+                if any(v.host_check_degraded for v in passed):
+                    # 与 `full.py`/`openweb.OpenWebResult.host_check_
+                    # degraded` 同一份事实、同一句措辞——降级不阻断抓取，
+                    # 但「内网地址拦截这一轮靠的是代理，不是本代码」是
+                    # 批准这条因子取值的人有权知道的事，不能只在整轮
+                    # 汇总里露一次面、单条因子的证据链上却看不见。
+                    n = sum(1 for v in passed if v.host_check_degraded)
+                    note += ("；" if note else "") + \
+                        (f"其中 {n} 条命中时主机安全校验降级（本机 DNS "
+                         "被代理劫持，IP 层校验无从进行）——内网地址拦截"
+                         "本轮依赖代理侧")
                 if unverified:
                     note += ("；" if note else "") + \
                         f"另有 {len(unverified)} 条模型转述未能在原页核实，" \
@@ -374,9 +400,21 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                             f"（{unverified[0].reason[:60]}）—— 取值为估计")
                 else:
                     note = f"{why} —— 取值为估计"
+                # **只放已核实的发现，不是这一轮见过的全部。** 这个分支
+                # 走到这里时 `passed` 恒为空（否则 supports_value 早就
+                # 判 ok 了）——但仍然显式写成 `[v.finding for v in
+                # passed]` 而不是 `[]`：跟着 `passed` 的定义走，不是
+                # 硬编码一个巧合恒成立的空表，避免以后 supports_value
+                # 的门槛改变时这里悄悄变回旧的洞。旧写法是
+                # `[v.finding for v in verified]`——把核验不通过的发现
+                # 也塞进 `findings`，而 `assume._match_finding` 按
+                # `finding.claim` 逐字匹配、不看核验状态，一条被代码
+                # 证伪的转述因此能拿到和已核实发现一样的 `Basis.
+                # external`。未核实的那部分仍然可见，走的是上面的
+                # `note`，不需要也不该出现在 `findings` 里。
                 out[f.key] = FactorData(
                     factor=f, status=MISSING,
-                    findings=[v.finding for v in verified], note=note)
+                    findings=[v.finding for v in passed], note=note)
     return out
 
 

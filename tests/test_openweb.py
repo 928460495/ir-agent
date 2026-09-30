@@ -1832,3 +1832,65 @@ def test_空claim直接算不通过(monkeypatch):
     monkeypatch.setattr(OW, "fetch", _never)
     assert OW.verify_finding(_finding("")).ok is False
     assert OW.verify_finding(_finding("   ")).ok is False
+
+
+# ── Fix wave 1（审查发现）：verify_finding 的 except 子句与
+# Fetched.host_check_degraded 的传递 ────────────────────────────────
+
+def test_verify_finding按Exception兜底非FetchFailed异常不逃逸(monkeypatch):
+    """同 gather() 里 fetch 那处 except Exception 的教训（见本文件
+    上方该处完整的事故记录）——只接 FetchFailed 挡不住 fetch 内部
+    惰性读取真正抛出的裸异常。verify_finding 是本文件第二个 fetch
+    调用点，同一类风险必须接同一条宽度的防线，不能只在 gather() 一个
+    调用点补。"""
+    import ir_agent.sources.openweb as OW
+
+    def _boom(url, **k):
+        raise RuntimeError("惰性读取抛出的裸异常，不是 FetchFailed")
+
+    monkeypatch.setattr(OW, "fetch", _boom)
+    got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
+    assert got.ok is False
+    assert "裸异常" in got.reason
+
+
+def test_核验通过时带回主机安全校验降级标记(monkeypatch):
+    """`Fetched.host_check_degraded` 的契约是"必须一路传到产物清单"
+    ——verify_finding 是本文件第二个 fetch 调用点，此前 `Verified`
+    没有这个字段，降级信息在这里丢失。这里钉住核验通过时 `Verified`
+    照实带回 `Fetched` 给出的这个标记。"""
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url=url, text="名义产能约 300 万平方米", meta_published=None,
+        host_check_degraded=True))
+    got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
+    assert got.ok is True
+    assert got.host_check_degraded is True
+
+
+def test_核验不通过时claim没对上也带回主机安全校验降级标记(monkeypatch):
+    """核验不通过（claim 没在原页找到）时依然实际发起并完成了一次
+    fetch，降级与否是这次 fetch 的真实情况，跟"claim 有没有对上"是
+    两件独立的事，不该因为后者是 False 就让前者也无从展示。"""
+    import ir_agent.sources.openweb as OW
+    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
+        final_url=url, text="无关正文", meta_published=None,
+        host_check_degraded=True))
+    got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
+    assert got.ok is False
+    assert got.host_check_degraded is True
+
+
+def test_没有实际抓取时不声称主机安全校验降级过(monkeypatch):
+    """空 claim（不发请求）与 fetch 直接抛出（没拿到 Fetched）这两种
+    情况下，都无从谈"这次抓取有没有降级"——默认 False，不能凭空声称
+    降级过。"""
+    import ir_agent.sources.openweb as OW
+
+    def _boom(url, **k):
+        raise OW.FetchFailed("抓取失败")
+
+    monkeypatch.setattr(OW, "fetch", _boom)
+    assert OW.verify_finding(_finding("")).host_check_degraded is False
+    assert OW.verify_finding(
+        _finding("名义产能约 300 万平方米")).host_check_degraded is False

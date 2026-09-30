@@ -530,9 +530,12 @@ def test_晚于as_of的发现被剔除(restore_web_capable):
 # 调用方（gaps.collect）必须只把核验通过的发现传进来，本函数不再自己
 # 判断等级是否够格。
 
-def test_全媒体但都通过核验则够格():
-    """门槛放宽的前提是 B2：核验之后「媒体 + 已核实」与「媒体 + 未核实」
-    不是同一个东西。等级只是不可核验性的代理指标。"""
+def test_单条MEDIA发现即够格_门槛已不读tier():
+    """名字要说清这条测试实际验证什么：这里传的是单条 MEDIA 发现，
+    `supports_value` 本身完全不核验、也不读 tier（见其文档字符串）——
+    它只回答"有没有发现"。核验发生在调用方 `gaps.collect`（见
+    test_gaps.py 的 test_核验不通过的发现不算合格来源 等测试），这条
+    测试不碰、也不该假装碰了那条链路。"""
     from ir_agent.sources.web import supports_value
     ok, why = supports_value([
         Finding(factor_key="k", claim="产能 300 万", url="https://a.example/1",

@@ -1305,6 +1305,14 @@ class Verified:
     text: str                   # 代码抓回的全文；ok=False 时为空串
     final_url: str              # 跟完重定向后的地址；ok=False 时沿用原 URL
     tier: Tier
+    # 这次核验用到的那次 fetch 有没有降级主机安全校验（IP 层被跳过）。
+    # **必须跟着 Verified 一路传到 gaps.collect 的 FactorData.note**——
+    # 与 `Fetched.host_check_degraded` 字段上的注释同一条道理：这是
+    # verify_finding 在本文件里的第二个 fetch 调用点，没有理由让同一份
+    # "内网地址拦截这一轮靠的是代理、不是本代码"的事实在这条路径上失踪。
+    # 没实际抓到东西时（claim 为空、fetch 抛异常）无从谈降级，留默认
+    # False。
+    host_check_degraded: bool = False
 
 
 def verify_finding(finding) -> Verified:
@@ -1323,7 +1331,14 @@ def verify_finding(finding) -> Verified:
                         text="", final_url=finding.url, tier=finding.tier)
     try:
         got = fetch(finding.url)
-    except FetchFailed as e:
+    except Exception as e:                                    # noqa: BLE001
+        # 同一条道理，同一份教训，见 gather() 里 fetch 那处 except 的
+        # 完整事故记录（本文件上方）——这里不重复整段来龙去脉，只重申
+        # 结论：只接 FetchFailed 曾经让一个裸异常原样冒出去，冒穿调用方
+        # 的失败边界，代价远大于这道防线"看起来不够精确"。今天走到这里
+        # 还没有已知的活路径会抛出 FetchFailed 之外的异常（fetch 的重试
+        # 与解码/解析都已在各自内部兜底），这条 except 是防御纵深，不是
+        # 在修一个已知能复现的崩溃。
         return Verified(finding=finding, ok=False, reason=str(e),
                         text="", final_url=finding.url, tier=finding.tier)
     if claim not in norm(got.text):
@@ -1331,11 +1346,13 @@ def verify_finding(finding) -> Verified:
             finding=finding, ok=False,
             reason=f"{finding.url}：模型转述「{finding.claim[:30]}」"
                    "未能在原页核实",
-            text="", final_url=got.final_url, tier=finding.tier)
+            text="", final_url=got.final_url, tier=finding.tier,
+            host_check_degraded=got.host_check_degraded)
     return Verified(
         finding=finding, ok=True, reason="", text=got.text,
         final_url=got.final_url,
         # **分级按代码观测到的最终域名重判。** 模型自报的 publisher 只能
         # 走 tier_of 的全称白名单；域名是代码亲手请求到的，可信度高一个
         # 量级——见 tier_of_url 的文档字符串。
-        tier=tier_of_url(got.final_url))
+        tier=tier_of_url(got.final_url),
+        host_check_degraded=got.host_check_degraded)
