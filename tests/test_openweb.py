@@ -1764,6 +1764,15 @@ def test_claim在原页则核验通过并带回全文(monkeypatch):
     got = OW.verify_finding(_finding("名义产能约 300 万平方米"))
     assert got.ok is True
     assert "同比增长 12%" in got.text, "入库要用抓回的全文，不是 claim"
+    # 复审发现：此前只有 `test_核验通过时带回主机安全校验降级标记` 覆盖
+    # ok=True 这条 return 语句的 host_check_degraded 赋值，且只 stub
+    # 了 True 那一侧——一个把 ok=True 分支硬编码成
+    # `host_check_degraded=True`（不管 `got.host_check_degraded` 实际
+    # 是什么）的实现会让那条测试和这里原有的断言全部通过。这里的 stub
+    # 是默认值 False 的 `Fetched`（未传 host_check_degraded），钉住
+    # ok=True 时这个字段确实照抄 `Fetched.host_check_degraded`，不是
+    # 被写死成常量。
+    assert got.host_check_degraded is False
 
 
 def test_核验忽略空白差异(monkeypatch):

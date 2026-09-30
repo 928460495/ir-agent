@@ -664,7 +664,13 @@ def test_核验通过的发现入库用抓回的全文(monkeypatch):
 
 
 def test_仅媒体支撑的因子在清单上被标注(monkeypatch):
-    """放宽之后媒体能撑因子，但证据强度要让人在批准时看得见。"""
+    """放宽之后媒体能撑因子，但证据强度要让人在批准时看得见。
+
+    **人在批准时读的是 `G.summary()` 的渲染结果，不是 `FactorData.note`
+    这个字段本身**——Fix A 之前 `summary()` 的 EXTERNAL 行只渲染
+    publisher/url 这个来源列表，note 被整个丢在地上，人从清单上根本
+    看不到"仅财经媒体支撑"这句话，只看得到模型自称的来源。这里补一条
+    对 `summary()` 输出的断言，钉住这句话确实渲染出来了。"""
     import ir_agent.gaps as G
     import ir_agent.sources.openweb as OW
     from ir_agent.sources.external import Corpus, Tier
@@ -679,6 +685,10 @@ def test_仅媒体支撑的因子在清单上被标注(monkeypatch):
         final_url=x.url, tier=Tier.MEDIA))
     data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
     assert "仅财经媒体支撑" in data["capacity"].note
+    assert "仅财经媒体支撑" in G.summary(data), (
+        "note 里有这句话不够——人在批准清单上读的是 summary() 的渲染"
+        "结果，EXTERNAL 行如果只印来源列表、不带上 note，这句话就永远"
+        "到不了人眼前。")
 
 
 # ── Fix wave 1（审查发现）──────────────────────────────────────────
@@ -715,8 +725,13 @@ def test_verify_finding抛出非FetchFailed异常不阻断整轮研究(monkeypat
 
 def test_主机安全校验降级会写进因子的note(monkeypatch):
     """`Fetched.host_check_degraded` 的契约是"必须一路传到产物清单"
-    ——这里钉住它确实传到了人在批准清单上会读到的 `FactorData.note`，
-    不是只停在 `Verified` 这个中间对象上就算完事。"""
+    ——这里钉住它确实传到了 `FactorData.note`，**并且经 `G.summary()`
+    渲染之后仍然可见**。人在批准清单上读的是 `summary()` 的输出，不是
+    `FactorData.note` 这个字段本身：Fix A 之前 `summary()` 的 EXTERNAL
+    行只渲染来源列表，这里算出来的 note 会被整个丢在地上，`fd.note`
+    这个字段级断言即使全部通过，人也看不到这句话——两条 review 都是
+    因为这类断言只停在字段上才漏掉这个洞的。同时钉住 Fix C 新增的结构
+    化字段 `FactorData.host_check_degraded`，不能只有 note 里的人话。"""
     import ir_agent.gaps as G
     import ir_agent.sources.openweb as OW
 
@@ -732,6 +747,12 @@ def test_主机安全校验降级会写进因子的note(monkeypatch):
     assert fd.status == G.EXTERNAL
     assert "主机安全校验降级" in fd.note
     assert "内网地址拦截" in fd.note
+    assert fd.host_check_degraded is True
+    txt = G.summary(data)
+    assert "主机安全校验降级" in txt, (
+        "note 里有这句话不够——EXTERNAL 行如果只印来源列表、不带上 "
+        "note，这句话到不了人在批准清单上会读的那张表。")
+    assert "内网地址拦截" in txt
 
 
 def test_未降级时note不提主机安全校验(monkeypatch):
@@ -749,6 +770,8 @@ def test_未降级时note不提主机安全校验(monkeypatch):
         final_url=x.url, tier=Tier.OFFICIAL, host_check_degraded=False))
     data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
     assert "主机安全校验" not in data["capacity"].note
+    assert data["capacity"].host_check_degraded is False
+    assert "主机安全校验" not in G.summary(data)
 
 
 def test_外部来源按代码观测到的tier排序不看模型自报(monkeypatch):

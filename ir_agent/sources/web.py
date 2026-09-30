@@ -76,22 +76,31 @@ _DATE_PATTERNS = (
 #     判不出来落 MEDIA 是正确行为，不是缺陷。
 #
 # 这条路径安全，靠的是 tier_of 产出的 Tier 不管走哪条读取路径都遵循
-# 同一条代价不对称。**tier_of 的输出（Finding.tier）如今只剩一条读取
-# 路径：`openweb.verify_finding` 核验不通过（或 claim 为空、抓取失败）
-# 时原样保留这个 Tier 供展示——不借失败的核验偷偷升级。** `gaps.py`
-# 拼"仅财经媒体支撑"那处提示文案，用的是 `openweb.Verified.tier`——
-# `verify_finding` 核验通过后按 `tier_of_url`（代码观测到的最终域名）
-# 重判出来的分级，不是这里产出的、模型自报的 `Finding.tier`；`gaps.py`
-# 不直接读 `Finding.tier`，见 `web.by_tier` 的说明与 gaps.py 模块顶部
-# 注释。
+# 同一条代价不对称。**tier_of 的输出（Finding.tier）目前只在
+# `openweb.verify_finding` 核验不通过（或 claim 为空、抓取失败）时被
+# 原样保留在失败的 `Verified.tier` 上。** 留着它，理由不是"留给谁
+# 展示"——复审确认过（grep 过 `.tier` 的所有生产代码读取点，不是靠
+# 推理）：`gaps.py` 只在 `passed`（核验通过、ok=True）的 `Verified`
+# 上读 `.tier`，从不读失败路径上这个保留值；今天没有任何生产代码会
+# 展示它，唯一的读者是 `test_核验不通过时不改tier也不带正文` 那一类
+# 回归测试。留着它的理由是**核验失败绝不能被顺带拔高**：不管将来是
+# 谁、在哪条新路径上读到一次失败的核验结果，都不能靠"核验没通过"这
+# 件事悄悄把 Tier 升级成看起来更可信的等级——这正是那条测试守的红线
+# （一次失败的 `.gov.cn` 抓取不能升级成 OFFICIAL 级发现）。`gaps.py`
+# 拼"仅财经媒体支撑"那处提示文案，用的是**核验通过路径**上的
+# `openweb.Verified.tier`——`verify_finding` 核验通过后按 `tier_of_url`
+# （代码观测到的最终域名）重判出来的分级，不是这里说的失败路径保留值，
+# 也不是模型自报的 `Finding.tier`；`gaps.py` 不直接读 `Finding.tier`，
+# 见 `web.by_tier` 的说明与 gaps.py 模块顶部注释。
 # **Task 6 之后 supports_value()（本文件）本身也不再读 tier**：门槛
 # 换成了"有没有被 verify_finding 核实过"，见其文档字符串；判断"是否
 # 只有媒体支撑"的职责整个搬去了 gaps.collect 的④分支。但只要 tier_of
-# 的输出还会在核验失败时原样展示给人看，拔高就仍然是危害而不只是过时
-# 的顾虑：判不出来落 MEDIA 是安全的；错拔成 SELLSIDE/OFFICIAL，会让一条
-# 从没被核实过的转述带着虚高的分级摆在人面前，等于一篇博客单独决定了
-# DCF 里的因子取值；把真官方/卖方错压成 MEDIA，只是需要再凑一条来源
-# 互相印证，是召回损失。这正是白名单机制的方向，不是缺省地各打五十大板。
+# 的输出还会在核验失败时原样保留、供将来任何一条路径读取，拔高就仍然
+# 是危害而不只是过时的顾虑：判不出来落 MEDIA 是安全的；错拔成
+# SELLSIDE/OFFICIAL，会让一条从没被核实过的转述带着虚高的分级摆在人
+# 面前，等于一篇博客单独决定了 DCF 里的因子取值；把真官方/卖方错压成
+# MEDIA，只是需要再凑一条来源互相印证，是召回损失。这正是白名单机制
+# 的方向，不是缺省地各打五十大板。
 
 # ── 归一化：让"国家统计局官网"和"国家统计局　官网"命中同一个前缀 ──
 # 只做三件事：去空白（含全角空格）、剔除常见全/半角标点、把 ASCII 字母
@@ -345,9 +354,11 @@ def tier_of(publisher: str) -> Tier:
     要支持新来源，往 `_SELLSIDE_CN`/`_SELLSIDE_ASCII`/`_OFFICIAL_CN`/
     `_OFFICIAL_ASCII` 加全称，或往 `_MODIFIERS` 加修饰词——不要碰这个
     函数的判别逻辑本身。**判不出来落 MEDIA 是正确行为，不是缺陷**：
-    见本节顶部注释——tier_of 产出的 Tier 如今只在 `openweb.verify_finding`
-    核验失败时原样保留展示这一条读取路径上，仍然遵循同一条代价不对称：
-    拔高是危害，压低只是召回损失。
+    见本节顶部注释——`openweb.verify_finding` 核验失败时原样保留这个
+    Tier；理由不是"留给谁展示"（今天没有任何生产代码读取这条失败路径
+    上的值，只有回归测试守着），是核验失败绝不能被顺带拔高，不管将来
+    谁在哪条路径上读到它。仍然遵循同一条代价不对称：拔高是危害，压低
+    只是召回损失。
     """
     name = _normalize(publisher or "")
     if not name:
@@ -472,7 +483,7 @@ _TIER_ORDER = {Tier.OFFICIAL: 0, Tier.COMPANY: 1, Tier.SELLSIDE: 2,
                Tier.MEDIA: 3}
 
 
-def by_tier(items):
+def by_tier(items) -> list:
     """按来源等级降序排列，媒体排末尾。**只影响呈现顺序。**
 
     接受任何带 `.tier` 属性的对象，不限于 `Finding`——`gaps.collect`

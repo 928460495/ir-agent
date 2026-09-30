@@ -129,6 +129,19 @@ class FactorData:
     # 击穿。机器要用的原文必须是独立字段，跟着数据走，`_match_excerpt`
     # 只认这个字段，不再碰 `note` 一个字符。
     source_excerpt: str = ""
+    # Task 6 fix wave 2（复审 Fix C）：这个因子的④证据里，有没有哪条
+    # 命中在核验时经历过主机安全校验降级——与下面 collect() 里拼进
+    # note 那句人话（「其中 N 条命中时主机安全校验降级…」）算的是
+    # 同一个 `any(v.host_check_degraded for v in passed)`，只是这里
+    # 存成结构化字段，不是字符串。理由见 assume.py `_match_excerpt`
+    # 上面那段（这里同一份，往回看几行）：下游代码不该也不能去解析
+    # `note` 文本，凡是要让机器读到的事实，都得有自己独立的字段。
+    # 只在 EXTERNAL 分支赋值；只赋值，暂无消费者读它——round 级
+    # 汇总（`openweb.OpenWebResult.host_check_degraded`／`full.py`
+    # 「N 篇入库时主机安全校验降级」那行）今天不聚合这个字段，接
+    # 进去是 Task 7（把 gaps 接进 full.py）的范围，这次改动只做到
+    # 让事实结构化可取，不做聚合，见 collect() 里对应分支的注释。
+    host_check_degraded: bool = False
 
 
 def identify(d: Decomposition, ledger: FactLedger, as_of: date) -> list[Factor]:
@@ -374,12 +387,27 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     # 放宽的是门槛，不是知情：仅靠媒体支撑时证据强度
                     # 要让人在批准时看得见。
                     note = "仅财经媒体支撑（已在原页逐字核实）"
-                if any(v.host_check_degraded for v in passed):
-                    # 与 `full.py`/`openweb.OpenWebResult.host_check_
-                    # degraded` 同一份事实、同一句措辞——降级不阻断抓取，
-                    # 但「内网地址拦截这一轮靠的是代理，不是本代码」是
-                    # 批准这条因子取值的人有权知道的事，不能只在整轮
-                    # 汇总里露一次面、单条因子的证据链上却看不见。
+                # Fix C（复审）：note 里这句人话与下面的结构化字段算的是
+                # 同一个谓词，只算一次、两处一起赋值，不能各说各的。
+                degraded = any(v.host_check_degraded for v in passed)
+                if degraded:
+                    # 与 `Fetched.host_check_degraded`（openweb.py:770-
+                    # 775）同一份事实——降级不阻断抓取，但「内网地址
+                    # 拦截这一轮靠的是代理，不是本代码」是批准这条因子
+                    # 取值的人有权知道的事。**这里落地的只是因子级**：
+                    # 这句 note（经 `gaps.summary()` 渲染后人可见，见
+                    # Fix wave 2 Fix A）与下面 `FactorData.
+                    # host_check_degraded` 结构化字段。不是
+                    # `openweb.OpenWebResult.host_check_degraded` 那个
+                    # 轮次级汇总——④ 分支走的是 `verify_finding` 这第
+                    # 二个 fetch 调用点，从没往 `OpenWebResult` 记过账，
+                    # `full.py`「N 篇入库时主机安全校验降级」那行今天
+                    # 不包含这里发生的降级，是真实的欠计数，不是已经
+                    # 解决、只是换了个地方展示。把这份事实接进轮次级
+                    # 汇总是 Task 7（把 gaps 接进 full.py）的范围，这次
+                    # 改动不做聚合，不能声称 `Fetched.host_check_
+                    # degraded` 「必须一路传到产物清单」这条契约已经
+                    # 在④分支上全部兑现。
                     n = sum(1 for v in passed if v.host_check_degraded)
                     note += ("；" if note else "") + \
                         (f"其中 {n} 条命中时主机安全校验降级（本机 DNS "
@@ -390,8 +418,13 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                         f"另有 {len(unverified)} 条模型转述未能在原页核实，" \
                         "已降级为线索"
                 out[f.key] = FactorData(factor=f, status=EXTERNAL,
-                                        findings=found, note=note)
+                                        findings=found, note=note,
+                                        host_check_degraded=degraded)
             else:
+                # `passed` 在这个分支里恒为空——`ok=False` 就是
+                # `supports_value(found)` 判了空，而 `found` 正是从
+                # `passed` 算出来的；下面 `not passed` 与 `findings=`
+                # 都在吃同一个事实，这里只说一次。
                 if unverified and not passed:
                     # 「搜到了但核实不过」与「什么都没搜到」对读者的含义
                     # 不同：前者是证据链起步了但站不住，后者是连线索都
@@ -400,18 +433,10 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                             f"（{unverified[0].reason[:60]}）—— 取值为估计")
                 else:
                     note = f"{why} —— 取值为估计"
-                # **只放已核实的发现，不是这一轮见过的全部。** 这个分支
-                # 走到这里时 `passed` 恒为空（否则 supports_value 早就
-                # 判 ok 了）——但仍然显式写成 `[v.finding for v in
-                # passed]` 而不是 `[]`：跟着 `passed` 的定义走，不是
-                # 硬编码一个巧合恒成立的空表，避免以后 supports_value
-                # 的门槛改变时这里悄悄变回旧的洞。旧写法是
-                # `[v.finding for v in verified]`——把核验不通过的发现
-                # 也塞进 `findings`，而 `assume._match_finding` 按
-                # `finding.claim` 逐字匹配、不看核验状态，一条被代码
-                # 证伪的转述因此能拿到和已核实发现一样的 `Basis.
-                # external`。未核实的那部分仍然可见，走的是上面的
-                # `note`，不需要也不该出现在 `findings` 里。
+                # 跟着 `passed` 的定义写，不写死 `[]`：`assume.
+                # _match_finding` 按 `claim` 逐字匹配、不看核验状态，
+                # 未核实的发现混进 `findings` 会被当成已核实的
+                # `Basis.external`。
                 out[f.key] = FactorData(
                     factor=f, status=MISSING,
                     findings=[v.finding for v in passed], note=note)
@@ -426,6 +451,15 @@ def summary(data: dict[str, FactorData]) -> str:
     for fd in data.values():
         if fd.status == EXTERNAL:
             src = "；".join(f"{x.publisher}（{x.url}）" for x in fd.findings[:2])
+            # 复审 Fix A：`note` 在 EXTERNAL 分支上装的是代码观测到的
+            # 事实（仅媒体支撑、主机安全校验是否降级、还有几条转述没
+            # 核实住）——这些是 Task 6 明确要求人在批准清单上看得见的
+            # 东西（见 task-6-brief.md「仅媒体支撑的因子在清单上被
+            # 标注」）。此前这里只渲染模型自报的 publisher/url，note
+            # 被整个丢在地上，人读到的只剩模型自己的说法。两者都要摆
+            # 出来，不能顶替，也不能只留一个。
+            if fd.note:
+                src = f"{src}｜{fd.note}"
         else:
             src = fd.note or "—"
         lines.append(f"| {fd.factor.label} | {fd.status} | {src} |")

@@ -1306,10 +1306,26 @@ class Verified:
     final_url: str              # 跟完重定向后的地址；ok=False 时沿用原 URL
     tier: Tier
     # 这次核验用到的那次 fetch 有没有降级主机安全校验（IP 层被跳过）。
-    # **必须跟着 Verified 一路传到 gaps.collect 的 FactorData.note**——
-    # 与 `Fetched.host_check_degraded` 字段上的注释同一条道理：这是
-    # verify_finding 在本文件里的第二个 fetch 调用点，没有理由让同一份
-    # "内网地址拦截这一轮靠的是代理、不是本代码"的事实在这条路径上失踪。
+    # **核验通过路径（ok=True）这份事实确实传到了 gaps.collect 的
+    # `FactorData.note`（经 `gaps.summary()` 渲染人可见）与
+    # `FactorData.host_check_degraded` 结构化字段（Task 6 复审 Fix
+    # wave 2）**——与 `Fetched.host_check_degraded` 字段上的注释同一
+    # 条道理：这是 verify_finding 在本文件里的第二个 fetch 调用点，
+    # 没有理由让同一份"内网地址拦截这一轮靠的是代理、不是本代码"的
+    # 事实在这条路径上失踪。
+    # **核验不通过路径（ok=False，claim 没对上）上的这个值目前没有
+    # 生产代码读者**——`gaps.collect` 只在 `passed`（ok=True）的
+    # `Verified` 上读 `.host_check_degraded`，`unverified` 那部分只被
+    # 读 `len()`/`[0].reason`。这里仍然照实填它，是因为
+    # `test_核验不通过时claim没对上也带回主机安全校验降级标记` 那类
+    # 测试要守住"失败路径的数据不能被静默丢弃/篡改"这条线，不是因为
+    # 已经有生产代码在读它——这句话 grep 过 `.host_check_degraded` 的
+    # 所有调用点才敢说，不是靠推理。
+    # 另外：不管走哪条路径，这份事实都还没接进
+    # `openweb.OpenWebResult.host_check_degraded` 那个轮次级汇总——
+    # `verify_finding` 从没往 `OpenWebResult` 记过账，`full.py` 里
+    # 「N 篇入库时主机安全校验降级」那行今天不包含这里发生的降级。
+    # 接进去是 Task 7（把 gaps 接进 full.py）的范围。
     # 没实际抓到东西时（claim 为空、fetch 抛异常）无从谈降级，留默认
     # False。
     host_check_degraded: bool = False
@@ -1334,11 +1350,15 @@ def verify_finding(finding) -> Verified:
     except Exception as e:                                    # noqa: BLE001
         # 同一条道理，同一份教训，见 gather() 里 fetch 那处 except 的
         # 完整事故记录（本文件上方）——这里不重复整段来龙去脉，只重申
-        # 结论：只接 FetchFailed 曾经让一个裸异常原样冒出去，冒穿调用方
-        # 的失败边界，代价远大于这道防线"看起来不够精确"。今天走到这里
-        # 还没有已知的活路径会抛出 FetchFailed 之外的异常（fetch 的重试
-        # 与解码/解析都已在各自内部兜底），这条 except 是防御纵深，不是
-        # 在修一个已知能复现的崩溃。
+        # 结论：只接 FetchFailed 曾经让一个裸异常原样冒出去。这里若逃出
+        # 去，会一路冒穿 `gaps.collect()`，被 `full.py` 包在
+        # `gaps.collect()` 外层的 `except Exception` 接住、记进
+        # `skipped`（full.py:1292-1293）——**不会中止整个研究轮次**，
+        # 真实代价是这一轮的 `factor_data` 整体拿不到（丢一整轮的因子
+        # 数据），不是只丢一条 finding，也不是"整轮研究"戛然而止。
+        # 今天走到这里还没有已知的活路径会抛出 FetchFailed 之外的异常
+        # （fetch 的重试与解码/解析都已在各自内部兜底），这条 except
+        # 是防御纵深，不是在修一个已知能复现的崩溃。
         return Verified(finding=finding, ok=False, reason=str(e),
                         text="", final_url=finding.url, tier=finding.tier)
     if claim not in norm(got.text):
