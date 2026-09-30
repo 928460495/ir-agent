@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 from ir_agent.sources.announce import (MAX_ANNOUNCEMENTS, PROMPT,
                                        format_candidates, parse_picks)
 from ir_agent.sources.cninfo import Announcement
@@ -35,7 +33,13 @@ ANNS = [
 
 def test_候选清单带序号标题与披露日():
     text = format_candidates(ANNS)
-    assert "0" in text and "1" in text and "2" in text
+    # 逐行核对「序号. 」前缀本身，而不是在整段文本里裸找数字——测试数据
+    # 的披露日（2026-08-01/08-28/05-20）本身就含 0/1/2，裸找会在序号被
+    # 整个漏掉时也误判通过。
+    lines = text.split("\n")
+    assert len(lines) == len(ANNS)
+    for i, line in enumerate(lines):
+        assert line.startswith(f"{i}. ")
     assert "高频高速覆铜板扩产项目投产" in text
     assert "2026-08-01" in text
 
