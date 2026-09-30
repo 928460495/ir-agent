@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import errno as _errno
 from datetime import date
 
 import requests
@@ -509,6 +510,174 @@ def test_取文为空与下载失败分别记录(monkeypatch):
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
+
+
+# 以下几条复刻 reviewer 直接通过 `gather()` 实测到的漏洞：`annual_pdf.
+# _download` 的 `cache.parent.mkdir(...)`/`write_bytes`/`read_bytes` 调用
+# 不在 `with_retry` 里，会原样抛出裸 `OSError`/`PermissionError`——这类
+# 异常只靠 `.errno` 就能表达完全不同的系统性原因，类型链单看类型名
+# （`"OSError"`）分不出来。同样用真实异常对象构造（`OSError(errno,
+# msg)`），不手写消息字符串。
+
+
+def test_ENOSPC与EIO分别记录(monkeypatch):
+    """磁盘满（`ENOSPC`）与单文件 I/O 错误（`EIO`），类型链相同（都只是
+    裸 `OSError`），必须靠 `.errno` 区分成两条——这正是本轮要修的漏洞：
+    旧实现里两者都只读到 `"OSError"`，八篇公告因为两种不同原因下载失败
+    会被合并成一条，另一种原因静默消失。"""
+    import ir_agent.sources.announce as A
+
+    url_nospc = "http://static.cninfo.com.cn/finalpage/2026-08-01/x.PDF"
+    url_eio = "http://static.cninfo.com.cn/finalpage/2026-08-02/y.PDF"
+    anns = [_long_ann("k0", url_nospc), _long_ann("k1", url_eio)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        if url == url_nospc:
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        raise OSError(_errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
+
+
+def test_相同errno的OSError合并为一条(monkeypatch):
+    """两篇不同公告上都是 `errno.ENOSPC`（同一种系统性原因：磁盘满），
+    必须收敛成一条——不能因为 ann_id/URL 不同就各记一条，那是这类去重
+    机制存在的意义。"""
+    import ir_agent.sources.announce as A
+
+    url_a = "http://static.cninfo.com.cn/finalpage/2026-08-01/x.PDF"
+    url_b = "http://static.cninfo.com.cn/finalpage/2026-08-02/y.PDF"
+    anns = [_long_ann("l0", url_a), _long_ann("l1", url_b)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 1
+
+
+def test_ENETUNREACH与EHOSTUNREACH分别记录(monkeypatch):
+    """网络不可达（`ENETUNREACH`）与主机不可达（`EHOSTUNREACH`）是两种
+    不同的网络层诊断。CPython 没有把它们提升成专门的异常子类——不像
+    `ECONNREFUSED` 有 `ConnectionRefusedError`——所以两者都是裸
+    `OSError`，只能靠 `.errno` 区分，必须各记一条。"""
+    import ir_agent.sources.announce as A
+
+    url_net = "http://static.cninfo.com.cn/finalpage/2026-08-01/x.PDF"
+    url_host = "http://static.cninfo.com.cn/finalpage/2026-08-02/y.PDF"
+    anns = [_long_ann("m0", url_net), _long_ann("m1", url_host)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        if url == url_net:
+            raise OSError(_errno.ENETUNREACH, "Network is unreachable")
+        raise OSError(_errno.EHOSTUNREACH, "No route to host")
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
+
+
+def test_ConnectionRefusedError与同errno裸OSError分别记录(monkeypatch):
+    """`ConnectionRefusedError`（`ECONNREFUSED` 对应的专门子类）与一个
+    携带同一个 `errno`（`ECONNREFUSED`）的裸 `OSError`，判定：**必须各
+    记一条**。理由：两者的类型链本来就不同（`"ConnectionRefusedError"`
+    与 `"OSError"` 是两个不同的类型名字符串），这条区分在类型链层面
+    早于本轮加的 `errno` 就已经成立，加了 `errno` 后两者的 key 依旧不同
+    （`"ConnectionRefusedError[errno=61]"` vs `"OSError[errno=61]"`）。
+    这条测试确认的是：给类型名拼接 errno 这个新逻辑不会意外抹平类型名
+    本身的区分力（比如误把 key 只取 errno、丢了类型名）——那样才会把
+    这两种不同来源的失败错误地合并。
+
+    构造"裸 OSError 带 ECONNREFUSED"这一侧必须绕开一个 CPython 细节：
+    `OSError(errno.ECONNREFUSED, msg)` 这种双参数构造形式会被
+    `OSError.__new__` 自动提升成 `ConnectionRefusedError`（PEP 3151），
+    根本得不到一个 `type() is OSError` 的实例——用这种写法会让两侧变成
+    完全同一个类型，测试判定的就不是本条要判定的问题了。因此这里改用
+    `OSError(msg)` 先构造一个不带 errno 参数、不会被提升的普通实例，
+    再手动赋值 `.errno`——这确实模拟了一种真实但少见的形状：某些库/
+    代码路径拿到系统错误后不经 `OSError(errno, msg)` 这条构造路径、而是
+    直接在一个已有的 `OSError` 实例上回填 `.errno`（例如包装转译一个
+    第三方来的错误码），产出的就是一个类型仍是 `OSError`、但
+    `.errno` 有值的对象。"""
+    import ir_agent.sources.announce as A
+
+    url_refused = "http://static.cninfo.com.cn/finalpage/2026-08-01/x.PDF"
+    url_bare = "http://static.cninfo.com.cn/finalpage/2026-08-02/y.PDF"
+    anns = [_long_ann("n0", url_refused), _long_ann("n1", url_bare)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        if url == url_refused:
+            raise ConnectionRefusedError(
+                _errno.ECONNREFUSED, "Connection refused")
+        bare = OSError("Connection refused")
+        bare.errno = _errno.ECONNREFUSED
+        assert type(bare) is OSError, (
+            "本测试要的是一个真正的裸 OSError 实例，不是被自动提升的子类")
+        raise bare
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    assert len(res.fetch_failed_reasons) == 2
+
+
+def test_原因过长按上限截断且仍按原因去重(monkeypatch):
+    """恢复被删掉的截断回归测试（原名
+    `test_相同原因不同URL且均超截断上限只记一条`）：存进
+    `fetch_failed_reasons` 的展示字符串必须截到 `_REASON_LIMIT`——
+    清单是给人看的，一条原因长到几百字没人读。原来的缺陷（去重键取自
+    被截断后的字符串，导致长 ann_id 一变就撞不上）现在已经结构性地不
+    存在了：`_exception_cause_key` 完全不碰 `str(e)`/展示字符串，但
+    截断这件事本身此前没有任何测试覆盖，这里单独补上。"""
+    import ir_agent.sources.announce as A
+
+    long_id_a = "ann_" + "x" * 300
+    long_id_b = "ann_" + "y" * 300
+    url_a = "http://static.cninfo.com.cn/finalpage/2026-08-01/a.PDF"
+    url_b = "http://static.cninfo.com.cn/finalpage/2026-08-02/b.PDF"
+    anns = [_long_ann(long_id_a, url_a), _long_ann(long_id_b, url_b)]
+    monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+
+    def _raise(url, cache_dir=None):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(A, "_download", _raise)
+
+    cp = Corpus(as_of=AS_OF)
+    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
+                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+                 corpus=cp)
+    assert res.fetch_failed == 2
+    # 同一种原因（都是 ENOSPC），即使两次拼出的展示字符串都超过上限，
+    # 依旧只记一条。
+    assert len(res.fetch_failed_reasons) == 1
+    assert len(res.fetch_failed_reasons[0]) == A._REASON_LIMIT
 
 
 def test_不同类型链的重试耗尽异常分别记录(monkeypatch):

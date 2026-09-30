@@ -255,13 +255,19 @@ def gather(client, *, code: str, company: str, factors: list[str],
 # `https?://` 起手的正则在这种消息里永远匹配不到，三次连接失败换三个
 # ann_id/URL 就得到三个互不相同的"字符串"，去重形同虚设。
 #
-# 教训：**别再往消息文本里加一条新模式**，下一个没设防的形状（bare
-# `OSError` 带 errno、代理错误里带端口号、SSL 错误）照样能打穿它。
+# 教训：**别再往消息文本里加一条新模式**——代理错误里带端口号、SSL
+# 错误这类形状，一旦真的撞见，接法仍然是同一套（读结构，不读
+# `str(e)`），不是回头再加一条正则。
 # 改成直接读异常对象的**结构**——类型链（`__cause__`/`__context__`，
 # 这条链正是用来把「`RetryExhausted` 包着 `ConnectionError`」和「裸的
-# `HTTPError`」分开的信息）、以及 HTTP 失败时从 `response.status_code`
-# 读到的整数状态码（不是从渲染出的文本里抠数字）。这两样都不经过
-# `str(e)`，因此这个失败模式和以后任何新形状都不会再打穿它。
+# `HTTPError`」分开的信息）、链上每个节点的 `errno`
+# （`getattr(node, "errno", None)`，用来接住「裸 `OSError`，只能靠
+# errno 分辨」这类——磁盘满 `ENOSPC` 和单文件 I/O 错误 `EIO`、网络不可达
+# `ENETUNREACH` 和主机不可达 `EHOSTUNREACH`，CPython 都没有把它们提升
+# 成专门的子类，是 `ECONNREFUSED` → `ConnectionRefusedError` 那种提升
+# 覆盖不到的空档）、以及 HTTP 失败时从 `response.status_code` 读到的
+# 整数状态码（不是从渲染出的文本里抠数字）。这三样都不经过 `str(e)`，
+# 因此这个失败模式和以后任何新形状都不会再打穿它。
 #
 # 本模块自己判定的本地条件（目前只有「PDF 取文为空」）没有异常对象，
 # 用一个字面量键（`_EMPTY_TEXT_KEY`）代替——这条件的字符串是我们自己
@@ -280,6 +286,16 @@ def _exception_cause_key(e: BaseException) -> str:
       与「裸的 `requests.HTTPError`」区分开的关键信息——单看最外层类型
       名有时还不够（比如同样是 `RetryExhausted`，包的可能是连接失败也
       可能是包了个持续 5xx 的 `HTTPError`），把整条链都记下来才稳。
+    - 每个节点的 `errno`：`getattr(node, "errno", None)`，有值就拼进
+      该节点的类型名里（例如 `OSError[errno=28]`）。裸 `OSError`/
+      `PermissionError` 只靠 `.errno` 就能表达完全不同的系统性原因——
+      磁盘满（`ENOSPC`）和单文件 I/O 错误（`EIO`）、网络不可达
+      （`ENETUNREACH`）和主机不可达（`EHOSTUNREACH`），CPython 都没有
+      把它们提升成专门的异常子类（不像 `ECONNREFUSED` 有
+      `ConnectionRefusedError`），不读 `errno` 的话类型链会把它们全部
+      记成同一个 `"OSError"`，八个不同原因的失败会被合并成一条、其余
+      七条静默消失。没有 `errno` 的节点（多数 `requests`/`urllib3`
+      异常）取到 `None`，类型名不受影响。
     - HTTP 状态码：链上第一个带 `.response.status_code` 的节点，读的
       是 `Response` 对象上的整数字段，不是从消息里拿正则抠出来的
       "404"/"403" 这类子串。这一项存在，404 和 403 才不会被合并成
@@ -296,7 +312,11 @@ def _exception_cause_key(e: BaseException) -> str:
     visited: set[int] = set()
     while node is not None and id(node) not in visited:
         visited.add(id(node))
-        types.append(type(node).__name__)
+        name = type(node).__name__
+        node_errno = getattr(node, "errno", None)
+        if node_errno is not None:
+            name = f"{name}[errno={node_errno}]"
+        types.append(name)
         if status is None:
             resp = getattr(node, "response", None)
             code = getattr(resp, "status_code", None)
