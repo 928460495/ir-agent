@@ -472,3 +472,60 @@ def test_时点守卫对照_披露时点早于as_of时不算缺口():
                  source_id="t", method=Method.COMPUTED))
     gaps = identify(_rev(), led, AS_OF)
     assert "capacity" not in [f.key for f in gaps]
+
+
+def test_公告命中排在研报之前并标公告披露(monkeypatch):
+    """②.5 排在 ③ 之前：公告是公司权威披露且由确定性接口取回，比两级
+    模型中介的来源更近。状态标签不能沿用「研报测算」——那会把一份公司
+    公告说成券商测算，是错误归因。"""
+    import ir_agent.gaps as G
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    cp = Corpus(as_of=AS_OF)
+    cp.add(Document(doc_id="r1", url="https://r.example.com/a", title="研报",
+                    publisher="某券商", tier=Tier.SELLSIDE,
+                    published=date(2026, 6, 1), retrieved=AS_OF,
+                    text="本文测算行业名义产能约 1200 万平方米。"))
+    cp.add(Document(doc_id="a1", url="http://static.cninfo.com.cn/a.PDF",
+                    title="扩产投产公告", publisher="生益科技",
+                    tier=Tier.COMPANY, published=date(2026, 8, 1),
+                    retrieved=AS_OF,
+                    text="本次投产新增名义产能 300 万平方米。"))
+    hit = G._match_announce(cp, "名义产能")
+    assert hit is not None
+    excerpt, doc = hit
+    assert doc.tier is Tier.COMPANY
+    assert "300 万平方米" in excerpt
+
+
+def test_公告命中只看COMPANY文档():
+    """②.5 是公告这一级，研报/媒体文档不该从这里命中——它们各有自己
+    的一级。"""
+    import ir_agent.gaps as G
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    cp = Corpus(as_of=AS_OF)
+    for t in (Tier.SELLSIDE, Tier.MEDIA, Tier.OFFICIAL):
+        cp.add(Document(doc_id=f"d{t.value}", url=f"https://x/{t.value}",
+                        title="t", publisher="p", tier=t,
+                        published=date(2026, 6, 1), retrieved=AS_OF,
+                        text="名义产能约 1200 万平方米。"))
+    assert G._match_announce(cp, "名义产能") is None
+
+
+def test_公告的否定语境不算命中():
+    """与 ②③ 同一条：「未披露名义产能的具体数据」不是命中。"""
+    import ir_agent.gaps as G
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    cp = Corpus(as_of=AS_OF)
+    cp.add(Document(doc_id="a1", url="http://static.cninfo.com.cn/a.PDF",
+                    title="公告", publisher="生益科技", tier=Tier.COMPANY,
+                    published=date(2026, 8, 1), retrieved=AS_OF,
+                    text="本公司未披露名义产能的具体数据。"))
+    assert G._match_announce(cp, "名义产能") is None
+
+
+def test_ANNOUNCE_标签文案():
+    import ir_agent.gaps as G
+    assert G.ANNOUNCE == "公告披露"

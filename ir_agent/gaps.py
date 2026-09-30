@@ -4,6 +4,7 @@
 
     ① 账本          已有事实
     ② 年报叙述章节   产能/产量的文字披露
+    ②.5 公司公告     扩产/投产/提价等法定披露
     ③ 研报语料库    深度报告里的行业产能测算
     ④ 开放网络      SEMI 出货、基板报价、协会统计
 
@@ -36,6 +37,7 @@ from ir_agent.sources.web import (Finding, WebUnavailable, search,
 
 DISCLOSED = "已披露"
 ANNUAL = "年报披露"     # ②年报叙述章节命中——文字依据，未必给出数值
+ANNOUNCE = "公告披露"   # ②.5 公司公告命中——同上，文字依据未必给出数值
 REPORT = "研报测算"     # ③研报语料库命中——同上
 EXTERNAL = "外部来源"
 MISSING = "无数据"
@@ -100,7 +102,7 @@ class FactorData:
     status: str = MISSING
     findings: list[Finding] = field(default_factory=list)
     note: str = ""
-    # ANNUAL/REPORT 命中时的真实出处——供 assume.py 在模型引用摘出的
+    # ANNUAL/ANNOUNCE/REPORT 命中时的真实出处——供 assume.py 在模型引用摘出的
     # 原文片段时，代码自动补上可核验的 URL/抓取日期（模型自己不接触
     # 这两样，同一条"模型写引用，代码填事实"的契约）。
     # EXTERNAL 状态不用这两个字段：那种情况下 findings 里可能有好几条，
@@ -224,6 +226,27 @@ def _match_report(corpus, label: str) -> tuple[str, Document] | None:
     return None
 
 
+def _match_announce(corpus, label: str) -> tuple[str, Document] | None:
+    """②.5 公司公告里是否提到该因子，判据与 `_match_report` 同理。
+
+    **只看 `Tier.COMPANY` 文档。** ②.5 是公告这一级；研报与媒体各有
+    自己的一级（③ 与 ④），从这里命中会让状态标签说错话。
+
+    公告排在研报之前，因为它是公司权威披露、且由确定性接口取回（模型只
+    挑下标、不给网址），比两级模型中介的来源更近。
+    """
+    if corpus is None:
+        return None
+    core = _core_label(label)
+    for d in corpus.docs:
+        if d.tier is not Tier.COMPANY:
+            continue
+        hit = _valid_hit(d.text, core)
+        if hit is not None:
+            return hit, d
+    return None
+
+
 def collect(client, decomps: list[Decomposition], ledger: FactLedger,
             corpus, industry: str, as_of: date,
             sections=None, annual_url: str = "") -> dict[str, FactorData]:
@@ -260,6 +283,17 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     # 与 note 里包在「」中的那段是同一份文字——note 是
                     # 拼给人看的，这里是给 assume._match_excerpt 用的，
                     # 两者必须来自同一个 excerpt 变量，不能事后各改各的。
+                    source_excerpt=excerpt)
+                continue
+
+            hit = _match_announce(corpus, f.label)
+            if hit is not None:
+                excerpt, doc = hit
+                out[f.key] = FactorData(
+                    factor=f, status=ANNOUNCE,
+                    note=f"「{excerpt}」——{doc.cite()}"
+                         "（文字依据，是否给出具体数值待人工确认）",
+                    source_url=doc.url, source_retrieved=doc.retrieved,
                     source_excerpt=excerpt)
                 continue
 
@@ -334,13 +368,14 @@ def summary(data: dict[str, FactorData]) -> str:
             src = fd.note or "—"
         lines.append(f"| {fd.factor.label} | {fd.status} | {src} |")
 
-    # ②③是文字命中，不是已核实的数值——必须与「已披露」「外部来源」分开
-    # 摆出来，不能让状态列里挨在一起的几行字看起来证明力一样。
+    # ②②.5③是文字命中，不是已核实的数值——必须与「已披露」「外部来源」
+    # 分开摆出来，不能让状态列里挨在一起的几行字看起来证明力一样。
     textual = [fd.factor.label for fd in data.values()
-               if fd.status in (ANNUAL, REPORT)]
+               if fd.status in (ANNUAL, ANNOUNCE, REPORT)]
     if textual:
         lines += ["",
-                  f"📄 以下因子仅命中年报叙述或研报文字（年报披露/研报测算），"
+                  f"📄 以下因子仅命中年报叙述、公司公告或研报文字"
+                  f"（年报披露/公告披露/研报测算），"
                   f"是文字依据，待人工确认原文是否给出具体数值——"
                   f"命中关键词不等于拿到了数值：{'、'.join(textual)}。"]
 
