@@ -705,3 +705,107 @@ def test_不同类型链的重试耗尽异常分别记录(monkeypatch):
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
+
+
+def test_落盘再读回文档内容逐字不变(tmp_path):
+    """跨阶段存活的全部意义在于第二阶段拿到的是**同一批文档**。
+    文档的 text 要逐字不变——第一阶段正文里的公告引文靠它核验。"""
+    from datetime import date
+
+    import ir_agent.sources.announce as A
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    as_of = date(2026, 9, 30)
+    doc = Document(doc_id="ann_x", url="http://static.cninfo.com.cn/a.PDF",
+                   title="扩产投产公告", publisher="生益科技",
+                   tier=Tier.COMPANY, published=date(2026, 8, 1),
+                   retrieved=as_of, text="本次投产新增名义产能 300 万平方米。",
+                   prompt_limit=2000)
+    res = A.AnnounceResult(docs=[doc], candidates=220, picked=3,
+                           fetch_failed=1, fetch_failed_reasons=["超时"],
+                           ignored=["越界: 99"])
+    p = tmp_path / A.ANNOUNCE_JSON
+    A.save(res, p)
+
+    cp = Corpus(as_of=as_of)
+    back = A.load(p, cp)
+    assert len(back.docs) == 1
+    d = back.docs[0]
+    assert d.text == "本次投产新增名义产能 300 万平方米。", \
+        "text 必须逐字不变——第一阶段的公告引文靠它核验"
+    assert d.tier is Tier.COMPANY, "分级必须存活，否则它撑不了因子取值"
+    assert d.published == date(2026, 8, 1) and d.retrieved == as_of
+    assert d.prompt_limit == 2000
+    # 头部计数也要存活：第二阶段的清单要说得出「候选 220 条里挑了 3 条」
+    assert (back.candidates, back.picked, back.fetch_failed) == (220, 3, 1)
+    assert back.fetch_failed_reasons == ["超时"] and back.ignored == ["越界: 99"]
+    # **读回必须真的入库**，不只是构造出 Document
+    assert cp.docs, "读回的文档没进语料库，第二阶段的核验就会失败"
+
+
+def test_读回照样过时点守卫(tmp_path):
+    """as_of 可能与落盘时不同。「这是我们自己存的」不构成放行理由——
+    否则第二阶段换一个更早的 as_of 就能看见未来的公告。"""
+    from datetime import date
+
+    import ir_agent.sources.announce as A
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    doc = Document(doc_id="ann_y", url="http://static.cninfo.com.cn/b.PDF",
+                   title="投产公告", publisher="生益科技", tier=Tier.COMPANY,
+                   published=date(2026, 8, 1), retrieved=date(2026, 9, 30),
+                   text="正文")
+    p = tmp_path / A.ANNOUNCE_JSON
+    A.save(A.AnnounceResult(docs=[doc], candidates=1, picked=1), p)
+
+    cp = Corpus(as_of=date(2026, 7, 1))          # 早于公告披露日
+    back = A.load(p, cp)
+    assert not cp.docs, "披露日晚于 as_of 的公告被读回入库了——时点守卫被绕过"
+    assert not back.docs, "没能入库的文档不该出现在 docs 里"
+
+
+def test_落盘文件损坏整份降级为空且不抛(tmp_path):
+    """一个坏文件不能让整次研究流程崩掉。调用方的契约是「读不到就是这节
+    缺公告」，不是「抛异常」。"""
+    import ir_agent.sources.announce as A
+    from ir_agent.sources.external import Corpus
+
+    p = tmp_path / A.ANNOUNCE_JSON
+    cp = Corpus(as_of=__import__("datetime").date(2026, 9, 30))
+
+    for bad in ("{ 这不是 JSON", "[]", '"裸字符串"',
+                '{"candidates": "二百二十"}', '{"docs": 7}'):
+        p.write_text(bad, encoding="utf-8")
+        back = A.load(p, cp)        # 不抛
+        assert back.docs == [] and back.candidates == 0, f"没整份降级: {bad}"
+
+    # 文件不存在也不抛
+    assert A.load(tmp_path / "nope.json", cp).docs == []
+
+
+def test_单条文档损坏只跳过那一条(tmp_path):
+    """比「整份损坏」更细一级：docs 是合法列表，但其中一条不是合法的
+    Document JSON。其余合法条目必须照常读回——丢一条不该连坐。"""
+    import json
+    from datetime import date
+
+    import ir_agent.sources.announce as A
+    from ir_agent.sources.external import Corpus
+
+    good = {"doc_id": "ok", "url": "http://static.cninfo.com.cn/c.PDF",
+            "title": "好的", "publisher": "生益科技", "tier": "company",
+            "published": "2026-08-01", "retrieved": "2026-09-30",
+            "text": "正文", "prompt_limit": 2000, "date_source": ""}
+    p = tmp_path / A.ANNOUNCE_JSON
+    p.write_text(json.dumps({
+        "docs": [{"doc_id": "坏的", "tier": "company"},      # 缺字段
+                 good,
+                 {**good, "doc_id": "坏分级", "tier": "不存在的档"}],
+        "candidates": 220, "picked": 3,
+    }, ensure_ascii=False), encoding="utf-8")
+
+    cp = Corpus(as_of=date(2026, 9, 30))
+    back = A.load(p, cp)
+    assert [d.doc_id for d in back.docs] == ["ok"], \
+        "合法条目没被读回，或非法条目被放了进来"
+    assert back.candidates == 220, "头部字段不该被单条损坏连坐"

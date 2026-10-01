@@ -381,15 +381,74 @@ def _restore_openweb(r, out: Path) -> list[str]:
     return _openweb_notes(res)
 
 
-def _load_announce(code: str, r, as_of: date, client, md: dict,
+def _restore_announce(r, out: Path) -> list[str]:
+    """第二阶段：读回第一阶段落盘的公司公告。**不重新采集。**
+
+    与 `_restore_openweb` 同一条理由：公告的挑选要调模型，重跑会挑出
+    与第一阶段不同的公告，第一阶段正文里的公告引文因此核验不过。公告
+    又是 `Tier.COMPANY`——这套设计里唯一够格直接支撑因子取值的第一手
+    披露——最好的证据不能是最不耐久的那一类。
+
+    读回照样走时点守卫（`announce.load` 内部走 `corpus.add_if_visible`）。
+
+    **零文档的成因这里只能分辨一部分，不能照抄 `_restore_openweb`。**
+    那边靠 `set(missing_slots) == set(SLOTS)` 区分「第一阶段真的什么都
+    没采到」与「文件损坏」，该信号之所以存在，是因为 `openweb.gather`
+    在零文档时把 `missing_slots` 填成槽位全集，而损坏文件降级出来的
+    `OpenWebResult()` 里它是空列表。公告没有槽位，`candidates` 在
+    「第一阶段确实没有候选」与「文件损坏」两种情形下都是 0——那个信号
+    不存在。于是分三种情形：
+
+      (a) 文件不存在——没落过盘。
+      (b) 有候选但没入库——可分辨：数字是第一阶段亲手记下的。
+      (c) 候选为零——**分辨不出**，如实把两种可能都说出来。
+
+    不去找一个替代信号，也不挑更可能的那一种猜：本项目的原则是
+    「缺什么必须显式列出来」，一份声称了自己并不知道的成因的清单，
+    比一句「不知道」更糟。
+    """
+    from ir_agent.sources import announce
+    from ir_agent.sources.external import Corpus
+
+    path = out / announce.ANNOUNCE_JSON
+    if not path.exists():
+        # 文件不存在也有不止一种成因：第一阶段采集抛了异常没走到落盘、
+        # 落盘失败（第一阶段已有清单条目）、或这是本机制上线之前产出的
+        # 阶段一产物。这里同样分辨不出，列出来而不是挑一种。
+        return ["公司公告未跨阶段存活（未找到 "
+                f"{announce.ANNOUNCE_JSON}——第一阶段可能采集未执行或落盘"
+                "失败，也可能是本机制上线前产出的阶段一产物），"
+                "公告引文可能核验不过"]
+    if r.corpus is None:
+        r.corpus = Corpus(as_of=r.as_of)
+    res = announce.load(path, r.corpus)
+    if res.docs:
+        # 第二阶段的产物是 report.md，读者不会再回头去看第一阶段的终端
+        # 输出——候选/挑选/取文失败这些计数要在这里再说一遍。
+        return [announce.summary(res)]
+    if res.candidates:
+        return [f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
+                f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
+    return ["公司公告：读回 0 篇且候选数为 0——分辨不出是第一阶段确实没有候选"
+            f"公告，还是落盘文件（{announce.ANNOUNCE_JSON}）已损坏或为空"
+            "（损坏的文件整份降级为零候选，与前者读回来一模一样）；"
+            "若是后者，公告引文可能核验不过"]
+
+
+def _load_announce(code: str, r, as_of: date, out: Path, client, md: dict,
                    factors: list[str]) -> list[str]:
-    """公司公告入语料库。返回要记进产物清单的条目。
+    """公司公告入语料库并落盘。返回要记进产物清单的条目。
 
     **不能放进 `_analyse_facts`。** 那一层的不变量写在它自己的
     docstring 上：「不调模型，因此两个阶段都要跑」。本函数要调模型从
-    候选清单里挑标题，放进去会让第二阶段挑出**与第一阶段不同的公告**，
-    第一阶段正文里写下的公告引文因此在第二阶段核验不过——与
-    `_load_openweb` 是同一条理由。
+    候选清单里挑标题，放进去第二阶段会重新挑选，挑出**与第一阶段不同的
+    公告**，第一阶段正文里写下的公告引文因此在第二阶段核验不过。
+
+    这个失败在 Task 7.5 之前**无条件成立**——公告当时既不落盘也无读回，
+    第二阶段的语料库里压根没有它们，不是什么假想的理由。是本函数的落盘
+    加 `_restore_announce` 的读回才把它消除。消除的前提是第二阶段**只读回、
+    不重采**，所以它仍然不能进 `_analyse_facts`：那样读回就形同虚设。
+    根因与 `_load_openweb` 同一个：不可复现的产物不能放在会被重跑的位置。
 
     与 `_load_openweb` 不同的是**本函数不需要联网工具的 client**：
     模型只从代码取回的清单里挑下标，不上网。
@@ -401,14 +460,33 @@ def _load_announce(code: str, r, as_of: date, client, md: dict,
         r.corpus = Corpus(as_of=as_of)
     try:
         res = announce.gather(client, code=code, company=_company_name(code),
-                              factors=factors, as_of=as_of, corpus=r.corpus)
+                              factors=factors, as_of=as_of, corpus=r.corpus,
+                              cache_dir=out)
     except Exception as e:                                  # noqa: BLE001
         return [f"公司公告采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
 
+    skipped: list[str] = []
+    try:
+        announce.save(res, out / announce.ANNOUNCE_JSON)
+    except Exception as e:                                  # noqa: BLE001
+        # **落盘失败不能连带毁掉本轮研究，也不能只说「保存失败」**——
+        # 理由与 `_load_openweb` 里同一处完全相同：`save()` 底层是
+        # `Path.write_text`，输出目录被回收/磁盘写满/权限被收回都是运行
+        # 环境的事，不是采集失败；而 `res.docs` 此刻已在 `r.corpus` 里，
+        # 本轮简报仍能引用、核验也能通过，跨阶段却存活不了——
+        # `_restore_announce` 读的正是这里本该写出的文件。简报里写下的
+        # 公告引文到第二阶段会被自己的核验闸门拒掉，这个具体后果必须说出来。
+        skipped.append(
+            f"公司公告未能落盘（{e.__class__.__name__}: {str(e)[:120]}）"
+            "——本阶段采集到的公告仍在本轮语料库中、可支撑当前简报，"
+            "但不会跨阶段存活：第二阶段读不到这份文件，"
+            "简报中写下的公告引文到时可能核验不过")
+
     md["公司公告"] = announce.summary(res)
     if not res.docs:
-        return [f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
-                f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
+        return skipped + [
+            f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
+            f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
 
     notes: list[str] = []
     if res.fetch_failed:
@@ -416,8 +494,8 @@ def _load_announce(code: str, r, as_of: date, client, md: dict,
         notes += [f"  - {x}" for x in res.fetch_failed_reasons]
     notes += [f"忽略了一条挑选：{x}" for x in res.ignored]
     if not notes:
-        return []
-    return ["公司公告：\n" + "\n".join(f"  · {x}" for x in notes)]
+        return skipped
+    return skipped + ["公司公告：\n" + "\n".join(f"  · {x}" for x in notes)]
 
 
 def _load_sections(r):
@@ -1362,7 +1440,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 默认不开工具的 client 即可，费用照样累计进下面的 `cost`。
     announce_client = make_client(model=model)
     skipped += _load_announce(
-        code, r, as_of, announce_client, md,
+        code, r, as_of, out, announce_client, md,
         [f.label for d in (meth.decompositions if meth is not None else [])
          for f in d.factors])
     # 公告入的是同一个 Corpus，清单要按语料库的实际内容重渲染一遍
@@ -1665,6 +1743,12 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # 开放网络文档：读回第一阶段落盘的，**不重新采集**。重跑 discover
     # 会引入第一阶段没有的文档，让第一阶段正文里的外部引文核验不过。
     skipped += _restore_openweb(r, out)
+    # 公司公告同理：读回，**不重新采集**。挑选要调模型，重跑会挑出与第一
+    # 阶段不同的公告，第一阶段正文里的公告引文就核验不过——而公告是
+    # `Tier.COMPANY`，这套设计里证明力最高的证据。理由见 `_load_announce`
+    # 与 `_restore_announce` 的 docstring。**必须是 `skipped +=`**：
+    # 裸调用时文档照样读回，但三种零文档措辞永远进不了产物清单。
+    skipped += _restore_announce(r, out)
 
     # 基期毛利率也要在重建之后再取——gross_margin 同样来自派生层。
     # I4：取「最近一个完整年度」，不跟着 r.period 走——同一个理由见

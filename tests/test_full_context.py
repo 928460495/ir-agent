@@ -1960,7 +1960,7 @@ def test_公告采集之后重渲染外部资料清单():
          "定性三节的重渲染顶替")
 
 
-def test_公告采集失败不阻断整轮研究(monkeypatch):
+def test_公告采集失败不阻断整轮研究(monkeypatch, tmp_path):
     from datetime import date
 
     from ir_agent import full
@@ -1981,12 +1981,13 @@ def test_公告采集失败不阻断整轮研究(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(
                             RuntimeError("巨潮超时")))
     skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
-                                  lambda p: "", {}, ["名义产能"])
+                                  tmp_path, lambda p: "", {}, ["名义产能"])
     assert skipped and "公司公告采集未执行" in skipped[0]
     assert "巨潮超时" in skipped[0]
 
 
-def test_公告采集成功但全部取文失败清单区分候选挑选与入库(monkeypatch):
+def test_公告采集成功但全部取文失败清单区分候选挑选与入库(monkeypatch,
+                                                         tmp_path):
     """`_load_announce` 的成功路径此前完全没测——四条既有测试是三条
     AST 结构检查加一条异常路径。0 篇入库（PDF 全部取文失败）恰恰是真实
     运行最容易撞见的样子，也是最需要区分清楚的：「候选 220 条里挑了
@@ -2013,7 +2014,7 @@ def test_公告采集成功但全部取文失败清单区分候选挑选与入�
 
     md: dict = {}
     skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
-                                  lambda p: "", md, ["名义产能"])
+                                  tmp_path, lambda p: "", md, ["名义产能"])
 
     assert skipped == [
         "公司公告：一篇都没入库（候选 220 条，模型挑 3 条，取文失败 1 篇）"]
@@ -2159,3 +2160,194 @@ def test_gaps_collect调用点会把降级聚合追加进skipped():
     assert binding.lineno > try_end_ln, (
         "_factor_host_check_note 的 skipped 聚合必须落在 gaps.collect 的"
         " try 块之后")
+
+
+def test_公告落盘失败不阻断整轮研究(monkeypatch, tmp_path):
+    """`save()` 底层是 Path.write_text，输出目录被回收/磁盘写满/权限被收回
+    都会在这里炸——那是运行环境的事，不是采集失败，不该把整轮 analyse
+    拖下水。但也不能只说「保存失败」：文档此刻已在 r.corpus 里、本轮简报
+    仍能引用，跨阶段却存活不了，第二阶段的核验会拒掉那些引文。这个具体
+    后果必须说出来。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import announce as A
+    from ir_agent.sources.external import Document, Tier
+
+    doc = Document(doc_id="a1", url="http://static.cninfo.com.cn/a.PDF",
+                   title="投产公告", publisher="生益科技", tier=Tier.COMPANY,
+                   published=date(2026, 8, 1), retrieved=date(2026, 9, 30),
+                   text="正文")
+    monkeypatch.setattr(full, "_company_name", lambda c: "某公司")
+    monkeypatch.setattr(A, "gather", lambda *a, **k: A.AnnounceResult(
+        docs=[doc], candidates=9, picked=1))
+
+    def boom(res, path):
+        raise PermissionError("只读目录")
+    monkeypatch.setattr(A, "save", boom)
+
+    class _R:
+        corpus = None
+        as_of = date(2026, 9, 30)
+
+    md = {}
+    skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
+                                  tmp_path, object(), md, ["名义产能"])
+    joined = "；".join(skipped)
+    assert "落盘" in joined or "存活" in joined, "落盘失败没进清单"
+    assert "核验" in joined, \
+        "只说了保存失败，没说出「第二阶段引文会核验不过」这个具体后果"
+    assert md.get("公司公告"), "落盘失败不该连带抹掉本轮的公告面板"
+
+
+def test_第二阶段读回公告而不重新采集(monkeypatch, tmp_path):
+    """重跑挑选会挑出**不同的**公告，第一阶段正文里的公告引文因此核验
+    不过。这正是落盘机制要防的事——所以第二阶段只读回，绝不调 gather。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import announce as A
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    doc = Document(doc_id="a1", url="http://static.cninfo.com.cn/a.PDF",
+                   title="投产公告", publisher="生益科技", tier=Tier.COMPANY,
+                   published=date(2026, 8, 1), retrieved=date(2026, 9, 30),
+                   text="本次投产新增名义产能 300 万平方米。")
+    A.save(A.AnnounceResult(docs=[doc], candidates=220, picked=3),
+           tmp_path / A.ANNOUNCE_JSON)
+
+    def never(*a, **k):
+        raise AssertionError("第二阶段重新采集了公告——落盘机制形同虚设")
+    monkeypatch.setattr(A, "gather", never)
+
+    class _R:
+        corpus = Corpus(as_of=date(2026, 9, 30))
+        as_of = date(2026, 9, 30)
+
+    r = _R()
+    notes = full._restore_announce(r, tmp_path)
+    assert any(d.tier is Tier.COMPANY for d in r.corpus.docs), \
+        "公告没读进第二阶段的语料库"
+    # 不能只断 `"3" in text`：单个数字会撞上措辞里别处出现的同一个字符。
+    # 断完整短语，「候选 220 条」与「挑 3 条」各自是一个不会偶然出现的片段。
+    assert "候选 220 条" in "；".join(notes) and \
+        "挑 3 条" in "；".join(notes), \
+        "第二阶段的清单要说得出「候选 220 条里挑了 3 条」"
+
+
+def test_读回零文档时三种成因分开交代(tmp_path):
+    """**这里不能照抄 `_restore_openweb`。** 它用
+    `set(missing_slots) == set(SLOTS)` 区分「第一阶段真的没采到」与
+    「文件损坏」。公告没有槽位，而 `candidates` 在两种情形下都是 0——
+    那个信号在这里不存在。所以诚实的做法是分三种情形，并且在分辨不出来
+    的那一种里**说出两种可能**，而不是挑一种猜。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import announce as A
+    from ir_agent.sources.external import Corpus
+
+    class _R:
+        def __init__(self):
+            self.corpus = Corpus(as_of=date(2026, 9, 30))
+            self.as_of = date(2026, 9, 30)
+
+    # (a) 文件不存在 —— 没落过盘
+    n = n_a = "；".join(full._restore_announce(_R(), tmp_path))
+    assert "未跨阶段存活" in n and A.ANNOUNCE_JSON in n
+
+    # (b) 有候选但一篇都没入库 —— 可分辨，要说出候选数
+    A.save(A.AnnounceResult(docs=[], candidates=220, picked=3, fetch_failed=3),
+           tmp_path / A.ANNOUNCE_JSON)
+    n = n_b = "；".join(full._restore_announce(_R(), tmp_path))
+    assert "候选 220 条" in n, \
+        "有候选这件事没说出来，读者无从判断是没搜到还是没取到"
+    assert "损坏" not in n, "可分辨的情形不该混进「可能损坏」的措辞"
+
+    # (c) 候选为零 —— **分辨不出**「第一阶段确实没候选」与「文件损坏」
+    A.save(A.AnnounceResult(docs=[], candidates=0), tmp_path / A.ANNOUNCE_JSON)
+    n = "；".join(full._restore_announce(_R(), tmp_path))
+    assert "确实没有候选" in n and "损坏" in n, \
+        "分辨不出来的情形必须把两种可能都说出来，不能挑一种猜"
+    # 反向也要断：(a)(b) 是可分辨的情形，不能把 (c) 那句「两种都可能」
+    # 的措辞抄过去——否则一个对所有零文档情形都说同一句话的实现也能过。
+    for case, text in (("a", n_a), ("b", n_b)):
+        assert "确实没有候选" not in text, f"({case}) 混进了 (c) 的措辞"
+
+
+def test_第一阶段落盘第二阶段读回_含零入库也要落盘(monkeypatch, tmp_path):
+    """上面三条分别测了落盘失败、读回、零文档措辞，**中间那一环没人测**：
+    `_load_announce` 在成功路径上真的把文件写出来了，且读回的就是它写的。
+
+    零入库（PDF 全部取文失败）也必须落盘——不是只在 `res.docs` 非空时
+    才写。第二阶段靠文件里的 `candidates` 才能把「候选 220 条但一篇没取到」
+    与「根本没落过盘」分开；只在有文档时才写，这个区分就丢了。
+
+    同时钉住 `cache_dir=out`：Task 7 的审查把「从不传 cache_dir，公告 PDF
+    缓存静默关闭」记为 Minor，现在拿得到 `out` 了，必须真的传进去。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources import announce as A
+    from ir_agent.sources.external import Corpus
+
+    seen: dict = {}
+
+    def fake_gather(*a, **k):
+        seen.update(k)
+        return A.AnnounceResult(candidates=220, picked=3, fetch_failed=3,
+                                fetch_failed_reasons=["超时"])
+    monkeypatch.setattr(full, "_company_name", lambda c: "某公司")
+    monkeypatch.setattr(A, "gather", fake_gather)
+
+    class _R:
+        corpus = Corpus(as_of=date(2026, 9, 30))
+        as_of = date(2026, 9, 30)
+
+    full._load_announce("600183", _R(), date(2026, 9, 30), tmp_path,
+                        object(), {}, ["名义产能"])
+    assert seen.get("cache_dir") == tmp_path, \
+        "没把 out 作为 cache_dir 传给 announce.gather——PDF 缓存仍是关的"
+    assert (tmp_path / A.ANNOUNCE_JSON).exists(), "零入库时没落盘"
+
+    class _R2:
+        corpus = Corpus(as_of=date(2026, 9, 30))
+        as_of = date(2026, 9, 30)
+    notes = "；".join(full._restore_announce(_R2(), tmp_path))
+    assert "候选 220 条" in notes and "挑 3 条" in notes, \
+        "第二阶段读回的不是第一阶段写出的那份头部计数"
+    assert "未跨阶段存活" not in notes, "落过盘的情形被报成了没落盘"
+
+
+def test_第二阶段读回公告的返回值汇入skipped():
+    """`run_valuation` 里的 `_restore_announce(r, out)` 必须是
+    `skipped += _restore_announce(...)`。裸调用时文档照样读回、语料库照样
+    有内容，但三种零文档措辞与「候选 220 条挑 3 条」永远进不了产物清单
+    ——本支线上一代结构性测试就栽在这里：调用存在、返回值被丢弃，测试全绿。
+
+    定位 `skipped +=` 这个 `ast.AugAssign` 节点本身，要求调用名出现在
+    它的值表达式里，位置检查落在**这个节点**的行号上（不是调用表达式的
+    行号，更不是 `_restore_openweb` 那一处）。"""
+    from ir_agent import full
+
+    calls = _calls(full.run_valuation)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_valuation)))
+    binding = None
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "skipped"):
+            continue
+        if any(isinstance(c, ast.Call) and _call_name(c) == "_restore_announce"
+               for c in ast.walk(node.value)):
+            binding = node
+            break
+    assert binding is not None, (
+        "_restore_announce 的返回值没有拼进 skipped（需要 skipped +="
+        " _restore_announce(...)，裸调用不算）")
+    facts_ln = min(ln for n, ln in calls if n == "_analyse_facts")
+    write_ln = min(ln for n, ln in calls if n == "_write_full_report")
+    assert facts_ln < binding.lineno < write_ln, \
+        "读回必须在重建事实之后、完整研报撰写（引文核验）之前"
+    # 第二阶段绝不能重新采集——重跑挑选会挑出不同的公告
+    assert "_load_announce" not in [n for n, _ in calls]

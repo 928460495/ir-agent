@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -369,3 +370,67 @@ def summary(res: AnnounceResult) -> str:
     for x in res.ignored:
         lines.append(f"  – 忽略了一条挑选：{x}")
     return "\n".join(lines)
+
+
+ANNOUNCE_JSON = "announce.json"
+
+
+def save(res: AnnounceResult, path: Path | str) -> None:
+    """落盘，供第二阶段读回。形状与 `openweb.save` 对齐。"""
+    from ir_agent.sources.openweb import _doc_to_json
+    Path(path).write_text(json.dumps({
+        "docs": [_doc_to_json(d) for d in res.docs],
+        "candidates": res.candidates,
+        "picked": res.picked,
+        "fetch_failed": res.fetch_failed,
+        "fetch_failed_reasons": res.fetch_failed_reasons,
+        "ignored": res.ignored,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load(path: Path | str, corpus) -> AnnounceResult:
+    """读回落盘的公告文档并入语料库。容忍两个层级的损坏，两者都不抛。
+
+    与 `openweb.load` 同一套处置（那里的 docstring 有完整论证）：
+
+    - **整份损坏**——文件不存在、JSON 语法错、顶层不是 dict、或头部字段
+      类型烂到没法安全解读。整份退化成空 `AnnounceResult()`：任何一处都
+      可能污染后面所有字段的读取，没有「只信一半」这回事。
+    - **单条文档损坏**——`docs` 是合法列表但某条不是合法 Document JSON。
+      只跳过那一条，其余照常读回入库。
+
+    **时点守卫照样走一遍 `corpus.add_if_visible`。** as_of 可能与落盘时
+    不同，「这是我们自己存的」不构成放行理由——否则第二阶段换一个更早的
+    as_of 就能看见未来的公告。没能入库的不进 `docs`。
+    """
+    from ir_agent.sources.openweb import _doc_from_json, _str_list_field
+
+    p = Path(path)
+    if not p.exists():
+        return AnnounceResult()
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:                                       # noqa: BLE001
+        return AnnounceResult()
+
+    try:
+        res = AnnounceResult(
+            candidates=int(raw.get("candidates", 0)),
+            picked=int(raw.get("picked", 0)),
+            fetch_failed=int(raw.get("fetch_failed", 0)),
+            fetch_failed_reasons=_str_list_field(raw, "fetch_failed_reasons"),
+            ignored=_str_list_field(raw, "ignored"))
+        docs_raw = list(raw.get("docs", []))
+    except Exception:                                       # noqa: BLE001
+        # 顶层不是 dict（没有 .get）、docs 不可迭代、或某个计数字段不是
+        # 数字。这三类都让后面的读取不可信，整份降级。
+        return AnnounceResult()
+
+    for item in docs_raw:
+        try:
+            doc = _doc_from_json(item)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if corpus.add_if_visible(doc):
+            res.docs.append(doc)
+    return res
