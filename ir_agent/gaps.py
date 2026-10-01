@@ -136,11 +136,14 @@ class FactorData:
     # 存成结构化字段，不是字符串。理由见 assume.py `_match_excerpt`
     # 上面那段（这里同一份，往回看几行）：下游代码不该也不能去解析
     # `note` 文本，凡是要让机器读到的事实，都得有自己独立的字段。
-    # 只在 EXTERNAL 分支赋值；只赋值，暂无消费者读它——round 级
-    # 汇总（`openweb.OpenWebResult.host_check_degraded`／`full.py`
-    # 「N 篇入库时主机安全校验降级」那行）今天不聚合这个字段，接
-    # 进去是 Task 7（接入 full.py）的范围，这次改动只做到
-    # 让事实结构化可取，不做聚合，见 collect() 里对应分支的注释。
+    # 只在 EXTERNAL 分支赋值。**消费者是 `full._factor_host_check_note`**
+    # （full.py:305-335），它把本字段聚合成产物清单里「N 个因子采集时
+    # 主机安全校验降级」那一行——与 `_openweb_notes` 的「N 篇入库时…」
+    # 是同一份事实、同一句措辞，分开计数只因为计数单位不同（因子 vs
+    # 文档）、且来自两个不同的 fetch 调用点。
+    # 它读的是这个布尔字段而**不是** note 文本：理由见 assume.py
+    # `_match_excerpt` 上面那段真实事故（下游拿正则啃 note，被年报里的
+    # 引号截断）。要改 note 的措辞时不必担心这条聚合会跟着坏。
     host_check_degraded: bool = False
 
 
@@ -399,15 +402,15 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     # Fix wave 2 Fix A）与下面 `FactorData.
                     # host_check_degraded` 结构化字段。不是
                     # `openweb.OpenWebResult.host_check_degraded` 那个
-                    # 轮次级汇总——④ 分支走的是 `verify_finding` 这第
-                    # 二个 fetch 调用点，从没往 `OpenWebResult` 记过账，
-                    # `full.py`「N 篇入库时主机安全校验降级」那行今天
-                    # 不包含这里发生的降级，是真实的欠计数，不是已经
-                    # 解决、只是换了个地方展示。把这份事实接进轮次级
-                    # 汇总是 Task 7（接入 full.py）的范围，这次
-                    # 改动不做聚合，不能声称 `Fetched.host_check_
-                    # degraded` 「必须一路传到产物清单」这条契约已经
-                    # 在④分支上全部兑现。
+                    # 计数器——④ 分支走的是 `verify_finding` 这第二个
+                    # fetch 调用点，从没往 `OpenWebResult` 记过账，所以
+                    # `_openweb_notes` 的「N 篇入库时…」那行至今不含这里
+                    # 发生的降级。**但这不再是欠计数**：Task 7 给④这条
+                    # 路径接了自己的清单行——`full._factor_host_check_
+                    # note`（full.py:305-335）读下面那个结构化字段，产出
+                    # 「N 个因子采集时主机安全校验降级」。`Fetched.
+                    # host_check_degraded`「必须一路传到产物清单」这条
+                    # 契约在④分支上由那一行兑现，不是由这句 note。
                     n = sum(1 for v in passed if v.host_check_degraded)
                     note += ("；" if note else "") + \
                         (f"其中 {n} 条命中时主机安全校验降级（本机 DNS "

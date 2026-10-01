@@ -1321,11 +1321,13 @@ class Verified:
     # 测试要守住"失败路径的数据不能被静默丢弃/篡改"这条线，不是因为
     # 已经有生产代码在读它——这句话 grep 过 `.host_check_degraded` 的
     # 所有调用点才敢说，不是靠推理。
-    # 另外：不管走哪条路径，这份事实都还没接进
-    # `openweb.OpenWebResult.host_check_degraded` 那个轮次级汇总——
-    # `verify_finding` 从没往 `OpenWebResult` 记过账，`full.py` 里
-    # 「N 篇入库时主机安全校验降级」那行今天不包含这里发生的降级。
-    # 接进去是 Task 7（接入 full.py）的范围。
+    # 另外：`verify_finding` 不往 `OpenWebResult` 记账，所以 `full.py`
+    # 里「N 篇入库时主机安全校验降级」那行**不**包含这里发生的降级。
+    # 这份事实走的是另一条路：成功路径上它被带进
+    # `gaps.FactorData.host_check_degraded`，再由
+    # `full._factor_host_check_note` 聚合成「N 个因子采集时主机安全
+    # 校验降级」。失败路径上填的这个值没有生产消费者（见上），只有
+    # 测试守着。
     # 没实际抓到东西时（claim 为空、fetch 抛异常）无从谈降级，留默认
     # False。
     host_check_degraded: bool = False
