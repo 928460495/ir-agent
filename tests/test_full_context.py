@@ -2077,6 +2077,46 @@ def test_factor_host_check_note_有因子降级时产出条目():
     assert "内网地址拦截本轮依赖代理侧" in notes[0]
 
 
+def test_factor_host_check_note渲染出的那一行不是未生成():
+    """**需求是读者看到什么，不是函数返回了什么。** 上面那条只断返回的
+    列表——而这条条目原先以数字起头，`research._mark` 匹配不上任何前缀，
+    渲染成「– 未生成：3 个因子采集时主机安全校验降级…」：因子明明采到了，
+    这是一条降级警告，印成「没生成」恰好说反。返回值断言一直是绿的。
+    这里走真正的渲染路径（`ResearchOutcome.summary()`）。
+
+    措辞复用规则也在这里钉死：同一件事在 `_openweb_notes` 里叫「N 篇入库
+    时主机安全校验降级（…）——…」，这里只许换计数单位与前面的引子，
+    括号里的诊断与结尾那半句必须逐字相同——两处各写各的，早晚会分叉。"""
+    from ir_agent import full, gaps
+    from ir_agent.drivers import Factor
+    from ir_agent.research import ResearchOutcome, Stage
+    from ir_agent.sources.external import Document, Tier
+    from ir_agent.sources.openweb import OpenWebResult
+
+    fd = gaps.FactorData(factor=Factor(key="capacity", label="产能", unit="吨"),
+                         status=gaps.EXTERNAL, host_check_degraded=True)
+    notes = full._factor_host_check_note({"capacity": fd})
+    assert len(notes) == 1
+    rendered = ResearchOutcome(
+        code="600183", period="2025FY", as_of=date(2026, 9, 30),
+        stage=Stage.VALUED, skipped=notes, cost_usd=Decimal(0)).summary()
+    line = next(ln for ln in rendered.splitlines() if "1 个因子" in ln)
+    assert "未生成" not in line, f"降级警告被渲染成了未生成：{line!r}"
+    assert line.lstrip().startswith("·"), f"应是信息行（· 开头）：{line!r}"
+
+    doc = Document(doc_id="x", url="https://a.example/1", title="t",
+                   publisher="p", tier=Tier.MEDIA, published=date(2026, 6, 1),
+                   retrieved=date(2026, 9, 30), text="正文")
+    web = full._openweb_notes(OpenWebResult(docs=[doc], host_check_degraded=1))
+    web_tail = web[0].split("篇入库时", 1)[1]
+    factor_tail = notes[0].split("个因子采集时", 1)[1]
+    assert web_tail.startswith("主机安全校验降级（"), \
+        "没从 _openweb_notes 的措辞里切出尾巴——这条比对在空转"
+    assert factor_tail == web_tail, (
+        "同一件事的两处措辞分叉了（括号里的诊断与结尾半句必须逐字相同）："
+        f"{factor_tail!r} != {web_tail!r}")
+
+
 def test_factor_host_check_note_没有因子降级时不产出条目():
     """反例（正例的必要配对，防住 `if any(...)` 被改成 `if True`
     这类突变仍能通过测试）：全部因子 `host_check_degraded` 均为假——
@@ -2439,7 +2479,16 @@ def test_采到了之后的注意事项清单不被渲染成未生成():
     for gap in ("开放网络资料：一篇都没取到（3 篇抓取失败），定性判断的"
                 "外部依据仍只有券商研报一类来源",
                 "公司公告：一篇都没入库（候选 220 条，模型挑 0 条，"
-                "取文失败 0 篇）"):
+                "取文失败 0 篇）",
+                # `_load_announce` 在 `gather` 抛异常时真实发出的措辞：
+                # 「未执行」落在冒号**之前**，所以不匹配「公司公告采集：」
+                # 这个键——它渲染成未生成，目前靠的是这个位置关系。把这条
+                # 放进来，是防登记键日后被放宽（比如去掉冒号）把它也吞掉。
+                # **只钉这个字面串防不住「措辞改成『公司公告采集：未执行』」**
+                # ——字面串自己不会跟着改；那一类改动由下面
+                # `test_本分支新增的清单生产者逐个断言渲染标记` 用真实生产者
+                # 的返回值去抓。
+                "公司公告采集未执行（RuntimeError: 巨潮超时）"):
         assert "未生成" in rendered(gap), \
             f"真缺口条目不再标未生成了——前缀登记得太宽：{gap[:24]!r}"
 
@@ -2473,3 +2522,183 @@ def test_公告部分取文失败的清单条目不被渲染成未生成(monkeyp
     line = f"  {research._mark(caveat[0])}{caveat[0]}"
     assert "未生成" not in line, \
         f"公告采到了 1 篇、只是 2 篇取文失败，却被渲染成未生成：{line!r}"
+
+
+def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, tmp_path):
+    """**逐个生产者、逐种返回形状，断言读者实际看到的那几行。**
+
+    `research._mark` 是白名单，默认分支渲染的是最强的断言（「未生成」）
+    ——新增一个清单生产者而忘了登记，不报错，只印一句假话。此前每次是
+    被人肉看终端发现的。这条测试把「每个生产者的每种返回都有一个明确的
+    预期标记」落成代码：新的、没登记的生产者在这里变红，而不是印假话。
+
+    范围（刻意收窄）：本分支新增或改动的四个生产者——`_load_announce`、
+    `_restore_announce`、`_openweb_notes`、`_factor_host_check_note`。
+    **不**把 `_media_tier_note` 与 `_propose_assumptions` 纳入断言：二者
+    是 main 上就有、至今没修的同类缺陷（后者还要先拆措辞，是单独的决
+    定）。一条会被正确状态弄红的测试最终的下场是被删掉而不是被遵守
+    （见 `tests/test_external_tier.py` 字节码哨兵的文档字符串）。末尾的
+    穷举校验只负责让「还有哪些生产者没被覆盖」显式写在这里，不会因为
+    那两个已知欠账变红。
+
+    断言走**真实生产者的返回值 + `ResearchOutcome.summary()` 的真实渲染
+    + 渲染出的每一行**，不是 `_mark(前缀)` 这个代理：
+      - 信息类：首行以 `·` 起头、渲染块里任何一行都不含「未生成」，且
+        **任何子行都不以 `–` 起头**（`–` 在本清单里就是未生成的符号；
+        `announce.summary` 的子行曾以 `  – ` 起头，读回成功的细节因此
+        读起来像一条条顶层的未生成）；
+      - 真缺口：首行含「未生成」。
+    每个场景还断言一个只有该场景才会产出的片段，防场景悄悄退化成
+    别的返回形状、断言空转。"""
+    from ir_agent import full, gaps
+    from ir_agent.drivers import Factor
+    from ir_agent.research import ResearchOutcome, Stage
+    from ir_agent.sources import announce as A
+    from ir_agent.sources.external import Corpus, Document, Tier
+    from ir_agent.sources.openweb import OpenWebResult
+
+    asof = date(2026, 9, 30)
+    INFO, GAP = "info", "gap"
+
+    def block(entries: list[str]) -> list[str]:
+        out = ResearchOutcome(code="600183", period="2025FY", as_of=asof,
+                              stage=Stage.VALUED, skipped=entries,
+                              cost_usd=Decimal(0)).summary().splitlines()
+        return out[1:]            # 去掉标题行
+
+    doc = Document(doc_id="a1", url="http://static.cninfo.com.cn/a.PDF",
+                   title="投产公告", publisher="生益科技", tier=Tier.COMPANY,
+                   published=date(2026, 8, 1), retrieved=asof, text="正文")
+    web_doc = Document(doc_id="w1", url="https://a.example/1", title="t",
+                       publisher="p", tier=Tier.MEDIA,
+                       published=date(2026, 6, 1), retrieved=asof, text="正文")
+
+    class _R:
+        def __init__(self):
+            self.corpus = Corpus(as_of=asof)
+            self.as_of = asof
+
+    monkeypatch.setattr(full, "_company_name", lambda c: "某公司")
+
+    def load_announce(gather=None, save=None):
+        if gather is not None:
+            monkeypatch.setattr(A, "gather", gather)
+        if save is not None:
+            monkeypatch.setattr(A, "save", save)
+        return full._load_announce("600183", _R(), asof, tmp_path, object(),
+                                   {}, ["名义产能"])
+
+    def boom(*a, **k):
+        raise RuntimeError("巨潮超时")
+
+    def disk_full(*a, **k):
+        raise OSError("磁盘已满")
+
+    def restore_announce(res=None):
+        for f in tmp_path.glob(A.ANNOUNCE_JSON):
+            f.unlink()
+        if res is not None:
+            A.save(res, tmp_path / A.ANNOUNCE_JSON)
+        return full._restore_announce(_R(), tmp_path)
+
+    real_save = A.save
+    # (生产者, 场景, 条目, 预期, 渲染里必须出现的片段)
+    cases: list[tuple[str, str, list[str], str, str]] = []
+
+    def add(producer, scenario, entries, kind, must):
+        cases.append((producer, scenario, entries, kind, must))
+
+    add("_load_announce", "gather 抛异常",
+        load_announce(gather=boom), GAP, "巨潮超时")
+    add("_load_announce", "零文档入库",
+        load_announce(gather=lambda *a, **k: A.AnnounceResult(
+            candidates=220, picked=3)), GAP, "一篇都没入库")
+    add("_load_announce", "落盘失败",
+        load_announce(gather=lambda *a, **k: A.AnnounceResult(
+            docs=[doc], candidates=220, picked=3), save=disk_full),
+        GAP, "公司公告未能落盘")
+    monkeypatch.setattr(A, "save", real_save)
+    add("_load_announce", "采到了但有取文失败与被忽略的挑选",
+        load_announce(gather=lambda *a, **k: A.AnnounceResult(
+            docs=[doc], candidates=220, picked=3, fetch_failed=2,
+            fetch_failed_reasons=["超时", "PDF 取文为空"],
+            ignored=["序号 99 超出候选范围"])),
+        INFO, "2 篇取文失败")
+
+    add("_restore_announce", "落盘文件不存在",
+        restore_announce(), GAP, "未跨阶段存活")
+    add("_restore_announce", "有候选但没入库",
+        restore_announce(A.AnnounceResult(candidates=220, picked=3)),
+        GAP, "一篇都没入库")
+    add("_restore_announce", "候选为零（分辨不出成因）",
+        restore_announce(A.AnnounceResult()), GAP, "分辨不出")
+    add("_restore_announce", "读回成功且带取文失败与被忽略的挑选",
+        restore_announce(A.AnnounceResult(
+            docs=[doc], candidates=220, picked=3, fetch_failed=2,
+            fetch_failed_reasons=["超时"],
+            ignored=["序号 99 超出候选范围"])),
+        INFO, "2 篇取文失败")
+
+    add("_openweb_notes", "采到了、带全部注意事项",
+        full._openweb_notes(OpenWebResult(
+            docs=[web_doc], fetch_failed=3, fetch_failed_reasons=["超时"],
+            model_dated=1, host_check_degraded=1,
+            missing_slots=["公司重大动态"])),
+        INFO, "3 篇抓取失败")
+
+    add("_factor_host_check_note", "有因子降级",
+        full._factor_host_check_note({"capacity": gaps.FactorData(
+            factor=Factor(key="capacity", label="产能", unit="吨"),
+            status=gaps.EXTERNAL, host_check_degraded=True)}),
+        INFO, "1 个因子")
+
+    problems: list[str] = []
+    for producer, scenario, entries, kind, must in cases:
+        tag = f"{producer} / {scenario}"
+        if len(entries) != 1:
+            problems.append(f"{tag}：期望恰好 1 条清单条目，实际 {len(entries)}"
+                            f" 条：{entries!r}")
+            continue
+        lines = block(entries)
+        text = "\n".join(lines)
+        if must not in text:
+            problems.append(f"{tag}：渲染里找不到 {must!r}（场景退化了？）\n"
+                            f"{text}")
+            continue
+        if kind == GAP:
+            if "未生成" not in lines[0]:
+                problems.append(f"{tag}：真缺口没渲染成未生成：{lines[0]!r}")
+            continue
+        if "未生成" in text:
+            problems.append(f"{tag}：采到了之后的注意事项被渲染成未生成：\n{text}")
+        if not lines[0].lstrip().startswith("·"):
+            problems.append(f"{tag}：信息行首行不是 · 起头：{lines[0]!r}")
+        for ln in lines[1:]:
+            if ln.lstrip().startswith("–"):
+                problems.append(f"{tag}：子行带着未生成的符号 –：{ln!r}")
+    assert not problems, "\n".join(problems)
+
+    # 两个多行场景必须真的多行，否则上面对子行的检查是空转。
+    multi = [c for c in cases if c[1].startswith(("采到了但", "读回成功"))]
+    assert len(multi) == 2
+    for _p, scenario, entries, _k, _m in multi:
+        assert len(block(entries)) >= 4, f"{scenario}：子行没有渲染出来"
+
+    # 穷举：`full` 里所有返回 `list[str]` 的函数（清单生产者的形状）要么
+    # 在上面被断言过，要么显式列在这里写明为什么没断言。新增一个生产者
+    # 而两边都不登记，这里变红。`_propose_assumptions` 返回 str，扫不到，
+    # 它的欠账与 `_media_tier_note` 同类，见本函数文档字符串。
+    covered = {c[0] for c in cases}
+    not_asserted = {
+        "_media_tier_note": "main 上就有的同类缺陷，未修（终审明确推迟）",
+        "_load_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
+        "_restore_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
+    }
+    producers = {n for n, f in inspect.getmembers(full, inspect.isfunction)
+                 if f.__module__ == full.__name__
+                 and "list[str]" in str(f.__annotations__.get("return"))}
+    assert covered <= producers, f"断言了不存在的生产者：{covered - producers}"
+    assert producers == covered | set(not_asserted), (
+        "full 里出现了没被登记的清单生产者（返回 list[str] 的函数）："
+        f"{sorted(producers - covered - set(not_asserted))}——给它加场景断言"
+        "渲染标记，或在 not_asserted 里写明为什么不断言")

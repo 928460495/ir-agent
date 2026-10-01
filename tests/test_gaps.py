@@ -691,6 +691,81 @@ def test_仅媒体支撑的因子在清单上被标注(monkeypatch):
         "到不了人眼前。")
 
 
+def test_部分核实的因子清单上写明另有几条已降级(monkeypatch):
+    """**终审补的：`if unverified:` 那一支此前没有任何测试能走到。**
+    仓库里所有 `ok=False` 的桩都只造单条 finding，`passed` 恒为空，
+    而这一支在 `if ok:` 里面——删掉整块 `if unverified:`，旧套件照绿。
+
+    它守的是「缺什么必须显式列出来」：一个因子由 1 条核实过的转述撑着，
+    另外 1 条被代码证伪、被悄悄丢掉——读清单的人若只看到「1 条依据」，
+    就永远不知道还有一条被证伪的转述曾经存在。**人读的是
+    `G.summary()` 的渲染，不是 `note` 字段**，所以断言落在渲染结果上
+    （同 `test_仅媒体支撑的因子在清单上被标注`）。
+
+    对「放着这句话不拼的实现」会红：note 里就没有「另有 1 条」，渲染
+    里自然也没有；而「核实不通过」这几个字在渲染里会因别处措辞凑巧
+    出现，所以钉的是只有这句模板才会拼出的数量短语。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Corpus, Tier
+    from ir_agent.sources.web import Finding
+
+    good = Finding(factor_key="capacity", claim="产能 300 万",
+                   url="https://m.example.com/a", publisher="某财经网",
+                   tier=Tier.MEDIA, published=date(2026, 6, 1))
+    bad = Finding(factor_key="capacity", claim="产能 999 万",
+                  url="https://m.example.com/b", publisher="某财经网",
+                  tier=Tier.MEDIA, published=date(2026, 6, 2))
+    monkeypatch.setattr(G, "search", lambda *a, **k: [good, bad])
+    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
+        finding=x, ok=(x is good),
+        reason="" if x is good else "未能在原页核实",
+        text=x.claim if x is good else "",
+        final_url=x.url, tier=x.tier))
+    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
+    fd = data["capacity"]
+    assert fd.status == G.EXTERNAL
+    assert [x.claim for x in fd.findings] == ["产能 300 万"], \
+        "被证伪的转述不能进 findings——assume._match_finding 不看核验状态"
+    assert "另有 1 条模型转述未能在原页核实，已降级为线索" in fd.note
+    assert "另有 1 条模型转述未能在原页核实，已降级为线索" in G.summary(data), \
+        "note 里有不够——人在批准清单上读的是 summary() 的渲染结果"
+
+
+def test_一条抓取失败不牵连同因子其余已核实的发现(monkeypatch):
+    """spec §8 第 9 条的后半句：「B2：抓取抛 `FetchFailed` → 同上，**且
+    不牵连同因子的其余 finding**」。前半句有测试，后半句此前没有。
+
+    不 stub `verify_finding`，只 stub 更底层的 `OW.fetch`：一条 URL 抛
+    真实的 `FetchFailed`，另一条返回含原话的正文。证明真实 `verify_
+    finding` 把前者判成 `ok=False` 之后，后者照样撑起因子。"""
+    import ir_agent.gaps as G
+    import ir_agent.sources.openweb as OW
+    from ir_agent.sources.external import Corpus, Tier
+    from ir_agent.sources.web import Finding
+
+    good = Finding(factor_key="capacity", claim="产能 300 万",
+                   url="https://m.example.com/a", publisher="某财经网",
+                   tier=Tier.MEDIA, published=date(2026, 6, 1))
+    dead = Finding(factor_key="capacity", claim="产能 320 万",
+                   url="https://m.example.com/dead", publisher="某财经网",
+                   tier=Tier.MEDIA, published=date(2026, 6, 2))
+    monkeypatch.setattr(G, "search", lambda *a, **k: [dead, good])
+
+    def _fake_fetch(url, **k):
+        if url.endswith("/dead"):
+            raise OW.FetchFailed(f"{url}：连接超时")
+        return OW.Fetched(final_url=url, text="据报道，产能 300 万平方米。",
+                          meta_published=None)
+
+    monkeypatch.setattr(OW, "fetch", _fake_fetch)
+    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
+    fd = data["capacity"]
+    assert fd.status == G.EXTERNAL
+    assert [x.claim for x in fd.findings] == ["产能 300 万"]
+    assert "另有 1 条模型转述未能在原页核实，已降级为线索" in G.summary(data)
+
+
 # ── Fix wave 1（审查发现）──────────────────────────────────────────
 #
 # 五条 review 发现里落在 gaps.py 这一侧的回归测试。Fix 1 的容纳测试

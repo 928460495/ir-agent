@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -1316,6 +1317,48 @@ def test_对有数据的因子写无数据估计仍被驳回():
     raw = "假设: 稼动率 | 第1年 | -2% | 0% | 2% | 无数据（估计），图省事"
     with pytest.raises(AssumeFailed, match="无数据"):
         assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+
+
+def test_提示词列出的会被驳回的状态等于门实际驳回的状态():
+    """**这条锁的是「提示词没说、门却会驳回」这类遗漏**：子项目 B 加了
+    ②.5 公司公告（`gaps.ANNOUNCE`），门对它照样驳回「无数据（估计）」，
+    提示词的枚举却漏了「公告披露」——公告摘录常常根本没有数字，这时
+    「无数据（估计）」恰是诚实答案，模型却从没被告知会被驳回，白吃
+    一次重试（本仓库有连续三次驳回把一轮拖进两标量降级的先例）。
+
+    枚举不手写：状态集合来自 `gaps` 里的状态常量，「门驳回哪些」是对
+    `assume.parse` 真跑出来的（每个状态各造一个因子喂一遍），提示词
+    里列出的状态是从渲染出的文本里解析出来的。以后 `gaps` 再加第六
+    档而提示词没更新，这里变红。"""
+    statuses = [v for k, v in vars(gaps).items()
+                if k.isupper() and isinstance(v, str)]
+    assert gaps.MISSING in statuses and len(statuses) >= 6, \
+        "没扫到 gaps 的状态常量——扫描方式失效了，下面的比对会空转"
+
+    d = _one_factor_decomp()
+    raw = "假设: 稼动率 | 第1年 | 5% | 8% | 12% | 无数据（估计），参照同业惯例"
+    rejected = []
+    for st in statuses:
+        fd = {"utilization": gaps.FactorData(
+            factor=d.factors[0], status=st, note="占位")}
+        try:
+            assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+        except AssumeFailed:
+            rejected.append(st)
+    # 门的语义：除 MISSING 外一律驳回——先把这一前提钉住，否则下面的
+    # 比对可能在比两个都错的东西。
+    assert gaps.MISSING not in rejected
+    assert set(rejected) == set(statuses) - {gaps.MISSING}
+
+    # 因子模式的提示词才带这段规则（两标量模式没有「无数据（估计）」出口）。
+    txt = assume.build_prompt({"g_stats": (), "gm_stats": ()}, ["2026E"], "上下文",
+                              decomps=[d], factor_data={})
+    m = re.search(r"开放，对((?:「[^」]+」)+)的因子这么写会被直接", txt)
+    assert m, "提示词里找不到「对…的因子这么写会被直接驳回」这句枚举"
+    listed = re.findall(r"「([^」]+)」", m.group(1))
+    # 顺序也跟着梯子走：`gaps` 里的常量就是按 ①②②.5③④ 的顺序声明的。
+    assert listed == rejected, \
+        f"提示词枚举 {listed} 与门实际驳回的状态 {rejected} 不一致"
 
 
 def test_因子压根没被采集也能用无数据出口():

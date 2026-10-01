@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import date
 from decimal import Decimal
@@ -336,8 +337,15 @@ def _factor_host_check_note(factor_data: dict) -> list[str]:
     n = sum(1 for fd in factor_data.values() if fd.host_check_degraded)
     if not n:
         return []
-    return [f"{n} 个因子采集时主机安全校验降级（本机 DNS 被代理劫持，"
-           "IP 层校验无从进行）——内网地址拦截本轮依赖代理侧"]
+    # **这个前缀是 `research._PREFIX` 的一个键，不是装饰。** 此前整句以
+    # 数字起头，任何字面前缀都匹配不上，`research._mark` 落到默认分支，
+    # 把一条降级提示印成「– 未生成：3 个因子采集时…」——而这些因子明明
+    # 采到了。前缀与 `gaps.collect` 的真缺口条目「因子数据采集（…失败）」
+    # 刻意分开（后者是整体没采到，该落「未生成」）；冒号之后的正文与
+    # `_openweb_notes` 的「N 篇入库时主机安全校验降级（…）——…」同一份
+    # 措辞，只换计数单位。
+    return [f"因子外部资料采集：{n} 个因子采集时主机安全校验降级（本机 DNS "
+           "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮依赖代理侧"]
 
 
 def _restore_openweb(r, out: Path) -> list[str]:
@@ -432,7 +440,18 @@ def _restore_announce(r, out: Path) -> list[str]:
         # 输出——候选/挑选/取文失败这些计数要在这里再说一遍。
         # **前缀不能省**：`research._mark` 按前缀给标记，不认识的一律打成
         # 「– 未生成：」——而这条是成功读回。键见 `research._PREFIX`。
-        return ["公司公告读回：" + announce.summary(res).removeprefix("公司公告 ")]
+        #
+        # **子行的缩进与符号也要处理。** `announce.summary` 的多行输出里
+        # 子行是 `  – …`（`–` 在本清单里就是「未生成」的符号），而
+        # `research.summary` 只给条目的第一行加前缀：不处理的话，读回成功
+        # 的子细节（取文失败、被忽略的挑选）会以 `  – ` 起头、缩进还比
+        # 父行浅，读起来像一条条顶层的「未生成」。这里把子行整体再缩进
+        # 一层（落在父行之下）、把 `–` 换成 `·`。`announce.summary(res,
+        # lead=…)` 才是不做字符串手术的做法，已明确推迟。
+        head, *kids = announce.summary(res).removeprefix("公司公告 ") \
+            .split("\n")
+        kids = ["    " + re.sub(r"^(\s*)– ", r"\1· ", k) for k in kids]
+        return ["公司公告读回：" + "\n".join([head, *kids])]
     if res.candidates:
         return [f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
                 f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]

@@ -137,7 +137,7 @@ class FactorData:
     # 上面那段（这里同一份，往回看几行）：下游代码不该也不能去解析
     # `note` 文本，凡是要让机器读到的事实，都得有自己独立的字段。
     # 只在 EXTERNAL 分支赋值。**消费者是 `full._factor_host_check_note`**
-    # （full.py:305-335），它把本字段聚合成产物清单里「N 个因子采集时
+    # （行号会漂，按函数名找），它把本字段聚合成产物清单里「N 个因子采集时
     # 主机安全校验降级」那一行——与 `_openweb_notes` 的「N 篇入库时…」
     # 是同一份事实、同一句措辞，分开计数只因为计数单位不同（因子 vs
     # 文档）、且来自两个不同的 fetch 调用点。
@@ -407,7 +407,7 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     # `_openweb_notes` 的「N 篇入库时…」那行至今不含这里
                     # 发生的降级。**但这不再是欠计数**：Task 7 给④这条
                     # 路径接了自己的清单行——`full._factor_host_check_
-                    # note`（full.py:305-335）读下面那个结构化字段，产出
+                    # note`（按函数名找，行号会漂）读下面那个结构化字段，产出
                     # 「N 个因子采集时主机安全校验降级」。`Fetched.
                     # host_check_degraded`「必须一路传到产物清单」这条
                     # 契约在④分支上由那一行兑现，不是由这句 note。
