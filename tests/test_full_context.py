@@ -1874,45 +1874,71 @@ def test_MEDIA引文经validate后能在corpus上累计并被full汇总():
 # 与 `_load_openweb` 这组测试是同一个思路。
 
 def test_公告采集排在定性三节之前():
-    """战略/产业链/宏观定性要引用公告原文，采集必须更早。"""
-    import ast
-    import inspect
-    import textwrap
+    """战略/产业链/宏观定性要引用公告原文，采集必须更早。
 
+    两层要求：（1）`_load_announce` 的返回值必须真的拼进 `skipped`
+    ——把 `skipped += _load_announce(...)` 改成裸调用，调用点还在、
+    位置也没变，只看「调用是否存在」的写法照样判「顺序正确」，但清单
+    条目再也生不出来，要求被悄悄删掉了。这里改为定位 `skipped += ...`
+    这个 `ast.AugAssign` 节点本身，确认 `_load_announce` 出现在它的值
+    表达式里；（2）位置必须在 `_analyse_facts` 之后、
+    `_analyse_qualitative` 之前——用**这个 AugAssign 节点自己的行号**
+    判断，不用调用表达式的行号，绑定和位置一起测。`_analyse_facts`/
+    `_analyse_qualitative` 的调用行改用 `_calls`（取最小行号），不再
+    手写 `names.setdefault(...)`——那种写法记的是遍历顺序里先出现的
+    那一行，不是最小行号，两个名字目前都只有一处调用所以暂时无害，
+    但这不该是测试正确的理由。
+    """
     from ir_agent import full
+
+    calls = _calls(full.run_analysis)
+
+    def first(name: str) -> int:
+        lines = [ln for n, ln in calls if n == name]
+        assert lines, f"{name} 没有被调用"
+        return min(lines)
+
     tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
-    names = {}
+    binding = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            names.setdefault(node.func.id, node.lineno)
-    assert "_load_announce" in names, "公告采集没有被调用"
-    assert names["_load_announce"] < names["_analyse_qualitative"]
-    assert names["_analyse_facts"] < names["_load_announce"]
+        if not (isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "skipped"):
+            continue
+        if any(isinstance(c, ast.Call) and _call_name(c) == "_load_announce"
+              for c in ast.walk(node.value)):
+            binding = node
+            break
+    assert binding is not None, (
+        "_load_announce 的返回值没有拼进 skipped（需要 skipped +="
+        " _load_announce(...)，裸调用不算）")
+    assert binding.lineno < first("_analyse_qualitative")
+    assert first("_analyse_facts") < binding.lineno
 
 
 def test_公告采集不在确定性层里():
     """`_analyse_facts` 的不变量是「不调模型，因此两个阶段都要跑」。
     公告采集要调模型挑标题——放进去会让第二阶段挑出不同的公告，
-    第一阶段写下的公告引文因此在第二阶段核验不过。"""
-    import inspect
+    第一阶段写下的公告引文因此在第二阶段核验不过。
 
+    用 `_calls` 而不是 `inspect.getsource` 子串匹配——子串匹配对
+    「不存在」这类断言不会被蒙混过关（子串命中就是命中），但会对着一个
+    正确实现误报：`_analyse_facts` 里随便一句提到「公告」或
+    `announce` 的注释就会让它假红。跟着它的姊妹测试
+    `test_开放网络采集不在确定性层里` 的写法走。"""
     from ir_agent import full
-    src = inspect.getsource(full._analyse_facts)
-    assert "announce" not in src
-    assert "_load_announce" not in src
+
+    names = [n for n, _ in _calls(full._analyse_facts)]
+    assert not any(n == "_load_announce" or n.startswith("announce.")
+                   for n in names), names
 
 
 def test_公告采集之后重渲染外部资料清单():
     """公告入的是同一个 Corpus。不重渲染，清单说的是加公告之前的篇数
     ——与子项目 A 终审 C1 是同一个失败模式。"""
-    import ast
-    import inspect
-    import textwrap
-
     from ir_agent import full
-    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
-    calls = [(n.func.id, n.lineno) for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+    calls = _calls(full.run_analysis)
     ann = [ln for name, ln in calls if name == "_load_announce"]
     ref = [ln for name, ln in calls if name == "_refresh_external_md"]
     qual = [ln for name, ln in calls if name == "_analyse_qualitative"]
@@ -1944,6 +1970,12 @@ def test_公告采集失败不阻断整轮研究(monkeypatch):
         as_of = date(2026, 9, 30)
         corpus = Corpus(as_of=date(2026, 9, 30))
 
+    # `_company_name(code)` 是 `announce.gather` 的一个*实参*，求值发生
+    # 在被打桩的 `gather` 真正跑起来之前——不挡住它，这条纯接线测试就会
+    # 去调 `taxonomy.fetch_all()`（跨网络分页拉巨潮），拖慢这个文件却
+    # 测不出任何东西：`_company_name` 自己吞掉所有异常，取不到真实公司名
+    # 不会让测试失败，只会让它变慢。
+    monkeypatch.setattr(full, "_company_name", lambda c: "某公司")
     import ir_agent.sources.announce as A
     monkeypatch.setattr(A, "gather",
                         lambda *a, **k: (_ for _ in ()).throw(
@@ -1952,6 +1984,44 @@ def test_公告采集失败不阻断整轮研究(monkeypatch):
                                   lambda p: "", {}, ["名义产能"])
     assert skipped and "公司公告采集未执行" in skipped[0]
     assert "巨潮超时" in skipped[0]
+
+
+def test_公告采集成功但全部取文失败清单区分候选挑选与入库(monkeypatch):
+    """`_load_announce` 的成功路径此前完全没测——四条既有测试是三条
+    AST 结构检查加一条异常路径。0 篇入库（PDF 全部取文失败）恰恰是真实
+    运行最容易撞见的样子，也是最需要区分清楚的：「候选 220 条里挑了
+    3 条」与「候选 3 条全挑了」含义完全不同，`md["公司公告"]` 与拼进
+    `skipped` 的说明都必须把候选、模型挑选、入库三个数字分开说。
+    字段名取自 `announce.py` 的 `AnnounceResult`（candidates/picked/
+    fetch_failed/fetch_failed_reasons/ignored/docs）。"""
+    from datetime import date
+
+    from ir_agent import full
+    from ir_agent.sources.external import Corpus
+    import ir_agent.sources.announce as A
+
+    class _R:
+        as_of = date(2026, 9, 30)
+        corpus = Corpus(as_of=date(2026, 9, 30))
+
+    res = A.AnnounceResult(
+        candidates=220, picked=3, fetch_failed=1,
+        fetch_failed_reasons=["巨潮 PDF 下载超时：2026年半年度报告摘要.pdf"],
+        ignored=["选取: 99（越界）"], docs=[])
+    monkeypatch.setattr(full, "_company_name", lambda c: "某公司")
+    monkeypatch.setattr(A, "gather", lambda *a, **k: res)
+
+    md: dict = {}
+    skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
+                                  lambda p: "", md, ["名义产能"])
+
+    assert skipped == [
+        "公司公告：一篇都没入库（候选 220 条，模型挑 3 条，取文失败 1 篇）"]
+    assert md["公司公告"] == (
+        "公司公告 0 篇（候选 220 条，模型挑 3 条）\n"
+        "  – 1 篇取文失败\n"
+        "    · 巨潮 PDF 下载超时：2026年半年度报告摘要.pdf\n"
+        "  – 忽略了一条挑选：选取: 99（越界）")
 
 
 # ── ④外部网络分支主机安全校验降级——轮次级聚合（Task 7 附加需求）──
@@ -2035,11 +2105,17 @@ def test_factor_host_check_note_只读结构化字段不碰note文本():
 
 def test_gaps_collect调用点会把降级聚合追加进skipped():
     """接线本身：`run_analysis` 里 `gaps.collect` 那段必须真的调用
-    `_factor_host_check_note` 并把结果拼进 `skipped`——只有
+    `_factor_host_check_note` **并把结果拼进 `skipped`**——只有
     `_factor_host_check_note` 自身正确、调用点没接上，效果一样是零。
-    用语法树定位 `gaps.collect` 所在的 `if meth is not None:` 块，
-    确认块内确有对 `_factor_host_check_note` 的真实调用，而不是
-    只在注释里提到这个名字（同一类陷阱见 `_calls` 的文档字符串）。"""
+
+    **只断言调用点存在还不够。** 把 `skipped += _factor_host_check_note(
+    factor_data)` 改成裸调用 `_factor_host_check_note(factor_data)`，
+    调用还在、行号没变，只找 `ast.Call` 节点、只看行号落在 try 块之后
+    的写法照样判「接上了」，但聚合结果再也没有任何地方接住，产物清单
+    里永远不会出现这条条目——要求被悄悄删掉了。这里改为定位
+    `skipped += ...` 这个 `ast.AugAssign` 节点本身，确认
+    `_factor_host_check_note` 出现在它的值表达式里，再用**这个节点
+    自己的行号**判断位置，绑定和位置一起测。"""
     import ast
     import inspect
     import textwrap
@@ -2062,10 +2138,24 @@ def test_gaps_collect调用点会把降级聚合追加进skipped():
     # `_refresh_external_md` 那样需要在异常路径上也执行（因子级
     # 降级信息本就只在 gaps.collect 成功返回时才有意义）。只要求
     # 调用点在包住 gaps.collect 的这个 try 节点之后。
-    all_calls = _calls(full.run_analysis)
     try_end_ln = max(n.lineno for n in ast.walk(target)
                      if hasattr(n, "lineno"))
-    note_lns = [ln for name, ln in all_calls
-               if name == "_factor_host_check_note" and ln > try_end_ln]
-    assert note_lns, ("run_analysis 里没有在 gaps.collect 的 try 块之后"
-                      "对 _factor_host_check_note 的真实调用")
+
+    binding = None
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "skipped"):
+            continue
+        if any(isinstance(c, ast.Call)
+              and _call_name(c) == "_factor_host_check_note"
+              for c in ast.walk(node.value)):
+            binding = node
+            break
+    assert binding is not None, (
+        "run_analysis 里没有把 _factor_host_check_note(...) 的返回值拼进"
+        " skipped（需要 skipped += _factor_host_check_note(...)，裸调用"
+        "不算）")
+    assert binding.lineno > try_end_ln, (
+        "_factor_host_check_note 的 skipped 聚合必须落在 gaps.collect 的"
+        " try 块之后")

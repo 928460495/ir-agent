@@ -1406,11 +1406,17 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             # 一开始就抛异常，都会重渲染一次。
             _refresh_external_md(r, md)
         # `gaps.collect` ④分支——轮次级主机安全校验降级聚合。不必放进
-        # 上面的 `finally`：这里读的是已经算好的 `factor_data` 字典，
-        # 异常路径上它维持着函数开头的空字典默认值，`_factor_host_
-        # check_note` 对空字典天然返回空列表——不像 `_refresh_external_md`
-        # 那样需要在异常路径上也执行才能不漏报。详见 `_factor_host_
-        # check_note` 自己的文档字符串。
+        # 上面的 `finally`：这里读的是已经算好的 `factor_data` 字典。
+        # **异常路径上确有欠计数，且这里治不好。** `gaps.collect` 按
+        # 分解出的因子逐个循环，跑到第 N 个因子才抛异常时，前 N-1 个
+        # 因子里任何一次 `openweb.verify_finding` 记下的降级，都只活
+        # 在那个从未 return 出来、被异常丢弃的局部字典里——`factor_data`
+        # 在这条路径上维持着函数开头的空字典默认值，`_factor_host_
+        # check_note` 对空字典自然返回空列表，但那不是「没有漏报」，
+        # 是「漏了也报不出来」：`gaps.collect` 不对外暴露异常路径上的
+        # 部分结果，这一层拿不到那半份 `factor_data`，修不了，只能在
+        # `gaps.collect` 自己那一层堵。详见 `_factor_host_check_note`
+        # 自己的文档字符串。
         skipped += _factor_host_check_note(factor_data)
 
     body, upheld, debate_md, cost, err = _write_and_debate(
