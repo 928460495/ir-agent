@@ -236,7 +236,12 @@ def _openweb_notes(res) -> list[str]:
     改变 `_load_openweb`/`_restore_openweb` 把它拼进 `skipped`（每个
     元素对应清单里一行）的既有语义。
     """
-    lines: list[str] = ["开放网络资料："]
+    # 前缀与「开放网络资料：一篇都没取到…」刻意分开。那条是真缺口、
+    # 该落 `_mark` 的「未生成」；本条是**采到了之后**的注意事项清单
+    # （抓取失败几篇、哪个槽位没取到、主机校验是否降级），把它也
+    # 标成「未生成」就是在说没采到——而 docs 里明明有东西。
+    # 见 `research._PREFIX` 的注释：这是同一个失败的第四次。
+    lines: list[str] = ["开放网络资料采集："]
     if res.fetch_failed:
         # `fetch_failed` 曾经是个不透明的数字——「模型给了个 PDF」「模型
         # 给了个内网地址」「这个域名 DNS 解析不出来」「正文提取为空」
@@ -497,7 +502,10 @@ def _load_announce(code: str, r, as_of: date, out: Path, client, md: dict,
     notes += [f"忽略了一条挑选：{x}" for x in res.ignored]
     if not notes:
         return skipped
-    return skipped + ["公司公告：\n" + "\n".join(f"  · {x}" for x in notes)]
+    # 同上，与「公司公告：一篇都没入库…」分开：走到这里 res.docs 非空，
+    # 公告是**采到了**的，notes 只是取文失败与被忽略挑选的注意事项。
+    return skipped + ["公司公告采集：\n"
+                      + "\n".join(f"  · {x}" for x in notes)]
 
 
 def _load_sections(r):

@@ -2396,3 +2396,80 @@ def test_第二阶段读回公告的返回值汇入skipped():
         "读回必须在重建事实之后、完整研报撰写（引文核验）之前"
     # 第二阶段绝不能重新采集——重跑挑选会挑出不同的公告
     assert "_load_announce" not in [n for n, _ in calls]
+
+
+def test_采到了之后的注意事项清单不被渲染成未生成():
+    """`research._mark` 是白名单：认识的前缀给标记，不认识的一律打成
+    「– 未生成：」。于是每新增一类清单条目，忘了登记的后果不是报错，
+    而是**默认落到最强的那个断言上**。
+
+    这条测试同时钉住两个方向，缺任一个都验不出东西：
+
+      正向——「采到了之后的注意事项清单」不得被标成未生成。
+      `_openweb_notes` 与 `_load_announce` 走到这两条时 `docs` 都非空，
+      说「未生成」是在说没采到，而紧接着的下一行写着「· N 篇抓取失败」，
+      自相矛盾。
+      反向——真缺口条目**仍然**要标未生成。否则把前缀登记得太宽
+      （比如直接登记「开放网络资料：」）会把「一篇都没取到」也变成
+      informational，那是反向的同一个错误。
+    """
+    from datetime import date
+
+    from ir_agent import full, research
+    from ir_agent.sources.external import Document, Tier
+    from ir_agent.sources.openweb import OpenWebResult
+
+    def rendered(entry: str) -> str:
+        return f"  {research._mark(entry)}{entry}"
+
+    doc = Document(doc_id="x", url="https://a.example/1", title="t",
+                   publisher="p", tier=Tier.MEDIA, published=date(2026, 6, 1),
+                   retrieved=date(2026, 9, 30), text="正文")
+    # 真实生产者，不是手搓的字符串形状
+    notes = full._openweb_notes(OpenWebResult(
+        docs=[doc], fetch_failed=3, fetch_failed_reasons=["超时"],
+        missing_slots=["公司重大动态"]))
+    assert len(notes) == 1
+    line = rendered(notes[0])
+    assert "未生成" not in line, \
+        f"采到 1 篇、失败 3 篇的注意事项清单被渲染成了未生成：{line!r}"
+    assert "3 篇抓取失败" in line, "注意事项的内容在渲染后丢了"
+
+    # 反向：真缺口仍须落「未生成」
+    for gap in ("开放网络资料：一篇都没取到（3 篇抓取失败），定性判断的"
+                "外部依据仍只有券商研报一类来源",
+                "公司公告：一篇都没入库（候选 220 条，模型挑 0 条，"
+                "取文失败 0 篇）"):
+        assert "未生成" in rendered(gap), \
+            f"真缺口条目不再标未生成了——前缀登记得太宽：{gap[:24]!r}"
+
+
+def test_公告部分取文失败的清单条目不被渲染成未生成(monkeypatch, tmp_path):
+    """与上一条同一件事，走 `_load_announce` 的真实返回值而不是手搓前缀
+    ——前缀一旦在代码里改动而忘了同步 `_PREFIX`，这条会红。"""
+    from datetime import date
+
+    from ir_agent import full, research
+    from ir_agent.sources import announce as A
+    from ir_agent.sources.external import Document, Tier
+
+    doc = Document(doc_id="a1", url="http://static.cninfo.com.cn/a.PDF",
+                   title="投产公告", publisher="生益科技", tier=Tier.COMPANY,
+                   published=date(2026, 8, 1), retrieved=date(2026, 9, 30),
+                   text="正文")
+    monkeypatch.setattr(full, "_company_name", lambda c: "某公司")
+    monkeypatch.setattr(A, "gather", lambda *a, **k: A.AnnounceResult(
+        docs=[doc], candidates=220, picked=3, fetch_failed=2,
+        fetch_failed_reasons=["超时", "PDF 取文为空"]))
+
+    class _R:
+        corpus = None
+        as_of = date(2026, 9, 30)
+
+    entries = full._load_announce("600183", _R(), date(2026, 9, 30),
+                                  tmp_path, object(), {}, ["名义产能"])
+    caveat = [e for e in entries if "取文失败" in e]
+    assert caveat, "部分取文失败没进清单"
+    line = f"  {research._mark(caveat[0])}{caveat[0]}"
+    assert "未生成" not in line, \
+        f"公告采到了 1 篇、只是 2 篇取文失败，却被渲染成未生成：{line!r}"
