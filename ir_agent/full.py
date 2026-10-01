@@ -425,7 +425,9 @@ def _restore_announce(r, out: Path) -> list[str]:
     if res.docs:
         # 第二阶段的产物是 report.md，读者不会再回头去看第一阶段的终端
         # 输出——候选/挑选/取文失败这些计数要在这里再说一遍。
-        return [announce.summary(res)]
+        # **前缀不能省**：`research._mark` 按前缀给标记，不认识的一律打成
+        # 「– 未生成：」——而这条是成功读回。键见 `research._PREFIX`。
+        return ["公司公告读回：" + announce.summary(res).removeprefix("公司公告 ")]
     if res.candidates:
         return [f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
                 f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
@@ -461,7 +463,7 @@ def _load_announce(code: str, r, as_of: date, out: Path, client, md: dict,
     try:
         res = announce.gather(client, code=code, company=_company_name(code),
                               factors=factors, as_of=as_of, corpus=r.corpus,
-                              cache_dir=out)
+                              cache_dir=out / "pdf")
     except Exception as e:                                  # noqa: BLE001
         return [f"公司公告采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
 
@@ -1792,7 +1794,8 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     md = state.get("md") or {}
     pr = state.get("pr") or {}
     # state.json 里那份清单是第一阶段渲染的；本阶段刚重建了研报语料库、
-    # 又读回了开放网络文档，篇数与分级构成要按**现在**的语料库重算，
+    # 又读回了开放网络文档与公司公告（后者是 `Tier.COMPANY`，直接改变分级
+    # 构成），篇数与分级构成要按**现在**的语料库重算，
     # 否则看板与终端还在讲第一阶段那个口径（见 `_external_md`）。
     _refresh_external_md(r, md)
 

@@ -38,7 +38,8 @@ from ir_agent.sources.annual_pdf import _download
 from ir_agent.sources.cninfo import Announcement
 from ir_agent.sources.cninfo import search as _search
 from ir_agent.sources.external import Document, Tier
-from ir_agent.sources.openweb import TEXT_LIMIT
+from ir_agent.sources.openweb import (TEXT_LIMIT, _doc_from_json, _doc_to_json,
+                                      _str_list_field)
 
 # 公告检索窗口（月）。比 corpus.gather 的研报窗口（24 个月）短：公告的
 # 时效性更强，两年前的扩产公告对当期因子取值的参考价值已经很低，而条数
@@ -377,7 +378,6 @@ ANNOUNCE_JSON = "announce.json"
 
 def save(res: AnnounceResult, path: Path | str) -> None:
     """落盘，供第二阶段读回。形状与 `openweb.save` 对齐。"""
-    from ir_agent.sources.openweb import _doc_to_json
     Path(path).write_text(json.dumps({
         "docs": [_doc_to_json(d) for d in res.docs],
         "candidates": res.candidates,
@@ -403,8 +403,6 @@ def load(path: Path | str, corpus) -> AnnounceResult:
     不同，「这是我们自己存的」不构成放行理由——否则第二阶段换一个更早的
     as_of 就能看见未来的公告。没能入库的不进 `docs`。
     """
-    from ir_agent.sources.openweb import _doc_from_json, _str_list_field
-
     p = Path(path)
     if not p.exists():
         return AnnounceResult()
@@ -426,11 +424,17 @@ def load(path: Path | str, corpus) -> AnnounceResult:
         # 数字。这三类都让后面的读取不可信，整份降级。
         return AnnounceResult()
 
+    # 与 `openweb.load` 同一道去重：若哪天确定性层也摄入了同一批巨潮公告
+    # URL，没有这道保险，读回的公告会被重复追加，「外部资料 N 篇」与
+    # COMPANY 档计数都会被悄悄放大。
+    seen = {d.url for d in corpus.docs}
     for item in docs_raw:
         try:
             doc = _doc_from_json(item)
         except Exception:                                   # noqa: BLE001
             continue
-        if corpus.add_if_visible(doc):
-            res.docs.append(doc)
+        if doc.url in seen or not corpus.add_if_visible(doc):
+            continue
+        seen.add(doc.url)
+        res.docs.append(doc)
     return res

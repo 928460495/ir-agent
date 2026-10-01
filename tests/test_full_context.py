@@ -1419,6 +1419,15 @@ def _call_name(node: "ast.Call") -> str:
     return ""
 
 
+def _call_arg_names(call: "ast.Call") -> set[str]:
+    """这一个调用点**自己**的实参里出现的变量名（位置参数与关键字参数
+    的值表达式里的 `ast.Name`）。按语法树取，不对源码文本做子串定位。"""
+    used: set[str] = set()
+    for part in list(call.args) + [kw.value for kw in call.keywords]:
+        used |= {n.id for n in ast.walk(part) if isinstance(n, ast.Name)}
+    return used
+
+
 def _calls(fn) -> list[tuple[str, int]]:
     """`fn` 函数体里每一个调用点的 (被调用者名字, 源码行号)——按**解析出
     的语法树**取，不按源码文本取。
@@ -1912,6 +1921,16 @@ def test_公告采集排在定性三节之前():
     assert binding is not None, (
         "_load_announce 的返回值没有拼进 skipped（需要 skipped +="
         " _load_announce(...)，裸调用不算）")
+    # （3）**目录实参**：「第一阶段写到哪、第二阶段读哪」是整个跨阶段机制
+    # 的要害，两处都必须是 `out`（`Path(out_dir)`）。把这里换成别的在作用域
+    # 里的目录变量（如 `snapshot_dir`），调用名、返回值绑定、位置全都不变，
+    # 行为测试又都是直接拿 tmp_path 调函数——只有断这个调用点自己的实参才
+    # 抓得到。
+    call = next(c for c in ast.walk(binding.value)
+                if isinstance(c, ast.Call) and _call_name(c) == "_load_announce")
+    assert "out" in _call_arg_names(call), (
+        "_load_announce 的目录实参不是 out——第一阶段写到的位置与第二阶段"
+        f"读回的位置对不上（实参名：{sorted(_call_arg_names(call))}）")
     assert binding.lineno < first("_analyse_qualitative")
     assert first("_analyse_facts") < binding.lineno
 
@@ -2233,6 +2252,21 @@ def test_第二阶段读回公告而不重新采集(monkeypatch, tmp_path):
     assert "候选 220 条" in "；".join(notes) and \
         "挑 3 条" in "；".join(notes), \
         "第二阶段的清单要说得出「候选 220 条里挑了 3 条」"
+    # **需求是读者看到什么，不是函数返回了什么。** 上面断的是返回值，
+    # 而 `research._mark` 按前缀给标记、不认识的一律打成「– 未生成：」——
+    # 每次成功的 `--value` 都把这条成功读回渲染成「未生成：公司公告 1 篇」，
+    # 返回值断言全绿。这里走真正的渲染路径（`ResearchOutcome.summary()`），
+    # 断**渲染出的那一行**。
+    from decimal import Decimal
+
+    from ir_agent.research import ResearchOutcome, Stage
+    rendered = ResearchOutcome(
+        code="600183", period="2025FY", as_of=date(2026, 9, 30),
+        stage=Stage.VALUED, skipped=notes, cost_usd=Decimal(0)).summary()
+    line = next(ln for ln in rendered.splitlines() if "候选 220 条" in ln)
+    assert "未生成" not in line, f"成功读回被渲染成了没生成：{line!r}"
+    assert line.lstrip().startswith("·"), \
+        f"成功读回应是信息行（· 开头），实际渲染：{line!r}"
 
 
 def test_读回零文档时三种成因分开交代(tmp_path):
@@ -2283,8 +2317,10 @@ def test_第一阶段落盘第二阶段读回_含零入库也要落盘(monkeypat
     才写。第二阶段靠文件里的 `candidates` 才能把「候选 220 条但一篇没取到」
     与「根本没落过盘」分开；只在有文档时才写，这个区分就丢了。
 
-    同时钉住 `cache_dir=out`：Task 7 的审查把「从不传 cache_dir，公告 PDF
-    缓存静默关闭」记为 Minor，现在拿得到 `out` 了，必须真的传进去。"""
+    同时钉住 `cache_dir=out / "pdf"`：Task 7 的审查把「从不传 cache_dir，
+    公告 PDF 缓存静默关闭」记为 Minor，现在拿得到 `out` 了，必须真的传进去；
+    且要进专用子目录——与 `pipeline.py` 的 `Path(snapshot_dir) / "pdf"` 同
+    一个惯例，原始 PDF 不能散落在 report.md/state.json 旁边的交付目录里。"""
     from datetime import date
 
     from ir_agent import full
@@ -2306,8 +2342,9 @@ def test_第一阶段落盘第二阶段读回_含零入库也要落盘(monkeypat
 
     full._load_announce("600183", _R(), date(2026, 9, 30), tmp_path,
                         object(), {}, ["名义产能"])
-    assert seen.get("cache_dir") == tmp_path, \
-        "没把 out 作为 cache_dir 传给 announce.gather——PDF 缓存仍是关的"
+    assert seen.get("cache_dir") == tmp_path / "pdf", \
+        "没把 out/pdf 作为 cache_dir 传给 announce.gather——PDF 缓存仍是关的，" \
+        "或原始 PDF 落进了交付目录"
     assert (tmp_path / A.ANNOUNCE_JSON).exists(), "零入库时没落盘"
 
     class _R2:
@@ -2345,6 +2382,14 @@ def test_第二阶段读回公告的返回值汇入skipped():
     assert binding is not None, (
         "_restore_announce 的返回值没有拼进 skipped（需要 skipped +="
         " _restore_announce(...)，裸调用不算）")
+    # 目录实参：必须与第一阶段落盘用的是同一个 `out`（见
+    # `test_公告采集排在定性三节之前` 里同样的断言）。
+    call = next(c for c in ast.walk(binding.value)
+                if isinstance(c, ast.Call)
+                and _call_name(c) == "_restore_announce")
+    assert "out" in _call_arg_names(call), (
+        "_restore_announce 的目录实参不是 out——第二阶段读的位置与第一阶段"
+        f"写的位置对不上（实参名：{sorted(_call_arg_names(call))}）")
     facts_ln = min(ln for n, ln in calls if n == "_analyse_facts")
     write_ln = min(ln for n, ln in calls if n == "_write_full_report")
     assert facts_ln < binding.lineno < write_ln, \

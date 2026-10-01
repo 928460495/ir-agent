@@ -764,6 +764,34 @@ def test_读回照样过时点守卫(tmp_path):
     assert not back.docs, "没能入库的文档不该出现在 docs 里"
 
 
+def test_读回不重复追加语料库里已有的公告网址(tmp_path):
+    """与 `openweb.load` 同一道去重。语料库里已经有同一网址的文档时
+    （如确定性层也摄入了这批巨潮公告），读回不能再追加一份——
+    `Corpus.add` 本身不查重，没有这道保险「外部资料 N 篇」与 COMPANY 档
+    计数会被悄悄翻倍。断言落在语料库实际内容上，不落在返回值上。"""
+    from datetime import date
+
+    import ir_agent.sources.announce as A
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    url = "http://static.cninfo.com.cn/c.PDF"
+
+    def mk(doc_id):
+        return Document(doc_id=doc_id, url=url, title="投产公告",
+                        publisher="生益科技", tier=Tier.COMPANY,
+                        published=date(2026, 8, 1),
+                        retrieved=date(2026, 9, 30), text="正文")
+    p = tmp_path / A.ANNOUNCE_JSON
+    A.save(A.AnnounceResult(docs=[mk("ann_saved")], candidates=1, picked=1), p)
+
+    cp = Corpus(as_of=date(2026, 9, 30))
+    assert cp.add_if_visible(mk("ann_prior"))      # 语料库里早已有这个网址
+    back = A.load(p, cp)
+    assert [d.doc_id for d in cp.docs] == ["ann_prior"], \
+        "同一网址的公告被追加了第二份"
+    assert not back.docs, "没入库的文档不该出现在 docs 里"
+
+
 def test_落盘文件损坏整份降级为空且不抛(tmp_path):
     """一个坏文件不能让整次研究流程崩掉。调用方的契约是「读不到就是这节
     缺公告」，不是「抛异常」。"""
