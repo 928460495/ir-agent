@@ -245,17 +245,22 @@ def _match_annual(sections, label: str) -> tuple[str, str] | None:
     只做包含判断，不抽数字——命中「稼动率」三个字不等于拿到了稼动率的
     数值，抽错一个数比没抽更糟。返回值交给调用方判断，不在这里下结论。
 
-    **匹配用剥掉后缀的核心词，不是原始标签。** 原始标签「有效产能变化
-    率」这种带单位/运算后缀的整串不会逐字出现在年报里，见 `_core_label`。
+    **匹配用按特指度降序的候选词，命中即停，不是单一核心词。** 原始标签
+    「有效产能变化率」这种带单位/运算后缀的整串不会逐字出现在年报里；
+    「原材料成本(铜箔/…)」这种带括号注解的更不会——见 `_core_candidates`。
     落在否定语境（"未披露"等）里的出现不算命中，见 `_valid_hit`。
     """
     if sections is None:
         return None
-    core = _core_label(label)
-    for s in sections.sections.values():
-        hit = _valid_hit(s.text, core)
-        if hit is not None:
-            return hit, f"《{s.label}》"
+    # **候选词在外层，章节在内层。** 顺序写反的话，一个较泛的候选词在
+    # 靠前的章节里命中会压过更具体的候选词在靠后章节里的命中——等于
+    # 放弃了「按特指度排序」这整个决定，且套件会全绿。
+    # 见 `test_候选词在外层容器在内层`。
+    for core in _core_candidates(label):
+        for s in sections.sections.values():
+            hit = _valid_hit(s.text, core)
+            if hit is not None:
+                return hit, f"《{s.label}》"
     return None
 
 
@@ -285,13 +290,15 @@ def _match_report(corpus, label: str) -> tuple[str, Document] | None:
     """
     if corpus is None:
         return None
-    core = _core_label(label)
-    for d in corpus.docs:
-        if d.tier is Tier.MEDIA:
-            continue
-        hit = _valid_hit(d.text, core)
-        if hit is not None:
-            return hit, d
+    # 候选词在外层，文档在内层——理由同 `_match_annual`，见
+    # `test_候选词在外层容器在内层`。
+    for core in _core_candidates(label):
+        for d in corpus.docs:
+            if d.tier is Tier.MEDIA:
+                continue
+            hit = _valid_hit(d.text, core)
+            if hit is not None:
+                return hit, d
     return None
 
 
@@ -306,13 +313,15 @@ def _match_announce(corpus, label: str) -> tuple[str, Document] | None:
     """
     if corpus is None:
         return None
-    core = _core_label(label)
-    for d in corpus.docs:
-        if d.tier is not Tier.COMPANY:
-            continue
-        hit = _valid_hit(d.text, core)
-        if hit is not None:
-            return hit, d
+    # 候选词在外层，文档在内层——理由同 `_match_annual`，见
+    # `test_候选词在外层容器在内层`。
+    for core in _core_candidates(label):
+        for d in corpus.docs:
+            if d.tier is not Tier.COMPANY:
+                continue
+            hit = _valid_hit(d.text, core)
+            if hit is not None:
+                return hit, d
     return None
 
 

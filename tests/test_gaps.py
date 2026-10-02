@@ -1041,3 +1041,94 @@ def test_候选词的退化情形都不崩且方向保守():
     assert _core_candidates("（全角括号）产能") == ["（全角括号）产能", "产能"]
     # 2 字恰好在下限上，保留
     assert _core_candidates("AB") == ["AB"]
+
+
+def test_候选词在外层容器在内层():
+    """**这条钉住循环嵌套的方向，把它写反会红。**
+
+    构造：两篇 SELLSIDE 文档，**靠前**那篇只含最不具体的候选词
+    （L3「有效产能」），**靠后**那篇含更具体的 L2「有效产能变化率」。
+
+    · 候选词在外层（正确）：先拿 L2 扫完所有文档 → 命中靠后那篇 → d2
+    · 容器在外层（写反）：先扫靠前那篇 → L1 不中、L2 不中、L3 中 → d1
+
+    若容器在外层，一个较泛的候选词在靠前的章节/文档里命中，会压过一个
+    更具体的候选词在靠后的容器里的命中——那等于悄悄放弃了「按特指度
+    排序」这整个决定，而套件会全绿。
+    """
+    import ir_agent.gaps as G
+
+    cp = Corpus(as_of=AS_OF)
+    cp.add(_doc("公司有效产能保持稳定，不再披露细分口径。",
+                tier=Tier.SELLSIDE, doc_id="d1"))
+    cp.add(_doc("我们测算其有效产能变化率为 12%。",
+                tier=Tier.SELLSIDE, doc_id="d2"))
+
+    hit = G._match_report(cp, "有效产能变化率(含新建产线)")
+    assert hit is not None, "两篇都没命中——候选词阶梯没接上"
+    _, doc = hit
+    assert doc.doc_id == "d2", (
+        f"命中了 {doc.doc_id}，应为 d2——容器在外层了：靠前那篇只含最不"
+        "具体的候选词「有效产能」，却压过了靠后那篇更具体的「有效产能变化率」")
+
+
+def test_带括号注解的标签能命中年报章节():
+    """改动前：`_core_label` 对带括号的标签原样返回，整串不会逐字出现在
+    年报里，② 必然落空。改动后：去括号的头「原材料成本」能命中。"""
+    import ir_agent.gaps as G
+
+    sections = _sections(("mgmt", "经营情况讨论与分析",
+                          "本期原材料成本上升，其中铜箔采购均价同比上涨 18%。"))
+    hit = G._match_annual(sections, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)")
+    assert hit is not None, "去括号的头没能命中——候选词阶梯没接进 _match_annual"
+    excerpt, where = hit
+    assert "原材料成本" in excerpt and where == "《经营情况讨论与分析》"
+
+
+def test_带括号注解的标签能命中公告():
+    """②.5 走同一条阶梯。实跑里 8 篇公告、89055 字，「原材料成本」命中 2 次。"""
+    import ir_agent.gaps as G
+
+    cp = Corpus(as_of=AS_OF)
+    cp.add(_doc("本期原材料成本同比上升 7.2 个百分点。", title="年度报告",
+                tier=Tier.COMPANY, doc_id="a1"))
+    hit = G._match_announce(cp, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)")
+    assert hit is not None, "②.5 没接上候选词阶梯"
+    _, doc = hit
+    assert doc.tier is Tier.COMPANY
+
+
+def test_括号内的词不会让因子误命中():
+    """**反向**：语料里只有括号内那个泛词时，不得命中。
+
+    实测「服务器」在真实公告语料里出现 18 次。没有这条断言，一个下探
+    括号内的实现会让「覆铜板下游需求规模」凭纯巧合拿到唯一的「证据」，
+    而正向测试全部照绿。
+    """
+    import ir_agent.gaps as G
+
+    cp = Corpus(as_of=AS_OF)
+    cp.add(_doc("AI 服务器需求旺盛，通信板块回暖。",
+                tier=Tier.SELLSIDE, doc_id="s1"))
+    assert G._match_report(
+        cp, "覆铜板下游需求规模(服务器/通信/消费电子PCB用量)") is None, \
+        "凭括号内的泛词「服务器」命中了——这正是「把巧合伪装成证据」"
+
+    sections = _sections(("mgmt", "经营情况讨论与分析", "AI 服务器出货增长。"))
+    assert G._match_annual(
+        sections, "覆铜板下游需求规模(服务器/通信/消费电子PCB用量)") is None
+
+
+def test_否定语境对每个候选词都生效():
+    """`_valid_hit` 一行不动，所以否定判断逐候选词成立——不是只对第一个。
+
+    这里 L1 整串不出现，L2「原材料成本」唯一的出现落在「未披露」窗口里，
+    必须判不命中、退到下一级或落空，而不是把否定句当证据摘出来。
+    """
+    import ir_agent.gaps as G
+
+    sections = _sections(("mgmt", "经营情况讨论与分析",
+                          "本期未披露原材料成本的具体构成。"))
+    assert G._match_annual(
+        sections, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)") is None, \
+        "否定语境里的命中被当成了证据"
