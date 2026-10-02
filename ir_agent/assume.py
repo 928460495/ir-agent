@@ -144,7 +144,8 @@ class Row:
 def _decomp_to_dict(d: Decomposition) -> dict:
     return {"target": d.target, "op": d.op.value,
             "factors": [{"key": f.key, "label": f.label, "unit": f.unit,
-                        "source_hint": f.source_hint} for f in d.factors]}
+                        "source_hint": f.source_hint,
+                        "search_term": f.search_term} for f in d.factors]}
 
 
 def _decomp_from_dict(d: dict) -> Decomposition:

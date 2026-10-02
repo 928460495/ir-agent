@@ -148,8 +148,7 @@ def test_解析遇到过短检索词报方法论错误而非分解式错误():
 
     from ir_agent.methodology import MethodologyFailed, parse
 
-    text = ("分解: 营收 | 乘 | 产能:变化率:年报:率 | 稼动率:变化率:年报 | "
-            "单价:变化率:年报 | 结构:变化率:年报\n"
+    text = ("分解: 营收 | 乘 | 产能:变化率:年报:率 | 稼动率:变化率:年报单价:变化率:年报\n"
             "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     with pytest.raises(MethodologyFailed) as e:
         parse(text)
@@ -352,7 +351,7 @@ def test_DSL第四段读成检索词且旧的三段仍然可用():
     from ir_agent.methodology import parse
 
     m = parse("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
-              "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
+              "稼动率:变化率:年报 | 单价:变化率:年报\n"
               "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     rev = next(d for d in m.decompositions if d.target == "revenue")
     by_label = {f.label: f for f in rev.factors}
@@ -368,7 +367,7 @@ def test_往返不丢检索词():
     from ir_agent.methodology import _to_dsl, parse
 
     src = ("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
-           "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
+           "稼动率:变化率:年报 | 单价:变化率:年报\n"
            "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     m1 = parse(src)
     m2 = parse(_to_dsl(m1))
@@ -386,11 +385,18 @@ def test_人读表里出现检索词列():
     from ir_agent.methodology import parse, to_markdown
 
     m = parse("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
-              "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
+              "稼动率:变化率:年报 | 单价:变化率:年报\n"
               "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     md = to_markdown(m)
-    assert "检索词" in md, "人读表没有检索词列"
-    assert "出货量" in md
+    # **断在表头行与数据行上，不断「检索词 in md」。** 后者是空断言：
+    # 文件末尾的往返说明里有一句「`分解: 目标 | 运算 | 因子名:单位:
+    # 数据线索:检索词 | …`」，「检索词」四个字在文档里另有出处，于是
+    # 去掉整列表头后那条断言照样通过（实测突变验证时发现）。
+    assert "| 因子 | 单位 | 数据线索 | 检索词 |" in md, "人读表没有检索词列"
+    rows = [l for l in md.splitlines() if l.startswith("| 出货量同比增速 ")]
+    assert rows, "表里没有这一行"
+    assert rows[0].rstrip().endswith("| 出货量 |"), \
+        f"检索词没落在那一列里：{rows[0]!r}"
 ```
 
 追加到 `tests/test_assume.py` 末尾：
@@ -560,7 +566,7 @@ def test_hint带冒号时第四段会变成假检索词():
     from ir_agent.methodology import parse
 
     m = parse("分解: 营收 | 乘 | 汇兑损益:变化率:年报附注:汇兑损益 | "
-              "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
+              "稼动率:变化率:年报 | 单价:变化率:年报\n"
               "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     f = next(f for d in m.decompositions for f in d.factors
              if f.label == "汇兑损益")

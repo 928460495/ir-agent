@@ -2249,3 +2249,27 @@ def test_读回的分解式里过短检索词不会让第二阶段崩成tracebac
                 "source_hint": "年报", "search_term": "率"}]}]}
     with pytest.raises(DecompositionInvalid):
         assume.from_json(bad, code="600183")
+
+
+def test_判断项落盘往返不丢检索词():
+    """`_decomp_to_dict`/`_decomp_from_dict` 两边都要带上，缺一边就在
+    第二阶段读回时静默丢掉。读回侧用 `.get` 带默认值，与既有的
+    `f.get("source_hint", "")` 同形——旧的 assumptions.json 没有这个键。
+    """
+    from ir_agent.assume import _decomp_from_dict, _decomp_to_dict
+    from ir_agent.drivers import Decomposition, Factor, Op
+
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[
+        Factor(key="shipment", label="出货量同比增速", unit="变化率",
+               source_hint="年报", search_term="出货量"),
+        Factor(key="asp", label="单价", unit="变化率", source_hint="年报")])
+    back = _decomp_from_dict(_decomp_to_dict(d))
+    got = {f.label: f.search_term for f in back.factors}
+    assert got["出货量同比增速"] == "出货量", "往返丢了检索词"
+    assert got["单价"] == ""
+
+    # 旧文件没有这个键，不能崩
+    raw = _decomp_to_dict(d)
+    for f in raw["factors"]:
+        f.pop("search_term")
+    assert all(f.search_term == "" for f in _decomp_from_dict(raw).factors)

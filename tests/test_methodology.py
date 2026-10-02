@@ -264,9 +264,96 @@ def test_解析遇到过短检索词报方法论错误而非分解式错误():
 
     from ir_agent.methodology import MethodologyFailed, parse
 
+    # 营收链用合法的三因子（产能 × 稼动率 × 单价）——`drivers` 有一条
+    # 领域规则：公司内部占比型因子（「结构」「高端产品收入占比」）不能进
+    # 营收乘法链。混进一个违规因子会让这条测试靠另一个 MethodologyFailed
+    # 通过，变成一条测不准东西的测试。
     text = ("分解: 营收 | 乘 | 产能:变化率:年报:率 | 稼动率:变化率:年报 | "
-            "单价:变化率:年报 | 结构:变化率:年报\n"
+            "单价:变化率:年报\n"
             "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     with pytest.raises(MethodologyFailed) as e:
         parse(text)
     assert "产能" in str(e.value) and "率" in str(e.value)
+
+
+def test_DSL第四段读成检索词且旧的三段仍然可用():
+    """第 4 段**此前是被静默丢弃的**（`hint = bits[2] if len(bits) > 2`），
+    所以旧的 3 段文件自然得到空检索词、退回 `_core_candidates` 的前三级
+    ——向后兼容是免费的，但要有断言守住它。
+
+    读第 4 段在 Task 1 已落地（错误转译需要一条能触发它的路径），所以
+    这条是回归保护而不是驱动实现的测试。
+    """
+    from ir_agent.methodology import parse
+
+    m = parse("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
+              "稼动率:变化率:年报 | 单价:变化率:年报\n"
+              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
+    rev = next(d for d in m.decompositions if d.target == "revenue")
+    by_label = {f.label: f for f in rev.factors}
+    assert by_label["出货量同比增速"].search_term == "出货量"   # 4 段
+    assert by_label["稼动率"].search_term == ""                # 3 段，兼容
+
+
+def test_往返不丢检索词():
+    """`_to_dsl` 是 `parse` 的逆操作，`from_markdown` 靠它把落盘文件读回。
+    **不改 `_to_dsl`，人工编辑 drivers.md 后重跑会把检索词吃掉**——而那个
+    往返是写进文件末尾的承诺（「编辑下面这段文字再重跑即可覆盖」）。
+    """
+    from ir_agent.methodology import _to_dsl, parse
+
+    src = ("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
+           "稼动率:变化率:年报 | 单价:变化率:年报\n"
+           "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
+    m1 = parse(src)
+    m2 = parse(_to_dsl(m1))
+    got = {f.label: f.search_term
+           for d in m2.decompositions for f in d.factors}
+    assert got["出货量同比增速"] == "出货量", "往返丢了检索词"
+    assert got["稼动率"] == ""
+
+
+def test_人读表里出现检索词列():
+    """`drivers.md` 是人看的。检索词决定了代码实际去搜什么词，人核实
+    分解式时必须看得见它——否则一个泛词（实测「服务器」18 次巧合命中）
+    会在没人注意的情况下决定一个因子的「年报披露」状态。
+    """
+    from ir_agent.methodology import parse, to_markdown
+
+    m = parse("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
+              "稼动率:变化率:年报 | 单价:变化率:年报\n"
+              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
+    md = to_markdown(m)
+    # **断在表头行与数据行上，不断「检索词 in md」。** 后者是空断言：
+    # 文件末尾的往返说明里有一句「`分解: 目标 | 运算 | 因子名:单位:
+    # 数据线索:检索词 | …`」，「检索词」四个字在文档里另有出处，于是
+    # 去掉整列表头后那条断言照样通过（实测突变验证时发现）。
+    assert "| 因子 | 单位 | 数据线索 | 检索词 |" in md, "人读表没有检索词列"
+    rows = [l for l in md.splitlines() if l.startswith("| 出货量同比增速 ")]
+    assert rows, "表里没有这一行"
+    assert rows[0].rstrip().endswith("| 出货量 |"), \
+        f"检索词没落在那一列里：{rows[0]!r}"
+
+
+def test_hint带冒号时第四段会变成假检索词():
+    """**这是一条把已知坏情形钉成明账的测试，不是一条验证正确行为的测试。**
+
+    `raw.split(":")` 对所有字段生效。`source_hint` 里出现冒号时，一行 3 段
+    的因子被切成 4 段，尾巴落进检索词位——而闸门只查长度，拦不住它。
+
+    设计早期版本把子串闸门当作这个风险的解药（hint 的碎片几乎不可能是
+    label 的子串）。闸门放开之后那条解药不存在了，所以这里只能记成明账。
+
+    它红了意味着有人修了这个 bug（限定 `split(":", 3)` 或禁止 hint 带冒号）
+    ——那是好事，请连这条测试一起改掉。
+    """
+    from ir_agent.methodology import parse
+
+    m = parse("分解: 营收 | 乘 | 汇兑损益:变化率:年报附注:汇兑损益 | "
+              "稼动率:变化率:年报 | 单价:变化率:年报\n"
+              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
+    f = next(f for d in m.decompositions for f in d.factors
+             if f.label == "汇兑损益")
+    assert f.source_hint == "年报附注", "hint 被切断（这是已知行为）"
+    assert f.search_term == "汇兑损益", \
+        "hint 的尾巴成了检索词（这是已知的坏情形，见本测试 docstring）"
