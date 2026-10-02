@@ -250,3 +250,23 @@ def test_提示词讲清营收乘法链不放占比类因子():
     """错误消息就是下一轮提示词——但首轮就说清，能省一次被驳回。"""
     from ir_agent import methodology
     assert "占比" in methodology.PROMPT and "市占率" in methodology.PROMPT
+
+
+def test_解析遇到过短检索词报方法论错误而非分解式错误():
+    """`Factor.__post_init__` 抛的是 `DecompositionInvalid`，而 `parse`
+    里 `Factor(...)` 的构造**不在任何 try 内**——不转译的话它会绕过
+    `methodology.py` 的重试循环（那里只 `except MethodologyFailed`），
+    模型拿不到驳回原因、也没有重试机会。
+
+    消息里要带因子名与那个检索词，否则模型不知道该改哪一个。
+    """
+    import pytest
+
+    from ir_agent.methodology import MethodologyFailed, parse
+
+    text = ("分解: 营收 | 乘 | 产能:变化率:年报:率 | 稼动率:变化率:年报 | "
+            "单价:变化率:年报 | 结构:变化率:年报\n"
+            "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
+    with pytest.raises(MethodologyFailed) as e:
+        parse(text)
+    assert "产能" in str(e.value) and "率" in str(e.value)

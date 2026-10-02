@@ -152,7 +152,7 @@ def test_解析遇到过短检索词报方法论错误而非分解式错误():
             "单价:变化率:年报 | 结构:变化率:年报\n"
             "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     with pytest.raises(MethodologyFailed) as e:
-        parse(text, industry="覆铜板")
+        parse(text)
     assert "产能" in str(e.value) and "率" in str(e.value)
 ```
 
@@ -174,7 +174,7 @@ def test_读回的分解式里过短检索词不会让第二阶段崩成tracebac
     from ir_agent import assume
 
     bad = {"code": "600183", "labels": [], "rows": [],
-           "decomps": [{"target": "revenue", "op": "×", "factors": [
+           "decomps": [{"target": "revenue", "op": "乘", "factors": [
                {"key": "capacity", "label": "产能利用率", "unit": "变化率",
                 "source_hint": "年报", "search_term": "率"}]}]}
     with pytest.raises(DecompositionInvalid):
@@ -311,7 +311,7 @@ Expected: 这条测试断言的是 `DecompositionInvalid`，去掉 `full.py` 的
 
 Run: `python -m pytest tests -q -m "not live" -W error`
 
-Expected: PASS，`1958 passed, 19 deselected`（基线 1954 + 4），无警告。
+Expected: PASS，`1959 passed, 19 deselected`（基线 1954 + 5），无警告。
 
 - [ ] **Step 9: 提交**
 
@@ -353,8 +353,7 @@ def test_DSL第四段读成检索词且旧的三段仍然可用():
 
     m = parse("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
               "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
-              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n",
-              industry="覆铜板")
+              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     rev = next(d for d in m.decompositions if d.target == "revenue")
     by_label = {f.label: f for f in rev.factors}
     assert by_label["出货量同比增速"].search_term == "出货量"   # 4 段
@@ -371,8 +370,8 @@ def test_往返不丢检索词():
     src = ("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
            "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
            "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
-    m1 = parse(src, industry="覆铜板")
-    m2 = parse(_to_dsl(m1), industry="覆铜板")
+    m1 = parse(src)
+    m2 = parse(_to_dsl(m1))
     got = {f.label: f.search_term
            for d in m2.decompositions for f in d.factors}
     assert got["出货量同比增速"] == "出货量", "往返丢了检索词"
@@ -388,8 +387,7 @@ def test_人读表里出现检索词列():
 
     m = parse("分解: 营收 | 乘 | 出货量同比增速:变化率:年报:出货量 | "
               "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
-              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n",
-              industry="覆铜板")
+              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     md = to_markdown(m)
     assert "检索词" in md, "人读表没有检索词列"
     assert "出货量" in md
@@ -563,8 +561,7 @@ def test_hint带冒号时第四段会变成假检索词():
 
     m = parse("分解: 营收 | 乘 | 汇兑损益:变化率:年报附注:汇兑损益 | "
               "稼动率:变化率:年报 | 单价:变化率:年报 | 结构:变化率:年报\n"
-              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n",
-              industry="覆铜板")
+              "分解: 毛利率 | 加 | 成本:pp:年报 | 稼动:pp:年报\n")
     f = next(f for d in m.decompositions for f in d.factors
              if f.label == "汇兑损益")
     assert f.source_hint == "年报附注", "hint 被切断（这是已知行为）"
@@ -641,7 +638,7 @@ Expected: PASS，5 passed
 
 Run: `python -m pytest tests -q -m "not live" -W error`
 
-Expected: PASS，`1963 passed, 19 deselected`（Task 1 后的 1958 + 5），无警告。
+Expected: PASS，`1964 passed, 19 deselected`（Task 1 后的 1959 + 5），无警告。
 
 - [ ] **Step 12: 提交**
 
@@ -872,7 +869,7 @@ Expected: **FAIL**，两条都红——`test_检索词是候选阶梯的最后�
 
 Run: `python -m pytest tests -q -m "not live" -W error`
 
-Expected: PASS，`1968 passed, 19 deselected`（Task 2 后的 1963 + 5），无警告。
+Expected: PASS，`1969 passed, 19 deselected`（Task 2 后的 1964 + 5），无警告。
 
 - [ ] **Step 9: 提交**
 
@@ -942,7 +939,7 @@ def test_靠标签结构命中时不加这句标注():
 
     f = Factor(key="cost", label="原材料成本(铜箔/电子级玻纤布/环氧树脂价格)",
                unit="pp", source_hint="年报", search_term="成本")
-    d = Decomposition(target="gross_margin", op=Op.ADD, factors=[f])
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[f])
     sections = _sections(("mgmt", "经营情况讨论与分析",
                           "本期原材料成本上升 7%。"))
     data = G.collect(_ExplodingClient(), [d], FactLedger(), None,
@@ -1160,7 +1157,7 @@ Expected: PASS。重点看这几条既有测试仍绿（它们解包匹配器的
 
 Run: `python -m pytest tests -q -m "not live" -W error`
 
-Expected: PASS，`1971 passed, 19 deselected`（Task 3 后的 1968 + 3），无警告。
+Expected: PASS，`1972 passed, 19 deselected`（Task 3 后的 1969 + 3），无警告。
 
 - [ ] **Step 10: 提交**
 

@@ -152,7 +152,8 @@ def _decomp_from_dict(d: dict) -> Decomposition:
     return Decomposition(
         target=d["target"], op=op,
         factors=[Factor(key=f["key"], label=f["label"], unit=f["unit"],
-                        source_hint=f.get("source_hint", ""))
+                        source_hint=f.get("source_hint", ""),
+                        search_term=f.get("search_term", ""))
                 for f in d["factors"]])
 
 

@@ -2227,3 +2227,25 @@ def test_两阶段用不同anchor会给出相反结论():
     with pytest.raises(AssumeFailed, match=r"26\.97%.*29\.57%.*29\.47%"):
         assume.check(build(), 2, ledger=FactLedger(), body="正文", as_of=AS_OF,
                     decomps=[gm], base_margin=base_margin)
+
+
+def test_读回的分解式里过短检索词不会让第二阶段崩成traceback():
+    """`from_json` 里 `_decomp_from_dict` 直接构造 `Factor`，而
+    `full.py` 的调用点（第 1741 行）**完全没兜**——`run_valuation` 对
+    `AssumeFailed` 的捕获在第 1809 行，**在 from_json 之后**，所以那里
+    抛任何异常都会以 traceback 的形式崩掉第二阶段命令。
+
+    人手改过的 assumptions.json 应该得到一句能看懂的话，不是 traceback。
+    措辞照 `assume.py` 既有那条「请重跑第一阶段」。
+    """
+    import pytest
+
+    from ir_agent import assume
+    from ir_agent.drivers import DecompositionInvalid
+
+    bad = {"code": "600183", "labels": [], "rows": [],
+           "decomps": [{"target": "revenue", "op": "乘", "factors": [
+               {"key": "capacity", "label": "产能利用率", "unit": "变化率",
+                "source_hint": "年报", "search_term": "率"}]}]}
+    with pytest.raises(DecompositionInvalid):
+        assume.from_json(bad, code="600183")

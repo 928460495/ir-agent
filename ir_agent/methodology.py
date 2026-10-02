@@ -76,8 +76,28 @@ def parse(text: str) -> Methodology:
                     f"因子写法应为「名称:单位:线索」，得到 {raw!r}")
             label, unit = bits[0], bits[1]
             hint = bits[2] if len(bits) > 2 else ""
-            factors.append(Factor(key=_slug(label), label=label, unit=unit,
-                                  source_hint=hint))
+            # 第 4 段 = 检索词。**此前它被静默丢弃**，所以旧的 3 段文件
+            # 自然得到空串、退回 `gaps._core_candidates` 的前三级——向后
+            # 兼容是免费的。
+            #
+            # **已知的坏情形（明账）**：`raw.split(":")` 对所有字段生效，
+            # 若 `source_hint` 里出现冒号（`年报附注:汇兑损益`），一行 3 段
+            # 的因子会被切成 4 段，尾巴落进这里，变成一个模型从没打算给的
+            # 检索词。闸门只查长度，拦不住它。不在本次修（修法是限定
+            # `split(":", 3)` 或禁止 hint 带冒号，是独立的一件事），但有
+            # 测试把它钉成已知——见 `test_hint带冒号时第四段会变成假检索词`。
+            term = bits[3] if len(bits) > 3 else ""
+            # **`Factor.__post_init__` 抛的是 `DecompositionInvalid`，必须
+            # 在这里转译成 `MethodologyFailed`。** 下面那个 try 只包着
+            # `check_closure(d)`，不包构造本身；不转译的话异常会绕过本模块
+            # 的重试循环（`parse` 的调用方只 `except MethodologyFailed`），
+            # 模型既拿不到驳回原因、也没有重试机会。
+            try:
+                factors.append(Factor(key=_slug(label), label=label,
+                                      unit=unit, source_hint=hint,
+                                      search_term=term))
+            except DecompositionInvalid as e:
+                raise MethodologyFailed(str(e)) from e
         d = Decomposition(target=_TARGETS[tgt], op=_OPS[op], factors=factors)
         try:
             check_closure(d)

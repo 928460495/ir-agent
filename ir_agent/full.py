@@ -18,6 +18,7 @@ from ir_agent.audit import audit
 from ir_agent.clients.claude_cli import ClaudeCliError, make_client
 from ir_agent.dashboard import build_dashboard
 from ir_agent.debate import DebateRefused, run_debate
+from ir_agent.drivers import DecompositionInvalid
 from ir_agent.market import market_of
 from ir_agent import dcf
 from ir_agent.research import (
@@ -1738,7 +1739,17 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     state = json.loads((out / STATE).read_text(encoding="utf-8")) \
         if (out / STATE).exists() else {"md": {}, "pr": {}}
 
-    a, edits = assume.from_json(saved, code=code)
+    # **`from_json` 里 `_decomp_from_dict` 直接构造 `Factor`，构造即校验。**
+    # 这里不兜的话，一份人手改坏的 assumptions.json 会以 traceback 的形式
+    # 崩掉整条第二阶段命令——`run_valuation` 对 `AssumeFailed` 的捕获在
+    # 下面（约 1809 行），在这一行之后，兜不到这里。措辞与上下两处
+    # `SystemExit` 同源：这份文件不可用，请做什么。
+    try:
+        a, edits = assume.from_json(saved, code=code)
+    except DecompositionInvalid as e:
+        raise SystemExit(
+            f"{js} 里的分解式已不合法：{e}　——请重跑第一阶段，"
+            "重新预研分解式后再填判断项。")
     if not a.rows:
         raise SystemExit(
             f"{js} 里没有判断项 —— 请先跑完第一阶段。")

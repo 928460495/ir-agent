@@ -391,3 +391,63 @@ def test_占比闸门只管营收乘法链不管毛利率加法链(label):
         Factor(key="cost", label="上游成本", unit="pp"),
         Factor(key="mix", label=label, unit="pp")])
     check_closure(d)
+
+
+# ── 检索词：由模型决定，代码只查长度 ──────────────────────────
+#
+# B3 第一版靠括号这个结构信号切分因子标签。实测它对**不带括号但同样
+# 冗长**的标签无能为力：「服务器及通信用高端覆铜板出货量同比增速」剥掉
+# 运算后缀仍 17 字，不会逐字出现在任何年报里。唯一知道该用什么词检索的
+# 是生成这个标签的那个模型，所以给它一条显式通道。
+
+
+def test_检索词不必是标签的子串():
+    """**这条钉住「放开闸门」这个决定。**
+
+    设计过程中先定的是「必须是 label 的子串」，用户裁定改为放开：在因子
+    检索这一环尽量不设闸门，由模型决定。「客户集中度」在年报里真实存在、
+    比标签里任何一段都准，而它不是标签的子串。
+
+    这条红了意味着有人把子串闸门加回来了——那是一个要重新讨论的决定，
+    不是一次「加固」。要重开请先读 spec 第二节那张实测命中表。
+    """
+    from ir_agent.drivers import Factor
+
+    f = Factor(key="k", label="前五大客户销售收入占营业收入比重变化率",
+               unit="变化率", search_term="客户集中度")
+    assert f.search_term == "客户集中度"
+
+
+def test_检索词的长度下限仍然生效():
+    """1 字检索词在任何年报里都**必然**命中，那不是「模型决定」而是
+    「定然命中」，会把所有因子都抬成「年报披露」、让这个状态标签彻底
+    失去信息量。放开闸门是为了让模型的判断生效，不是让判断失效。
+    """
+    import pytest
+
+    from ir_agent.drivers import DecompositionInvalid, Factor
+
+    with pytest.raises(DecompositionInvalid):
+        Factor(key="k", label="产能利用率", unit="变化率", search_term="率")
+    # 空检索词通过——旧的 3 段 DSL 与旧的 JSON 都靠这条向后兼容
+    assert Factor(key="k", label="产能利用率", unit="变化率").search_term == ""
+
+
+def test_代码不下探括号内而模型可以给任何词():
+    """**这处不对称是刻意的，两面同时钉住。** 分开写，将来只会有一半
+    被读到。
+
+    · 代码侧：B3 第一版的决定，不得倒退——实测代码分不开「铜箔」
+      （真信号，命中 6 次）与「通信」（巧合，命中 4 次），长度分不开。
+    · 模型侧：完全自由，连不在标签里的词也可以给。
+
+    谁要「修平」这处不对称，请先读 spec 第二节。往任一方向修都会破坏
+    一个已做出的决定。
+    """
+    from ir_agent.drivers import Factor
+    from ir_agent.gaps import _core_candidates
+
+    assert "铜箔" not in _core_candidates(
+        "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)")
+    assert Factor(key="k", label="原材料成本(铜箔/电子级玻纤布/环氧树脂价格)",
+                  unit="pp", search_term="铜箔").search_term == "铜箔"
