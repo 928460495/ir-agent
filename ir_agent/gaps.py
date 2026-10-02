@@ -246,7 +246,7 @@ def _valid_hit(text: str, core: str) -> str | None:
 
 
 def _match_annual(sections, label: str,
-                  search_term: str = "") -> tuple[str, str] | None:
+                  search_term: str = "") -> tuple[str, str, str] | None:
     """②年报叙述章节里是否提到该因子。
 
     只做包含判断，不抽数字——命中「稼动率」三个字不等于拿到了稼动率的
@@ -256,6 +256,10 @@ def _match_annual(sections, label: str,
     「有效产能变化率」这种带单位/运算后缀的整串不会逐字出现在年报里；
     「原材料成本(铜箔/…)」这种带括号注解的更不会——见 `_core_candidates`。
     落在否定语境（"未披露"等）里的出现不算命中，见 `_valid_hit`。
+
+    **第三个返回值是命中的那个候选词。** `collect` 靠它判断命中来自哪一级
+    ——相等于 `Factor.search_term` 就说明是靠模型给的检索词命中的，那件事
+    要在产物清单上说出来（见 `_via_note`）。
     """
     if sections is None:
         return None
@@ -267,12 +271,12 @@ def _match_annual(sections, label: str,
         for s in sections.sections.values():
             hit = _valid_hit(s.text, core)
             if hit is not None:
-                return hit, f"《{s.label}》"
+                return hit, f"《{s.label}》", core
     return None
 
 
 def _match_report(corpus, label: str,
-                  search_term: str = "") -> tuple[str, Document] | None:
+                  search_term: str = "") -> tuple[str, Document, str] | None:
     """③研报语料库里是否提到该因子，判据与 _match_annual 同理。
 
     **返回命中的原文片段与它所在的 Document 本身**，不只是格式化好的
@@ -295,6 +299,10 @@ def _match_report(corpus, label: str,
     继续扫描其余文档——同一因子仍可能在别的 SELLSIDE/OFFICIAL 文档里
     正常命中，落空了才退到④或"无数据"，这正是代价不对称原则要求的
     方向：宁可多退一级，不可把媒体错拔成研报依据。
+
+    **第三个返回值是命中的那个候选词。** `collect` 靠它判断命中来自哪一级
+    ——相等于 `Factor.search_term` 就说明是靠模型给的检索词命中的，那件事
+    要在产物清单上说出来（见 `_via_note`）。
     """
     if corpus is None:
         return None
@@ -306,12 +314,12 @@ def _match_report(corpus, label: str,
                 continue
             hit = _valid_hit(d.text, core)
             if hit is not None:
-                return hit, d
+                return hit, d, core
     return None
 
 
 def _match_announce(corpus, label: str,
-                    search_term: str = "") -> tuple[str, Document] | None:
+                    search_term: str = "") -> tuple[str, Document, str] | None:
     """②.5 公司公告里是否提到该因子，判据与 `_match_report` 同理。
 
     **只看 `Tier.COMPANY` 文档。** ②.5 是公告这一级；研报与媒体各有
@@ -319,6 +327,10 @@ def _match_announce(corpus, label: str,
 
     公告排在研报之前，因为它是公司权威披露、且由确定性接口取回（模型只
     挑下标、不给网址），比两级模型中介的来源更近。
+
+    **第三个返回值是命中的那个候选词。** `collect` 靠它判断命中来自哪一级
+    ——相等于 `Factor.search_term` 就说明是靠模型给的检索词命中的，那件事
+    要在产物清单上说出来（见 `_via_note`）。
     """
     if corpus is None:
         return None
@@ -330,8 +342,28 @@ def _match_announce(corpus, label: str,
                 continue
             hit = _valid_hit(d.text, core)
             if hit is not None:
-                return hit, d
+                return hit, d, core
     return None
+
+
+def _via_note(core: str, f: Factor) -> str:
+    """命中来自模型给的检索词时，在 `note` 末尾说出来；否则空串。
+
+    **这是放开检索词闸门的对价。** 闸门只查长度（见
+    `drivers.Factor.search_term`），所以一个泛词会一路走到底：实测
+    「覆铜板」在真实公告语料里命中 98 次、「产能」31 次、「服务器」18 次，
+    那些命中与因子无关，却会被标成「年报披露」。代码不再拦，那就至少要
+    让读者分得清「这条证据是代码按标签结构找到的」与「这条是靠模型指的
+    路找到的」。同源做法见 `Corpus.media_cited` 的「警告不驳回」与
+    `host_check_degraded` 的「不阻断但必须一路传到产物清单」。
+
+    **按字符串比较，不按位置。** `_core_candidates` 会去重：若标签本身就是
+    「产能」、检索词也给「产能」，它根本不会作为第四项出现，数位置会在这种
+    情形下说错话。见 `test_标注按字符串比较而非按位置`。
+    """
+    if f.search_term and core == f.search_term:
+        return f"（靠模型给的检索词「{f.search_term}」命中，非标签结构）"
+    return ""
 
 
 def collect(client, decomps: list[Decomposition], ledger: FactLedger,
@@ -361,11 +393,12 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
 
             hit = _match_annual(sections, f.label, f.search_term)
             if hit is not None:
-                excerpt, src = hit
+                excerpt, src, core = hit
                 out[f.key] = FactorData(
                     factor=f, status=ANNUAL,
                     note=f"「{excerpt}」——{src}"
-                         "（文字依据，是否给出具体数值待人工确认）",
+                         "（文字依据，是否给出具体数值待人工确认）"
+                         + _via_note(core, f),
                     source_url=annual_url, source_retrieved=as_of,
                     # 与 note 里包在「」中的那段是同一份文字——note 是
                     # 拼给人看的，这里是给 assume._match_excerpt 用的，
@@ -375,22 +408,24 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
 
             hit = _match_announce(corpus, f.label, f.search_term)
             if hit is not None:
-                excerpt, doc = hit
+                excerpt, doc, core = hit
                 out[f.key] = FactorData(
                     factor=f, status=ANNOUNCE,
                     note=f"「{excerpt}」——{doc.cite()}"
-                         "（文字依据，是否给出具体数值待人工确认）",
+                         "（文字依据，是否给出具体数值待人工确认）"
+                         + _via_note(core, f),
                     source_url=doc.url, source_retrieved=doc.retrieved,
                     source_excerpt=excerpt)
                 continue
 
             hit = _match_report(corpus, f.label, f.search_term)
             if hit is not None:
-                excerpt, doc = hit
+                excerpt, doc, core = hit
                 out[f.key] = FactorData(
                     factor=f, status=REPORT,
                     note=f"「{excerpt}」——{doc.cite()}"
-                         "（文字依据，是否给出具体数值待人工确认）",
+                         "（文字依据，是否给出具体数值待人工确认）"
+                         + _via_note(core, f),
                     source_url=doc.url, source_retrieved=doc.retrieved,
                     source_excerpt=excerpt)
                 continue

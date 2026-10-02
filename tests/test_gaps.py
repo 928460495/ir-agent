@@ -556,7 +556,7 @@ def test_公告命中取出COMPANY文档的摘录():
                     text="本次投产新增名义产能 300 万平方米。"))
     hit = G._match_announce(cp, "名义产能")
     assert hit is not None
-    excerpt, doc = hit
+    excerpt, doc, _ = hit
     assert doc.tier is Tier.COMPANY
     assert "300 万平方米" in excerpt
 
@@ -1066,7 +1066,7 @@ def test_候选词在外层容器在内层():
 
     hit = G._match_report(cp, "有效产能变化率(含新建产线)")
     assert hit is not None, "两篇都没命中——候选词阶梯没接上"
-    _, doc = hit
+    _, doc, _core = hit
     assert doc.doc_id == "d2", (
         f"命中了 {doc.doc_id}，应为 d2——容器在外层了：靠前那篇只含最不"
         "具体的候选词「有效产能」，却压过了靠后那篇更具体的「有效产能变化率」")
@@ -1081,7 +1081,7 @@ def test_带括号注解的标签能命中年报章节():
                           "本期原材料成本上升，其中铜箔采购均价同比上涨 18%。"))
     hit = G._match_annual(sections, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)")
     assert hit is not None, "去括号的头没能命中——候选词阶梯没接进 _match_annual"
-    excerpt, where = hit
+    excerpt, where, _ = hit
     assert "原材料成本" in excerpt and where == "《经营情况讨论与分析》"
 
 
@@ -1094,7 +1094,7 @@ def test_带括号注解的标签能命中公告():
                 tier=Tier.COMPANY, doc_id="a1"))
     hit = G._match_announce(cp, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)")
     assert hit is not None, "②.5 没接上候选词阶梯"
-    _, doc = hit
+    _, doc, _core = hit
     assert doc.tier is Tier.COMPANY
 
 
@@ -1176,7 +1176,7 @@ def test_前三级落空时检索词兜底命中():
         "不给检索词时本该落空——否则这条测试证明不了检索词起了作用"
     hit = G._match_annual(sections, label, search_term="出货量")
     assert hit is not None, "检索词没能兜底"
-    excerpt, where = hit
+    excerpt, where, _ = hit
     assert "出货量" in excerpt and where == "《经营情况讨论与分析》"
 
 
@@ -1196,7 +1196,7 @@ def test_更具体的结构候选优先于检索词():
         sections, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)",
         search_term="成本")
     assert hit is not None
-    _, where = hit
+    _, where, _core = hit
     assert where == "《第二节》", \
         "用了检索词「成本」而不是更具体的「原材料成本」——L4 被提前了"
 
@@ -1218,3 +1218,74 @@ def test_三个匹配器都收检索词():
                    tier=Tier.COMPANY, doc_id="a1"))
     assert G._match_announce(cp_co, label) is None
     assert G._match_announce(cp_co, label, search_term="出货量") is not None
+
+
+def test_靠检索词命中要在清单渲染里说出来():
+    """**断言落在 `G.summary(data)` 的渲染输出上，不是 `fd.note` 字段上。**
+
+    子项目 B 的终审用一个阻断项换来这条教训：一条要求是「人看得见」，而
+    两条测试都断在 `FactorData.note` 字段上，渲染器把那个字段整行丢掉，
+    两条测试照样通过。要求是人看得见，断言就必须落在人看到的那个字符串上。
+    """
+    import ir_agent.gaps as G
+    from ir_agent.drivers import Decomposition, Factor, Op
+    from ir_agent.ledger import FactLedger
+
+    f = Factor(key="shipment", label="服务器及通信用高端覆铜板出货量同比增速",
+               unit="变化率", source_hint="年报", search_term="出货量")
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[f])
+    sections = _sections(("mgmt", "经营情况讨论与分析",
+                          "本期出货量同比增长 23%。"))
+    data = G.collect(_ExplodingClient(), [d], FactLedger(), None,
+                     "覆铜板", AS_OF, sections=sections)
+
+    assert data["shipment"].status == G.ANNUAL
+    rendered = G.summary(data)
+    assert "靠模型给的检索词" in rendered, \
+        "靠检索词命中这件事没出现在人看到的清单里"
+    assert "出货量" in rendered
+
+
+def test_靠标签结构命中时不加这句标注():
+    """**反向。** 没有它，一个无条件追加这句话的实现也能让正向测试通过，
+    而那会让这条标注失去全部信息量——每一行都写着「靠检索词命中」，
+    等于没写。
+    """
+    import ir_agent.gaps as G
+    from ir_agent.drivers import Decomposition, Factor, Op
+    from ir_agent.ledger import FactLedger
+
+    f = Factor(key="cost", label="原材料成本(铜箔/电子级玻纤布/环氧树脂价格)",
+               unit="pp", source_hint="年报", search_term="成本")
+    d = Decomposition(target="gross_margin", op=Op.ADD_PP, factors=[f])
+    sections = _sections(("mgmt", "经营情况讨论与分析",
+                          "本期原材料成本上升 7%。"))
+    data = G.collect(_ExplodingClient(), [d], FactLedger(), None,
+                     "覆铜板", AS_OF, sections=sections)
+
+    assert data["cost"].status == G.ANNUAL
+    assert "靠模型给的检索词" not in G.summary(data), \
+        "L2（去括号的头「原材料成本」）命中却被标成了靠检索词命中"
+
+
+def test_标注按字符串比较而非按位置():
+    """标签本身就是「产能」、检索词也给「产能」时，候选列表去重后它**不会**
+    作为第四项出现。按位置判断（「第 4 项就是检索词」）会在这里说错话——
+    把一次 L1 命中标成「靠检索词命中」，或反过来漏标。
+
+    这条红了意味着有人改成了数位置。
+    """
+    import ir_agent.gaps as G
+    from ir_agent.drivers import Decomposition, Factor, Op
+    from ir_agent.ledger import FactLedger
+
+    f = Factor(key="capacity", label="产能", unit="变化率",
+               source_hint="年报", search_term="产能")
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[f])
+    sections = _sections(("mgmt", "经营情况讨论与分析", "本期产能提升 10%。"))
+    data = G.collect(_ExplodingClient(), [d], FactLedger(), None,
+                     "覆铜板", AS_OF, sections=sections)
+    assert data["capacity"].status == G.ANNUAL
+    # 命中的候选词确实等于 search_term，所以这里**应当**标注——
+    # 本测试要钉住的是实现方式（比较字符串，不数位置），不是标不标。
+    assert "靠模型给的检索词" in G.summary(data)
