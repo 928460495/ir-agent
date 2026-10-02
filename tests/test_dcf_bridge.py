@@ -539,3 +539,59 @@ class Test研报对WACC的归因必须指向真正参与计算的β:
     def test_建模时从工作簿读出所用β(self):
         import inspect
         assert 'inp["dcf"]["Beta（5年"]' in inspect.getsource(dcf.run)
+
+
+# ── 量级对账：每股价值与现价不能差一个数量级 ──────────────────────
+#
+# **实测事故（生益科技 600183，第二阶段首次跑通）。** 取数降级到腾讯通道，
+# 那条分支把换手率（1.47）当成总股本读走，总股本从 24.29 亿股变成
+# 0.000147 亿股，每股内在价值算出 25,077,036 元 —— 现价 129.96。
+#
+# 根因已在 ashare-dcf 的 `_check_quote` 修掉（现价 × 股本 要对得上同一条
+# 响应里的总市值）。这里加的是**第二道网，且不依赖病因**: 任何原因导致
+# 每股价值与现价差一个数量级，都该先怀疑数据而不是先怀疑市场。
+#
+# 为什么两道网都要有: 上游那条对的是取数口径，它拦不住建模层的单位错位；
+# 这条对的是最终输出，它不知道错在哪但知道结果不可信。一道网只在它所在
+# 的那一层有效。
+class TestScaleCheck:
+    def test_每股价值是现价的十九万倍要拦下(self):
+        w = dcf._scale_warnings(D("25077036.37"), D("129.96"))
+        assert w and "不可采信" in w[0]
+
+    def test_每股价值只有现价的万分之一也要拦下(self):
+        """反面同样是量级错位 —— 单位少乘一次和多乘一次同样常见。"""
+        assert dcf._scale_warnings(D("0.013"), D("129.96"))
+
+    def test_正常的上行空间不该被拦(self):
+        assert dcf._scale_warnings(D("151.70"), D("129.96")) == []
+
+    def test_翻三倍的深度低估不该被拦(self):
+        """DCF 算出三倍空间是罕见但真实的结论，不是数据错 —— 这条钉住
+        阈值别收得太紧，否则这道网会在真结论上响，然后被人忽略。"""
+        assert dcf._scale_warnings(D("114"), D("38")) == []
+
+    def test_现价缺失时不判(self):
+        assert dcf._scale_warnings(D("151.7"), D("0")) == []
+
+    def test_量级告警排在其它健全性告警前面(self):
+        """数要是根本不对，后面那些告警都是在给一个错的模型体检 ——
+        与 `_readback_check` 同一条道理。"""
+        res = _res(price=D("129.96"), value_per_share=D("25077036.37"),
+                   warnings=["终值占 EV 94%：估值几乎全部来自终值假设"])
+        got = dcf._with_scale_check(res)
+        assert "不可采信" in got.warnings[0]
+        assert "终值占 EV" in got.warnings[1]
+
+
+def test_量级对账真的接在run里():
+    """**这条钉的是「接上了」，不是「写出来了」。** 本轮另一处踩过同样的
+    坑: 传输重试的计数器写好了却没人读，注释里却声称产物会报告它。一个
+    没有调用点的检查函数，和没写这个函数没有区别。
+
+    这里查的是调用点存不存在（函数名比 except 子句的字面量稳定得多），
+    真正的行为由上面 TestScaleCheck 那组测试钉住。
+    """
+    import inspect
+
+    assert "_with_scale_check(res)" in inspect.getsource(dcf.run)

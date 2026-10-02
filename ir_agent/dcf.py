@@ -57,6 +57,48 @@ XCHECK_ITEMS = (
 )
 
 
+# 每股内在价值与现价允许相差的倍数。超过它先怀疑数据，不怀疑市场。
+#
+# 阈值取 10 倍（及其倒数）: DCF 算出三倍空间是罕见但真实的结论，而量级
+# 错位造成的偏差是成百上千倍，两者之间有好几个数量级的空隙。**这道网
+# 宁可宽也不能在真结论上响** —— 一个经常误报的告警会被人学会忽略，那时
+# 它连真错误也拦不住了。
+SCALE_TOL = Decimal(10)
+
+
+def _scale_warnings(ps: Decimal, price: Decimal) -> list[str]:
+    """每股内在价值与现价差一个数量级以上 —— 先查数据。
+
+    **实测事故（生益科技 600183）。** 取数降级到腾讯通道，那条分支把换手率
+    当成总股本读走，总股本从 24.29 亿股变成 0.000147 亿股，每股内在价值
+    算出 25,077,036 元（现价 129.96）。根因已在 ashare-dcf 的
+    `_check_quote` 修掉，这里是**不依赖病因的第二道网**: 上游那条对的是
+    取数口径，拦不住建模层的单位错位；这条对的是最终输出，它不知道错在
+    哪，但知道结果不可信。一道网只在它所在的那一层有效。
+    """
+    if price <= 0 or ps <= 0:
+        return []
+    r = ps / price
+    if r <= SCALE_TOL and r >= 1 / SCALE_TOL:
+        return []
+    return [f"每股内在价值 {ps:,.2f} 元与现价 {price:,.2f} 元相差 "
+            f"{r:,.4g} 倍（超过 {SCALE_TOL} 倍）—— **本结果不可采信**，"
+            f"这种量级的偏差几乎总是取数或单位错位（总股本、币种、万元/亿元），"
+            f"而不是市场定价错误。请先核对工作簿「总股本（亿股）」与现价。"]
+
+
+def _with_scale_check(res: "DcfResult") -> "DcfResult":
+    """把量级告警插到 warnings 最前面。
+
+    排在其它健全性告警前面: 数要是根本不对，后面那些告警都是在给一个错的
+    模型体检 —— 与 `_readback_check` 同一条道理。
+    """
+    w = _scale_warnings(res.value_per_share, res.price)
+    if w:
+        res.warnings = w + list(res.warnings)
+    return res
+
+
 class DcfUnavailable(Exception):
     """拿不到 ashare-dcf，或它拒绝为本标的建模。"""
 
@@ -474,6 +516,9 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
             f"（原始 {meta.get('beta_raw')}，{meta.get('beta_n')} 期）",
         ] + [f"校准被截断：{x}" for x in (cal.get("clamps") or [])],
     )
+    # 量级对账在前、验算失败在后 —— 插入顺序相反，于是验算失败最终排第一。
+    # 公式引擎都没跑通是更根本的断言，该排在最前面。
+    res = _with_scale_check(res)
     if not res.verified:
         res.warnings.insert(0, f"公式引擎验算失败 {len(fails)} 处，"
                                "本结果不可采信")
