@@ -116,6 +116,95 @@ def _http(url: str, referer: str | None = None, timeout: int = 12) -> bytes:
     if referer: h["Referer"] = referer
     return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout).read()
 
+def _opt(v, scale=1.0):
+    """东财字段的缺值兜底：None/"-"/空 给 NaN，不给 0（理由见 `_num`）。"""
+    if v is None or v == "" or v == "-":
+        return np.nan
+    try:
+        return float(v) * scale
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _num(parts, i, scale=1.0):
+    """取第 i 个字段并乘以 scale；缺字段或空串给 NaN，不给 0。
+
+    原先写的是 `(d.get(k) or 0)` 式的 0 兜底——0 会一路算下去（除零、
+    或者算出一个「看起来只是很小」的数），NaN 会在工作簿的 NaN 检测那里
+    被吼出来。**兜底值该选最弱的那个断言。**
+    """
+    if i >= len(parts) or not parts[i]:
+        return np.nan
+    try:
+        return float(parts[i]) * scale
+    except ValueError:
+        return np.nan
+
+
+def _parse_tencent(text: str) -> dict:
+    """解析腾讯 qt.gtimg.cn 的 `~` 分隔行情串。
+
+    **下标必须逐个对过账，不能照抄。** 实测事故（生益科技 600183）: 这里
+    原先把 `p[38]` 当成总股本读走，而它是**换手率**——
+
+        p[3]  = 129.96        现价
+        p[38] = 1.47          换手率（%），被读成总股本后又 /1e4
+        p[45] = 3156.73       总市值（亿元），被又除了一次 1e4
+        p[72] = 2411748857    流通股（股）
+        p[73] = 2429003670    **总股本（股）**
+
+    于是总股本成了 0.000147 亿股，每股内在价值算出 2507 万元（现价
+    129.96）。校验这种错的办法不是把下标再核对一遍（下一次字段漂移照样
+    中招），而是 `_check_quote` 那条对账。
+    """
+    p = text.split('="')[1].split("~")
+    return dict(source="腾讯", name=p[1], price=_num(p, 3),
+                shares=_num(p, 73, 1 / YI),      # 总股本（股）→ 亿股
+                mktcap=_num(p, 45),              # 总市值，已是亿元
+                pe=_num(p, 39), pb=_num(p, 46))
+
+
+# 现价 × 总股本 与总市值的允许偏差。行情源的总市值可能按另一时点的价格
+# 算，留 2% 的余量；而字段漂移或单位错位造成的偏差都是**成百上千倍**，
+# 两者之间有好几个数量级的空隙，阈值怎么取都不敏感。
+QUOTE_GAP_TOL = 0.02
+
+
+def _check_quote(d: dict) -> dict:
+    """对账：现价 × 总股本 必须等于同一条响应里的总市值。
+
+    **这条对账是免费的** —— 两个数来自同一次请求，而它们的乘积关系是
+    定义式，不是经验规律。下标错位、单位错位、字段漂移都会被它抓住，
+    而逐个核对下标只能抓住今天这一次。
+
+    生益科技那次事故里，下游每一道闸门都放行了: 三表勾稽通过（股本不参与
+    资产=负债+权益）、140 格独立复算通过（复算的是同一套公式，自洽不等于
+    正确）、健全性检查只报了终值占比。**所有校验都在模型内部查一致性，
+    没有一个拿模型外的事实去校准它** —— 而那个事实就在这条响应里。
+
+    对不上就抛错让调用方降级到下一个通道，而不是挑一个看起来对的数：
+    两个数矛盾时我们并不知道哪个对。降到最后拿到 NaN 也比拿到一个
+    「看起来只是有点小」的股本好 —— NaN 会被工作簿的 NaN 检测吼出来。
+
+    **已知的误报可能**: A+H 或 A+B 股公司，若行情源的总市值只含 A 股而
+    总股本含全部股份，这条会判矛盾并拦下。真遇到了再按实际响应处理，
+    不要为了避免假想的误报先把这条放宽 —— 它拦住的那种错是致命的。
+    """
+    px, sh, mc = d.get("price"), d.get("shares"), d.get("mktcap")
+    if any(x is None or (isinstance(x, float) and np.isnan(x)) for x in (px, sh, mc)):
+        return d                        # 缺数不是矛盾
+    if px <= 0 or sh <= 0 or mc <= 0:
+        return d
+    gap = abs(px * sh - mc) / mc
+    if gap > QUOTE_GAP_TOL:
+        raise DataError(
+            f"行情自相矛盾: 现价 {px} × 总股本 {sh:.6g} 亿股 = "
+            f"{px * sh:.4g} 亿元，而同一条响应里的总市值是 {mc:.4g} 亿元"
+            f"（差 {gap * 100:.0f}%）—— 股本或市值的字段/单位读错了，"
+            f"此通道的数不可用。")
+    return d
+
+
 def fetch_quote(code: str) -> dict:
     """行情/总股本/PE/PB。push2delay 优先（东财 push2 常被代理拦截），逐级降级。"""
     errs = []
@@ -124,19 +213,19 @@ def fetch_quote(code: str) -> dict:
         d = json.loads(_http(f"https://push2delay.eastmoney.com/api/qt/stock/get?secid={_secid(code)}&fields={F}",
                              "https://quote.eastmoney.com/")).get("data")
         if d and d.get("f43"):
-            return dict(source="push2delay", name=d.get("f58"), price=d["f43"]/100,
-                        shares=(d.get("f84") or 0)/YI, mktcap=(d.get("f116") or 0)/YI,
-                        pe=(d.get("f162") or 0)/100, pb=(d.get("f167") or 0)/100)
+            # 这条通道的字段本来是对的（f84 总股本/股、f116 总市值/元），
+            # 但对账同样挂上去 —— 它拦的是「将来某次字段漂移」，而不是
+            # 「今天这一处写错」。只在出错的那条分支加检查，等于假设其余
+            # 分支不会出错。
+            return _check_quote(dict(
+                source="push2delay", name=d.get("f58"), price=d["f43"]/100,
+                shares=_opt(d.get("f84"), 1/YI), mktcap=_opt(d.get("f116"), 1/YI),
+                pe=_opt(d.get("f162"), 0.01), pb=_opt(d.get("f167"), 0.01)))
     except Exception as e: errs.append(f"push2delay: {type(e).__name__}")
     try:
-        t = _http(f"https://qt.gtimg.cn/q={_mk(code)}{code}").decode("gbk", "replace")
-        p = t.split('="')[1].split("~")
-        return dict(source="腾讯", name=p[1], price=float(p[3]),
-                    shares=float(p[38])/1e4 if len(p) > 38 and p[38] else np.nan,
-                    mktcap=float(p[45])/1e4 if len(p) > 45 and p[45] else np.nan,
-                    pe=float(p[39]) if len(p) > 39 and p[39] else np.nan,
-                    pb=float(p[46]) if len(p) > 46 and p[46] else np.nan)
-    except Exception as e: errs.append(f"腾讯: {type(e).__name__}")
+        return _check_quote(_parse_tencent(
+            _http(f"https://qt.gtimg.cn/q={_mk(code)}{code}").decode("gbk", "replace")))
+    except Exception as e: errs.append(f"腾讯: {type(e).__name__}: {e}")
     try:
         t = _http(f"https://hq.sinajs.cn/list={_mk(code)}{code}", "https://finance.sina.com.cn").decode("gbk", "replace")
         p = t.split('="')[1].split(",")
