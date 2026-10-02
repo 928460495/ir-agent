@@ -99,7 +99,7 @@ def _core_label(label: str) -> str:
 _PAREN = re.compile(r"[（(][^）)]*[）)]")
 
 
-def _core_candidates(label: str) -> list[str]:
+def _core_candidates(label: str, search_term: str = "") -> list[str]:
     """按特指度降序的候选词，调用方命中即停。**绝不下探括号内。**
 
     L1 整串标签 → L2 去掉括号及其内容 → L3 头再剥 `_SUFFIXES` 后缀。
@@ -119,6 +119,11 @@ def _core_candidates(label: str) -> list[str]:
     不加新的过滤条件，只按特指度排序、让调用方命中即停。
 
     2 字下限沿用 `_core_label` 的理由：一两个字的片段几乎到处都能命中。
+
+    **L4 = 模型给的检索词，在最底端不是顶端。** 「出货量」比整串标签更泛、
+    不是更具体；放顶端会压过更具体的候选，颠倒本函数「按特指度排序」这条
+    原则。它存在的理由恰恰是 L1–L3 全部落空（不带括号的冗长标签没有结构
+    信号可切）。由模型决定、代码只查长度，见 `drivers.Factor.search_term`。
     """
     out: list[str] = []
 
@@ -130,6 +135,7 @@ def _core_candidates(label: str) -> list[str]:
     head = _PAREN.sub("", label).strip()    # L2 去掉括号及其内容
     add(head)
     add(_core_label(head))                  # L3 头再剥后缀
+    add(search_term)                        # L4 模型给的检索词，最后才试
     return out
 
 
@@ -239,7 +245,8 @@ def _valid_hit(text: str, core: str) -> str | None:
         start = i + len(core)
 
 
-def _match_annual(sections, label: str) -> tuple[str, str] | None:
+def _match_annual(sections, label: str,
+                  search_term: str = "") -> tuple[str, str] | None:
     """②年报叙述章节里是否提到该因子。
 
     只做包含判断，不抽数字——命中「稼动率」三个字不等于拿到了稼动率的
@@ -256,7 +263,7 @@ def _match_annual(sections, label: str) -> tuple[str, str] | None:
     # 靠前的章节里命中会压过更具体的候选词在靠后章节里的命中——等于
     # 放弃了「按特指度排序」这整个决定，且套件会全绿。
     # 见 `test_候选词在外层容器在内层`。
-    for core in _core_candidates(label):
+    for core in _core_candidates(label, search_term):
         for s in sections.sections.values():
             hit = _valid_hit(s.text, core)
             if hit is not None:
@@ -264,7 +271,8 @@ def _match_annual(sections, label: str) -> tuple[str, str] | None:
     return None
 
 
-def _match_report(corpus, label: str) -> tuple[str, Document] | None:
+def _match_report(corpus, label: str,
+                  search_term: str = "") -> tuple[str, Document] | None:
     """③研报语料库里是否提到该因子，判据与 _match_annual 同理。
 
     **返回命中的原文片段与它所在的 Document 本身**，不只是格式化好的
@@ -292,7 +300,7 @@ def _match_report(corpus, label: str) -> tuple[str, Document] | None:
         return None
     # 候选词在外层，文档在内层——理由同 `_match_annual`，见
     # `test_候选词在外层容器在内层`。
-    for core in _core_candidates(label):
+    for core in _core_candidates(label, search_term):
         for d in corpus.docs:
             if d.tier is Tier.MEDIA:
                 continue
@@ -302,7 +310,8 @@ def _match_report(corpus, label: str) -> tuple[str, Document] | None:
     return None
 
 
-def _match_announce(corpus, label: str) -> tuple[str, Document] | None:
+def _match_announce(corpus, label: str,
+                    search_term: str = "") -> tuple[str, Document] | None:
     """②.5 公司公告里是否提到该因子，判据与 `_match_report` 同理。
 
     **只看 `Tier.COMPANY` 文档。** ②.5 是公告这一级；研报与媒体各有
@@ -315,7 +324,7 @@ def _match_announce(corpus, label: str) -> tuple[str, Document] | None:
         return None
     # 候选词在外层，文档在内层——理由同 `_match_annual`，见
     # `test_候选词在外层容器在内层`。
-    for core in _core_candidates(label):
+    for core in _core_candidates(label, search_term):
         for d in corpus.docs:
             if d.tier is not Tier.COMPANY:
                 continue
@@ -350,7 +359,7 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                 out[f.key] = FactorData(factor=f, status=DISCLOSED)
                 continue
 
-            hit = _match_annual(sections, f.label)
+            hit = _match_annual(sections, f.label, f.search_term)
             if hit is not None:
                 excerpt, src = hit
                 out[f.key] = FactorData(
@@ -364,7 +373,7 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     source_excerpt=excerpt)
                 continue
 
-            hit = _match_announce(corpus, f.label)
+            hit = _match_announce(corpus, f.label, f.search_term)
             if hit is not None:
                 excerpt, doc = hit
                 out[f.key] = FactorData(
@@ -375,7 +384,7 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                     source_excerpt=excerpt)
                 continue
 
-            hit = _match_report(corpus, f.label)
+            hit = _match_report(corpus, f.label, f.search_term)
             if hit is not None:
                 excerpt, doc = hit
                 out[f.key] = FactorData(

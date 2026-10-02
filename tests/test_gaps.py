@@ -1132,3 +1132,89 @@ def test_否定语境对每个候选词都生效():
     assert G._match_annual(
         sections, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)") is None, \
         "否定语境里的命中被当成了证据"
+
+
+def test_检索词是候选阶梯的最后一级():
+    """**不是第一级。** 「出货量」比整串标签更泛，不是更具体；放顶端会
+    压过更具体的候选，颠倒「按特指度排序」这条原则。检索词存在的理由
+    恰恰是前三级全部落空。
+    """
+    from ir_agent.gaps import _core_candidates
+
+    assert _core_candidates("服务器及通信用高端覆铜板出货量同比增速",
+                            "出货量") == [
+        "服务器及通信用高端覆铜板出货量同比增速",
+        "服务器及通信用高端覆铜板出货量同比",
+        "出货量",
+    ]
+    # 不传检索词时与 B3 第一版完全一致
+    assert _core_candidates("服务器及通信用高端覆铜板出货量同比增速") == [
+        "服务器及通信用高端覆铜板出货量同比增速",
+        "服务器及通信用高端覆铜板出货量同比",
+    ]
+
+
+def test_检索词与结构候选重复时只出现一次():
+    """`add` 去重。这条同时是 Task 4 那个「按字符串比较而非位置」决定的
+    依据：标签本身就是「产能」、检索词也给「产能」时，检索词**不会**作为
+    第四项出现——按位置判断「是否靠 L4 命中」会在这里说错话。
+    """
+    from ir_agent.gaps import _core_candidates
+
+    assert _core_candidates("产能", "产能") == ["产能"]
+
+
+def test_前三级落空时检索词兜底命中():
+    """这是整个字段存在的理由：不带括号的冗长标签，前三级都不会逐字出现
+    在年报里，只有模型给的检索词能命中。"""
+    import ir_agent.gaps as G
+
+    sections = _sections(("mgmt", "经营情况讨论与分析",
+                          "本期出货量同比增长 23%，高端产品占比提升。"))
+    label = "服务器及通信用高端覆铜板出货量同比增速"
+    assert G._match_annual(sections, label) is None, \
+        "不给检索词时本该落空——否则这条测试证明不了检索词起了作用"
+    hit = G._match_annual(sections, label, search_term="出货量")
+    assert hit is not None, "检索词没能兜底"
+    excerpt, where = hit
+    assert "出货量" in excerpt and where == "《经营情况讨论与分析》"
+
+
+def test_更具体的结构候选优先于检索词():
+    """L2 能命中时就不该用 L4——「按特指度排序」。
+
+    构造：L2（去括号的头「原材料成本」）在**靠后**的章节里命中，
+    L4（检索词「成本」）在**靠前**的章节里命中。候选在外层循环，
+    所以 L2 先扫完所有章节、命中靠后那篇。
+    """
+    import ir_agent.gaps as G
+
+    sections = _sections(
+        ("a", "第一节", "本期成本控制良好。"),
+        ("b", "第二节", "本期原材料成本上升 7%。"))
+    hit = G._match_annual(
+        sections, "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)",
+        search_term="成本")
+    assert hit is not None
+    _, where = hit
+    assert where == "《第二节》", \
+        "用了检索词「成本」而不是更具体的「原材料成本」——L4 被提前了"
+
+
+def test_三个匹配器都收检索词():
+    """②、②.5、③ 走同一条阶梯，三处都要接上，漏一处那一级就得不到兜底。"""
+    import ir_agent.gaps as G
+
+    label = "服务器及通信用高端覆铜板出货量同比增速"
+
+    cp_sell = Corpus(as_of=AS_OF)
+    cp_sell.add(_doc("我们测算其出货量同比增长 23%。",
+                     tier=Tier.SELLSIDE, doc_id="s1"))
+    assert G._match_report(cp_sell, label) is None
+    assert G._match_report(cp_sell, label, search_term="出货量") is not None
+
+    cp_co = Corpus(as_of=AS_OF)
+    cp_co.add(_doc("本期出货量同比增长 23%。", title="年度报告",
+                   tier=Tier.COMPANY, doc_id="a1"))
+    assert G._match_announce(cp_co, label) is None
+    assert G._match_announce(cp_co, label, search_term="出货量") is not None
