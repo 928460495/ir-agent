@@ -153,3 +153,62 @@ def test_依据层不依赖估值模块():
     src = inspect.getsource(basis)
     assert "valuation" not in src.replace("不在 valuation 包里", "")
     assert basis.__name__ == "ir_agent.basis"
+
+
+# ── 引文核验的规范化: 标点字形不同不是捏造 ────────────────────────
+#
+# 真实事故（600183 第四轮实跑）: 模型给宏观定性的依据引了「"十五五」，
+# 年报正文里写的是「“十五五”」——同一句话，只是引号从弯的变成了直的。
+# 逐字核验判不过，连续三次重试都是同一条驳回，MacroViewFailed 整段未
+# 生成，级联到研究简报与 DCF 判断项一并缺失，一轮 $7.38 作废。
+#
+# 这与 citation.py 里那个 `\b` 是同一类缺陷: 规则是对的（引文必须真的
+# 出自原文），但对字符的实际形态估计错了。PDF 抽文、模型输出、网页复制
+# 三条路径各有各的标点习惯。
+class TestQuoteGlyphsAreNotFabrication:
+    def test_弯引号与直引号视为同一句(self):
+        body = "## 宏观\n中央提出“十五五”时期的新质生产力方向。\n"
+        assert validate([Basis.report('"十五五')], ledger(), body, AS_OF) == []
+
+    def test_模型自己把片段加上引号不算捏造(self):
+        """正文里本来没有引号，模型引用时自己套了一对——文字一字未改。"""
+        body = "## 宏观\n中央提出十五五时期的新质生产力方向。\n"
+        assert validate([Basis.report("「十五五时期」")],
+                        ledger(), body, AS_OF) == []
+
+    def test_破折号字形不同视为同一句(self):
+        body = "## 宏观\n规划期为 2026—2030 年。\n"
+        assert validate([Basis.report("2026-2030 年")],
+                        ledger(), body, AS_OF) == []
+
+    # ── 反面: 放宽标点不等于放宽文字 ──────────────────────────
+    def test_文字不同仍然判为捏造(self):
+        """折叠标点若顺手折叠了文字，这条就会变绿——而那意味着核验失效。"""
+        body = "## 宏观\n中央提出“十五五”时期的新质生产力方向。\n"
+        probs = validate([Basis.report('"十六五')], ledger(), body, AS_OF)
+        assert probs and "正文" in probs[0]
+
+    def test_去掉引号不得让两句不同的话合并(self):
+        body = "## 宏观\n公司“不”考虑分拆上市。\n"
+        probs = validate([Basis.report("公司考虑分拆上市")],
+                         ledger(), body, AS_OF)
+        assert probs, "剥掉引号后两句话读起来意思相反，不能判为同一句"
+
+
+def test_结构哨兵_引文核验共用同一个规范化函数():
+    """同一条「逐字核验」规则此前在三个文件里各写了一遍，每一份的
+    docstring 都声称「与另两处同一套规范化」——而真正保证它们一致的
+    只有这三句注释。第四轮事故后只修 basis.py 一处，另外四条核验路径
+    （assume 的判断项依据、external 的语料库核验、openweb 的转述核验、
+    attribution 的年报出处核验）会继续带着同一个缺陷，而注释照旧声称
+    它们一样。
+
+    这里钉的是**函数对象同一**，不是行为相似: 任何人再复制一份实现，
+    这条测试立刻变红。
+    """
+    import ir_agent.assume as assume
+    import ir_agent.basis as basis
+    import ir_agent.sources.external as external
+
+    assert basis.norm is external.norm
+    assert assume._norm is external.norm

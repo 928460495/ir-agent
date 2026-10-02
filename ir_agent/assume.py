@@ -37,6 +37,7 @@ from ir_agent.gaps import FactorData
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.lineparse import keyed, pick
 from ir_agent.operators.ratios import annual_periods
+from ir_agent.sources.external import norm
 
 
 class AssumeFailed(Exception):
@@ -767,12 +768,9 @@ def _basis(raw: str, what: str) -> list[Basis]:
         raise AssumeFailed(f"{what} 的依据不合法: {e}") from e
 
 
-_WS = re.compile(r"\s+")
-
-
-def _norm(s: str) -> str:
-    """与 basis.py/external.py 同一套规范化——引文核验必须两边一致。"""
-    return _WS.sub("", s)
+# 引文核验的规范化从 sources/external.py 导入——「同一套规范化」此前
+# 是三份各自为政的实现靠 docstring 互相声称，见那边的注释。
+_norm = norm
 
 
 # 「无数据（估计）」的识别不做成一个固定短语的死匹配——模型措辞会有

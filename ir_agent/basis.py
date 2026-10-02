@@ -31,8 +31,11 @@ from enum import Enum
 
 from ir_agent.citation import REF_RE
 from ir_agent.ledger import FactLedger, LookAheadError
-
-_WS = re.compile(r"\s+")
+# 引文核验的规范化只有一份实现，在 sources/external.py —— 本文件的
+# REPORT 引文、assume 的判断项依据、openweb 的转述核验、attribution 的
+# 年报出处核验共用它。此前三个文件各写一份、靠 docstring 互相声称
+# 「同一套」，第四轮实跑的引号字形事故就卡在只有一份被修的那种场面。
+from ir_agent.sources.external import norm
 _URL = re.compile(r"^https?://\S+$")
 
 # 驳回信息必须说清怎么改才能通过 —— 否则同一条驳回会被原样重试到底。
@@ -111,8 +114,6 @@ class Basis:
         return f"外部 {self.ref}（{self.retrieved}）「{self.quote[:32]}」"
 
 
-def _norm(s: str) -> str:
-    return _WS.sub("", s)
 
 
 def validate(
@@ -134,7 +135,7 @@ def validate(
     if not bases:
         return ["未提供任何依据。"]
 
-    body_norm = _norm(body)
+    body_norm = norm(body)
     problems: list[str] = []
     for b in bases:
         if b.kind is BasisKind.FACT:
@@ -146,7 +147,7 @@ def validate(
                 problems.append(
                     f"依据引用的事实 {key}@{period} 在账本中不存在或该时点不可得。")
         elif b.kind is BasisKind.REPORT:
-            if _norm(b.quote) not in body_norm:
+            if norm(b.quote) not in body_norm:
                 problems.append(
                     f"依据引用的正文片段「{b.quote[:30]}」在正文中找不到 —— "
                     "与凭空捏造无异。"
