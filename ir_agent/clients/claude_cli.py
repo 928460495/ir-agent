@@ -61,6 +61,14 @@ class ClaudeCliTransient(ClaudeCliError):
 _TRANSIENT = re.compile(
     r"connection closed|connection reset|connection error|connection aborted"
     r"|socket hang up|network error|stream (?:error|closed)|unexpected eof"
+    # 实测到的两种措辞都带「响应被截断」的意思，且都以
+    # 「The response above may be incomplete.」收尾:
+    #   · Connection closed mid-response（第四轮，撰写正文）
+    #   · Response stalled mid-stream（第五轮，多空辩论）
+    # 第一次只按第一种措辞建白名单，第二种就漏了——**一个样本建的白名单
+    # 只覆盖一个样本**。这里按「截断」这个共同语义收口，而不是再贴一条
+    # 字面量。
+    r"|mid-stream|mid-response|stalled|may be incomplete"
     r"|\b50[0234]\b|bad gateway|service unavailable|gateway timeout"
     r"|overloaded|please try again",
     re.I)

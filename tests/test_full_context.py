@@ -8,6 +8,7 @@ import textwrap
 from datetime import date
 from decimal import Decimal
 
+from ir_agent.debate import DebateRefused
 from ir_agent.full import _macro_periods, _prior_period
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.research import assumption_template
@@ -194,15 +195,28 @@ def test_回写失败不丢弃正文():
     import inspect
 
     from ir_agent import full
-    src = inspect.getsource(full._write_and_debate)
-    assert "except RevisionFailed" in src, "回写失败仍会连正文一起丢掉"
-    assert "未修订稿" in src
-    # RevisionFailed 不应再出现在「整轮放弃」的那个 except 里
-    fatal = src.split("except (")[-1].split(")")[0]
-    assert "RevisionFailed" not in fatal
+    from ir_agent.revision import RevisionFailed
+
+    body, _, _, _, note = _run_debate_stage(
+        revision_boom=RevisionFailed("第 3 条挑战没能落实到文字上"))
+    assert body == "撰写好的正文", "回写失败仍会连正文一起丢掉"
+    assert "未修订稿" in note
 
     run = inspect.getsource(full.run_analysis)
     assert "err and body is None" in run, "有正文时不应报「研究简报」缺失"
+
+
+def test_回写阶段断流同样不丢弃正文():
+    """与辩论那处同一个缺陷的第二处: 回写调用断流不该让撰写与辩论两步的
+    产出一起归零。生益科技第五轮断在辩论，回写这处是同一个 except 结构，
+    一起修一起钉。"""
+    from ir_agent.clients.claude_cli import ClaudeCliTransient
+
+    body, _, _, _, note = _run_debate_stage(
+        revision_boom=ClaudeCliTransient("claude 返回错误：API Error: "
+                                         "Response stalled mid-stream."))
+    assert body == "撰写好的正文", "断流把已经写好的正文一起丢掉了"
+    assert "未修订稿" in note
 
 
 # ── Task 10: 方法论预研 → 定向采集 → 按因子填判断项 ─────────────
@@ -420,14 +434,81 @@ def test_辩论失败不丢弃正文():
     正文有独立的验收审计，辩论里的裸数字进不了正文（修订稿仍要过
     _violations）。保留正文并说明「未经证伪环节」，比连正文一起丢掉诚实。
     """
-    import inspect
+    body, _, _, _, note = _run_debate_stage(boom=DebateRefused("挑战者写了派生数字"))
+    assert body == "撰写好的正文", "辩论失败仍会连正文一起丢掉"
+    assert "未经证伪环节" in note
+
+
+def test_辩论阶段断流同样不丢弃正文():
+    """**跑生益科技第五轮时踩到。** 撰写正文通过了全部闸门（五轮以来第一
+    次），辩论调用却断流（`API Error: Response stalled mid-stream`）。这条
+    传输故障从上面那个 `except DebateRefused` 旁边绕过去，落到函数最外层
+    那个 `except (AnalystRefused, ClaudeCliError)` 上——**已经写好、已经
+    付过钱、已经过完审计的正文被丢掉了**，研究简报与 DCF 判断项随之缺失，
+    一轮 $7.31 作废。
+
+    上面那条注释里的道理（辩论失败不该毙掉整篇报告）对传输故障**更**成立:
+    DebateRefused 至少说明挑战者确实写了东西而它不合规，断流什么都没说明。
+    """
+    from ir_agent.clients.claude_cli import ClaudeCliTransient
+
+    body, _, _, _, note = _run_debate_stage(
+        boom=ClaudeCliTransient("claude 返回错误：API Error: Response "
+                                "stalled mid-stream."))
+    assert body == "撰写好的正文", "断流把已经写好的正文一起丢掉了"
+    assert "未经证伪环节" in note
+
+
+def _run_debate_stage(boom: Exception | None = None,
+                      revision_boom: Exception | None = None):
+    """跑一遍 `_write_and_debate`。撰写总是成功；`boom` 让辩论抛错，
+    `revision_boom` 让辩论成功而回写抛错。
+
+    撰写与辩论都打掉成假的: 这条测试要钉的是**失败时正文留不留得住**，
+    与模型实际写了什么无关。客户端在函数内部用 make_client 造，不经参数
+    传入，所以连它一起打掉。
+    """
+    from unittest import mock
 
     from ir_agent import full
-    src = inspect.getsource(full._write_and_debate)
-    assert "except DebateRefused" in src, "辩论失败仍会连正文一起丢掉"
-    assert "未经证伪环节" in src
-    fatal = src.split("except (")[-1].split(")")[0]
-    assert "DebateRefused" not in fatal
+
+    def _client(prompt):                        # pragma: no cover - 不会被调用
+        raise AssertionError("不该真的调模型")
+    _client.total_cost_usd = 1.23
+    _client.calls = 0
+
+    class _Cat:
+        entries = ()
+        evidence = None
+
+    class _R:
+        period = "2025FY"
+        as_of = None
+        ledger = None
+
+    class _Verdicts:
+        upheld_count = 1
+        challenges = ()
+
+        def summary(self):
+            return "辩论摘要"
+
+    def _debate(*a, **kw):
+        if boom is not None:
+            raise boom
+        return _Verdicts()
+
+    with mock.patch.object(full, "make_client", lambda **kw: _client), \
+         mock.patch.object(full.FactCatalog, "from_ledger",
+                           classmethod(lambda cls, *a, **kw: _Cat())), \
+         mock.patch.object(full, "_build_evidence", lambda r, code: None), \
+         mock.patch.object(full, "_catalog_periods", lambda r: ()), \
+         mock.patch.object(full, "write_body",
+                           lambda *a, **kw: ("撰写好的正文", None)), \
+         mock.patch.object(full, "run_debate", _debate), \
+         mock.patch.object(full, "revise_from_verdicts",
+                           mock.Mock(side_effect=revision_boom)):
+        return full._write_and_debate(_R(), "600183", None)
 
 
 def test_第二阶段必须重建派生事实():

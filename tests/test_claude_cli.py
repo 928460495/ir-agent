@@ -163,6 +163,17 @@ class TestTransientClassification:
                 result="API Error: Connection closed mid-response. "
                        "The response above may be incomplete."))
 
+    def test_断流的第二种措辞也被认成传输故障(self):
+        """第一次按「Connection closed mid-response」一条措辞建白名单，
+        第五轮实跑换成「Response stalled mid-stream」就漏了——重试没触发，
+        已经写好的正文被丢掉。一个样本建的白名单只覆盖一个样本。"""
+        from ir_agent.clients.claude_cli import ClaudeCliTransient
+        with pytest.raises(ClaudeCliTransient):
+            parse_result(payload(
+                is_error=True,
+                result="API Error: Response stalled mid-stream. "
+                       "The response above may be incomplete."))
+
     def test_服务端五开头的错误被认成传输故障(self):
         from ir_agent.clients.claude_cli import ClaudeCliTransient
         with pytest.raises(ClaudeCliTransient):

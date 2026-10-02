@@ -1001,7 +1001,7 @@ def _write_and_debate(r, code: str, model: str | None,
         print("多空辩论…", file=sys.stderr)
         try:
             d = run_debate(cat, draft=body, client=client, period=r.period)
-        except DebateRefused as e:
+        except (DebateRefused, ClaudeCliError) as e:
             # **辩论失败不该毙掉整篇报告。** 挑战者要算账才能质疑
             # （投资现金流与资本开支的差额、占比），而账本里没有「差额」
             # 这条事实 —— 禁止派生算术等于禁止它提出有力的质疑。
@@ -1009,6 +1009,15 @@ def _write_and_debate(r, code: str, model: str | None,
             # 而且正文有独立的验收审计，辩论里的裸数字进不了正文: 修订稿
             # 仍要过 _violations。因此这一步失败时保留正文并说明辩论未完成，
             # 比连正文一起丢掉诚实得多。
+            #
+            # **ClaudeCliError 也接在这里**（生益科技第五轮踩到）: 辩论调用
+            # 断流（`Response stalled mid-stream`）时，这条异常原先从这个
+            # except 旁边绕过去，落到函数最外层那个
+            # `except (AnalystRefused, ClaudeCliError)` 上，把已经写好、已经
+            # 付过钱、已经过完审计的正文一起丢掉。上面那条道理对传输故障
+            # **更**成立: DebateRefused 至少说明挑战者确实写了东西而它不
+            # 合规，断流什么都没说明。最外层那个 except 要留着——撰写本身
+            # 断流时手里根本没有正文可保。
             print(f"辩论未完成，保留正文：{str(e)[:80]}", file=sys.stderr)
             return body, 0, "", client.total_cost_usd, (
                 f"多空辩论未完成（{str(e)[:160]}）—— "
@@ -1019,7 +1028,7 @@ def _write_and_debate(r, code: str, model: str | None,
             print(f"回写 {d.upheld_count} 项成立的挑战…", file=sys.stderr)
             try:
                 body, _ = revise_from_verdicts(cat, body, d.challenges, client)
-            except RevisionFailed as e:
+            except (RevisionFailed, ClaudeCliError) as e:
                 # **回写失败不该毙掉整篇报告。** 正文已通过全部闸门、辩论
                 # 也已留痕，只是某条挑战没能落实到文字上。丢掉全部产出，
                 # 读者既拿不到分析、也看不到那条挑战 —— 反而更不透明。
@@ -1027,6 +1036,9 @@ def _write_and_debate(r, code: str, model: str | None,
                 # 保留未修订稿并**如实标注哪条没落实**: 辩论记录里有完整
                 # 的质疑与裁决，读者可以自己判断。这与「缺什么必须显式说
                 # 出来」是同一条原则。
+                #
+                # ClaudeCliError 同样接在这里，理由与上面辩论那处一样——
+                # 回写调用断流不该让前两步的产出一起归零。
                 note = (f"辩论回写未完成（{e}）—— "
                         "正文为**未修订稿**，上述挑战未落实到文字，"
                         "阅读时请对照 debate.md 自行判断")
