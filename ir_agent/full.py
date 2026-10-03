@@ -998,61 +998,78 @@ def _write_and_debate(r, code: str, model: str | None,
                              valuation_summary=valuation_summary or None,
                              brief=brief)
 
-        print("多空辩论…", file=sys.stderr)
-        try:
-            d = run_debate(cat, draft=body, client=client, period=r.period)
-        except (DebateRefused, ClaudeCliError) as e:
-            # **辩论失败不该毙掉整篇报告。** 挑战者要算账才能质疑
-            # （投资现金流与资本开支的差额、占比），而账本里没有「差额」
-            # 这条事实 —— 禁止派生算术等于禁止它提出有力的质疑。
-            #
-            # 而且正文有独立的验收审计，辩论里的裸数字进不了正文: 修订稿
-            # 仍要过 _violations。因此这一步失败时保留正文并说明辩论未完成，
-            # 比连正文一起丢掉诚实得多。
-            #
-            # **ClaudeCliError 也接在这里**（生益科技第五轮踩到）: 辩论调用
-            # 断流（`Response stalled mid-stream`）时，这条异常原先从这个
-            # except 旁边绕过去，落到函数最外层那个
-            # `except (AnalystRefused, ClaudeCliError)` 上，把已经写好、已经
-            # 付过钱、已经过完审计的正文一起丢掉。上面那条道理对传输故障
-            # **更**成立: DebateRefused 至少说明挑战者确实写了东西而它不
-            # 合规，断流什么都没说明。最外层那个 except 要留着——撰写本身
-            # 断流时手里根本没有正文可保。
-            print(f"辩论未完成，保留正文：{str(e)[:80]}", file=sys.stderr)
-            return body, 0, "", client.total_cost_usd, (
-                f"多空辩论未完成（{str(e)[:160]}）—— "
-                "正文**未经证伪环节**，其结论未被交叉质疑过，阅读时请留意")
-
-        note = ""
-        if d.upheld_count:
-            print(f"回写 {d.upheld_count} 项成立的挑战…", file=sys.stderr)
-            try:
-                body, _ = revise_from_verdicts(cat, body, d.challenges, client)
-            except (RevisionFailed, ClaudeCliError) as e:
-                # **回写失败不该毙掉整篇报告。** 正文已通过全部闸门、辩论
-                # 也已留痕，只是某条挑战没能落实到文字上。丢掉全部产出，
-                # 读者既拿不到分析、也看不到那条挑战 —— 反而更不透明。
-                #
-                # 保留未修订稿并**如实标注哪条没落实**: 辩论记录里有完整
-                # 的质疑与裁决，读者可以自己判断。这与「缺什么必须显式说
-                # 出来」是同一条原则。
-                #
-                # ClaudeCliError 同样接在这里，理由与上面辩论那处一样——
-                # 回写调用断流不该让前两步的产出一起归零。
-                note = (f"辩论回写未完成（{e}）—— "
-                        "正文为**未修订稿**，上述挑战未落实到文字，"
-                        "阅读时请对照 debate.md 自行判断")
-                print(f"回写失败，保留未修订稿：{str(e)[:80]}", file=sys.stderr)
-
-        return body, d.upheld_count, d.summary(), client.total_cost_usd, note
+        body, upheld, debate_md, note = _debate_and_revise(
+            cat, body, client, r.period)
+        return body, upheld, debate_md, client.total_cost_usd, note
     except (AnalystRefused, ClaudeCliError) as e:
         return None, 0, "", client.total_cost_usd, f"{e.__class__.__name__}: {e}"
+
+
+def _debate_and_revise(cat, body: str, client, period: str):
+    """辩论 → 回写。返回 (正文, 成立挑战数, 辩论记录, 失败说明)。
+
+    **两个阶段共用这一份。** 第一阶段辩论简报、第二阶段辩论完整研报，而
+    「这一步失败不该毙掉已经写好的正文」这条保证两处都要有 —— 同一条道理
+    写两遍，迟早只有一处被修。本会话已经三次撞上这种缝（规范化的三份副本、
+    两处 except 的元组、辩论三方的指令），不再添第四处。
+    """
+    print("多空辩论…", file=sys.stderr)
+    try:
+        d = run_debate(cat, draft=body, client=client, period=period)
+    except (DebateRefused, ClaudeCliError) as e:
+        # **辩论失败不该毙掉整篇报告。** 挑战者要算账才能质疑（投资现金流
+        # 与资本开支的差额、占比），而账本里没有「差额」这条事实 —— 禁止
+        # 派生算术等于禁止它提出有力的质疑。
+        #
+        # 而且正文有独立的验收审计，辩论里的裸数字进不了正文: 修订稿仍要过
+        # _violations。因此这一步失败时保留正文并说明辩论未完成，比连正文
+        # 一起丢掉诚实得多。
+        #
+        # **ClaudeCliError 也接在这里**（生益科技第五轮踩到）: 辩论调用断流
+        # （`Response stalled mid-stream`）时，这条异常原先从这个 except 旁边
+        # 绕过去，落到调用方最外层那个 `except (AnalystRefused,
+        # ClaudeCliError)` 上，把已经写好、已经付过钱、已经过完审计的正文
+        # 一起丢掉。上面那条道理对传输故障**更**成立: DebateRefused 至少说明
+        # 挑战者确实写了东西而它不合规，断流什么都没说明。调用方最外层那个
+        # except 要留着 —— 撰写本身断流时手里根本没有正文可保。
+        print(f"辩论未完成，保留正文：{str(e)[:80]}", file=sys.stderr)
+        return body, 0, "", (
+            f"多空辩论未完成（{str(e)[:160]}）—— "
+            "正文**未经证伪环节**，其结论未被交叉质疑过，阅读时请留意")
+
+    note = ""
+    if d.upheld_count:
+        print(f"回写 {d.upheld_count} 项成立的挑战…", file=sys.stderr)
+        try:
+            body, _ = revise_from_verdicts(cat, body, d.challenges, client)
+        except (RevisionFailed, ClaudeCliError) as e:
+            # **回写失败不该毙掉整篇报告。** 正文已通过全部闸门、辩论也已
+            # 留痕，只是某条挑战没能落实到文字上。丢掉全部产出，读者既拿
+            # 不到分析、也看不到那条挑战 —— 反而更不透明。
+            #
+            # 保留未修订稿并**如实标注哪条没落实**: 辩论记录里有完整的质疑
+            # 与裁决，读者可以自己判断。这与「缺什么必须显式说出来」是同一
+            # 条原则。
+            #
+            # ClaudeCliError 同样接在这里，理由与上面辩论那处一样 —— 回写
+            # 调用断流不该让前两步的产出一起归零。
+            note = (f"辩论回写未完成（{e}）—— "
+                    "正文为**未修订稿**，上述挑战未落实到文字，"
+                    "阅读时请对照辩论记录自行判断")
+            print(f"回写失败，保留未修订稿：{str(e)[:80]}", file=sys.stderr)
+
+    return body, d.upheld_count, d.summary(), note
 
 
 # 两阶段的产物名。**简报与完整研报是两个文件，不是同一个文件的两稿** ——
 # 建模之前不该存在一份读起来像结论的完整研报。
 BRIEF = "brief.md"
 REPORT = "report.md"
+# 两阶段的辩论记录。**同名就会把上一阶段的记录冲掉** —— 两者是两场
+# 不同的辩论（一场评审简报、一场评审完整研报），不是同一场的两稿，
+# 而两阶段的产物同在一个目录里。
+DEBATE_BRIEF = "debate.md"
+DEBATE_REPORT = "debate_report.md"
 # ASSUMPTIONS_MD 定义在 research.py 并从那里导入——`next_actions` 要按
 # 「判断项文件在不在」决定教人重跑哪一阶段，两处各写一遍同一个文件名
 # 早晚分叉（本仓库已经在占位符期间上踩过这种分叉）。research 不能反向
@@ -1549,8 +1566,8 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     elif err:
         skipped.append(err)
     if debate_md:
-        (out / "debate.md").write_text(debate_md, encoding="utf-8")
-        arts["辩论记录"] = str(out / "debate.md")
+        (out / DEBATE_BRIEF).write_text(debate_md, encoding="utf-8")
+        arts["辩论记录"] = str(out / DEBATE_BRIEF)
     if body:
         r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
         (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
@@ -1885,10 +1902,15 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     caveat, caveats_md = _assumption_caveats(
         a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""))
     if dcf_res is not None:
-        full, cost, ferr = _write_full_report(
+        full, cost, ferr, debate_md, dnote = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), caveat=caveat)
         if ferr:
             skipped.append(ferr)
+        if dnote:
+            skipped.append(dnote)
+        if debate_md:
+            (out / DEBATE_REPORT).write_text(debate_md, encoding="utf-8")
+            arts["辩论记录（完整研报）"] = str(out / DEBATE_REPORT)
         if full:
             r.audit = audit(full, r.ledger, r.store, as_of=r.as_of)
             # 附录追加在 `audit()` **之后**：它是代码写的、不是模型写的，
@@ -1943,10 +1965,19 @@ def _write_full_report(code, r, brief, model, dcf_res, bundle, caveat=""):
                                                 + ("\n\n" + caveat if caveat else "")),
                              context=f"**已完成的分析简报**\n\n{brief}",
                              **{k: v or None for k, v in bundle.items()})
-        return full, client.total_cost_usd, ""
+        # **估值结论同样要过证伪环节。** 辩论此前只跑在第一阶段的简报上，
+        # 而第二阶段把 DCF 结果写进第 8 节就直接产出 —— 整条链上最需要被
+        # 质疑的一层反而没有质疑者。实测代价（生益科技）: 总股本错一个数量
+        # 级，每股内在价值算出 2507 万元、结论从「低估」翻成「高估 59%」，
+        # 而三表勾稽、140 格复算、健全性检查、引文审计四道闸门全部放行 ——
+        # 它们都在模型内部查一致性。质疑者是唯一被要求「找出站不住的地方」
+        # 的角色，荒谬的量级恰恰是最容易被看出来的那种站不住。
+        full, _upheld, debate_md, dnote = _debate_and_revise(
+            cat, full, client, r.period)
+        return full, client.total_cost_usd, "", debate_md, dnote
     except (AnalystRefused, ClaudeCliError) as e:
         return None, client.total_cost_usd, \
-            f"完整研报（{e.__class__.__name__}: {str(e)[:160]}）"
+            f"完整研报（{e.__class__.__name__}: {str(e)[:160]}）", "", ""
 
 
 def report(outcome: ResearchOutcome, out_dir: str | None = None,

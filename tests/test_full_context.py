@@ -1018,8 +1018,12 @@ def test_未核验声明真的接进了第二阶段():
 
     src = inspect.getsource(full.run_valuation)
     assert "_assumption_caveats(" in src
-    assert src.index("audit(full") < src.index("REPORT"), "附录必须追加在审计之后"
-    assert "_assumption_caveats(" in src
+    # 这条此前写的是 `src.index("REPORT")` —— 而 "REPORT" 是 "DEBATE_REPORT"
+    # 的子串，新增一行「落盘完整研报的辩论记录」（排在 audit 之前）就让它
+    # 变红了，而它要守的不变量一点没被破坏。断言应当指向要守的那一句本身:
+    # 附录是在 `with_sources()` 的结果上拼接的，而 with_sources 来自 audit。
+    assert src.index("audit(full") < src.index("with_sources() + caveats_md"), \
+        "附录必须追加在审计之后"
 
     wsrc = inspect.getsource(full._write_full_report)
     assert "caveat" in wsrc and "valuation_summary" in wsrc
@@ -2783,3 +2787,97 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
         "full 里出现了没被登记的清单生产者（返回 list[str] 的函数）："
         f"{sorted(producers - covered - set(not_asserted))}——给它加场景断言"
         "渲染标记，或在 not_asserted 里写明为什么不断言")
+
+
+# ── 第二阶段的完整研报同样要过证伪环节 ───────────────────────────
+#
+# **这一轮暴露的缺口。** 辩论此前只跑在第一阶段的简报上；第二阶段把 DCF
+# 结果交给模型写进第 8 节，然后直接产出 —— **没有任何环节质疑过估值结论**。
+#
+# 而这一轮刚好证明了估值层会错: 总股本错一个数量级，每股内在价值算出
+# 25,077,036 元（现价 129.96），结论从「低估」翻成「高估 59%」，而三表
+# 勾稽、140 格复算、健全性检查、引文审计四道闸门全部放行。质疑者是整条链
+# 上唯一一个被要求「找出站不住的地方」的角色，荒谬的量级恰恰是最容易被看
+# 出来的那种站不住 —— 它本该是第一个发现问题的环节，而它压根没被叫到场。
+#
+# 这不是设计失误，是分阶段演进留下的缝: 辩论是在只有简报的时候做的。
+class TestFullReportIsDebated:
+    def test_完整研报会被辩论并回写(self):
+        got = _run_full_report_stage()
+        assert got["body"] == "回写后的完整研报"
+        assert got["debate_md"], "辩论记录没带出来，无从落盘"
+
+    def test_辩论失败时保留完整研报(self):
+        """与简报那条同一个保证: 已经写好、已经付过钱、已经过完审计的正文
+        不该因为后面一步失败而归零。"""
+        got = _run_full_report_stage(boom=DebateRefused("挑战者写了派生数字"))
+        assert got["body"] == "撰写好的完整研报"
+        assert "未经证伪环节" in got["note"]
+
+    def test_辩论断流时同样保留完整研报(self):
+        from ir_agent.clients.claude_cli import ClaudeCliTransient
+        got = _run_full_report_stage(
+            boom=ClaudeCliTransient("API Error: Response stalled mid-stream."))
+        assert got["body"] == "撰写好的完整研报"
+        assert "未经证伪环节" in got["note"]
+
+    def test_两个阶段的辩论记录不互相覆盖(self):
+        """两阶段产物同在一个目录里。同名就会把简报那轮的记录冲掉 ——
+        而那是另一场辩论，不是同一场的新一稿。"""
+        from ir_agent import full
+        assert full.DEBATE_REPORT != full.DEBATE_BRIEF
+
+
+def _run_full_report_stage(boom: Exception | None = None):
+    """跑一遍 `_write_full_report`：撰写成功，辩论按 `boom` 决定成败。"""
+    from unittest import mock
+
+    from ir_agent import analyst, full
+
+    # `_write_full_report` 在函数体内 import write_body，所以要打在 analyst 上
+    # 而不是 full 上 —— 打错位置时它会去真的调模型，而不是报错说没打中。
+    def _client(prompt):                        # pragma: no cover
+        raise AssertionError("不该真的调模型")
+    _client.total_cost_usd = 0.5
+    _client.calls = 0
+
+    class _Cat:
+        entries = ()
+        evidence = None
+
+    class _R:
+        period = "2025FY"
+        as_of = None
+        ledger = None
+
+    class _Dcf:
+        anchor_note = ""
+
+        def summary(self):
+            return "DCF 估值摘要"
+
+    class _Verdicts:
+        upheld_count = 1
+        challenges = ()
+
+        def summary(self):
+            return "完整研报的辩论记录"
+
+    def _debate(*a, **kw):
+        if boom is not None:
+            raise boom
+        return _Verdicts()
+
+    with mock.patch.object(full, "make_client", lambda **kw: _client), \
+         mock.patch.object(full.FactCatalog, "from_ledger",
+                           classmethod(lambda cls, *a, **kw: _Cat())), \
+         mock.patch.object(full, "_build_evidence", lambda r, code: None), \
+         mock.patch.object(full, "_catalog_periods", lambda r: ()), \
+         mock.patch.object(analyst, "write_body",
+                           lambda *a, **kw: ("撰写好的完整研报", None)), \
+         mock.patch.object(full, "run_debate", _debate), \
+         mock.patch.object(full, "revise_from_verdicts",
+                           lambda *a, **kw: ("回写后的完整研报", None)):
+        body, cost, err, debate_md, note = full._write_full_report(
+            "600183", _R(), "简报正文", None, _Dcf(), {})
+    return dict(body=body, cost=cost, err=err, debate_md=debate_md, note=note)
