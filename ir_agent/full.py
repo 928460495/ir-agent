@@ -1716,6 +1716,23 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     # I4：因子模式连续失败后 assume.decide 会退回两标量模式，不是抛错——
     # 判断项照常写出，但降级这件事不能只留在 assumptions.md 里，终端的
     # skipped 清单是读者第一眼看到的地方，同一条原因要在这里再报一次。
+    return _assumption_caveat_note(a)
+
+
+def _assumption_caveat_note(a) -> str:
+    """判断项**产出之后**的保留意见。空串 = 没有保留。
+
+    前缀是「判断项待复核：」而不是「DCF 判断项（…）」，这是必须的:
+    `_propose_assumptions` 另有三条返回路径（校准失败 / AssumeFailed /
+    调用失败）也以「DCF 判断项（」开头，而那三条是**真的没产出判断项**，
+    `research._mark` 把它们标成「未生成」是对的。两种状态共用一个前缀时，
+    白名单无从区分 —— 注册它会把三条真失败一起降级成警告。
+
+    实测（贵州茅台 600519 第一阶段）: 同一份输出里一行写着
+    「✓ DCF 判断项（待核实）：…/assumptions.md」，另一行写着
+    「– 未生成：DCF 判断项（5 行依据未能逐字核验（已标注，**未阻断**…））」
+    —— 消息自己说未阻断，标签说没生成。
+    """
     notes: list[str] = []
     if a.degraded:
         notes.append(a.degraded)
@@ -1727,7 +1744,7 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     if unverified:
         notes.append(f"{unverified} 行依据未能逐字核验（已标注，未阻断，"
                      "需人工复核）")
-    return f"DCF 判断项（{'；'.join(notes)}）" if notes else ""
+    return f"判断项待复核：{'；'.join(notes)}" if notes else ""
 
 
 _APPROVE_NOTE = """

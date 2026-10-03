@@ -171,3 +171,56 @@ def test_审计未通过不该被标成未生成():
 def test_锚定覆盖标成警示而不是未生成():
     from ir_agent.research import _mark
     assert _mark("判断项被锚定覆盖：首年被锚定已披露中期实际覆盖") == "  ⚠ "
+
+
+def test_判断项产出了但有保留不该标成未生成():
+    """**贵州茅台全流程实跑（600519，第一阶段）。** 同一份输出里两条互相
+    矛盾的断言:
+
+        ✓ DCF 判断项（待核实）：out/600519-t1/assumptions.md
+        – 未生成：DCF 判断项（5 行依据未能逐字核验（已标注，未阻断，需人工复核））
+
+    那条消息自己写着「未阻断」，却被打成「未生成」。它是在
+    assumptions.md **写盘成功之后**产生的保留意见。
+
+    难点在于 `_propose_assumptions` 有四条返回路径，全以「DCF 判断项（」
+    开头: 三条是真失败（校准失败 / AssumeFailed / 调用失败），它们标成
+    「未生成」是对的。所以修法不是把这个前缀注册进白名单——那会把三条真
+    失败一起降级成警告——而是让成功路径用一个**自己说清状态**的前缀。
+
+    这是 `_PREFIX` 白名单兜底的第 9 个实例。兜底值是「未生成」，而它是
+    最强的那个断言；凡是没注册的条目都会被它说成「这东西没产出」。
+    """
+    from ir_agent.research import _mark
+
+    assert _mark("判断项待复核：5 行依据未能逐字核验（已标注，未阻断，"
+                 "需人工复核）") == "  ⚠ "
+    # 三条真失败必须仍然是「未生成」——它们确实没产出判断项
+    for real in ("DCF 判断项（无简报正文，假设无从追溯到分析结论）",
+                 "DCF 判断项（校准失败：未找到 ashare-dcf）",
+                 "DCF 判断项（ClaudeCliError: 连接中断）"):
+        assert _mark(real) == "  – 未生成：", f"真失败被降级了：{real}"
+
+
+def test_判断项保留意见的文案由纯函数产出():
+    """钉住「产出了但有保留」这条消息本身，而不只是它的前缀 —— 前缀对了
+    而消息没发出来，终端照样什么都看不到。"""
+    from ir_agent.full import _assumption_caveat_note
+
+    class _Row:
+        def __init__(self, bad=""):
+            self.basis_unverified = bad
+
+    class _A:
+        degraded = ""
+        rows = [_Row("依据未逐字核验"), _Row(), _Row("同上")]
+
+    note = _assumption_caveat_note(_A())
+    assert note.startswith("判断项待复核：")
+    assert "2 行" in note and "未阻断" in note
+
+    class _Clean:
+        degraded = ""
+        rows = [_Row(), _Row()]
+
+    assert _assumption_caveat_note(_Clean()) == ""
