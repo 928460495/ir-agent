@@ -57,6 +57,41 @@ _RULES = """你正在根据研究总监的裁决修订自己的研报正文。
 """
 
 
+_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.M)
+
+# 修订稿相对原稿允许的最短长度。章节标题齐全而内容被删光是同一种损失的
+# 另一张脸，只查标题会漏掉它；而正当的修订（降级一个无据断言、删掉一句
+# 站不住的话）只会让正文略短。两者之间的空隙很宽: 茅台那次只剩原文的
+# 26%，而正常修订实测是略微变长（生益科技第二阶段 29.6KB → 31.7KB）。
+# 阈值取 0.6 —— 宁可宽也不要在正当修订上误报，一个常响的检查会被学会忽略。
+MIN_KEEP = 0.6
+
+
+def _lost(draft: str, revised: str) -> list[str]:
+    """修订稿相对原稿丢掉了什么。空列表 = 没有可观测的损失。
+
+    **这条规则此前只写在提示词里。** `_RULES` 一直有「不要整段删光」，而
+    提示词是对模型的请求 —— 最弱的那种执行。实测（贵州茅台 600519 第一
+    阶段）: 辩论 2 项成立并回写，简报从八节塌缩成三节、从 23KB 量级只剩
+    6KB，保留下来的两节恰好就是那两条挑战的主题。
+
+    两道既有验收都放行了: 截断后的文本完全满足占位符契约（它只是更短）；
+    而 `unaddressed` 查的是「被质疑的原句是否仍原样存在」—— **那条检查反过来
+    奖励删除**，把整节删掉是通过它最省力的办法。
+
+    章节丢失与正文大幅缩水都是**代码能独立观测的事实**，不必依赖模型自觉。
+    """
+    out = []
+    kept = set(_HEADING.findall(revised))
+    gone = [h for h in _HEADING.findall(draft) if h not in kept]
+    if gone:
+        out.append("丢掉了这些章节：" + "、".join(f"「{h}」" for h in gone))
+    if draft.strip() and len(revised) < MIN_KEEP * len(draft):
+        out.append(f"正文从 {len(draft)} 字缩到 {len(revised)} 字"
+                   f"（不足原文的 {MIN_KEEP:.0%}）")
+    return out
+
+
 def revise_from_verdicts(
     catalog: FactCatalog,
     draft: str,
@@ -75,20 +110,27 @@ def revise_from_verdicts(
     base = (f"{_RULES}\n**可用事实**\n{catalog.render_for_prompt()}\n"
             f"\n**原正文**\n{draft}\n\n**已成立的挑战（必须逐条落实）**\n{listed}\n")
 
-    prompt, last_open, last_bad = base, [], []
+    prompt, last_open, last_bad, last_lost = base, [], [], []
     for _ in range(max_attempts):
         out = strip_preamble(client(prompt))
         last_bad = _violations(out, catalog)
         last_open = unaddressed(upheld, out) if not last_bad else []
-        if not last_bad and not last_open:
+        last_lost = _lost(draft, out)
+        if not last_bad and not last_open and not last_lost:
             return out, True
 
         notes = [f"- {v}" for v in last_bad]
         notes += [f"- 挑战「{c.passage[:40]}」未处理：该句仍原样出现在修订稿中。"
                   for c in last_open]
+        # 驳回信息必须说清怎么改才能通过，否则同一条驳回会被原样重试到底
+        # （与 basis.py 的 _REPORT_GUIDANCE 同一条教训）。只说「不许删」
+        # 模型无从定位，这里点名丢掉的章节。
+        notes += [f"- {x}。请返回**完整正文**：保留原有的全部章节与仍然"
+                  f"成立的分析，只改站不住的那几句。" for x in last_lost]
         prompt = (f"{base}\n---\n**上一稿被驳回：**\n" + "\n".join(notes)
                   + "\n请据此重写全文。\n")
 
     detail = "；".join([*(v for v in last_bad),
-                        *(c.passage[:40] for c in last_open)])
+                        *(c.passage[:40] for c in last_open),
+                        *last_lost])
     raise RevisionFailed(f"修订反复未达要求：{detail}")

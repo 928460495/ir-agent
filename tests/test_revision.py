@@ -123,3 +123,106 @@ class TestReviseFromVerdicts:
                 catalog(), "净利润降幅小于营收降幅。",
                 [ch("净利润降幅小于营收降幅")],
                 self._client(unchanged), max_attempts=2)
+
+
+# ── 回写不得把正文掏空：规则此前只写在提示词里 ────────────────────
+#
+# **贵州茅台全流程实跑（600519 第一阶段）。** 辩论 2 项挑战成立并回写，
+# 简报从应有的八节塌缩成三节，23KB 量级的正文只剩 6KB —— 而保留下来的两节
+# 恰好就是那两条挑战的主题。宏观环境、行业格局、竞争格局、公司经营、财务
+# 结构、风险提示连同已经花钱写出、已经通过全部闸门的内容一起消失。
+#
+# 为什么两道验收都没拦住:
+#   · `_violations` —— 截断后的文本**完全满足**占位符契约，它只是更短
+#   · `unaddressed` —— 查的是「被质疑的原句是否仍原样存在」。**这条检查
+#     反过来奖励删除**: 把那句话删掉是通过它最省力的办法，把整节删掉更
+#     保险。验收条件写的是「那句话不许原样留着」，而我们要的是「那句话被
+#     改对了」—— 两者之差正好是模型这次走的那条路。
+#
+# 而「不要整段删光」这条规则**一直写在 `_RULES` 里**，`test_prompt_forbids_
+# wholesale_deletion` 还专门钉住了它在提示词里。提示词是对模型的请求，是最
+# 弱的那种执行；而「章节丢了」「正文缩了一大半」是代码能独立观测的事实。
+#
+# 对照: 生益科技第二阶段同样回写了 3 项，研报从 29.6KB **涨到** 31.7KB。
+# 同一段代码、同一组检查，模型的两种行为都合法 —— 所以这不是代码写错了，
+# 是验收条件弱到让两种行为都通过。
+# 回写测试的原稿夹具。每节都带一段有实质长度的分析 —— 夹具必须像真产物。
+# 第一版写成每节一句「若干。」，于是「标题留着、内容删光」那一稿反而有原文
+# 90% 的长度（标题占了大头），长度兜底测不出来: **夹具不真实，测试就测不到
+# 它要测的东西**，与本仓库踩过的「测试输入分布与生产不一致」同类。
+_PARA = ("该节对相关事实逐项展开，说明口径、同业位置与其对后续假设的影响，"
+         "并指出哪些结论可由清单内的事实支撑、哪些只能作为方向性参考。")
+_DRAFT = "\n\n".join(
+    [f"## {t}\n{_PARA}" for t in ("投资要点", "宏观环境", "行业格局")]
+    + [f"## 公司经营\n净利润降幅小于营收降幅，"
+       f"营收同比 [[revenue.yoy@2025FY]]。{_PARA}"]
+    + [f"## {t}\n{_PARA}" for t in ("财务结构", "风险提示")]) + "\n"
+
+
+class TestRevisionMustNotGutTheReport:
+    DRAFT = _DRAFT
+
+    # 只剩被质疑的那一节 —— 茅台那次的形状
+    GUTTED = ("## 公司经营\n净利润降幅大于营收降幅，"
+              "营收同比 [[revenue.yoy@2025FY]]。\n")
+
+    # 章节齐全、只改站不住的那一句
+    FIXED = DRAFT.replace("净利润降幅小于营收降幅", "净利润降幅大于营收降幅")
+
+    def _client(self, *rs):
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return rs[min(len(seen) - 1, len(rs) - 1)]
+        c.seen = seen
+        return c
+
+    def _ch(self):
+        return [ch("净利润降幅小于营收降幅")]
+
+    def test_丢了章节的修订稿被驳回并重写(self):
+        c = self._client(self.GUTTED, self.FIXED)
+        out, changed = revise_from_verdicts(catalog(), self.DRAFT,
+                                            self._ch(), c)
+        assert changed and out.strip() == self.FIXED.strip(), "塌缩的那一稿被收下了"
+        assert len(c.seen) == 2, "没有驳回重写"
+
+    def test_驳回信息要列出丢掉的章节(self):
+        """只说「不许删」模型无从定位 —— 驳回信息必须说清怎么改才能通过，
+        这是本仓库已有的一条教训（见 basis.py 的 _REPORT_GUIDANCE）。"""
+        c = self._client(self.GUTTED, self.FIXED)
+        revise_from_verdicts(catalog(), self.DRAFT, self._ch(), c)
+        assert "宏观环境" in c.seen[1] and "风险提示" in c.seen[1]
+
+    def test_一直丢章节则拒绝交付修订稿(self):
+        """用尽重试后抛 RevisionFailed —— 调用方据此保留未修订稿并标注，
+        那条兜底已经在 full._debate_and_revise 里（两阶段共用）。"""
+        c = self._client(self.GUTTED)
+        with pytest.raises(RevisionFailed, match="章节"):
+            revise_from_verdicts(catalog(), self.DRAFT, self._ch(), c)
+
+    def test_章节齐全的正常修订不被误判(self):
+        out, changed = revise_from_verdicts(catalog(), self.DRAFT,
+                                            self._ch(), self._client(self.FIXED))
+        assert changed and "大于" in out
+
+    def test_章节齐全但正文被掏空同样驳回(self):
+        """标题留着、内容删光是同一种损失的另一张脸 —— 只查标题会漏掉它。"""
+        hollow = "\n\n".join(
+            f"## {t}\n略。" for t in ("投资要点", "宏观环境", "行业格局",
+                                      "财务结构", "风险提示")
+        ) + ("\n\n## 公司经营\n营收同比 [[revenue.yoy@2025FY]]，"
+             "净利润降幅大于营收降幅。\n")
+        c = self._client(hollow, self.FIXED)
+        out, _ = revise_from_verdicts(catalog(), self.DRAFT, self._ch(), c)
+        assert len(c.seen) == 2, "被掏空的那一稿被收下了"
+        assert out.strip() == self.FIXED.strip(), \
+            "最终交付的不是章节与分析都完整的那一稿"
+
+    def test_新增章节不算丢(self):
+        """补上被忽略的反面证据可能需要新起一节，这是正当修订。"""
+        added = self.FIXED + "\n## 反面证据\n补充若干。\n"
+        out, changed = revise_from_verdicts(catalog(), self.DRAFT,
+                                           self._ch(), self._client(added))
+        assert changed and "反面证据" in out
