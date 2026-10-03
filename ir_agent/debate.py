@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from ir_agent.analyst import FactCatalog, _violations
+from ir_agent.analyst import PLACEHOLDER_RULES, FactCatalog, _violations
 
 Client = Callable[[str], str]
 
@@ -119,8 +119,13 @@ def should_continue(round_no: int, max_rounds: int, open_count: int) -> bool:
     return round_no < max_rounds and open_count > 0
 
 
-_RULES = """本轮为内部研究评审。数字一律写占位符 [[字段@期间]]，
-清单外的字段不得引用，**不得写出任何字面数字**。
+# 与撰写者**同一份**纪律 —— 不是「也提到了占位符」的简版。
+# 原先这里是两行自己写的概述，没提事实清单「数值」列是渲染结果这条坑，
+# 于是质疑者照抄分位数（17、67、50）被驳回三次、辩论中止（生益科技第六
+# 轮）。契约的执行一视同仁而指令不对等时，吃亏的一方是只能看见指令的那个。
+_RULES = f"""本轮为内部研究评审。
+
+{PLACEHOLDER_RULES}
 """
 
 _CHALLENGER = _RULES + """

@@ -198,3 +198,52 @@ class TestEnumerationIsStructureNotContent:
     def test_year_like_number_at_line_start_survives(self):
         """行首的 2025 是年份不是编号，不该被结构剥离吃掉。"""
         assert "2025" in self.s("2025 年公司营收下滑")
+
+
+# ── 占位符契约：执行一视同仁，指令也必须一视同仁 ──────────────────
+#
+# **实测事故（生益科技 600183 第六轮）。** 撰写正文通过了全部闸门，多空辩论
+# 却被驳回三次后中止，违规的数字是 17、67、50 —— 全是**分位数**，而它们正是
+# 事实清单「数值」一列里显示的东西：
+#
+#     权益乘数分位        67 分位   写作 [[equity_multiplier.percentile@2025FY]]
+#
+# 提示词必须显示数值（模型不知道数量级就无法推理），而契约禁止写出数值。
+# 撰写者为此拿到整整一段纪律，其中专门有一条讲「数值」列是渲染结果、不要
+# 照抄——例子用的就是「17 分位」。而质疑者与裁决者拿到的只有两行，这条坑
+# 一个字都没提。
+#
+# debate.py 的模块 docstring 写着「占位符契约对所有参与者一视同仁」。
+# **执行确实一视同仁（_violations 对三方同一套），指令从来不是。** 这是
+# 同一个会话里第三次撞上「声明与现实之间的缝」: _norm 的三份副本都声称
+# 与另两处相同；两处 except 的注释都论证了失败不该毙掉正文而元组没照做。
+class TestPlaceholderRuleParity:
+    def test_三方提示词都带着与撰写者同一份纪律(self):
+        """钉的是**同一份文本**，不是「也提到了占位符」：任何人再写一个
+        简版，这条立刻变红。"""
+        from ir_agent.analyst import PLACEHOLDER_RULES
+        from ir_agent import debate
+
+        for name, prompt in (("质疑者", debate._CHALLENGER),
+                             ("回应者", debate._RESPONDER),
+                             ("裁决者", debate._JUDGE)):
+            assert PLACEHOLDER_RULES in prompt, f"{name}拿到的纪律不是同一份"
+
+    def test_撰写者两种模式也用同一份(self):
+        """简报版与完整研报版此前逐字重复了两遍（553 字符），一份改了另一份
+        不会跟着改。"""
+        from ir_agent.analyst import PLACEHOLDER_RULES, build_prompt
+        from ir_agent.analyst import FactCatalog
+
+        cat = FactCatalog(entries=[])
+        for brief in (True, False):
+            assert PLACEHOLDER_RULES in build_prompt(
+                cat, code="600183", period="2025FY", brief=brief)
+
+    def test_纪律里确实有数值列那条坑(self):
+        """这条是事故的直接成因，单独钉一次 —— 收归一处时若把它丢了，
+        上面那条身份测试照样全绿。"""
+        from ir_agent.analyst import PLACEHOLDER_RULES
+
+        assert "「数值」一列" in PLACEHOLDER_RULES
+        assert "渲染结果" in PLACEHOLDER_RULES
