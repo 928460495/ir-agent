@@ -1229,16 +1229,32 @@ def _catalog_periods(r) -> tuple[str, ...]:
     于是裁判判「均不在本轮可用事实清单内」、无据断言成立、回写时把一致预期的
     句子删掉——每次辩论成功就删光（长电辩论失败没回写，反而留下 14 条）。
 
+    **同一个坑第二次（贵州茅台 600519 第二阶段）。** 当时只为 `consensus.*`
+    修，没有推广。第二阶段把估值结果写进研报时，`dcf_res.summary()` 直接给出
+    `[[valuation.value_per_share@2026-10-03]]` 这类占位符（期间是估值时点），
+    而清单收不到它 —— 裁判判「六个占位符均系自行拼造」、无据断言成立、回写
+    把估值数字全删掉，研报的估值一节变成「具体数值账本未披露，此处不作字面
+    引用」。那句话是假的: `dcf.to_facts` 在撰写之前就把它们 put 进账本了。
+    第一阶段不跑估值，所以这个坑一直等到辩论接进第二阶段才被踩出来。
+
+    一般原则: **凡是提示词能递给模型的占位符，其期间都必须在裁判的清单里。**
+    下面这张「提示词侧事实族」表每加一个摘要类提示词就要跟着加一条 ——
+    漏一条的后果不是报错，是那一族数字在辩论成功后被静默删光。
+
     - 宏观/利率/β：每个 key 取最新一期（`_macro_periods`）
     - 一致预期：**全部**期间——提示词三个预测年都给了，只收最新一期等于只给
       裁判看一年
+    - 估值：全部期间（实际只有一个估值时点）
     - 行情：市值所在的报价日
     """
-    cons = sorted({per for key, per in r.ledger._facts           # noqa: SLF001
-                   if key.startswith("consensus.")})
+    # 提示词侧事实族：由摘要类提示词（corpus.consensus_prompt、
+    # dcf_res.summary()）直接递给模型的占位符，其期间清单里必须有。
+    PROMPT_SIDE = ("consensus.", "valuation.")
+    extra = sorted({per for key, per in r.ledger._facts          # noqa: SLF001
+                    if key.startswith(PROMPT_SIDE)})
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
-    return _macro_periods(r) + tuple(cons) + ((spot,) if spot else ())
+    return _macro_periods(r) + tuple(extra) + ((spot,) if spot else ())
 
 
 def _prompt_bundle(pr: dict) -> dict:

@@ -2881,3 +2881,81 @@ def _run_full_report_stage(boom: Exception | None = None):
         body, cost, err, debate_md, note = full._write_full_report(
             "600183", _R(), "简报正文", None, _Dcf(), {})
     return dict(body=body, cost=cost, err=err, debate_md=debate_md, note=note)
+
+
+def _ledger_with_valuation():
+    """第二阶段 `dcf.to_facts` 落进账本的 valuation.* —— 期间是估值时点。"""
+    from ir_agent.ledger import Fact, FactLedger, Method
+    l = _ledger_with_consensus()
+    for k, v in (("valuation.value_per_share", "2642.36"),
+                 ("valuation.price", "1258.62"),
+                 ("valuation.wacc", "0.0674"),
+                 ("valuation.terminal_share", "0.884")):
+        l.put(Fact(key=k, value=Decimal(v), unit="元", currency="CNY",
+                   period="2026-10-03", as_of=date(2026, 10, 3),
+                   source_id="ashare_dcf", method=Method.COMPUTED))
+    return l
+
+
+def test_估值事实也要进辩论裁判的可引用清单():
+    """**贵州茅台全流程实跑（600519 第二阶段）抓到的，而且是我把辩论接进
+    第二阶段之后才暴露的回归。**
+
+    研报的估值一节被回写成这样：
+
+        DCF 模型测算的每股内在价值、现价对比、所用 WACC 与终值 ROIC 等
+        具体数值**账本未披露，此处不作字面引用**。
+
+    这句话是假的 —— 账本里有（`dcf.to_facts` 在撰写之前就 put 进去了）。
+    发生的事与 `test_写作方与辩论裁判看的是同一份可引用清单` 记的那次
+    **一字不差是同一个机制**:
+
+    - 写作方：`dcf_res.summary()` 在提示词里直接给出
+      `[[valuation.value_per_share@2026-10-03]]` 这类占位符，正文校验走
+      `render()` 查账本，引用能通过（实测 0 个未替换占位符）
+    - 裁判方：拿的是可引用清单，而清单只收公司报告期、`_macro_periods`、
+      一致预期与报价日 —— **没有估值时点**。于是裁判判「六个占位符均系
+      自行拼造」→ 无据断言成立 → 回写把估值数字全删掉
+
+    当时为 `consensus.*` 修了这个坑，没有推广到别的「提示词给得出、清单里
+    没有」的事实族。`valuation.*` 落在同一个坑里，而第一阶段不跑估值、
+    从来碰不到它 —— 这个坑等了接上辩论才被踩出来。
+
+    一般原则: **凡是提示词能递给模型的占位符，其期间都必须在裁判的清单里**。
+    """
+    from ir_agent import full
+
+    class _R:
+        ledger = _ledger_with_valuation()
+        quotes = _Quotes()
+
+    assert "2026-10-03" in full._catalog_periods(_R()), \
+        "估值时点不在清单期间里，裁判会判估值数字是编的"
+
+
+def test_估值占位符都进了可引用清单():
+    from ir_agent import full
+    from ir_agent.analyst import FactCatalog
+
+    class _R:
+        ledger = _ledger_with_valuation()
+        quotes = _Quotes()
+        period = "2025FY"
+
+    cat = FactCatalog.from_ledger(_R.ledger, period=_R.period,
+                                  as_of=date(2026, 10, 3),
+                                  extra_periods=full._catalog_periods(_R()))
+    for k in ("valuation.value_per_share", "valuation.wacc",
+              "valuation.terminal_share"):
+        assert f"[[{k}@2026-10-03]]" in cat.tokens, f"{k} 不在清单里"
+
+
+def test_第一阶段没有估值事实时清单不变():
+    """第一阶段账本里没有 valuation.*，这条改动不该给它凭空加期间。"""
+    from ir_agent import full
+
+    class _R:
+        ledger = _ledger_with_consensus()
+        quotes = _Quotes()
+
+    assert not any(p == "2026-10-03" for p in full._catalog_periods(_R()))
