@@ -123,14 +123,24 @@ class TestRunDebate:
         assert r.challenges == [] and len(c.seen) == 1
 
     def test_participants_must_respect_the_placeholder_contract(self):
-        """质疑者写裸数字同样要被驳回并重写 —— 契约对所有参与者一视同仁。"""
+        """契约对所有参与者一视同仁 —— **但「一视同仁」的内容变了。**
+
+        这条测试原先断言「质疑者写裸数字要被驳回并重写」。该策略已撤销:
+        实跑三次辩论失败里有两次是它造成的，而放行的理由本就写在
+        debate.py 的注释里（辩论文字不进正文，回写另有审计）。见
+        TestChallengerMayDoArithmetic。
+
+        仍然一视同仁的是**不得凭空拼造占位符** —— 那是声称账本里有一条
+        不存在的事实，与「没写成占位符」不是一个量级。这条测试改为钉住
+        这一半: 驳回信息要指名那个伪造的引用，且重写后仍能产出可用挑战。
+        """
         bad = ("[挑战 1] 类型：逻辑错误\n原文：某句\n"
-               "质疑：营收同比 -1.21% 与净利润同比 -4.50% 矛盾。")
+               "质疑：毛利率 [[gross_margin.fake@2025FY]] 与结论矛盾。")
         c = self._client(bad, RAW, "分析师回应。", self.VERDICT)
         r = run_debate(self._catalog(), draft="某正文。", client=c, max_rounds=1)
-        assert "被驳回" in c.seen[1]          # 第二次调用带上了驳回说明
-        assert "1.21" in c.seen[1]            # 且指名了违规的那个数字
-        assert r.challenges                   # 重写后仍产出了可用挑战
+        assert "被驳回" in c.seen[1]              # 第二次调用带上了驳回说明
+        assert "gross_margin.fake" in c.seen[1]   # 且指名了伪造的那个引用
+        assert r.challenges                       # 重写后仍产出了可用挑战
 
     def test_structural_markers_are_not_treated_as_bare_numbers(self):
         """[挑战 1] 里的编号是格式不是内容 —— 否则每一稿都会因自己的
@@ -140,7 +150,10 @@ class TestRunDebate:
         assert "被驳回" not in c.seen[1]
 
     def test_persistent_contract_violation_refuses(self):
-        bad = "[挑战 1] 类型：逻辑错误\n原文：某句\n质疑：营收 1688.38 亿元有误。"
+        """反复伪造引用则中止辩论。**违规样本从裸数字换成了伪造占位符** ——
+        裸数字对参与者已放行，见上一条测试的 docstring。"""
+        bad = ("[挑战 1] 类型：逻辑错误\n原文：某句\n"
+               "质疑：营收 [[revenue.fake@2025FY]] 有误。")
         with pytest.raises(DebateRefused):
             run_debate(self._catalog(), draft="某正文。",
                        client=self._client(bad), max_rounds=1, max_attempts=2)
@@ -247,3 +260,90 @@ class TestPlaceholderRuleParity:
 
         assert "「数值」一列" in PLACEHOLDER_RULES
         assert "渲染结果" in PLACEHOLDER_RULES
+
+
+# ── 质疑者可以算账：裸数字对辩论参与者放行 ────────────────────────
+#
+# **今天三次辩论失败里有两次是这条规则造成的**（生益科技 600183 与贵州茅台
+# 600519 各一次）:
+#   · 「238亿、3.7倍」—— 质疑者自己算的差额与倍数，账本里没有这两条事实
+#   · 「67（应写作 [[equity_multiplier.percentile@2025FY]]）」—— 照抄事实
+#     清单「数值」列里的分位数
+#
+# 两类都无害，而放行的理由**代码注释里早就写好了**:
+#
+#   > 正文有独立的验收审计，辩论里的裸数字进不了正文: 修订稿仍要过
+#   > `_violations`。
+#
+# 结构上三道保障: ①质疑者/回应者/裁决者的文字只进 debate.md，不进研报正文
+# ②正文只能由 revision.py 改，而那条路径的审计**不放宽** ③`_ask` 里本来就有
+# 放宽先例（「没有引用任何事实占位符」对质疑者不适用）。
+#
+# 代价是 debate.md 里会出现未经账本校验的派生数字 —— 但那本来就是「某人提出
+# 的质疑」，不是事实陈述。而收益是实质的: 算账恰恰是最有力的质疑形式，旧规则
+# 在**系统性淘汰质量最高的那类挑战**。
+class TestChallengerMayDoArithmetic:
+    VERDICT = "[裁决 1] 成立　（理由）"
+
+    def _client(self, *rs):
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return rs[min(len(seen) - 1, len(rs) - 1)]
+        c.seen = seen
+        return c
+
+    def _catalog(self):
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.ledger import Fact, FactLedger, Method
+        l = FactLedger()
+        for k, v in [("revenue.yoy", "-0.0121"), ("net_profit.yoy", "-0.045")]:
+            l.put(Fact(key=k, value=D(v), unit="ratio", currency=None,
+                       period="2025FY", as_of=date(2026, 4, 20),
+                       source_id="calc_x", method=Method.COMPUTED))
+        return FactCatalog.from_ledger(l, "2025FY", as_of=date(2026, 6, 1))
+
+    def test_质疑者写自己算的数字不再被驳回(self):
+        """账本里没有「差额」这条事实 —— 禁止派生算术等于禁止它提出有力质疑。"""
+        ch1 = ("[挑战 1] 类型：逻辑错误\n原文：某句\n"
+               "质疑：投资现金流与资本开支的差额约 238亿，占比 3.7倍，与结论矛盾。")
+        c = self._client(ch1, "分析师回应。", self.VERDICT)
+        r = run_debate(self._catalog(), draft="某正文。", client=c, max_rounds=1)
+        assert "被驳回" not in c.seen[1], "质疑者又因为算账被驳回了"
+        assert r.challenges
+
+    def test_质疑者照抄清单数值列也不再被驳回(self):
+        ch1 = ("[挑战 1] 类型：逻辑错误\n原文：某句\n"
+               "质疑：营收同比 -1.21% 与结论方向相反。")
+        c = self._client(ch1, "分析师回应。", self.VERDICT)
+        run_debate(self._catalog(), draft="某正文。", client=c, max_rounds=1)
+        assert "被驳回" not in c.seen[1]
+
+    def test_凭空拼造占位符仍然被驳回(self):
+        """**这条界线不能放。** 裸数字只是「没写成占位符」，拼造占位符是
+        声称账本里有一条不存在的事实 —— 裁决者会据一个不存在的事实判挑战
+        成立，而回写会据那个裁决改正文。"""
+        bad = ("[挑战 1] 类型：无据断言\n原文：某句\n"
+               "质疑：毛利率 [[gross_margin.fabricated@2025FY]] 并不支持该结论。")
+        with pytest.raises(DebateRefused):
+            run_debate(self._catalog(), draft="某正文。",
+                       client=self._client(bad), max_rounds=1, max_attempts=2)
+
+    def test_辩论记录如实标出放行过裸数字(self):
+        """放行不等于不说。读者看 debate.md 时要知道里面的派生数字未经校验。"""
+        ch1 = ("[挑战 1] 类型：逻辑错误\n原文：某句\n"
+               "质疑：差额约 238亿，与结论矛盾。")
+        r = run_debate(self._catalog(), draft="某正文。",
+                       client=self._client(ch1, "分析师回应。", self.VERDICT),
+                       max_rounds=1)
+        assert "未经账本校验" in r.summary()
+
+    def test_回写路径不放宽(self):
+        """正文只能由 revision.py 改，而那条路径必须保持严格 —— 放宽它等于
+        允许裸数字进研报。"""
+        import inspect
+
+        from ir_agent import revision
+        src = inspect.getsource(revision.revise_from_verdicts)
+        assert "is_bare_number" not in src, "回写路径放宽了裸数字审计"

@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from ir_agent.analyst import PLACEHOLDER_RULES, FactCatalog, _violations
+from ir_agent.analyst import (PLACEHOLDER_RULES, FactCatalog,
+                              _violations, is_bare_number)
 
 Client = Callable[[str], str]
 
@@ -81,6 +82,8 @@ class DebateResult:
     challenges: list[Challenge] = field(default_factory=list)
     transcript: list[tuple[str, str]] = field(default_factory=list)
     rounds: int = 0
+    # 放宽审计时留下的说明（见 `_ask` 的 `allowed`）。**放行不等于不说。**
+    notes: list[str] = field(default_factory=list)
 
     @property
     def upheld_count(self) -> int:
@@ -96,6 +99,9 @@ class DebateResult:
             lines.append(f"  {mark}　[{c.kind.value}] {c.passage[:34]}")
             if c.upheld and c.rationale:
                 lines.append(f"        {c.rationale.strip()[:70]}")
+        # 放宽审计的说明排在末尾、逐条列出 —— 放行不等于不说。
+        for n in dict.fromkeys(self.notes):
+            lines.append(f"  ⚠ {n}")
         return "\n".join(lines)
 
 
@@ -159,14 +165,38 @@ _JUDGE = _RULES + """
 
 
 def _ask(client: Client, prompt: str, catalog: FactCatalog,
-         max_attempts: int) -> str:
-    """调用并强制占位符契约 —— 违规驳回重写，用尽则中止辩论。"""
+         max_attempts: int, allowed: list[str] | None = None) -> str:
+    """调用并强制占位符契约 —— 违规驳回重写，用尽则中止辩论。
+
+    **裸数字对辩论参与者放行。** 今天三次辩论失败里有两次是这条规则造成的
+    （质疑者自己算的「238亿、3.7倍」、照抄清单数值列的「67」）。放行的理由
+    本文件注释里早就写好了:「正文有独立的验收审计，辩论里的裸数字进不了
+    正文 —— 修订稿仍要过 `_violations`。」三道结构保障: ①三方的文字只进
+    debate.md ②正文只能由 revision.py 改，那条路径不放宽 ③本函数本来就对
+    「没有引用任何事实占位符」放行过，这是同类放宽的第二条。
+
+    算账恰恰是最有力的质疑形式（差额、占比、倍数），旧规则在系统性淘汰
+    质量最高的那类挑战。
+
+    **凭空拼造占位符仍然驳回**: 裸数字只是「没写成占位符」，拼造占位符是
+    声称账本里有一条不存在的事实 —— 裁决者会据它判挑战成立，而回写会据
+    那个裁决改正文。两者不是一个量级。
+
+    放行过的，`allowed` 会收到一条说明，由 `DebateResult.summary()` 如实
+    印进 debate.md —— 放行不等于不说。
+    """
     p, last = prompt, []
     for _ in range(max_attempts):
         out = client(p)
         audited = strip_structure(out)
-        last = [v for v in _violations(audited, catalog)
-                if "没有引用任何事实占位符" not in v]   # 质疑可以不含数字
+        bad = _violations(audited, catalog)
+        if allowed is not None and any(is_bare_number(v) for v in bad):
+            allowed.append("辩论文字中含未经账本校验的派生数字（差额、占比、"
+                           "倍数等）—— 已按规则放行，它们不进研报正文，"
+                           "但阅读挑战内容时请自行核对")
+        last = [v for v in bad
+                if "没有引用任何事实占位符" not in v   # 质疑可以不含数字
+                and not is_bare_number(v)]             # 质疑者可以算账
         if not last:
             return out
         p = (f"{prompt}\n\n---\n**上一稿被驳回，原因：**\n"
@@ -215,7 +245,8 @@ def run_debate(
                        "或与正文结论自相矛盾\n")
 
     result = DebateResult()
-    raw = _ask(client, challenger + ctx, catalog, max_attempts)
+    allowed = result.notes          # 三方共用一份，summary 去重后输出
+    raw = _ask(client, challenger + ctx, catalog, max_attempts, allowed)
     result.transcript.append(("质疑者", raw))
     result.challenges = parse_challenges(raw)
     result.rounds = 1
@@ -227,11 +258,12 @@ def run_debate(
         for c in result.challenges)
 
     resp = _ask(client, _RESPONDER + ctx + f"\n**挑战**\n{listed}\n",
-                catalog, max_attempts)
+                catalog, max_attempts, allowed)
     result.transcript.append(("分析师", resp))
 
     verdicts = _ask(client, _JUDGE + ctx + f"\n**挑战**\n{listed}\n"
-                    f"\n**分析师回应**\n{resp}\n", catalog, max_attempts)
+                    f"\n**分析师回应**\n{resp}\n", catalog, max_attempts,
+                    allowed)
     result.transcript.append(("研究总监", verdicts))
 
     by_idx = {int(m.group(1)): m for m in _VERDICT.finditer(verdicts)}

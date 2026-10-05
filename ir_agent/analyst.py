@@ -485,6 +485,17 @@ def is_cosmetic(v: str) -> bool:
     return any(k in v for k in COSMETIC)
 
 
+# 裸数字违规的开头。**辩论参与者对这一类放行**（见 debate._ask），因为
+# 他们的文字只进 debate.md、不进研报正文，而正文只能由 revision.py 改，
+# 那条路径的审计不放宽。单独成常量而不是在 debate 里字符串匹配: 消息措辞
+# 会变，匹配点只该有一处。
+BARE_NUMBER_MSG = "以下数字是字面值，必须改写为占位符："
+
+
+def is_bare_number(v: str) -> bool:
+    return v.startswith(BARE_NUMBER_MSG)
+
+
 def strip_preamble(body: str) -> str:
     """去掉正文开头的交代话，让报告从第一个标题开始。
 
@@ -513,7 +524,7 @@ def _violations(body: str, catalog: FactCatalog) -> list[str]:
     bare = audit_bare_numbers(body)
     if bare:
         hints = [_hint(b, catalog) for b in bare[:10]]
-        msg = "以下数字是字面值，必须改写为占位符：" + "、".join(hints)
+        msg = BARE_NUMBER_MSG + "、".join(hints)
         if any(_NO_MATCH in h for h in hints):
             msg += _NO_MATCH_NOTE
         out.append(msg)
