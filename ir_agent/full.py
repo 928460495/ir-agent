@@ -1078,6 +1078,10 @@ DEBATE_REPORT = "debate_report.md"
 # 早晚分叉（本仓库已经在占位符期间上踩过这种分叉）。research 不能反向
 # 导入 full（full 依赖 research），所以单一定义放在被依赖的那一侧。
 ASSUMPTIONS_JSON = "assumptions.json"
+# 判断项那一步的超时。比默认的 900s 更长 —— 它是全链路输出最长的调用，
+# 而输出长度不受提示词控制。配合 `retry_timeout=True`（见下方调用处）。
+ASSUME_TIMEOUT = 1500
+
 FAILED_RAW = "assumptions_failed_raw.txt"
 # 撰写被驳回时最后一稿的落盘名。两个阶段各一个 —— 同一个目录，同名就会
 # 把另一阶段的证据冲掉（与 debate.md / debate_report.md 同一处理）。
@@ -1597,7 +1601,8 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
 
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, out=out, brief=True, **_prompt_bundle(pr))
-    cost += (qual_client.total_cost_usd + research_client.total_cost_usd
+    cost += (assume_client.total_cost_usd
+             + qual_client.total_cost_usd + research_client.total_cost_usd
              + announce_client.total_cost_usd)
     if err and body is None:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
@@ -1615,9 +1620,19 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             skipped.append(note)
 
     # ── AI 填写 DCF 判断项 ────────────────────────────────
+    # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出
+    # 最长的一次调用（7~8 个因子 × 5 年 × 3 档，几十行结构化文本），瓶颈在
+    # 输出而不在提示词长度 —— 与撰写正文正相反。实测（生益科技
+    # 2026-10-06）: 它 900s 超时，而 brief 与 debate 都已成功落盘、5 项挑战
+    # 全部回写，整轮 $11.09 却因为进不了第二阶段而作废。
+    #
+    # 不借用 `qual_client`: 那个客户端服务宏观定性/战略/产业链三步，它们是
+    # 输入受限的调用，给它们开超时重试只会换来静默等待。
+    assume_client = make_client(model=model, timeout=ASSUME_TIMEOUT,
+                                retry_timeout=True)
     if body:
         aerr = _propose_assumptions(
-            code, r, body, md, as_of, out, qual_client, arts,
+            code, r, body, md, as_of, out, assume_client, arts,
             decomps=(meth.decompositions if meth is not None else None),
             factor_data=factor_data)
         if aerr:

@@ -14,6 +14,7 @@ import pytest
 
 from ir_agent.clients.claude_cli import (
     ClaudeCliError,
+    ClaudeCliTimeout,
     NotAuthenticated,
     make_client,
     parse_result,
@@ -279,3 +280,70 @@ class TestTransientRetry:
         要么得去 monkeypatch time.sleep。"""
         import inspect
         assert "sleeper" in inspect.signature(make_client).parameters
+
+
+# ── 超时：按「输入受限」还是「输出受限」区分，不按一条规则 ──────────
+#
+# **实测（生益科技 600183 全流程，2026-10-06）。** 第一阶段只差最后一步，
+# 判断项那次调用 900s 超时，整轮 $11.09 作废 —— brief 与 debate 都已落盘且
+# 5 项挑战全部回写，但没有判断项就进不了第二阶段，而流水线没有续跑点。
+#
+# 超时原先被刻意排除在可重试白名单外，理由是「超时的常见原因（提示词太长）
+# 重试也不会变」。这条推理对**撰写**成立（提示词两万余字，长度固定），对
+# **判断项**不成立: 它的瓶颈在输出 —— 要为 7~8 个因子 × 5 年 × 3 档生成几十
+# 行结构化文本，是全链路输出最长的一次调用，而生成速度是会波动的。
+#
+# 同一条规则套在两种不同瓶颈的调用上，这是当初的错。因此改为**由调用方
+# 声明**: 输出受限的调用显式开启 `retry_timeout`，其余保持原样（重试超时
+# 会带来 45 分钟静默等待，这个代价是真的）。
+class TestTimeoutPolicy:
+    def _timeout_runner(self, rec, then=None):
+        def run(cmd, prompt, timeout):
+            rec["calls"] = rec.get("calls", 0) + 1
+            if then is not None and rec["calls"] > 1:
+                return then
+            raise ClaudeCliTimeout(f"claude 调用超时（{timeout}s）。")
+        return run
+
+    def test_超时是独立一类而不是传输故障(self):
+        """按**异常类型**区分，不按错误文本匹配 —— 文本会变，类型不会。"""
+        from ir_agent.clients.claude_cli import (ClaudeCliTimeout,
+                                                 ClaudeCliTransient)
+        assert issubclass(ClaudeCliTimeout, ClaudeCliError)
+        assert not issubclass(ClaudeCliTimeout, ClaudeCliTransient)
+
+    def test_默认不重试超时(self):
+        """45 分钟静默等待是真代价，默认不付。"""
+        rec = {}
+        c = make_client(runner=self._timeout_runner(rec), sleeper=lambda s: None)
+        with pytest.raises(ClaudeCliTimeout):
+            c("q")
+        assert rec["calls"] == 1
+
+    def test_调用方可以显式开启超时重试(self):
+        rec = {}
+        c = make_client(runner=self._timeout_runner(rec, then=payload()),
+                        retry_timeout=True, sleeper=lambda s: None)
+        assert "毛利率" in c("q")
+        assert rec["calls"] == 2
+
+    def test_开启后仍然受重试次数限制(self):
+        rec = {}
+        c = make_client(runner=self._timeout_runner(rec), retry_timeout=True,
+                        retries=1, sleeper=lambda s: None)
+        with pytest.raises(ClaudeCliTimeout):
+            c("q")
+        assert rec["calls"] == 2
+
+    def test_开启超时重试不影响内容类错误(self):
+        """提示词过长这类确定性失败仍然一次都不重试。"""
+        rec = {}
+
+        def run(cmd, prompt, timeout):
+            rec["calls"] = rec.get("calls", 0) + 1
+            return payload(is_error=True, result="Prompt is too long")
+
+        c = make_client(runner=run, retry_timeout=True, sleeper=lambda s: None)
+        with pytest.raises(ClaudeCliError):
+            c("q")
+        assert rec["calls"] == 1

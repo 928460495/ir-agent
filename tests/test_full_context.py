@@ -3018,3 +3018,24 @@ def test_没有稿子时不写空文件(tmp_path):
 
     assert full._dump_refused(tmp_path, "", full.WRITE_FAILED_BRIEF) == ""
     assert not (tmp_path / full.WRITE_FAILED_BRIEF).exists()
+
+
+def test_判断项那一步开了超时重试并给了更长超时():
+    """**这条钉的是「接上了」。** 生益科技 2026-10-06 那轮就是判断项 900s
+    超时作废的: brief 与 debate 都已落盘、5 项挑战全部回写，整轮 $11.09
+    因为进不了第二阶段而白花，而流水线没有续跑点。
+
+    策略本身（输出受限的调用才开超时重试）由 tests/test_claude_cli.py 的
+    TestTimeoutPolicy 钉住；这里只查 run_analysis 真的为这一步单独开了
+    客户端 —— 借用 qual_client 就等于给三个输入受限的调用一起开了重试。
+    """
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full.run_analysis)
+    assert "retry_timeout=True" in src, "判断项没开超时重试"
+    assert "timeout=ASSUME_TIMEOUT" in src, "判断项没给更长的超时"
+    assert "out, assume_client, arts" in src, "判断项还在借用 qual_client"
+    assert "assume_client.total_cost_usd" in src, "新客户端的开销没计进总开销"
+    assert full.ASSUME_TIMEOUT > 900, "ASSUME_TIMEOUT 不比默认超时更长"

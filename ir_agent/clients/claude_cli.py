@@ -36,6 +36,26 @@ class NotAuthenticated(ClaudeCliError):
     """登录已过期 —— 解法明确，单列一类便于调用方给出准确提示。"""
 
 
+class ClaudeCliTimeout(ClaudeCliError):
+    """调用超时 —— **单独一类，不等于传输故障。**
+
+    超时是否值得重试取决于**瓶颈在输入还是输出**:
+
+      · 撰写正文: 提示词两万余字（可引用事实 + 六段摘要 + 年报摘录），
+        长度是固定的，超时意味着这个提示词本身跑不完 —— 重试三次只是
+        45 分钟静默等待。
+      · 填判断项: 要为 7~8 个因子 × 5 年 × 3 档生成几十行结构化文本，是
+        全链路**输出最长**的一次调用，而生成速度会波动 —— 重试很可能过。
+
+    实测（生益科技全流程，2026-10-06）: 第一阶段只差判断项这最后一步，
+    900s 超时，整轮 $11.09 作废 —— brief 与 debate 都已落盘、5 项挑战全部
+    回写，但没有判断项就进不了第二阶段，而流水线没有续跑点。
+
+    所以重试与否**由调用方声明**（`make_client(retry_timeout=True)`），
+    默认不重试。按异常类型区分而不是匹配错误文本: 文本会变，类型不会。
+    """
+
+
 class ClaudeCliTransient(ClaudeCliError):
     """传输层故障 —— 什么都没说明，值得重试。
 
@@ -105,7 +125,7 @@ def _subprocess_runner(cmd: list[str], prompt: str, timeout: int) -> str:
         raise ClaudeCliError(
             "找不到 claude 命令。请确认 Claude Code 已安装且在 PATH 中。") from e
     except subprocess.TimeoutExpired as e:
-        raise ClaudeCliError(f"claude 调用超时（{timeout}s）。") from e
+        raise ClaudeCliTimeout(f"claude 调用超时（{timeout}s）。") from e
     return p.stdout or p.stderr
 
 
@@ -117,6 +137,7 @@ def make_client(
     retries: int = 2,
     backoff: float = 5.0,
     sleeper: Callable[[float], None] = time.sleep,
+    retry_timeout: bool = False,
 ):
     """返回一个 `str -> str` 的 client，可直接交给 analyst.write_body。
 
@@ -147,6 +168,18 @@ def make_client(
         for attempt in range(retries + 1):
             try:
                 text, cost = parse_result(run(list(cmd), prompt, timeout))
+            except ClaudeCliTimeout as e:
+                # 默认不重试: 45 分钟静默等待是真代价。输出受限的调用
+                # （判断项）显式开启，理由见 ClaudeCliTimeout 的 docstring。
+                if not retry_timeout or attempt == retries:
+                    raise
+                client.transient_retries += 1
+                wait = backoff * (attempt + 1)
+                print(f"调用超时，{wait:.0f}s 后重试"
+                      f"（第 {attempt + 1}/{retries} 次）：{str(e)[:120]}",
+                      file=sys.stderr)
+                sleeper(wait)
+                continue
             except ClaudeCliTransient as e:
                 if attempt == retries:
                     raise
