@@ -976,7 +976,7 @@ def _build_evidence(r, code: str):
                     corpus=r.corpus, peers=_peer_names(code))
 
 
-def _write_and_debate(r, code: str, model: str | None,
+def _write_and_debate(r, code: str, model: str | None, out=None,
                       macro_summary: str = "", industry_summary: str = "",
                       comps_summary: str = "", strategy_summary: str = "",
                       chain_summary: str = "", consensus_summary: str = "",
@@ -1002,7 +1002,10 @@ def _write_and_debate(r, code: str, model: str | None,
             cat, body, client, r.period)
         return body, upheld, debate_md, client.total_cost_usd, note
     except (AnalystRefused, ClaudeCliError) as e:
-        return None, 0, "", client.total_cost_usd, f"{e.__class__.__name__}: {e}"
+        dumped = _dump_refused(out, getattr(e, "raw", ""), WRITE_FAILED_BRIEF) if out else ""
+        tail = f"（最后一稿已落盘：{dumped}）" if dumped else ""
+        return None, 0, "", client.total_cost_usd, \
+            f"{e.__class__.__name__}: {e}{tail}"
 
 
 def _debate_and_revise(cat, body: str, client, period: str):
@@ -1076,6 +1079,26 @@ DEBATE_REPORT = "debate_report.md"
 # 导入 full（full 依赖 research），所以单一定义放在被依赖的那一侧。
 ASSUMPTIONS_JSON = "assumptions.json"
 FAILED_RAW = "assumptions_failed_raw.txt"
+# 撰写被驳回时最后一稿的落盘名。两个阶段各一个 —— 同一个目录，同名就会
+# 把另一阶段的证据冲掉（与 debate.md / debate_report.md 同一处理）。
+WRITE_FAILED_BRIEF = "brief_failed_raw.md"
+WRITE_FAILED_REPORT = "report_failed_raw.md"
+
+
+def _dump_refused(out, raw: str, name: str) -> str:
+    """把被驳回的最后一稿落盘，返回路径（没稿子就返回空串）。
+
+    **不落盘的诊断信息等于没诊断。** 撰写是整条链上最贵的一次调用，而
+    `AnalystRefused` 原先只带一句问题清单: 贵州茅台第一阶段重跑连续三次被判
+    「正文没有引用任何事实占位符」，烧掉三次调用之后无从判断模型写了什么。
+    assume 环节早就这么做了（assumptions_failed_raw.txt），这里是把同一条
+    教训推广过来。
+    """
+    if not raw or not raw.strip():
+        return ""
+    path = Path(out) / name
+    path.write_text(raw, encoding="utf-8")
+    return str(path)
 STATE = "state.json"
 # 方法论预研（Task 4）的产出 —— 分解式落盘为独立文件，而不是塞进
 # brief.md 的某一段：它要在数据采集之前就能被人看到、改坏了可以直接
@@ -1573,7 +1596,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
         skipped += _factor_host_check_note(factor_data)
 
     body, upheld, debate_md, cost, err = _write_and_debate(
-        code=code, r=r, model=model, brief=True, **_prompt_bundle(pr))
+        code=code, r=r, model=model, out=out, brief=True, **_prompt_bundle(pr))
     cost += (qual_client.total_cost_usd + research_client.total_cost_usd
              + announce_client.total_cost_usd)
     if err and body is None:
@@ -1936,7 +1959,8 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""))
     if dcf_res is not None:
         full, cost, ferr, debate_md, dnote = _write_full_report(
-            code, r, body, model, dcf_res, _prompt_bundle(pr), caveat=caveat)
+            code, r, body, model, dcf_res, _prompt_bundle(pr), out,
+            caveat=caveat)
         if ferr:
             skipped.append(ferr)
         if dnote:
@@ -1983,7 +2007,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         cost_usd=Decimal(str(cost)), route_reason=reason, phase="value")
 
 
-def _write_full_report(code, r, brief, model, dcf_res, bundle, caveat=""):
+def _write_full_report(code, r, brief, model, dcf_res, bundle, out=None, caveat=""):
     """在简报之上补出完整研报 —— 第 8 节要拿估值结果与前面各节对账。"""
     from ir_agent.analyst import FactCatalog, write_body
 
@@ -2009,8 +2033,10 @@ def _write_full_report(code, r, brief, model, dcf_res, bundle, caveat=""):
             cat, full, client, r.period)
         return full, client.total_cost_usd, "", debate_md, dnote
     except (AnalystRefused, ClaudeCliError) as e:
+        dumped = _dump_refused(out, getattr(e, "raw", ""), WRITE_FAILED_REPORT) if out else ""
+        tail = f"（最后一稿已落盘：{dumped}）" if dumped else ""
         return None, client.total_cost_usd, \
-            f"完整研报（{e.__class__.__name__}: {str(e)[:160]}）", "", ""
+            f"完整研报（{e.__class__.__name__}: {str(e)[:160]}）{tail}", "", ""
 
 
 def report(outcome: ResearchOutcome, out_dir: str | None = None,

@@ -2959,3 +2959,62 @@ def test_第一阶段没有估值事实时清单不变():
         quotes = _Quotes()
 
     assert not any(p == "2026-10-03" for p in full._catalog_periods(_R()))
+
+
+def test_撰写被驳回时最后一稿落盘(tmp_path):
+    """**贵州茅台第一阶段重跑抓到。** 撰写连续三次被判「正文没有引用任何
+    事实占位符」，整轮中止，而三稿都没留下来 —— 撰写是整条链上最贵的一次
+    调用，烧掉三次之后无从判断模型写了什么。
+
+    assume 环节早就把失败稿落盘了（assumptions_failed_raw.txt），注释里记着
+    理由:「实测排查时只能靠残缺的尾巴反推格式，每一轮都是猜。」同一条教训
+    没有推广到撰写环节 —— 本会话第六次遇到「一处学到的教训没有推广」。
+
+    两阶段文件名必须分开: 同一个目录，同名会把另一阶段的证据冲掉。
+    """
+    from unittest import mock
+
+    from ir_agent import analyst, full
+    from ir_agent.analyst import AnalystRefused
+
+    assert full.WRITE_FAILED_BRIEF != full.WRITE_FAILED_REPORT
+
+    def _client(prompt):                        # pragma: no cover
+        raise AssertionError("不该走到这里")
+    _client.total_cost_usd = 1.0
+    _client.calls = 0
+
+    class _Cat:
+        entries = ()
+        evidence = None
+
+    class _R:
+        period = "2025FY"
+        as_of = None
+        ledger = None
+
+    boom = AnalystRefused("连续 3 次违反占位符契约", raw="## 一节\n没有数字的三稿。")
+
+    with mock.patch.object(full, "make_client", lambda **kw: _client), \
+         mock.patch.object(full.FactCatalog, "from_ledger",
+                           classmethod(lambda cls, *a, **kw: _Cat())), \
+         mock.patch.object(full, "_build_evidence", lambda r, code: None), \
+         mock.patch.object(full, "_catalog_periods", lambda r: ()), \
+         mock.patch.object(full, "write_body", mock.Mock(side_effect=boom)):
+        body, _, _, _, err = full._write_and_debate(_R(), "600519", None,
+                                                   tmp_path)
+
+    assert body is None
+    dumped = tmp_path / full.WRITE_FAILED_BRIEF
+    assert dumped.exists(), "被驳回的稿子没落盘"
+    assert "没有数字的三稿" in dumped.read_text(encoding="utf-8")
+    assert str(dumped) in err, "产物清单里没指出稿子在哪"
+
+
+def test_没有稿子时不写空文件(tmp_path):
+    """ClaudeCliError 这类失败手里没有稿子 —— 不该留下一个空文件让人以为
+    有证据可看。"""
+    from ir_agent import full
+
+    assert full._dump_refused(tmp_path, "", full.WRITE_FAILED_BRIEF) == ""
+    assert not (tmp_path / full.WRITE_FAILED_BRIEF).exists()

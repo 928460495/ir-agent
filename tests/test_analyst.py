@@ -426,3 +426,40 @@ class TestReportCarriesItsSources:
         from ir_agent import full
         for fn in (full.run_analysis, full.run_valuation):
             assert "with_sources()" in inspect.getsource(fn), fn.__name__
+
+
+# ── 被驳回的稿子必须落盘 ──────────────────────────────────────────
+#
+# **贵州茅台第一阶段重跑（600519，2026-10-05）。** 撰写连续三次被判
+# 「正文没有引用任何事实占位符 —— 研报不能没有数字」，整轮中止。297 条可用
+# 事实摆在面前写出一篇没有数字的研报，这不像正常的契约违规 —— 但**三稿都
+# 没留下来**，`AnalystRefused` 只带一句消息，所以无从判断模型到底写了什么。
+#
+# 这一课本仓库已经在另一个环节学过（`assume` 失败时把最后一次的完整输出
+# 落到 assumptions_failed_raw.txt）:「实测排查时只能靠残缺的尾巴反推格式，
+# 每一轮都是猜。」同一条教训没有推广到撰写环节，而撰写是整条链上最贵的
+# 一次调用。
+class TestRefusedDraftIsKept:
+    def test_异常带着最后一稿(self):
+        from ir_agent.analyst import AnalystRefused, write_body
+
+        cat = FactCatalog.from_ledger(led(), period="2025FY", as_of=AS_OF)
+        with pytest.raises(AnalystRefused) as e:
+            write_body(cat, lambda p: "## 一节\n一句没有数字的话。",
+                       code="600519", period="2025FY", max_attempts=2)
+        assert "一句没有数字的话" in e.value.raw, "最后一稿没带出来"
+
+    def test_每次重试后带的是最新那一稿(self):
+        from ir_agent.analyst import AnalystRefused, write_body
+
+        seen = []
+
+        def client(p):
+            seen.append(p)
+            return f"## 第{'一二三'[len(seen) - 1]}稿\n没有数字。"
+
+        with pytest.raises(AnalystRefused) as e:
+            write_body(FactCatalog.from_ledger(
+                led(), period="2025FY", as_of=AS_OF), client, code="600519", period="2025FY",
+                       max_attempts=3)
+        assert "第三稿" in e.value.raw, "带的是早先某一稿，不是最后一稿"

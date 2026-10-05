@@ -108,7 +108,22 @@ _ALIASES = {"net_profit_attr_parent_ttm": "net_profit_ttm"}
 
 
 class AnalystRefused(Exception):
-    """反复违反占位符契约，拒绝出具报告。"""
+    """反复违反占位符契约，拒绝出具报告。
+
+    `raw` 带着**最后一稿的完整正文**（没有的话是空串）。消息里只放问题
+    清单，稿子本身由调用方落盘 —— 这与 `assume.AssumeFailed` 的 `raw`
+    同一处理，而那边的注释记着为什么:「实测排查时只能靠残缺的尾巴反推
+    格式，每一轮都是猜。」
+
+    实测代价（贵州茅台 600519 第一阶段重跑）: 撰写连续三次被判「正文没有
+    引用任何事实占位符」，整轮中止，而三稿都没留下来 —— 撰写是整条链上
+    最贵的一次调用（297 条可用事实的提示词），烧掉三次之后**无从判断模型
+    到底写了什么**。
+    """
+
+    def __init__(self, msg: str, raw: str = "") -> None:
+        super().__init__(msg)
+        self.raw = raw
 
 
 @dataclass
@@ -574,5 +589,6 @@ def write_body(
 
     raise AnalystRefused(
         f"连续 {max_attempts} 次违反占位符契约，拒绝出具报告。"
-        f"最后一次的问题：{'；'.join(last)}"
+        f"最后一次的问题：{'；'.join(last)}",
+        raw=body,
     )
