@@ -1599,6 +1599,20 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
         # 自己的文档字符串。
         skipped += _factor_host_check_note(factor_data)
 
+    # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出
+    # 最长的一次调用（7~8 个因子 × 5 年 × 3 档，几十行结构化文本），瓶颈在
+    # 输出而不在提示词长度 —— 与撰写正文正相反。实测（生益科技
+    # 2026-10-06）: 它 900s 超时，而 brief 与 debate 都已成功落盘、5 项挑战
+    # 全部回写，整轮 $11.09 却因为进不了第二阶段而作废。
+    #
+    # 不借用 `qual_client`: 那个客户端服务宏观定性/战略/产业链三步，它们是
+    # 输入受限的调用，给它们开超时重试只会换来静默等待。
+    assume_client = make_client(model=model, timeout=ASSUME_TIMEOUT,
+                                retry_timeout=True)
+    # **创建必须早于下面的开销累加。** 实测踩到: 原先这段放在判断项那一节
+    # （第 1617 行附近），而累加在第 1604 行引用它 —— UnboundLocalError 把
+    # 整轮打崩，而 2030 条单元测试全绿: 它们断言的是「源码里有这个字符串」，
+    # 而字符串在不在说明不了先后。见 test_判断项客户端的创建早于开销累加。
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, out=out, brief=True, **_prompt_bundle(pr))
     cost += (assume_client.total_cost_usd
@@ -1620,16 +1634,6 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
             skipped.append(note)
 
     # ── AI 填写 DCF 判断项 ────────────────────────────────
-    # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出
-    # 最长的一次调用（7~8 个因子 × 5 年 × 3 档，几十行结构化文本），瓶颈在
-    # 输出而不在提示词长度 —— 与撰写正文正相反。实测（生益科技
-    # 2026-10-06）: 它 900s 超时，而 brief 与 debate 都已成功落盘、5 项挑战
-    # 全部回写，整轮 $11.09 却因为进不了第二阶段而作废。
-    #
-    # 不借用 `qual_client`: 那个客户端服务宏观定性/战略/产业链三步，它们是
-    # 输入受限的调用，给它们开超时重试只会换来静默等待。
-    assume_client = make_client(model=model, timeout=ASSUME_TIMEOUT,
-                                retry_timeout=True)
     if body:
         aerr = _propose_assumptions(
             code, r, body, md, as_of, out, assume_client, arts,

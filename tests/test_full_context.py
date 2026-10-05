@@ -3039,3 +3039,28 @@ def test_判断项那一步开了超时重试并给了更长超时():
     assert "out, assume_client, arts" in src, "判断项还在借用 qual_client"
     assert "assume_client.total_cost_usd" in src, "新客户端的开销没计进总开销"
     assert full.ASSUME_TIMEOUT > 900, "ASSUME_TIMEOUT 不比默认超时更长"
+
+
+def test_判断项客户端的创建早于开销累加():
+    """**上一条测试全绿，而代码是崩的。**
+
+    实跑（生益科技 2026-10-06 第二次重跑）: `assume_client = make_client(...)`
+    被放在判断项那一节，而开销累加在它前面十几行就引用了它 ——
+    `UnboundLocalError` 把整轮打崩，崩在撰写与辩论都已花完钱之后，而那一轮
+    的产物一件都没落盘（brief 的写盘在累加之后）。
+
+    上一条测试断言的是「源码里有 `assume_client.total_cost_usd` 这个字符
+    串」—— 而**字符串在不在，说明不了先后**。这是本仓库记过三次的那类
+    空心结构测试的第四种形态: 前三次分别被一条注释、一个同名的另一处调用、
+    一个「调用存在但没有绑定」满足过。
+
+    这条断言的是位置关系，而位置关系就是被破坏的那个不变量本身。
+    """
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full.run_analysis)
+    assert src.index("assume_client = make_client") < \
+        src.index("assume_client.total_cost_usd"), \
+        "客户端的创建晚于它的开销被累加 —— 运行时必然 UnboundLocalError"
