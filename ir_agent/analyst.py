@@ -502,6 +502,22 @@ def is_bare_number(v: str) -> bool:
     return v.startswith(BARE_NUMBER_MSG)
 
 
+# 「伪造」类违规：声称账本/语料里有一条不存在的东西。**只有这一类对辩论
+# 参与者有意义** —— 他们的文字只进 debate.md，正文另有独立审计，所以
+# 「没写成占位符」「单位写重了」对他们都无关，而「账本里有这条事实」是
+# 一个会被裁决者采信、并据以改正文的断言。
+#
+# 这里给的是**白名单（拦什么）而不是黑名单（不拦什么）**。黑名单的毛病是
+# 每放开一类，下一轮撞上下一类: 实测依次撞过「没有引用任何占位符」→
+# 「裸数字」→「单位写重了」，三次都毙掉了一整场辩论，最后一次毁在一个
+# 「分位分位」的错字上。
+_FABRICATION = ("属于伪造", "与捏造无异")
+
+
+def is_fabrication(v: str) -> bool:
+    return any(k in v for k in _FABRICATION) or v.startswith("输出为空")
+
+
 def strip_preamble(body: str) -> str:
     """去掉正文开头的交代话，让报告从第一个标题开始。
 

@@ -408,3 +408,33 @@ class TestAssumptionDebate:
         r = run_debate(self._catalog(), draft="（三档表）", client=c,
                        scale=self.SCALE, max_rounds=1)
         assert r.challenges and "被驳回" not in c.seen[1]
+
+
+class TestOnlyFabricationBlocks:
+    """**白名单: 只有伪造类违规才拦。** 黑名单式地逐类放开，每次都在下一轮
+    撞上下一类 —— 实测依次毙掉过三场辩论: 占位符缺失、裸数字、以及一个
+    「分位分位」的重复单位。最后那次尤其失当: 质疑者的文字压根不进研报。
+
+    判据只有一条: 这条违规会不会让裁决者采信一件不存在的事，并据以改正文。
+    """
+
+    def test_重复单位不再毙掉辩论(self):
+        from ir_agent.analyst import is_fabrication
+        assert not is_fabrication(
+            "以下占位符后重复写了单位（渲染值已自带单位）："
+            "[[payable_days.percentile@2025FY]] 之后紧跟「分位」")
+
+    def test_裸数字与占位符缺失同样放行(self):
+        from ir_agent.analyst import BARE_NUMBER_MSG, NO_REF_MSG, is_fabrication
+        assert not is_fabrication(BARE_NUMBER_MSG + "238亿、3.7倍")
+        assert not is_fabrication(NO_REF_MSG)
+
+    def test_伪造引用与捏造出处仍然拦(self):
+        from ir_agent.analyst import is_fabrication
+        assert is_fabrication("以下引用在事实账本中不存在，属于伪造：x@2025FY")
+        assert is_fabrication("归属给一个查不到的出处与捏造无异。")
+
+    def test_空输出仍然拦(self):
+        """空串不是「放行」而是「什么都没给」—— 它过不了解析，也不该算通过。"""
+        from ir_agent.analyst import is_fabrication
+        assert is_fabrication("输出为空。")

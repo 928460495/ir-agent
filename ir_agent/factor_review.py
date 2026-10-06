@@ -75,7 +75,8 @@ class ReviewResult:
             for f in self.flagged])
 
 
-def expected_items(decomps: list) -> list[tuple[str, str]]:
+def expected_items(decomps: list,
+                   drivers: tuple = ()) -> list[tuple[str, str]]:
     """代码生成「必须回答的条目」。**清单由代码出，不由模型出** —— 否则
     模型可以通过少列条目来回避问题。
 
@@ -83,6 +84,13 @@ def expected_items(decomps: list) -> list[tuple[str, str]]:
     （合成值与理由栏对账）。
     """
     out: list[tuple[str, str]] = []
+    if not decomps:
+        # **两标量模式（分解式被拒或预研失败）下仍要审。** 否则「分解式越
+        # 可疑，这道检查越不运行」—— 实测（生益科技 2026-10-06）: 分解式因
+        # 重复计算被逐出，`decomps` 变空，于是这道检查与假设辩论一次都没跑，
+        # 而那正是最该看一眼的一轮。此时没有因子、谈不上两两正交，但「取值
+        # 与它自己的理由是否自洽」照样要对账。
+        return [("对账", d) for d in drivers]
     for d in decomps or []:
         labels = [f.label for f in d.factors]
         out += [("因子", l) for l in labels]
@@ -139,7 +147,8 @@ _RULES = """你是研究总监，正在审查一份**驱动因子分解式**本�
 
 
 def review(client: Client, decomps: list, checklist: str,
-           implied: str = "", max_attempts: int = 2) -> ReviewResult:
+           implied: str = "", max_attempts: int = 2,
+           drivers: tuple = ()) -> ReviewResult:
     """跑一次结构审查。
 
     `checklist` 是 `AssumptionSet.describe()` 的因子表部分（含三档与理由），
@@ -147,7 +156,7 @@ def review(client: Client, decomps: list, checklist: str,
     同一个模型换个角色再说一遍。实测里真正把问题说穿的那句话是
     「隐含份额 39.2%，而当前 CR5 才 47.13%」，而写出分解式的模型没看过它。
     """
-    expected = expected_items(decomps)
+    expected = expected_items(decomps, drivers)
     if not expected:
         return ReviewResult()
     items = "\n".join(f"- [{k}] {s}" for k, s in expected)

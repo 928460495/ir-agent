@@ -1758,12 +1758,16 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     # ── 因子结构审查（第 3 道：清单式，不设闸门）────────────────
     # **必须在写盘之前跑，但 checklist 要取写盘之前的 describe()** ——
     # 审查结果自己会进 describe()，拿带结果的清单去喂审核者是循环引用。
-    if a.decomps:
+    # **条件是「算得出算术后果」，不是「有分解式」。** 分解式被拒时
+    # `decomps` 为空，而那恰恰是最该审一眼的一轮（实测生益科技 2026-10-06:
+    # 分解式因重复计算被逐出，这两道检查于是一次都没跑）。
+    if a.implied is not None:
         from ir_agent import factor_review
         try:
             a.review = factor_review.review(
                 client, a.decomps, checklist=a.describe(),
-                implied=(a.implied.describe() if a.implied is not None else ""))
+                implied=a.implied.describe(),
+                drivers=tuple(assume.DRIVERS) if not a.decomps else ())
         except Exception as e:                              # noqa: BLE001
             # **审查失败不该毙掉判断项。** 它是一道补充意见，不是闸门 ——
             # 与本仓库「这一步失败不该毙掉已经写好的正文」同一条原则。
@@ -1774,7 +1778,7 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     # 与 factor_review 分工: 那边清单式（可枚举），这边开放式（产能、竞争
     # 格局、周期位置 —— 规则写不出来的那部分）。输入带算术后果，否则它只是
     # 同一个模型换个角色再说一遍。
-    if a.decomps and a.implied is not None:
+    if a.implied is not None:
         from ir_agent.debate import run_debate
         try:
             cat = FactCatalog.from_ledger(r.ledger, period=r.period,

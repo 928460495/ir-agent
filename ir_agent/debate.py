@@ -23,7 +23,8 @@ from enum import Enum
 from typing import Callable
 
 from ir_agent.analyst import (PLACEHOLDER_RULES, FactCatalog,
-                              _violations, is_bare_number)
+                              _violations, is_bare_number,
+                              is_fabrication)
 
 Client = Callable[[str], str]
 
@@ -194,9 +195,11 @@ def _ask(client: Client, prompt: str, catalog: FactCatalog,
             allowed.append("辩论文字中含未经账本校验的派生数字（差额、占比、"
                            "倍数等）—— 已按规则放行，它们不进研报正文，"
                            "但阅读挑战内容时请自行核对")
-        last = [v for v in bad
-                if "没有引用任何事实占位符" not in v   # 质疑可以不含数字
-                and not is_bare_number(v)]             # 质疑者可以算账
+        # **白名单: 只有伪造类违规才拦。** 黑名单式地逐类放开，每次都会在
+        # 下一轮撞上下一类 —— 实测依次毙掉过三场辩论（占位符缺失、裸数字、
+        # 「分位分位」）。判据只有一条: 这条违规会不会让裁决者采信一件不
+        # 存在的事，并据以改正文。
+        last = [v for v in bad if is_fabrication(v)]
         if not last:
             return out
         p = (f"{prompt}\n\n---\n**上一稿被驳回，原因：**\n"

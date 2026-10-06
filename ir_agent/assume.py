@@ -1124,7 +1124,15 @@ def _implied_for(a: AssumptionSet, ledger: FactLedger, as_of: date,
         list(rates),
         share_now=_latest(ledger, "company.market_share", as_of),
         cr5=_latest(ledger, "industry.cr5", as_of),
-        industry_growth=_latest(ledger, "industry.revenue_yoy", as_of))
+        # **优先用多年 CAGR，而不是最近单年。** 实测（生益科技
+        # 2026-10-06）: `industry.revenue_yoy` 取到的是 AI 爆发那一年的
+        # 25.8%，把一个景气年外推五年会让行业涨 3.15 倍，分母被撑大，
+        # 隐含份额算出来反而低于当前份额 —— 这道检查在景气行业里接近失效。
+        # 清单自己的理由栏引用的就是 `industry.revenue_cagr`（12.8%，并注明
+        # 「行业多年营收CAGR，中性路径的收敛锚点」）: **模型知道该用哪个数，
+        # 而这里原先用错了那个数。**
+        industry_growth=(_latest(ledger, "industry.revenue_cagr", as_of)
+                         or _latest(ledger, "industry.revenue_yoy", as_of)))
 
 
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,

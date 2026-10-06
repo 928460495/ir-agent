@@ -2389,3 +2389,34 @@ def test_账本没有份额事实时这道检查不生效():
             r.bear, r.base, r.bull = D("0.9"), D("1.0"), D("1.1")
     assume.check(a, 2, ledger=FactLedger(), body=BODY, as_of=AS_OF)
     assert a.implied is None
+
+
+def test_行业增速优先用多年CAGR而不是最近单年():
+    """**实测（生益科技 2026-10-06）这道检查差一倍灵敏度。**
+    `industry.revenue_yoy` 取到的是 AI 爆发那一年的 25.8%，外推五年让行业
+    涨 3.15 倍，分母被撑大，隐含份额算出来反而低于当前份额 —— 在景气行业里
+    这道检查接近失效。而清单自己的理由栏引用的是 `industry.revenue_cagr`
+    （12.8%，注明「行业多年营收CAGR，中性路径的收敛锚点」）: 模型知道该用
+    哪个数，而检查原先用错了那个数。"""
+    from ir_agent.ledger import Fact, FactLedger, Method
+
+    def _led(**kw):
+        l = FactLedger()
+        for k, v in kw.items():
+            l.put(Fact(key=f"industry.{k}", value=D(v), unit="ratio",
+                       currency=None, period="2025FY",
+                       as_of=date(2026, 4, 20), source_id="agg",
+                       method=Method.COMPUTED))
+        l.put(Fact(key="company.market_share", value=D("0.0889"), unit="ratio",
+                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="agg", method=Method.COMPUTED))
+        return l
+
+    a = assume.parse(_full(years=2), 2)
+    assume.check(a, 2, ledger=_led(revenue_cagr="0.128", revenue_yoy="0.258"),
+                 body=BODY, as_of=AS_OF)
+    assert a.implied.industry_growth == D("0.128"), "没优先用多年 CAGR"
+
+    b = assume.parse(_full(years=2), 2)
+    assume.check(b, 2, ledger=_led(revenue_yoy="0.258"), body=BODY, as_of=AS_OF)
+    assert b.implied.industry_growth == D("0.258"), "CAGR 缺失时没回落到 yoy"

@@ -121,3 +121,33 @@ class TestReview:
     def test_没有分解式时不调模型(self):
         c = self._client("不该被调用")
         assert review(c, [], checklist="x").findings == [] and c.seen == []
+
+
+class TestTwoScalarMode:
+    """**分解式被拒时仍要审。** 实测（生益科技 2026-10-06）: 分解式因重复
+    计算被逐出，`decomps` 变空，于是结构审查与假设辩论一次都没跑 —— 而那
+    正是最该看一眼的一轮。「分解式越可疑，检查越不运行」是个盲区。"""
+
+    def test_没有分解式时按判断项出对账条目(self):
+        items = expected_items([], drivers=("营收增速", "毛利率"))
+        assert items == [("对账", "营收增速"), ("对账", "毛利率")]
+
+    def test_两标量模式下只对账不谈正交(self):
+        """没有因子就谈不上两两重叠 —— 强行出题会逼模型编一个结论。"""
+        items = expected_items([], drivers=("营收增速", "毛利率"))
+        assert not any(k == "正交" for k, _ in items)
+
+    def test_两标量模式真的会调模型(self):
+        raw = ("[对账] 营收增速：矛盾　理由栏说向行业中枢 12.8% 收敛，"
+               "而给的是 20%。\n"
+               "[对账] 毛利率：一致　与锚定后的首年水平吻合。")
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return raw
+
+        r = review(c, [], checklist="（清单）", implied="累计 2.03 倍",
+                   drivers=("营收增速", "毛利率"))
+        assert len(seen) == 1 and len(r.findings) == 2
+        assert len(r.flagged) == 1
