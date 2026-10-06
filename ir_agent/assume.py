@@ -244,6 +244,10 @@ class AssumptionSet:
     # 第一阶段由 check() 按锚定输入算出，给清单展示用；第二阶段由 apply_to
     # 按当时的 calibrate 结果重算，给工作簿用——两处用的是同一个函数。
     margin_bases: dict | None = None
+    # 增速路径的算术后果（`implied_scale`）。派生量，不进 JSON —— 由 check()
+    # 算出并挂在这里，`describe()` 原样印在清单顶部。**算的人和显示的人用
+    # 同一个对象**，否则清单上的数和校验用的数会分叉。
+    implied: object = None
     # I4：因子模式连续填不出合格判断项时，decide() 回落到两标量模式，
     # 这里记下降级原因。**不进 to_json/from_json**——降级是这一轮研究
     # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
@@ -272,6 +276,13 @@ class AssumptionSet:
             # 「降级但继续」不能悄悄发生——清单顶部就要让人看到这轮
             # 判断项其实是降级产出的，损失的是精度，不是担保。
             lines += [f"⚠ **降级说明**：{self.degraded}", ""]
+        if self.implied is not None:
+            # **增速路径的算术后果，印在最前面。** 批准人看到的是三档数值
+            # 和理由，而「中性档 71.75%」这种数看不出荒谬 —— 换算成「隐含
+            # 市占率 39.2%，而当前前五名合计 47.13%」就看得出。生益科技
+            # 实测: 那条路径过了单位检查、三表勾稽、140 格复算、每股价值
+            # 量级对账与人工门，没有一道闸门把假设换算成它的后果。
+            lines += [f"📐 **算术后果**：{self.implied.describe()}", ""]
         if self.decomps:
             lines += self._describe_factors()
         else:
@@ -974,6 +985,125 @@ def _factor_basis(raw: str, label: str, fd: FactorData | None,
         "或对同一因子上一行的依据回指「同上」）")
 
 
+# 隐含份额的阻断阈值。
+#
+# **生益科技 600183 实测。** 分解式「营收 = 销量增速 × 售价增速 × 高频高速
+# 收入增速」重复计算（销量×售价已是收入），三个约 20% 的因子相乘得到中性档
+# 71.75%，五年累计 8.05 倍 —— 而它过了全部闸门: 单位检查、三表勾稽、140 格
+# 复算、每股价值量级对账（183/130 = 1.4 倍，在容差内）、人工门。
+#
+# **71.75% 看不出荒谬，「隐含市占率 39.2%」看得出。** 这道检查的全部作用是
+# 把见解之争换成算术之争: 不问「这个增速高不高」，问「这个份额可能吗」。
+SHARE_VS_NOW_MAX = Decimal(2)       # 隐含份额不得超过当前份额的几倍
+
+
+@dataclass(frozen=True)
+class ImpliedScale:
+    """增速路径的算术后果。`None` 表示账本缺份额事实，算不出来就不算。"""
+
+    rates: tuple
+    multiple: Decimal               # 预测期营收累计倍数 Π(1+r)
+    share_now: Decimal
+    implied_share: Decimal
+    industry_multiple: Decimal
+    industry_growth: Decimal        # 实际用于外推的行业增速（已取下限 0）
+    clamped: bool                   # 行业增速是否被下限截断
+    cr5: Decimal | None
+
+    @property
+    def years(self) -> int:
+        return len(self.rates)
+
+    @property
+    def blocking(self) -> bool:
+        return bool(self.reason)
+
+    @property
+    def reason(self) -> str:
+        """空串 = 通过。非空 = 阻断理由，会原样进驳回信息。"""
+        if self.implied_share > 1:
+            return (f"隐含份额 {self.implied_share:.0%} 超过 100% —— "
+                    "数学上不可能，这条增速路径自相矛盾")
+        if self.cr5 is not None and self.implied_share > self.cr5:
+            return (f"隐含份额 {self.implied_share:.1%} 超过当前前五名合计 "
+                    f"CR5 {self.cr5:.1%} —— 等于一家吃掉接近整个头部")
+        if self.implied_share > SHARE_VS_NOW_MAX * self.share_now:
+            return (f"隐含份额 {self.implied_share:.1%} 超过当前份额 "
+                    f"{self.share_now:.1%} 的 {SHARE_VS_NOW_MAX:.0f} 倍")
+        return ""
+
+    def describe(self) -> str:
+        """给人核对的中间量。**只给结论无从复核。**"""
+        ind = (f"行业增速按 {self.industry_growth:.1%} 外推"
+               if not self.clamped else
+               "行业增速按 0 外推（账本里最近一期为负，照它外推五年会让行业"
+               "凭空缩水、隐含份额虚高，那是外推假设的误报）")
+        return (f"预测期营收累计 {self.multiple:.2f} 倍"
+                f"（{self.years} 年），{ind}，"
+                f"隐含份额 {self.implied_share:.1%}"
+                f"（当前份额 {self.share_now:.1%}，"
+                f"CR5 {self.cr5:.1%}）" if self.cr5 is not None else
+                f"预测期营收累计 {self.multiple:.2f} 倍"
+                f"（{self.years} 年），{ind}，"
+                f"隐含份额 {self.implied_share:.1%}"
+                f"（当前份额 {self.share_now:.1%}，CR5 未取到）")
+
+
+def implied_scale(rates: list[Decimal], *, share_now: Decimal | None,
+                  cr5: Decimal | None,
+                  industry_growth: Decimal | None) -> ImpliedScale | None:
+    """把增速路径换算成隐含市占率。缺份额事实则返回 None。
+
+    行业增速取下限 0: 账本里最近一期为负时照它外推五年，行业会缩掉一半、
+    隐含份额凭空翻倍 —— 那是外推假设造成的误报，不是公司的问题。取 0 的
+    方向是**让隐含份额更小**，也就是更不容易阻断，与「宁可漏报不可误报」
+    一致（一个常响的阻断会被学会绕过）。
+    """
+    if share_now is None or share_now <= 0 or not rates:
+        return None
+    mult = Decimal(1)
+    for r in rates:
+        mult *= (Decimal(1) + Decimal(r))
+    g = Decimal(industry_growth or 0)
+    clamped = g < 0
+    if clamped:
+        g = Decimal(0)
+    ind = (Decimal(1) + g) ** len(rates)
+    return ImpliedScale(rates=tuple(rates), multiple=mult, share_now=share_now,
+                        implied_share=share_now * mult / ind,
+                        industry_multiple=ind, industry_growth=g,
+                        clamped=clamped, cr5=cr5)
+
+
+def _latest(ledger: FactLedger, key: str, as_of: date) -> Decimal | None:
+    """账本里某个 key 最新一期的值；取不到返回 None（不猜）。"""
+    pers = sorted({p for k, p in ledger._facts if k == key})   # noqa: SLF001
+    for per in reversed(pers):
+        try:
+            return ledger.get(key, per, as_of=as_of).value
+        except Exception:                                      # noqa: BLE001
+            continue
+    return None
+
+
+def _implied_for(a: AssumptionSet, ledger: FactLedger, as_of: date,
+                 decomps: list[Decomposition] | None):
+    """中性档营收路径的隐含份额。算不出来就返回 None。"""
+    rev = next((d for d in (decomps or []) if d.op is Op.MULTIPLY), None)
+    if rev is None:
+        rates = [r.base for r in sorted(a.rows, key=lambda x: x.year)
+                 if r.driver == "growth"]
+    else:
+        rates = a._synthesized_for(rev, Case.BASE)             # noqa: SLF001
+    if not rates:
+        return None
+    return implied_scale(
+        list(rates),
+        share_now=_latest(ledger, "company.market_share", as_of),
+        cr5=_latest(ledger, "industry.cr5", as_of),
+        industry_growth=_latest(ledger, "industry.revenue_yoy", as_of))
+
+
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
           as_of: date, decomps: list[Decomposition] | None = None,
           base_margin: Decimal | None = None, anchor: dict | None = None) -> None:
@@ -981,6 +1111,18 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
         _check_factors(a, years, decomps, base_margin, anchor)
     else:
         _check_scalar(a, years)
+    # **增速路径的算术后果。** 阻断的含义是退回让模型重算（本函数抛
+    # AssumeFailed 会进 `_decide_once` 的重试循环并把理由附进提示词），
+    # 不是毙掉整轮 —— 连续失败后 `decide()` 仍会降级到两标量模式。
+    a.implied = _implied_for(a, ledger, as_of, decomps)
+    if a.implied is not None and a.implied.blocking:
+        raise AssumeFailed(
+            f"中性档营收路径的算术后果不成立：{a.implied.reason}。"
+            f"（{a.implied.describe()}）"
+            "请下调各因子的中性档取值，使隐含份额落在可能的范围内；"
+            "若分解式本身把同一个量算了两遍（例如销量×售价之外又乘了一个"
+            "收入量级的增速），请在理由里指出，并按不重复计算的口径给值。")
+
     # 出口二（「无数据（估计）」）合法时 `Row.bases` 就是空列表——
     # `basis.validate([])` 的原意是防"整批一条依据都没给"，但因子模式
     # 下"每一行都被 `_factor_basis` 判定为合法的无数据估计"是一种真实

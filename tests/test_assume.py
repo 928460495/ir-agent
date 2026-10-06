@@ -2273,3 +2273,119 @@ def test_判断项落盘往返不丢检索词():
     for f in raw["factors"]:
         f.pop("search_term")
     assert all(f.search_term == "" for f in _decomp_from_dict(raw).factors)
+
+
+# ── 合成后果换算：把增速路径翻译成隐含市占率 ──────────────────────
+#
+# **生益科技 600183 实跑（2026-10-06）。** 分解式是
+# 「营收 = 覆铜板销量同比增速 × 覆铜板平均售价同比增速 × 高频高速覆铜板
+# 收入同比增速」—— 销量×售价已经是收入，第三项又是一个收入量级的增速，
+# 乘法链因此重复计算。三个各约 20% 的因子相乘得到中性档 71.75%。
+#
+# 合成表如实印出了 71.75%/66.88%/59.31%/50.69%/43.71%，而它过了全部闸门:
+# 单位检查（三项都是「变化率」）、三表勾稽（股本/增速不参与）、140 格复算
+# （复算同一套公式）、每股价值量级对账（183/130 = 1.4 倍，落在 10 倍容差内）、
+# 以及人工门（批准人看到的就是这张表）。
+#
+# **71.75% 看不出荒谬，「隐含市占率 39%」看得出。** 账本里有换算所需的
+# 全部事实:
+#     本司份额 8.89%   CR5 47.13%   行业增速   2025A 营收 284.3 亿
+# 推出: 五年累计 8.05 倍 → 2030E 营收 2,289 亿 → 隐含份额 39.2%，而当前
+# 前五名合计才 47.13% —— 等于一家吃掉接近当前 CR5 的全部。
+#
+# 这是唯一不依赖模型判断的那道检查: 它把「这个增速高不高」（见解之争）
+# 变成「这个份额可能吗」（算术之争）。
+class TestImpliedScale:
+    def _s(self, rates, share=D("0.0889"), cr5=D("0.4713"), ind=D("0.128")):
+        from ir_agent.assume import implied_scale
+        return implied_scale([D(str(r)) for r in rates],
+                             share_now=share, cr5=cr5, industry_growth=ind)
+
+    def test_生益实测那条路径算出隐含份额(self):
+        """含锚定后的首年 39.85%，其余四年是批准值。"""
+        s = self._s(["0.3985", "0.6688", "0.5931", "0.5069", "0.4371"])
+        assert s.multiple == pytest.approx(D("8.05"), abs=D("0.05"))
+        assert s.implied_share == pytest.approx(D("0.392"), abs=D("0.01"))
+
+    def test_超过两倍当前份额即阻断(self):
+        s = self._s(["0.3985", "0.6688", "0.5931", "0.5069", "0.4371"])
+        assert s.blocking and "隐含份额" in s.reason
+
+    def test_超过CR5也阻断(self):
+        """份额涨到超过当前前五名合计 —— 等于一家吃掉整个头部。"""
+        s = self._s(["1.0"] * 5, share=D("0.30"), cr5=D("0.60"))
+        assert s.blocking
+
+    def test_隐含份额超过百分之百必然阻断(self):
+        """数学上不可能，与阈值无关。"""
+        s = self._s(["1.24"] * 5, share=D("0.0889"), cr5=None)
+        assert s.implied_share > 1 and s.blocking
+
+    def test_温和的路径不阻断(self):
+        """份额从 8.89% 到 12% 左右 —— 快于行业但可能，不该误报。"""
+        s = self._s(["0.18", "0.16", "0.15", "0.14", "0.13"])
+        assert not s.blocking, s.reason
+
+    def test_行业负增长不放大隐含份额(self):
+        """行业最近一期负增长时，若按它外推五年，行业会缩掉一半、隐含份额
+        凭空翻倍 —— 那是外推假设造成的误报，不是公司的问题。增速取下限 0
+        并在文字里说明。"""
+        a = self._s(["0.10"] * 5, ind=D("-0.1826"))
+        b = self._s(["0.10"] * 5, ind=D("0"))
+        assert a.implied_share == b.implied_share
+        assert "行业增速按 0" in a.describe()
+
+    def test_描述里要给出可核对的中间量(self):
+        """只给结论无从复核 —— 累计倍数、隐含营收、当前份额都要印出来。"""
+        d = self._s(["0.3985", "0.6688", "0.5931", "0.5069", "0.4371"],
+                    ).describe()
+        for frag in ("累计", "倍", "隐含份额", "当前份额", "CR5"):
+            assert frag in d
+
+    def test_缺份额事实时不判(self):
+        """算不出来就不算 —— 不用猜一个份额去凑一个结论。"""
+        from ir_agent.assume import implied_scale
+        assert implied_scale([D("0.5")] * 5, share_now=None, cr5=None,
+                             industry_growth=D("0.1")) is None
+
+
+def _ledger_with_share(share="0.0889", cr5="0.4713", yoy="0.128"):
+    from ir_agent.ledger import Fact, FactLedger, Method
+    l = FactLedger()
+    for k, v in (("company.market_share", share), ("industry.cr5", cr5),
+                 ("industry.revenue_yoy", yoy)):
+        l.put(Fact(key=k, value=D(v), unit="ratio", currency=None,
+                   period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="agg", method=Method.COMPUTED))
+    return l
+
+
+def test_隐含份额超限时退回让模型重算():
+    """**阻断的含义是退回重算，不是毙掉整轮。** check() 抛 AssumeFailed 会
+    进 `_decide_once` 的重试循环并把理由附进提示词；连续失败后 decide() 仍
+    会降级到两标量模式。生益科技实测那条路径（五年累计 8 倍）就该走到这里。"""
+    a = assume.parse(_full(years=2), 2)
+    # 年年翻倍 → 远超任何可能的份额。三档要一起改: 三档未严格拉开会先被
+    # 另一条检查拦住，那样这条测试测的就不是它想测的东西了。
+    for r in a.rows:
+        if r.driver == "growth":
+            r.bear, r.base, r.bull = D("0.9"), D("1.0"), D("1.1")
+    with pytest.raises(assume.AssumeFailed, match="隐含份额"):
+        assume.check(a, 2, ledger=_ledger_with_share(), body=BODY, as_of=AS_OF)
+
+
+def test_正常路径不被阻断且算术后果印在清单顶部():
+    a = assume.parse(_full(years=2), 2)
+    assume.check(a, 2, ledger=_ledger_with_share(), body=BODY, as_of=AS_OF)
+    assert a.implied is not None and not a.implied.blocking
+    assert "算术后果" in a.describe() and "隐含份额" in a.describe()
+
+
+def test_账本没有份额事实时这道检查不生效():
+    """算不出来就不算 —— 不猜一个份额去凑一个阻断。"""
+    a = assume.parse(_full(years=2), 2)
+    for r in a.rows:
+        if r.driver == "growth":
+            r.bear, r.base, r.bull = D("0.9"), D("1.0"), D("1.1")
+    assume.check(a, 2, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    assert a.implied is None
