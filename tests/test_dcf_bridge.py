@@ -595,3 +595,39 @@ def test_量级对账真的接在run里():
     import inspect
 
     assert "_with_scale_check(res)" in inspect.getsource(dcf.run)
+
+
+# ── 终值占 EV 接近 100% = DCF 已退化成一个终值公式 ────────────────
+#
+# **生益科技 600183 实跑（2026-10-06）。** 判断项给出五年 8 倍营收，资本开支
+# 占营收 15–19%，于是明确期 FCFF 现值只剩 2.26 亿，终值占 EV **100.0%** ——
+# 而终端照样印出「每股内在价值 183.27 元 vs 现价 129.96 元，空间 +41.0%」，
+# 研报也照样产出了。
+#
+# 既有的健全性检查报了这一条（>90% 那档），但它和「终值占 78%」同级，只是
+# 清单里的一条 ⚠。终值占到 100% 不是「高度依赖终值」，是**明确期不贡献任何
+# 价值**: 这时 DCF 已经退化成 `FCFF终/(WACC−g)` 一个公式，五年三表预测对
+# 结果毫无影响，而那五年正是全部判断项的用处所在。
+#
+# 与 `_scale_warnings` 同一处理（排在最前、措辞「不可采信」），理由也一样:
+# 数要是根本不对，后面那些告警都是在给一个错的模型体检。
+class TestTerminalShareBlocks:
+    def test_终值占满百判为不可采信(self):
+        w = dcf._terminal_warnings(D("1.0"))
+        assert w and "不可采信" in w[0]
+
+    def test_九成八也算退化(self):
+        assert dcf._terminal_warnings(D("0.985"))
+
+    def test_八成四不触发(self):
+        """茅台 87.8%、生益 b6 轮 83.9% 都是真实可用的结果 —— 高但不退化。
+        这条钉住阈值别收得太紧: 一个常响的「不可采信」会被学会忽略。"""
+        assert dcf._terminal_warnings(D("0.878")) == []
+        assert dcf._terminal_warnings(D("0.839")) == []
+
+    def test_接进了run(self):
+        import inspect
+        src = inspect.getsource(dcf.run)
+        assert "_terminal_warnings(" in src
+        assert src.index("_terminal_warnings(") < \
+            src.index('res.warnings.insert(0, f"公式引擎验算失败')

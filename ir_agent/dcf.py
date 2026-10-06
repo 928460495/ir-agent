@@ -87,6 +87,31 @@ def _scale_warnings(ps: Decimal, price: Decimal) -> list[str]:
             f"而不是市场定价错误。请先核对工作簿「总股本（亿股）」与现价。"]
 
 
+# 终值占 EV 的退化阈值。超过它，明确期对估值的贡献已经可以忽略 ——
+# DCF 退化成 `FCFF终/(WACC−g)` 一个公式，五年三表预测对结果毫无影响，
+# 而那五年正是全部判断项的用处所在。
+#
+# 实测（生益科技 2026-10-06）: 判断项给出五年 8 倍营收，资本开支占营收
+# 15–19%，明确期 FCFF 现值只剩 2.26 亿、终值占 **100.0%**，而终端照样印出
+# 「空间 +41.0%」、研报照样产出。
+#
+# 取 0.98 而不是 1.0: 占到 98% 与占满 100% 在性质上没有差别，而浮点与
+# 四舍五入会让「实际上的退化」显示成 99.x%。茅台 87.8%、生益 b6 轮 83.9%
+# 都是真实可用的结果，必须不触发 —— 一个常响的「不可采信」会被学会忽略。
+TERMINAL_DEGENERATE = Decimal("0.98")
+
+
+def _terminal_warnings(share: Decimal) -> list[str]:
+    """终值占 EV 高到使明确期无意义 —— 先查假设，不要读这个点估值。"""
+    if share < TERMINAL_DEGENERATE:
+        return []
+    return [f"终值占企业价值 {share:.1%}（≥{TERMINAL_DEGENERATE:.0%}）—— "
+            "**本结果不可采信**：明确期现金流对估值的贡献已可忽略，DCF 退化"
+            "成一个终值公式，五年预测与全部判断项对结果不再有影响。"
+            "通常是增速与资本开支把明确期现金流吃光所致，请回到判断项"
+            "（营收增速、资本开支/营收）而不是读这个点估值。"]
+
+
 def _with_scale_check(res: "DcfResult") -> "DcfResult":
     """把量级告警插到 warnings 最前面。
 
@@ -519,6 +544,9 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     # 量级对账在前、验算失败在后 —— 插入顺序相反，于是验算失败最终排第一。
     # 公式引擎都没跑通是更根本的断言，该排在最前面。
     res = _with_scale_check(res)
+    # 终值退化与量级错位同级（都是「不可采信」），排在验算失败之后 ——
+    # 公式引擎都没跑通是更根本的断言。
+    res.warnings = _terminal_warnings(res.terminal_share) + list(res.warnings)
     if not res.verified:
         res.warnings.insert(0, f"公式引擎验算失败 {len(fails)} 处，"
                                "本结果不可采信")

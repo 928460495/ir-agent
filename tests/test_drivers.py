@@ -451,3 +451,89 @@ def test_代码不下探括号内而模型可以给任何词():
         "原材料成本(铜箔/电子级玻纤布/环氧树脂价格)")
     assert Factor(key="k", label="原材料成本(铜箔/电子级玻纤布/环氧树脂价格)",
                   unit="pp", search_term="铜箔").search_term == "铜箔"
+
+
+# ── 乘法链禁止收入量级因子 ────────────────────────────────────────
+#
+# **生益科技 600183 实跑（2026-10-06）。** 模型给出的营收分解式是
+#
+#     营收 = 覆铜板销量同比增速 × 覆铜板平均售价同比增速
+#            × 高频高速覆铜板收入同比增速
+#
+# 销量 × 售价**已经是收入**，第三项又是一个收入量级的增速，于是同一个量被
+# 算了两遍。三个各约 20% 的因子相乘得到中性档 71.75%，五年累计 8.05 倍
+# （营收 284 亿 → 2,289 亿，隐含市占率 39.2%，而当前 CR5 才 47.13%）。
+#
+# 既有的单位检查放行了它 —— 三项的单位都是「变化率」，完全合规。单位对了
+# 不代表量纲对: **乘法链的因子必须是营收的不同维度（量、价、份额），而不
+# 能是营收本身。** 这与 `_is_mix_factor` 是同一类词法规则，判据同样是
+# 「这个因子衡量的到底是什么」。
+class TestNoRevenueLevelFactorInMultiplyChain:
+    def _d(self, *labels):
+        from ir_agent.drivers import (Decomposition, Factor, Op,
+                                      check_closure)
+        d = Decomposition(
+            target="revenue", op=Op.MULTIPLY,
+            factors=[Factor(key=f"k{i}", label=l, unit="变化率")
+                     for i, l in enumerate(labels)])
+        check_closure(d)
+        return d
+
+    def test_收入量级的因子不得进乘法链(self):
+        from ir_agent.drivers import DecompositionInvalid
+
+        with pytest.raises(DecompositionInvalid, match="收入"):
+            self._d("覆铜板销量同比增速", "覆铜板平均售价同比增速",
+                    "高频高速覆铜板收入同比增速")
+
+    def test_营收与销售额同样算收入量级(self):
+        from ir_agent.drivers import DecompositionInvalid
+
+        for bad in ("海外营收同比增速", "单客户销售额增速", "营业额增速"):
+            with pytest.raises(DecompositionInvalid):
+                self._d("覆铜板销量同比增速", "覆铜板平均售价同比增速", bad)
+
+    def test_量价份额三类仍然合法(self):
+        """今天两个标的实际用过的分解式都必须照旧通过 —— 这条防的是
+        规则收得过紧。"""
+        self._d("覆铜板销量同比增速", "覆铜板平均售价同比增速",
+                "全球市场占有率变化率")
+        self._d("茅台酒销量", "茅台酒出厂价", "系列酒销量", "系列酒出厂价")
+
+    def test_驳回信息不给可照抄的安全词(self):
+        """与 _is_mix_factor 那条同一处教训: 结尾写「改成售价就行」会让模型
+        把标签改个字绕过去，量纲错误一字未改。"""
+        from ir_agent.drivers import DecompositionInvalid
+
+        with pytest.raises(DecompositionInvalid) as e:
+            self._d("销量同比增速", "售价同比增速", "分部收入同比增速")
+        msg = str(e.value)
+        assert "算了两遍" in msg or "重复" in msg
+        assert "改成" not in msg
+
+    def test_加法链不受这条限制(self):
+        """毛利率加法链里出现「收入占比」是正当的（那是结构变动的贡献），
+        这条规则只管乘法链。"""
+        from ir_agent.drivers import (Decomposition, Factor, Op,
+                                      check_closure)
+        check_closure(Decomposition(
+            target="gross_margin", op=Op.ADD_PP,
+            factors=[Factor(key="a", label="高毛利产品收入贡献", unit="pp"),
+                     Factor(key="b", label="原材料成本变动", unit="pp")]))
+
+
+def test_变化率后缀不被当成内部比率():
+    """**既有规则的误伤，这一轮才发现。** `_MIX` 里的 `化率` 会匹配上
+    **`变化率`** —— 而「变化率」正是乘法链因子的标准单位后缀（`UNITS`
+    里写着），于是「市占率变化率」这类**完全正当**的营收乘数被拦下。
+
+    而同一条规则的驳回信息自己写着:「只有分母在公司之外的份额型指标
+    （该指标 × 行业规模 = 营收）才是合法的营收乘数」—— **规则说它合法，
+    代码拦下它。** 这是本会话第八次撞上「声明与现实之间的缝」。
+    """
+    from ir_agent.drivers import _is_mix_factor
+
+    for ok in ("市占率变化率", "全球市场占有率变化率", "销量变化率"):
+        assert not _is_mix_factor(ok), f"正当的乘数被当成内部比率：{ok}"
+    for bad in ("转化率提升", "渗透率变化", "高端产品收入占比"):
+        assert _is_mix_factor(bad), f"真正的内部比率漏网：{bad}"
