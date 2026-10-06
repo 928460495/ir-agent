@@ -1755,6 +1755,21 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         # 整轮研究不该因此停摆。**
         return f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
 
+    # ── 因子结构审查（第 3 道：清单式，不设闸门）────────────────
+    # **必须在写盘之前跑，但 checklist 要取写盘之前的 describe()** ——
+    # 审查结果自己会进 describe()，拿带结果的清单去喂审核者是循环引用。
+    if a.decomps:
+        from ir_agent import factor_review
+        try:
+            a.review = factor_review.review(
+                client, a.decomps, checklist=a.describe(),
+                implied=(a.implied.describe() if a.implied is not None else ""))
+        except Exception as e:                              # noqa: BLE001
+            # **审查失败不该毙掉判断项。** 它是一道补充意见，不是闸门 ——
+            # 与本仓库「这一步失败不该毙掉已经写好的正文」同一条原则。
+            a.review = None
+            print(f"因子结构审查未完成：{str(e)[:120]}", file=sys.stderr)
+
     (out / ASSUMPTIONS_MD).write_text(
         _anchor_banner(cal, labels, rebased=bool(a.margin_bases)) + a.describe()
         + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
@@ -1798,6 +1813,11 @@ def _assumption_caveat_note(a) -> str:
     # 留在 assumptions.md 的表格里等人自己逐行发现——终端产物清单是
     # 读者第一眼看到的地方，同一件事要在这里也露出来，而不是非致命
     # 就等于"没有的事"。
+    flagged = getattr(getattr(a, "review", None), "flagged", None)
+    if flagged:
+        notes.append(f"因子结构审查标出 {len(flagged)} 项需人工复核"
+                     "（两两重叠 / 合成值与理由栏矛盾 / 不可测，"
+                     "逐条见清单顶部）")
     unverified = sum(1 for r in a.rows if getattr(r, "basis_unverified", ""))
     if unverified:
         notes.append(f"{unverified} 行依据未能逐字核验（已标注，未阻断，"

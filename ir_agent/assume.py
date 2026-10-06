@@ -248,6 +248,9 @@ class AssumptionSet:
     # 算出并挂在这里，`describe()` 原样印在清单顶部。**算的人和显示的人用
     # 同一个对象**，否则清单上的数和校验用的数会分叉。
     implied: object = None
+    # 因子结构审查结果（`factor_review.ReviewResult`）。派生量，不进 JSON。
+    # 它**不是闸门**：只给结论与理由，印在清单上给批准人看。
+    review: object = None
     # I4：因子模式连续填不出合格判断项时，decide() 回落到两标量模式，
     # 这里记下降级原因。**不进 to_json/from_json**——降级是这一轮研究
     # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
@@ -283,6 +286,14 @@ class AssumptionSet:
             # 实测: 那条路径过了单位检查、三表勾稽、140 格复算、每股价值
             # 量级对账与人工门，没有一道闸门把假设换算成它的后果。
             lines += [f"📐 **算术后果**：{self.implied.describe()}", ""]
+        if self.review is not None and getattr(self.review, "flagged", None):
+            # 审核意见印在清单顶部而不是末尾 —— 批准人要在看三档数值之前
+            # 先知道「有哪几条已经被质疑过」。实测那条重复计算的因子若有
+            # 这一行，批准时一眼就能看到「重叠」。
+            lines += ["🔍 **因子结构审查**（审核者意见，未改任何数值）：", ""]
+            lines += [f"- [{f.kind}] {f.subject}：**{f.verdict}** —— {f.why}"
+                      for f in self.review.flagged]
+            lines += [""]
         if self.decomps:
             lines += self._describe_factors()
         else:

@@ -3064,3 +3064,41 @@ def test_判断项客户端的创建早于开销累加():
     assert src.index("assume_client = make_client") < \
         src.index("assume_client.total_cost_usd"), \
         "客户端的创建晚于它的开销被累加 —— 运行时必然 UnboundLocalError"
+
+
+def test_因子结构审查接进了判断项环节():
+    """**这条钉的是「接上了」。** 审查本身由 tests/test_factor_review.py 钉；
+    这里查三件事: 真的调了、checklist 取的是写盘前的清单（带审查结果的清单
+    喂回审核者是循环引用）、以及它失败时不毙掉判断项。
+    """
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full._propose_assumptions)
+    assert "factor_review.review(" in src, "审查没接进来"
+    assert src.index("factor_review.review(") < \
+        src.index("(out / ASSUMPTIONS_MD).write_text"), \
+        "审查必须在写盘之前跑，否则清单上看不到它"
+    # 失败不阻断: 异常被接住、a.review 置空、流程继续写盘
+    assert "a.review = None" in src
+
+
+def test_审查标出的条数要进终端清单():
+    """印在 assumptions.md 顶部还不够 —— 终端产物清单是读者第一眼看到的
+    地方，这与「审计未通过」「判断项待复核」同一处理。"""
+    from ir_agent.full import _assumption_caveat_note
+
+    class _R:
+        basis_unverified = ""
+
+    class _Rev:
+        flagged = [object(), object()]
+
+    class _A:
+        degraded = ""
+        rows = [_R()]
+        review = _Rev()
+
+    note = _assumption_caveat_note(_A())
+    assert note.startswith("判断项待复核：") and "2 项" in note
