@@ -251,6 +251,10 @@ class AssumptionSet:
     # 因子结构审查结果（`factor_review.ReviewResult`）。派生量，不进 JSON。
     # 它**不是闸门**：只给结论与理由，印在清单上给批准人看。
     review: object = None
+    # 假设的数据合理性辩论结果（`debate.DebateResult`）。派生量，不进 JSON。
+    # **同样不是闸门**：成立的挑战不改任何取值，只印在清单上 —— 自动改数
+    # 会绕过人工门，而这道门的意义正是让人负责。
+    debate: object = None
     # I4：因子模式连续填不出合格判断项时，decide() 回落到两标量模式，
     # 这里记下降级原因。**不进 to_json/from_json**——降级是这一轮研究
     # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
@@ -293,6 +297,14 @@ class AssumptionSet:
             lines += ["🔍 **因子结构审查**（审核者意见，未改任何数值）：", ""]
             lines += [f"- [{f.kind}] {f.subject}：**{f.verdict}** —— {f.why}"
                       for f in self.review.flagged]
+            lines += [""]
+        up = [c for c in getattr(getattr(self, "debate", None),
+                                 "challenges", []) if c.upheld]
+        if up:
+            lines += ["⚖️ **假设辩论**（成立的挑战，**取值未因此改动**）：", ""]
+            lines += [f"- [{c.kind.value}] {c.passage[:60]} —— "
+                      f"{(c.rationale or c.objection).strip()[:140]}"
+                      for c in up]
             lines += [""]
         if self.decomps:
             lines += self._describe_factors()

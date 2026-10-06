@@ -351,3 +351,60 @@ class TestChallengerMayDoArithmetic:
         from ir_agent import revision
         src = inspect.getsource(revision.revise_from_verdicts)
         assert "is_bare_number" not in src, "回写路径放宽了裸数字审计"
+
+
+# ── 第 4 道：对假设做开放式证伪，输入带算术后果 ───────────────────
+class TestAssumptionDebate:
+    VERDICT = "[裁决 1] 成立　（理由）"
+
+    def _client(self, *rs):
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return rs[min(len(seen) - 1, len(rs) - 1)]
+        c.seen = seen
+        return c
+
+    def _catalog(self):
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.ledger import Fact, FactLedger, Method
+        l = FactLedger()
+        l.put(Fact(key="revenue.yoy", value=D("-0.0121"), unit="ratio",
+                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="calc_x", method=Method.COMPUTED))
+        return FactCatalog.from_ledger(l, "2025FY", as_of=date(2026, 6, 1))
+
+    SCALE = "预测期营收累计 8.05 倍，隐含份额 39.2%（当前份额 8.9%，CR5 47.1%）"
+
+    def test_算术后果进了质疑者的提示词(self):
+        """**独立性来自输入的差异，不只是角色的差异。** 只给「中性档
+        71.75%」，质疑者很可能说「成长期行业，合理」；给它「隐含份额 39.2%
+        而 CR5 才 47.1%」，这条就很难说得过去。"""
+        c = self._client("正文未见明显问题。")
+        run_debate(self._catalog(), draft="（三档表）", client=c,
+                   scale=self.SCALE, max_rounds=1)
+        assert "39.2%" in c.seen[0] and "未见过" in c.seen[0]
+
+    def test_打开假设不当这一类(self):
+        c = self._client("正文未见明显问题。")
+        run_debate(self._catalog(), draft="（三档表）", client=c,
+                   scale=self.SCALE, max_rounds=1)
+        assert "假设不当" in c.seen[0] and "产能" in c.seen[0]
+
+    def test_不传换算表时提示词不变(self):
+        """这一类规则只在真的给了换算表时出现 —— 否则规则本身会污染
+        「没有假设可审」的场景（与 `_assumption_block` 同一处考虑）。"""
+        c = self._client("正文未见明显问题。")
+        run_debate(self._catalog(), draft="某正文。", client=c, max_rounds=1)
+        assert "假设不当" not in c.seen[0] and "算术后果" not in c.seen[0]
+
+    def test_换算表里的裸数字不会把辩论弄挂(self):
+        """换算表全是裸数字（它们不是账本事实）。若仍强制占位符，这张表
+        压根喂不进去 —— 这一道能成立，靠的是 de81f3b 那次放开。"""
+        ch = ("[挑战 1] 类型：假设不当\n原文：中性档 71.75%\n"
+              "质疑：隐含份额 39.2% 超过当前 CR5 47.1%，不可能。")
+        c = self._client(ch, "分析师回应。", self.VERDICT)
+        r = run_debate(self._catalog(), draft="（三档表）", client=c,
+                       scale=self.SCALE, max_rounds=1)
+        assert r.challenges and "被驳回" not in c.seen[1]

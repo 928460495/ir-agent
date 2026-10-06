@@ -1770,6 +1770,24 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
             a.review = None
             print(f"因子结构审查未完成：{str(e)[:120]}", file=sys.stderr)
 
+    # ── 假设的数据合理性辩论（第 4 道：开放式，同样不设闸门）────────
+    # 与 factor_review 分工: 那边清单式（可枚举），这边开放式（产能、竞争
+    # 格局、周期位置 —— 规则写不出来的那部分）。输入带算术后果，否则它只是
+    # 同一个模型换个角色再说一遍。
+    if a.decomps and a.implied is not None:
+        from ir_agent.debate import run_debate
+        try:
+            cat = FactCatalog.from_ledger(r.ledger, period=r.period,
+                                          as_of=as_of,
+                                          extra_periods=_catalog_periods(r))
+            a.debate = run_debate(cat, draft=a.describe(), client=client,
+                                  period=r.period,
+                                  scale=a.implied.describe(), max_rounds=1)
+        except Exception as e:                              # noqa: BLE001
+            # 同一条原则：这一步失败不该毙掉判断项。
+            a.debate = None
+            print(f"假设辩论未完成：{str(e)[:120]}", file=sys.stderr)
+
     (out / ASSUMPTIONS_MD).write_text(
         _anchor_banner(cal, labels, rebased=bool(a.margin_bases)) + a.describe()
         + _APPROVE_NOTE.format(js=ASSUMPTIONS_JSON),
@@ -1813,6 +1831,10 @@ def _assumption_caveat_note(a) -> str:
     # 留在 assumptions.md 的表格里等人自己逐行发现——终端产物清单是
     # 读者第一眼看到的地方，同一件事要在这里也露出来，而不是非致命
     # 就等于"没有的事"。
+    upheld = getattr(getattr(a, "debate", None), "upheld_count", 0)
+    if upheld:
+        notes.append(f"假设辩论有 {upheld} 项挑战成立（数据合理性，"
+                     "逐条见清单顶部）——**取值未因此改动**，请自行判断")
     flagged = getattr(getattr(a, "review", None), "flagged", None)
     if flagged:
         notes.append(f"因子结构审查标出 {len(flagged)} 项需人工复核"

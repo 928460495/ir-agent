@@ -3102,3 +3102,40 @@ def test_审查标出的条数要进终端清单():
 
     note = _assumption_caveat_note(_A())
     assert note.startswith("判断项待复核：") and "2 项" in note
+
+
+def test_假设辩论接进了判断项环节且不改取值():
+    """第 4 道。**不设闸门、不改数**: 成立的挑战只印在清单上 —— 自动改数会
+    绕过人工门，而那道门的意义正是让人负责。"""
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full._propose_assumptions)
+    assert "run_debate(" in src, "假设辩论没接进来"
+    assert "scale=a.implied.describe()" in src, "没把算术后果喂给质疑者"
+    assert src.index("factor_review.review(") < src.index("run_debate("), \
+        "清单式审查应排在开放式辩论之前（先用便宜且可枚举的）"
+    assert src.index("run_debate(") < \
+        src.index("(out / ASSUMPTIONS_MD).write_text"), \
+        "辩论必须在写盘之前跑，否则清单上看不到它"
+    assert "a.debate = None" in src, "辩论失败应不阻断"
+
+
+def test_假设辩论的成立挑战进终端清单():
+    from ir_agent.full import _assumption_caveat_note
+
+    class _R:
+        basis_unverified = ""
+
+    class _D:
+        upheld_count = 2
+
+    class _A:
+        degraded = ""
+        rows = [_R()]
+        review = None
+        debate = _D()
+
+    note = _assumption_caveat_note(_A())
+    assert "假设辩论有 2 项" in note and "未因此改动" in note
