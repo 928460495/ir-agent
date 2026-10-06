@@ -106,7 +106,11 @@ class TestWriteBodyEnforcesTheContract:
         assert "1000" not in body
 
     def test_the_rewrite_prompt_names_the_offending_numbers(self, catalog):
-        bad = "营业收入 1688 亿元。"
+        # 夹具必须像真产物: 有占位符、其中个别数字写成了字面值。
+        # 原先这一稿一个占位符都没有，而「一个都没有」现在是
+        # 「根本没交正文」的信号，会压掉裸数字意见（见
+        # TestNoPlaceholderOutranksEverything）。
+        bad = "净利润 [[net_profit@2025FY]]，营业收入 1688 亿元。"
         c = self._client(bad, self.GOOD)
         write_body(catalog, c)
         assert "1688" in c.seen[1]
@@ -131,7 +135,7 @@ class TestWriteBodyEnforcesTheContract:
             write_body(catalog, c, max_attempts=3)
 
     def test_refusal_reports_what_kept_failing(self, catalog):
-        c = self._client("营业收入 1000 元。")
+        c = self._client("净利润 [[net_profit@2025FY]]，营业收入 1000 元。")
         with pytest.raises(AnalystRefused, match="1000"):
             write_body(catalog, c, max_attempts=2)
 
@@ -463,3 +467,61 @@ class TestRefusedDraftIsKept:
                 led(), period="2025FY", as_of=AS_OF), client, code="600519", period="2025FY",
                        max_attempts=3)
         assert "第三稿" in e.value.raw, "带的是早先某一稿，不是最后一稿"
+
+
+# ── 一个占位符都没有 = 根本没交正文 ──────────────────────────────
+#
+# **生益科技 600183 实跑（2026-10-06）诊断出来的。** 撰写连续三次被驳回，
+# 而落盘的最后一稿只有 464 字节，是一句英文状态汇报:
+#
+#     No stray literal numbers found — the brief is clean. The research brief
+#     for 600183 (2025FY) is complete… File: `/private/tmp/claude-501/.../
+#     scratchpad/600183_brief.md`
+#
+# `claude -p` 不是补全接口，它是带工具的 agent —— 它把正文写进了自己的临时
+# 文件，然后汇报完成。而那个被判违规的「501」来自路径里的 `claude-501`。
+#
+# 三次重试全部浪费在这条噪声意见上: 裸数字检查先跑、先入列，于是「必须改写
+# 为占位符：501」压在了唯一要紧的那条（「没有引用任何事实占位符」）前面。
+# 模型于是去修一个它自己上一句就说不存在的问题。
+#
+# **驳回信息的排序决定模型修哪一个。** 一个占位符都没有时，其余意见全部是
+# 噪声 —— 因为手里根本没有正文可谈。
+class TestNoPlaceholderOutranksEverything:
+    def _cat(self):
+        from ir_agent.analyst import FactCatalog
+        return FactCatalog.from_ledger(led(), period="2025FY", as_of=AS_OF)
+
+    def test_无占位符时只报这一条(self):
+        from ir_agent.analyst import _violations
+
+        v = _violations("The brief is complete. File: /tmp/claude-501/x.md",
+                        self._cat())
+        assert len(v) == 1, f"噪声意见没被压掉：{v}"
+        assert "没有引用任何事实占位符" in v[0]
+
+    def test_那条意见要点出可能是把正文写进了文件(self):
+        """只说「不能没有数字」时模型会去找数字；要告诉它真正可能的病因。"""
+        from ir_agent.analyst import _violations
+
+        v = _violations("Done. File: /tmp/x.md", self._cat())
+        assert "文件" in v[0] and "直接输出" in v[0]
+
+    def test_有占位符时裸数字照常报(self):
+        """压掉噪声只在「根本没交正文」时成立，不能顺手放宽正常情况。"""
+        from ir_agent.analyst import _violations
+
+        v = _violations("营收 [[revenue@2025FY]]，去年是 1688.38 亿元。",
+                        self._cat())
+        assert any("字面值" in x for x in v)
+
+
+def test_提示词禁止把正文写进文件():
+    """两种模式（简报/完整研报）都要有这条 —— 实测模型两次都这么干了
+    （生益科技、贵州茅台各一次）。"""
+    from ir_agent.analyst import FactCatalog, build_prompt
+
+    cat = FactCatalog.from_ledger(led(), period="2025FY", as_of=AS_OF)
+    for brief in (True, False):
+        p = build_prompt(cat, code="600183", period="2025FY", brief=brief)
+        assert "不要把正文写入文件" in p, f"brief={brief} 缺这条规则"

@@ -332,8 +332,12 @@ class TestChallengerMayDoArithmetic:
 
     def test_辩论记录如实标出放行过裸数字(self):
         """放行不等于不说。读者看 debate.md 时要知道里面的派生数字未经校验。"""
+        # 夹具带上占位符: 真实的质疑是「引用账本事实 + 自己算一个数」，
+        # 而「一个占位符都没有」现在走的是「根本没交正文」那条路，
+        # 裸数字意见压根不产生（见 analyst.NO_REF_MSG）。
         ch1 = ("[挑战 1] 类型：逻辑错误\n原文：某句\n"
-               "质疑：差额约 238亿，与结论矛盾。")
+               "质疑：营收同比 [[revenue.yoy@2025FY]] 之下差额约 238亿，"
+               "与结论矛盾。")
         r = run_debate(self._catalog(), draft="某正文。",
                        client=self._client(ch1, "分析师回应。", self.VERDICT),
                        max_rounds=1)
