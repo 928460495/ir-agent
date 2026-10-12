@@ -32,7 +32,21 @@ _OPS = {"乘": Op.MULTIPLY, "加": Op.ADD_PP}
 
 
 class MethodologyFailed(Exception):
-    """预研产出不可用 —— 退回不分解模式，并说明原因。"""
+    """预研产出不可用 —— 退回不分解模式，并说明原因。
+
+    `raw` 带着**最后一次的完整模型输出**（没有的话是空串）。与
+    `AnalystRefused.raw` / `AssumeFailed.raw` 同一处理，由调用方落盘。
+
+    **为什么必须落盘**: 被驳回的分解式不留文件，于是事后的离线复盘只能
+    看到**通过了闸门的样本**（存活者偏差）。实测: 牧原股份那个「公司出栏量
+    占全国比重」被拒 3 次，`drivers.md` 根本没生成，而后来用 10 份存档做
+    离线消融时，两个词法修复在 56 个存活因子上的效果是 0 个改变 ——
+    真正的拦截与漏报全部发生在看不见的那一半。
+    """
+
+    def __init__(self, msg: str, raw: str = "") -> None:
+        super().__init__(msg)
+        self.raw = raw
 
 
 @dataclass
@@ -277,7 +291,8 @@ def research(client, industry: str, code: str,
         return m
     raise MethodologyFailed(
         f"连续 {max_attempts} 次给不出闭合的分解式：{last}"
-        f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")
+        f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}",
+        raw=raw)
 
 
 _RAW_HEADING = "## 分解式原始定义（供人工编辑与重跑读回）"

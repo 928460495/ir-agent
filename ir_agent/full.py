@@ -1085,6 +1085,7 @@ ASSUME_TIMEOUT = 1500
 FAILED_RAW = "assumptions_failed_raw.txt"
 # 撰写被驳回时最后一稿的落盘名。两个阶段各一个 —— 同一个目录，同名就会
 # 把另一阶段的证据冲掉（与 debate.md / debate_report.md 同一处理）。
+DRIVERS_FAILED_RAW = "drivers_failed_raw.md"
 WRITE_FAILED_BRIEF = "brief_failed_raw.md"
 WRITE_FAILED_REPORT = "report_failed_raw.md"
 
@@ -1222,7 +1223,14 @@ def _research_methodology(code: str, r, out: Path, client):
     try:
         m = methodology.research(client, industry, code)
     except methodology.MethodologyFailed as e:
-        return None, (f"方法论预研（{str(e)[:160]}）—— "
+        # **被驳回的分解式必须落盘。** 不落盘的后果不是"排查麻烦"，是**存活者
+        # 偏差**: 事后拿历史产物做离线复盘时，只能看到通过了闸门的样本。实测
+        # （牧原股份 002714）: 「公司出栏量占全国比重」被拒 3 次、drivers.md
+        # 根本没生成，于是用 10 份存档做消融时，两个词法修复在 56 个存活因子
+        # 上的效果是 0 个改变 —— 真正的拦截与漏报全在看不见的那一半。
+        dumped = _dump_refused(out, getattr(e, "raw", ""), DRIVERS_FAILED_RAW)
+        tail = f"（最后一稿已落盘：{dumped}）" if dumped else ""
+        return None, (f"方法论预研（{str(e)[:160]}）{tail}—— "
                       "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
     except ClaudeCliError as e:
         # **与 5db4ca5 修过的是同一个洞，只是换了个调用点。** 实测

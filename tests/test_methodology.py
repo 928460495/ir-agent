@@ -357,3 +357,25 @@ def test_hint带冒号时第四段会变成假检索词():
     assert f.source_hint == "年报附注", "hint 被切断（这是已知行为）"
     assert f.search_term == "汇兑损益", \
         "hint 的尾巴成了检索词（这是已知的坏情形，见本测试 docstring）"
+
+
+def test_被驳回的分解式带着最后一稿():
+    """**存活者偏差，而不只是排查麻烦。** 被驳回的分解式不留文件，于是事后
+    拿历史产物做离线复盘只能看到通过了闸门的样本 —— 实测（牧原股份 002714）:
+    「公司出栏量占全国比重」被拒 3 次、drivers.md 根本没生成，后来用 10 份
+    存档做消融时，两个词法修复在 56 个存活因子上的效果是 **0 个改变**，
+    真正的拦截与漏报全在看不见的那一半。
+    """
+    from ir_agent.methodology import MethodologyFailed, research
+
+    bad = "营收:乘:覆铜板收入增速:变化率:收入\n毛利率:加:成本:pp:成本"
+    with pytest.raises(MethodologyFailed) as e:
+        research(lambda p: bad, "电子-元件-印制电路板", "600183", max_attempts=2)
+    assert "覆铜板收入增速" in e.value.raw, "最后一稿没带出来"
+
+
+def test_落盘与读回用不同的文件名():
+    """drivers.md 是可人工编辑、会被读回的往返文件；失败稿是证据。同名会让
+    下一轮把失败稿当成人工修改读回去。"""
+    from ir_agent import full
+    assert full.DRIVERS_FAILED_RAW != full.DRIVERS_MD

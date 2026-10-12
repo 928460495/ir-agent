@@ -1017,7 +1017,25 @@ def _factor_basis(raw: str, label: str, fd: FactorData | None,
 #
 # **71.75% 看不出荒谬，「隐含市占率 39.2%」看得出。** 这道检查的全部作用是
 # 把见解之争换成算术之争: 不问「这个增速高不高」，问「这个份额可能吗」。
-SHARE_VS_NOW_MAX = Decimal(2)       # 隐含份额不得超过当前份额的几倍
+# 份额相对倍数的上限：隐含份额 ÷ 当前份额。
+#
+# **判据从「份额的绝对水平」改成「份额的相对倍数」。** 离线消融（10 份历史
+# 判断项）证明旧判据是惰性的: 按「隐含份额 > 2×当前份额 或 > CR5」，10 份
+# **一次都不触发** —— 因为阈值随份额水平走:
+#
+#     生益科技 份额 8.9%  → 阈值 17.8%，实测最高隐含 14.8%  永不触发
+#     贵州茅台 份额 47.1% → 阈值 94.2%/CR5 81.7%，实测 46%  永不触发
+#     牧原股份 份额 45.1% → 阈值 90.3%，实测 35%            永不触发
+#
+# 同一条规则对龙头极宽松、对小公司极严苛，而这完全是「2 倍当前份额」这个
+# 形式造成的，不是想要的语义。改用相对倍数后与份额水平无关:
+#
+#     10 份存活样本的相对倍数 0.78 ~ 1.66   全部通过
+#     那个五年 8.05 倍营收的灾难案例  4.4   触发
+#
+# 阈值 2.0 = 「五年里份额相对行业翻一倍」。再高的增速不是不可能，但它需要
+# 人看一眼，而不是默默进模型。
+SHARE_RATIO_MAX = Decimal(2)
 
 
 @dataclass(frozen=True)
@@ -1042,6 +1060,11 @@ class ImpliedScale:
         return bool(self.reason)
 
     @property
+    def share_ratio(self) -> Decimal:
+        """份额相对倍数 = 隐含份额 ÷ 当前份额。**与份额水平无关的判据。**"""
+        return self.implied_share / self.share_now
+
+    @property
     def reason(self) -> str:
         """空串 = 通过。非空 = 阻断理由，会原样进驳回信息。"""
         if self.implied_share > 1:
@@ -1050,9 +1073,11 @@ class ImpliedScale:
         if self.cr5 is not None and self.implied_share > self.cr5:
             return (f"隐含份额 {self.implied_share:.1%} 超过当前前五名合计 "
                     f"CR5 {self.cr5:.1%} —— 等于一家吃掉接近整个头部")
-        if self.implied_share > SHARE_VS_NOW_MAX * self.share_now:
-            return (f"隐含份额 {self.implied_share:.1%} 超过当前份额 "
-                    f"{self.share_now:.1%} 的 {SHARE_VS_NOW_MAX:.0f} 倍")
+        if self.share_ratio > SHARE_RATIO_MAX:
+            return (f"份额相对倍数 {self.share_ratio:.2f}（隐含份额 "
+                    f"{self.implied_share:.1%} ÷ 当前份额 {self.share_now:.1%}）"
+                    f"超过 {SHARE_RATIO_MAX:.0f} —— 这条增速路径要求公司在"
+                    f"五年内把相对行业的份额翻一倍以上")
         return ""
 
     def describe(self) -> str:
@@ -1061,15 +1086,11 @@ class ImpliedScale:
                if not self.clamped else
                "行业增速按 0 外推（账本里最近一期为负，照它外推五年会让行业"
                "凭空缩水、隐含份额虚高，那是外推假设的误报）")
-        return (f"预测期营收累计 {self.multiple:.2f} 倍"
-                f"（{self.years} 年），{ind}，"
-                f"隐含份额 {self.implied_share:.1%}"
-                f"（当前份额 {self.share_now:.1%}，"
-                f"CR5 {self.cr5:.1%}）" if self.cr5 is not None else
-                f"预测期营收累计 {self.multiple:.2f} 倍"
-                f"（{self.years} 年），{ind}，"
-                f"隐含份额 {self.implied_share:.1%}"
-                f"（当前份额 {self.share_now:.1%}，CR5 未取到）")
+        cr5 = (f"CR5 {self.cr5:.1%}" if self.cr5 is not None else "CR5 未取到")
+        return (f"预测期营收累计 {self.multiple:.2f} 倍（{self.years} 年），"
+                f"{ind}，隐含份额 {self.implied_share:.1%}"
+                f"（当前份额 {self.share_now:.1%}，相对倍数 "
+                f"{self.share_ratio:.2f}，{cr5}）")
 
 
 def implied_scale(rates: list[Decimal], *, share_now: Decimal | None,

@@ -152,12 +152,20 @@ def _is_mix_factor(label: str) -> bool:
 _REV_LEVEL = re.compile(r"收入|营收|销售额|营业额")
 
 
+# 「收入」在标签里可能只是**修饰语**，被衡量的是别的量。离线消融（56 个
+# 历史因子）里唯一的误伤就是这种: 「出口收入人民币兑美元**汇率**变化」——
+# 它衡量汇率，不是收入。判据是标签里有没有出现一个明确的非收入计量词。
+_NOT_REV_HEAD = re.compile(r"汇率|利率|税率|单价|均价|价格|价差")
+
+
 def _is_revenue_level(label: str) -> bool:
     """这个因子衡量的是不是「营收本身」。
 
     只在乘法链上适用 —— 毛利率加法链里出现「高毛利产品收入贡献」是正当的，
     那是结构变动对毛利率的贡献，不是营收的乘数。
     """
+    if _NOT_REV_HEAD.search(label):
+        return False
     return bool(_REV_LEVEL.search(label))
 
 

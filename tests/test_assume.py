@@ -2307,9 +2307,11 @@ class TestImpliedScale:
         assert s.multiple == pytest.approx(D("8.05"), abs=D("0.05"))
         assert s.implied_share == pytest.approx(D("0.392"), abs=D("0.01"))
 
-    def test_超过两倍当前份额即阻断(self):
+    def test_份额相对倍数超过二即阻断(self):
+        """生益科技那条 8.05 倍路径: 相对倍数 4.4。"""
         s = self._s(["0.3985", "0.6688", "0.5931", "0.5069", "0.4371"])
-        assert s.blocking and "隐含份额" in s.reason
+        assert s.blocking and "相对倍数" in s.reason
+        assert s.share_ratio > 4
 
     def test_超过CR5也阻断(self):
         """份额涨到超过当前前五名合计 —— 等于一家吃掉整个头部。"""
@@ -2325,6 +2327,42 @@ class TestImpliedScale:
         """份额从 8.89% 到 12% 左右 —— 快于行业但可能，不该误报。"""
         s = self._s(["0.18", "0.16", "0.15", "0.14", "0.13"])
         assert not s.blocking, s.reason
+
+    def test_判据与份额水平无关(self):
+        """**离线消融证明旧判据是惰性的。** 旧判据「隐含份额 > 2×当前份额」
+        的阈值随份额水平走: 份额 8.9% 的公司阈值 17.8%，份额 47% 的公司阈值
+        94% —— 同一条规则对龙头极宽松、对小公司极严苛，10 份历史判断项
+        **一次都不触发**。
+
+        改用相对倍数后，同一条增速路径在任何份额水平上得到同一个结论。"""
+        rates = ["0.5"] * 5                      # 相对倍数固定
+        small = self._s(rates, share=D("0.02"), cr5=D("0.40"))
+        big = self._s(rates, share=D("0.45"), cr5=D("0.90"))
+        assert small.share_ratio == pytest.approx(big.share_ratio, rel=D("0.001"))
+        assert small.blocking and big.blocking, "同一路径在两种份额水平下结论不同"
+
+    def test_历史存活样本全部通过而灾难案例被拦(self):
+        """离线消融（10 份历史判断项）测到的相对倍数区间是 0.78~1.66，而那条
+        五年 8.05 倍营收的灾难路径是 4.4。阈值 2.0 必须把两者分开 —— 否则
+        要么回溯误报历史产物，要么漏掉它本来要防的那一个。
+
+        用目标倍数反推等效路径（行业按 12.8% 外推，五年 1.8252 倍）: 
+        公司累计 = 目标倍数 × 1.8252，均匀年增速 = 该值的五次方根 − 1。
+        """
+        ind = (D("1.128") ** 5)
+
+        def path_for(ratio):
+            mult = D(str(ratio)) * ind
+            r = mult ** (D(1) / D(5)) - 1
+            return [r] * 5
+
+        for ratio in ("0.78", "1.09", "1.46", "1.66"):        # 存活区间
+            s = self._s(path_for(ratio))
+            assert s.share_ratio == pytest.approx(D(ratio), rel=D("0.01"))
+            assert not s.blocking, f"回溯误报了历史样本：{ratio} → {s.reason}"
+
+        bad = self._s(path_for("4.4"))                        # 灾难案例
+        assert bad.blocking and "相对倍数" in bad.reason
 
     def test_行业负增长不放大隐含份额(self):
         """行业最近一期负增长时，若按它外推五年，行业会缩掉一半、隐含份额
