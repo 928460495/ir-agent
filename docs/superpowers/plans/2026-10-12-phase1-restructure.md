@@ -2826,12 +2826,19 @@ def _snapshot_gaps(r) -> list[tuple[str, int]]:
     from collections import Counter
     from ir_agent.sources.manifest import KNOWN_GAPS
 
+    # **`_facts` 的值是 `list[Fact]`，不是单条 Fact**（`ledger.py:63`）。
+    # 写成 `for (key, per), f in ….items()` 再读 `f.source_id`，拿的是 list
+    # 的属性 —— 恒得空串，于是这个函数永远返回空列表，门① 的「缺原始接口
+    # 快照」那一节一次也不会打印。而那一节正是这道门的首要动机：这条告警
+    # 连续六轮只在终端一闪而过。实跑 Task 6 时在同形的 collect_rows 上
+    # 踩到过同一处。
     c: Counter = Counter()
-    for (key, per), f in getattr(r.ledger, "_facts", {}).items():   # noqa: SLF001
-        sid = (getattr(f, "source_id", "") or "").split("#")[0]
-        for name in KNOWN_GAPS:
-            if sid.startswith(name):
-                c[name] += 1
+    for bucket in getattr(r.ledger, "_facts", {}).values():         # noqa: SLF001
+        for f in bucket:
+            sid = (getattr(f, "source_id", "") or "").split("#")[0]
+            for name in KNOWN_GAPS:
+                if sid.startswith(name):
+                    c[name] += 1
     return sorted(c.items())
 ```
 
