@@ -10,7 +10,13 @@
 
 ## Global Constraints
 
-- 第二阶段（`run_valuation`、`_write_full_report`、`_debate_and_revise`）**一行都不改**
+- 第二阶段（`run_valuation`、`_write_full_report`、`_debate_and_revise`）**一行都不改**。
+  这条不靠记性守，每个改 `full.py` 的 Task 在提交前跑一次：
+  ```bash
+  git diff main -- ir_agent/full.py | grep -c "^[+-].*\(run_valuation\|_write_full_report\|_debate_and_revise\)"
+  ```
+  非零就停下来逐行看。`run_analysis` 与 `run_valuation` 在同一个文件里相邻，
+  而本次要重写的正是前者 —— 「我记得没动它」在 2000 行的 diff 上不是证据。
 - `debate.py` 不改 —— 第二阶段的成稿辩论仍用它；新辩论写在 `stance.py`
 - 多空证据的依据核验**不阻断**，核验不过的逐条标注（与 `Row.basis_unverified` 同一模式）
 - 平衡值必须满足 `空方值 ≤ 平衡值 ≤ 多方值`，**违反则驳回重试**
@@ -28,7 +34,7 @@
 | `ir_agent/sources.py`（新） | 门①：来源清单生成（账本/外部文档/公告/年报/同业）、本地文件存在性校验 |
 | `ir_agent/full.py`（改） | `run_analysis` 拆三段；新顺序；逐步落盘；三签名进附录 |
 | `ir_agent/assume.py`（改） | `Row.deviation` 字段、存在性校验、平衡三元组进提示词 |
-| `ir_agent/research.py`（改） | `Stage` 新增三态、`next_actions` 认四状态、`_PREFIX` 注册新前缀 |
+| `ir_agent/research.py`（改） | `Stage` 新增三态（Task 8）、`next_actions` 认四状态与 `_PREFIX` 新前缀（Task 10） |
 | `ir_agent/__main__.py`（改） | `--brief` / `--assume` / `--verified-by` / `--reviewed-by` / `--accept-manual` |
 | `tests/test_stance.py`（新） | stance 全部纯函数 + 编排行为 |
 | `tests/test_sources.py`（新） | 清单生成 + 文件存在性校验 |
@@ -1370,14 +1376,722 @@ git commit -m "assume: 判断项偏离多空平衡点时必须填 deviation（�
 
 ---
 
-### Task 8: CLI 三个新子命令与签名参数
+### Task 8: `full.py` 拆三段与新顺序
+
+**Files:**
+- Modify: `ir_agent/full.py`
+- Modify: `ir_agent/research.py`（`Stage` 三个新成员）
+- Modify: `tests/test_full_context.py`
+
+**Interfaces:**
+- Consumes: Task 4/5 的 `stance.run_stance` / `load_manual` / `template_json`；Task 6 的 `sources.manifest`；Task 7 的 `check_deviation`
+- Produces:
+  - `run_analyse(code, r, as_of, out_dir, *, model=None, snapshot_dir="snapshots") -> ResearchOutcome`
+  - `run_brief(code, r, as_of, out_dir, verified_by, *, model=None, snapshot_dir="snapshots", accept_manual=False) -> ResearchOutcome`
+  - `run_assume(code, r, as_of, out_dir, reviewed_by, *, model=None, snapshot_dir="snapshots", accept_manual=False) -> ResearchOutcome`
+  - `Stage.AWAITING_SOURCES` / `Stage.AWAITING_BRIEF_REVIEW` / `Stage.AWAITING_ASSUME_REVIEW`
+  - 私有助手：`_restore_state` / `_save_state` / `_collect_factors` / `_factor_ctx` / `_stop_for_manual` / `_snapshot_gaps`
+  - 文件名常量：`SOURCES_MD="sources.md"`、`SOURCES_JSON="sources.json"`、`STANCE_A="stance_a.json"`、`STANCE_B="stance_b.json"`、`REVIEW_MD="review.md"`
+
+- [ ] **Step 0a: 纯提取三个助手（不改行为，单独一个提交）**
+
+`run_brief` / `run_assume` 要用的这三件事，今天都内联在 `run_analysis` 里。
+**先原样搬出来、跑全量确认行为没变、提交**，再动顺序 —— 搬家与改流程分成两个
+可独立回滚的提交。搬完 `run_analysis` 改为调用它们，此时它仍是一个完整函数、
+行为与搬之前逐字节相同。
+
+先在 `full.py` 已有的文件名常量旁（`DRIVERS_MD = "drivers.md"` 附近）加五条
+—— 下面 Step 3/4/5 的代码全靠它们，Interfaces 里列了名字不等于它们存在：
+
+```python
+SOURCES_MD = "sources.md"
+SOURCES_JSON = "sources.json"
+STANCE_A = "stance_a.json"
+STANCE_B = "stance_b.json"
+REVIEW_MD = "review.md"
+```
+
+然后在 `_analyse_qualitative` 之后、`_research_methodology` 之前插入：
+
+```python
+def _restore_state(out: Path) -> tuple[dict, dict]:
+    """读回上一次调用落盘的定性分析结果（`state.json` 的 `md` / `pr`）。
+
+    与 `run_valuation` 读 `state.json` 的那两行同源 —— 现在有三处要读它，
+    形状必须是同一个：缺文件时给空壳而不是抛错，因为「上一阶段没留下 md」
+    与「state.json 不存在」对调用方是同一件事。`or {}` 不能省：人手改过的
+    state.json 里 `"md": null` 是合法 JSON，`.get("md")` 会返回 None，
+    下游 `md.items()` 当场崩。
+    """
+    f = out / STATE
+    state = json.loads(f.read_text(encoding="utf-8")) if f.exists() \
+        else {"md": {}, "pr": {}}
+    return state.get("md") or {}, state.get("pr") or {}
+
+
+def _save_state(out: Path, code: str, r, as_of: date, md: dict, pr: dict,
+                *, upheld: int | None = None, **signoff: str) -> None:
+    """落盘 `state.json`。三次调用都写它，每次把自己那道门的签名补进去。
+
+    **先读旧的再 update，不能整份覆盖。** `upheld` 只有跑过辩论的那次调用
+    算得出来；若无条件按默认值写入，后一次调用会把它清成 0 —— 读回时
+    「这轮确实是 0」和「这轮没算」长得一样。这正是本项目反复踩的那条缝：
+    产物上两种情形不可区分，人就看不见。
+    """
+    f = out / STATE
+    old = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    old.update({"code": code, "period": r.period, "as_of": as_of.isoformat(),
+                "md": md, "pr": pr})
+    if upheld is not None:
+        old["upheld"] = upheld
+    old.update({k: v for k, v in signoff.items() if v})
+    f.write_text(json.dumps(old, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
+
+
+def _read_drivers(out: Path):
+    """只读 `drivers.md`，读不回就说为什么。**不联网。**
+
+    这段逻辑今天内联在 `_research_methodology` 开头（`full.py:1203`）：
+    文件在就读回、不在就往下走去联网预研。`run_assume` 需要的是**只有读回
+    那一半** —— 它绝不能在 drivers.md 缺失时悄悄重新联网预研一个新分解式：
+    那样人在门② 审过的简报与接下来要填的判断项，依据的是两个不同的分解式。
+    """
+    from ir_agent import methodology
+
+    path = out / DRIVERS_MD
+    if not path.exists():
+        return None, ""
+    try:
+        return methodology.from_markdown(path.read_text(encoding="utf-8")), ""
+    except methodology.MethodologyFailed as e:
+        return None, (f"方法论预研（{path} 已存在但读不回：{str(e)[:160]}）"
+                      "—— 未重新联网预研（避免悄悄覆盖你的修改），"
+                      "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+
+
+def _collect_factors(r, as_of: date, client, md: dict, decomps,
+                     industry: str, skipped: list[str]) -> dict:
+    """按分解式定向采集因子数据。整段从 `run_analysis` 原样搬出。
+
+    **`_refresh_external_md` 必须留在 `finally` 里。** 见原处的长注释：
+    `gaps.collect` 在循环内部往 `r.corpus` 加文档，第 N 个因子已经往语料库
+    里塞了文档、第 N+1 个因子才抛异常时，`md["外部资料"]` 必须被告知，
+    否则读者看到的篇数与分级停在这次采集之前那一刻。
+    """
+    from ir_agent import gaps
+    from ir_agent.sources.external import Corpus
+
+    factor_data: dict = {}
+    try:
+        factor_data = gaps.collect(
+            client, decomps, r.ledger, r.corpus or Corpus(as_of=as_of),
+            industry, as_of, sections=getattr(r, "sections", None),
+            annual_url=getattr(r, "annual_url", ""))
+        md["因子数据"] = gaps.summary(factor_data)
+    except Exception as e:                                  # noqa: BLE001
+        skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
+    finally:
+        _refresh_external_md(r, md)
+    # 轮次级主机安全校验降级聚合。异常路径上确有欠计数且这一层治不好 ——
+    # `gaps.collect` 不对外暴露异常路径上的部分结果。详见
+    # `_factor_host_check_note` 自己的文档字符串。
+    skipped += _factor_host_check_note(factor_data)
+    return factor_data
+```
+
+`_research_methodology` 开头那段读回改为 `m, err = _read_drivers(out)`：
+`err` 非空或 `m` 非 None 时按原样 return，`m is None and not err` 才往下走
+联网预研 —— 与搬之前逐字节等价（原来「文件不存在」就是往下走）。
+
+把 `run_analysis` 里原来那三处改为调用：`md, pr` 的来源不动（这一次调用自己
+算定性分析，不读回），`state.json` 那一段整体换成
+`_save_state(out, code, r, as_of, md, pr, upheld=upheld)`，因子采集那一整段
+（含注释）换成：
+
+```python
+    factor_data: dict = {}
+    if meth is not None:
+        factor_data = _collect_factors(r, as_of, research_client, md,
+                                       meth.decompositions, meth.industry,
+                                       skipped)
+```
+
+- [ ] **Step 0b: 跑全量确认行为没变，并提交**
+
+Run: `python -m pytest -q -m "not live" -W error`
+Expected: PASS，数量与搬之前一致（搬家不该让任何测试变色）
+
+```bash
+git add ir_agent/full.py
+git commit -m "full: 提取 _restore_state/_save_state/_collect_factors（纯搬家，行为不变）"
+```
+
+- [ ] **Step 0c: 新增两个助手与三个 Stage 成员（带测试）**
+
+这两个助手在 `run_analysis` 里没有对应物 —— 它们是新流程才需要的。
+
+```python
+# tests/test_full_context.py
+def test_因子采集失败时上下文显式说出来而不是留空段落():
+    """**空段落让辩手把「没采到」读成「采到了但没有」。** 前者该降低双方的
+    置信度，后者不该 —— 产物上必须能区分。"""
+    from ir_agent.full import _factor_ctx
+
+    for empty in (None, {}):
+        assert "未成功" in _factor_ctx(empty)
+
+
+def test_停下来的指引里年度取自报告期而不是当前年():
+    """可粘贴的命令必须真能跑。as_of 是今天（2026），报告期是 2025FY ——
+    用 as_of.year 拼出来的 `--year 2026` 会把人引到一个空账本上。"""
+    import datetime
+    from ir_agent import full
+
+    class _R:
+        period, ledger, quotes, corpus = "2025FY", None, None, None
+        verdicts, store = [], None
+
+    class _C:
+        total_cost_usd = 0.0
+
+    o = full._stop_for_manual("600183", _R(), datetime.date(2026, 10, 12),
+                              __import__("pathlib").Path("out/x"), {}, [],
+                              _C(), round_="A")
+    assert o.stage is full.Stage.INCOMPLETE
+
+
+def test_后一次调用不清掉前一次算出来的_upheld(tmp_path):
+    import datetime
+    from ir_agent.full import STATE, _restore_state, _save_state
+
+    class _R:
+        period = "2025FY"
+
+    d = datetime.date(2026, 10, 12)
+    _save_state(tmp_path, "600183", _R(), d, {"a": "1"}, {}, upheld=5)
+    _save_state(tmp_path, "600183", _R(), d, {"a": "1"}, {},
+                verified_by="xhl")          # 不传 upheld
+    import json as _j
+    saved = _j.loads((tmp_path / STATE).read_text(encoding="utf-8"))
+    assert saved["upheld"] == 5, "没算过 upheld 的调用把它清掉了"
+    assert saved["verified_by"] == "xhl"
+    assert _restore_state(tmp_path) == ({"a": "1"}, {})
+```
+
+Run: `python -m pytest tests/test_full_context.py -q -k "因子采集失败 or 停下来的指引 or 不清掉"`
+Expected: FAIL，`ImportError: cannot import name '_factor_ctx'`
+
+实现（`ir_agent/full.py`）：
+
+```python
+def _factor_ctx(factor_data: dict | None) -> str:
+    """把因子采集结果渲染进辩论②的提示词。
+
+    **采集失败时必须显式说出来**，不能给一个空段落 —— 见
+    `test_因子采集失败时上下文显式说出来而不是留空段落`。
+    """
+    if not factor_data:
+        return ("（本轮因子数据采集未成功；以下取值只能基于上面的定量事实"
+                "与语料库，双方都应据此降低置信度）")
+    from ir_agent import gaps
+    return gaps.summary(factor_data)
+
+
+def _stop_for_manual(code: str, r, as_of: date, out: Path, arts: dict,
+                     skipped: list[str], client, *,
+                     round_: str) -> ResearchOutcome:
+    """多空环节失败时停下，给出两条可粘贴的命令。
+
+    **没有「跳过」这条路。** 每份研报的多空输入要么来自模型、要么来自人。
+    已知代价：某家公司反复失败时流程会卡住，直到有人手写那份 JSON。
+
+    年度取自 `r.period` 而不是 `as_of.year`：as_of 是今天，报告期是上一个
+    年度，拼错了这条命令就把人引到一个空账本上。
+    """
+    low = round_.lower()
+    cmd = (f"python -m ir_agent {code} --year {r.period[:4]} "
+           f"--brief {out} --verified-by <名字>")
+    print(f"\n多空辩论{round_} 未完成。最后一稿与待填模板已落盘：\n"
+          f"  {out}/stance_{low}_failed_raw.md\n"
+          f"  {out}/stance_{low}.template.json\n\n"
+          f"  ① 原样重试（模型重抽）\n     {cmd}\n\n"
+          f"  ② 人工补写：按模板填好 {out}/stance_{low}.json，然后\n"
+          f"     {cmd} --accept-manual\n", file=sys.stderr)
+    skipped.append(f"多空辩论{round_} 未完成 —— 需重跑或人工补写")
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of, stage=Stage.INCOMPLETE,
+        artifacts=arts, skipped=skipped,
+        cost_usd=Decimal(str(client.total_cost_usd)), phase="brief")
+```
+
+三个 `Stage` 成员（`ir_agent/research.py`，`class Stage` 内紧随
+`AWAITING_REVIEW`）—— **必须在本 Task 建好**，下面 Step 3/4 就要用；
+Task 11 的 `next_actions` 只是再读它们：
+
+```python
+    AWAITING_SOURCES = "awaiting_sources"              # 停在门①：来源待核验
+    AWAITING_BRIEF_REVIEW = "awaiting_brief_review"    # 停在门②：简报待审阅
+    AWAITING_ASSUME_REVIEW = "awaiting_assume_review"  # 停在门③：判断项待核实
+```
+
+Run: `python -m pytest tests/test_full_context.py -q -k "因子采集失败 or 停下来的指引 or 不清掉"`
+Expected: PASS
+
+```bash
+git add ir_agent/full.py ir_agent/research.py tests/test_full_context.py
+git commit -m "full: 新增 _factor_ctx/_stop_for_manual 与三个待审 Stage"
+```
+
+- [ ] **Step 1: 写行为测试（不是源码字符串匹配）**
+
+```python
+# 追加到 tests/test_full_context.py
+def _stub_phase(monkeypatch, full):
+    """把三个阶段里所有模型调用打掉，只留流程与落盘。
+
+    **用行为测试而不是源码字符串匹配。** 本会话有四次「结构式断言盯着源码
+    字面量」而误报或漏报的记录：断言被一条注释满足、被另一处同名调用满足、
+    被「调用存在但没有绑定」满足、被「字符串在但顺序反了」满足。
+    """
+    calls = []
+
+    def rec(name, ret=None):
+        def f(*a, **k):
+            calls.append(name)
+            return ret
+        return f
+
+    monkeypatch.setattr(full, "make_client", lambda **k: (lambda p: ""))
+    monkeypatch.setattr(full, "_analyse_facts", rec("定量采集"))
+    monkeypatch.setattr(full, "_load_openweb", rec("开放网络"))
+    monkeypatch.setattr(full, "_load_announce", rec("公司公告"))
+    monkeypatch.setattr(full, "_analyse_qualitative",
+                        rec("定性分析", (lambda p: "")))
+    return calls
+
+
+def test_第一阶段之一只跑到定性分析并产出来源清单(tmp_path, monkeypatch):
+    from ir_agent import full
+    calls = _stub_phase(monkeypatch, full)
+    class _AnalyseR:          # 不要叫 _R —— 模块级已有一个只带 ledger 的 _R
+        period, as_of, ledger, quotes, corpus = "2025FY", None, None, None, None
+        verdicts, store = [], None
+
+    full.run_analyse("600183", _AnalyseR(),
+                     __import__("datetime").date(2026, 10, 12), tmp_path)
+    assert "定量采集" in calls and "定性分析" in calls
+    assert "方法论预研" not in calls, "预研不再属于第一次调用"
+    assert "撰写" not in calls, "撰写不再属于第一次调用"
+    # 门① 的清单是本次调用的交付物，断言文件真的在磁盘上 —— 不 monkeypatch
+    # 一个「写清单」的函数来替代：那样断言的是「我们调了它」，而人要的是
+    # 「清单在那儿」。
+    assert (tmp_path / "sources.md").exists(), "门① 的来源清单没有落盘"
+
+
+def _stub_brief(monkeypatch, full):
+    """把 `run_brief` 的五个模型环节打掉，只记录它们被调用的先后。
+
+    **断言记录下来的调用顺序，不断言源码里字符串的先后。** 本会话有四次
+    「结构式断言盯着源码字面量」而误报或漏报的记录；更现实的是字面量会漂：
+    因子采集一旦从内联改为 `_collect_factors(...)`，`src.index("gaps.collect(")`
+    当场 `ValueError`，而流程顺序其实一点没变 —— 测试红了却不是因为它要守的
+    那条不变量被破坏。
+    """
+    seq: list[str] = []
+
+    class _S:                      # 冒充 StanceResult
+        unverified = ()
+        balances = {}
+
+        def summary(self):
+            return ""
+
+        def to_json(self):
+            return {}
+
+    def stance_round(*a, round_=None, **k):
+        seq.append(f"辩论{round_ or a[3]}")
+        return _S()
+
+    class _M:
+        decompositions, industry = [], "测试业"
+
+    monkeypatch.setattr(full, "_stance_round", stance_round)
+    monkeypatch.setattr(full, "_research_methodology",
+                        lambda *a, **k: (seq.append("预研"), (_M(), ""))[1])
+    monkeypatch.setattr(full, "_collect_factors",
+                        lambda *a, **k: (seq.append("因子采集"), {})[1])
+    monkeypatch.setattr(full, "_factor_ctx", lambda d: "")
+    return seq
+
+
+def _brief_client():
+    """假客户端。照 `tests/test_full_context.py` 既有写法：带属性的函数。"""
+    def c(prompt):                       # pragma: no cover - 不该被调用
+        raise AssertionError("不该真的调模型")
+    c.total_cost_usd = 0.0
+    return c
+
+
+class _BriefR:
+    """`run_brief` 读到的最小 r。模块级那个 `_R` 只有 ledger，不够用。"""
+    period, as_of = "2025FY", None
+    ledger = store = corpus = quotes = sections = None
+    verdicts, audit, annual_url = [], None, ""
+
+
+def test_第一阶段之二的五个环节按新顺序跑(tmp_path, monkeypatch):
+    """**替换掉旧的 `test_预研排在数据采集之前`。** 旧不变量（预研在**所有**
+    采集之前）按 spec 已废除 —— 新顺序让分解式能基于全部证据与多空结论设计。
+    但预研仍须在**因子**采集之前，否则「按分解式定向采集」无从谈起；而两轮
+    辩论必须一前一后夹住它们。
+    """
+    import datetime
+
+    from ir_agent import full
+
+    seq = _stub_brief(monkeypatch, full)
+    monkeypatch.setattr(full, "make_client", lambda **k: _brief_client())
+    monkeypatch.setattr(full, "_analyse_facts", lambda *a, **k: None)
+    monkeypatch.setattr(full, "_restore_state", lambda out: ({}, {}))
+    monkeypatch.setattr(full, "_build_evidence", lambda r, code: None)
+    monkeypatch.setattr(full, "_catalog_periods", lambda r: ())
+    # `write_body` patch 在 `full` 上（它是 full.py 顶部的模块级名字），
+    # 返回空正文 —— 顺序测试只关心它被调到，不关心正文内容。
+    monkeypatch.setattr(full, "write_body",
+                        lambda *a, **k: (seq.append("撰写"), ("", None))[1])
+    full.run_brief("600183", _BriefR(), datetime.date(2026, 10, 12),
+                   tmp_path, "xhl")
+    assert seq == ["辩论A", "预研", "因子采集", "辩论B", "撰写"], seq
+```
+
+- [ ] **Step 2: 跑测试确认红**
+
+Run: `python -m pytest tests/test_full_context.py -q -k "第一阶段之一 or 预研排在因子 or 多空辩论一"`
+Expected: FAIL，`AttributeError: module 'ir_agent.full' has no attribute 'run_analyse'`
+
+- [ ] **Step 3: 实现 `run_analyse`**
+
+把现有 `run_analysis` 复制为 `run_analyse`，**只保留**到定性分析为止的部分（取数 → `_analyse_facts` → `_load_openweb` → `_load_announce` → `_analyse_qualitative`），然后：
+
+```python
+    # ── 门①：来源清单 ───────────────────────────────────────────
+    from ir_agent.sources.manifest import collect_rows, missing_files, render
+
+    # `peers` 不在 `r` 上 —— `peer_set(code)` 的结果是 `_load_industry`
+    # 的局部变量，从未挂到 r。写成 `getattr(r, "peers", ())` 会恒取到空元组，
+    # 于是门① 的同业样本名单永远是空的，而 spec 要的正是让人看见
+    # 「牧原 11 家 vs 生益 46 家」这个代表性差异。用 `_build_evidence` 已经
+    # 在用的那条路：`_peer_names(code)`。
+    rows = collect_rows(r.ledger, corpus=getattr(r, "corpus", None),
+                        pdf_dir=out / "pdf", peers=_peer_names(code))
+    gaps = _snapshot_gaps(r)          # [(来源名, 条数)]，见下一步
+    (out / SOURCES_MD).write_text(render(rows, gaps), encoding="utf-8")
+    (out / SOURCES_JSON).write_text(
+        json.dumps({"rows": [vars(x) for x in rows], "verified_by": ""},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    arts["资料来源清单"] = str(out / SOURCES_MD)
+    for bad in missing_files(rows):
+        skipped.append(f"来源清单：{bad}")
+    stage = Stage.AWAITING_SOURCES
+```
+
+并新增私有助手：
+
+```python
+def _snapshot_gaps(r) -> list[tuple[str, int]]:
+    """统计本轮涉及的「缺原始接口快照」来源及条数。
+
+    这条告警此前每轮都在终端重复一遍。它属于**来源质量**，归门①说一次。
+    """
+    from collections import Counter
+    from ir_agent.sources.manifest import KNOWN_GAPS
+
+    c: Counter = Counter()
+    for (key, per), f in getattr(r.ledger, "_facts", {}).items():   # noqa: SLF001
+        sid = (getattr(f, "source_id", "") or "").split("#")[0]
+        for name in KNOWN_GAPS:
+            if sid.startswith(name):
+                c[name] += 1
+    return sorted(c.items())
+```
+
+- [ ] **Step 4: 实现 `run_brief`**
+
+```python
+def run_brief(code, r, as_of, out_dir, verified_by, *, model=None,
+              snapshot_dir="snapshots", accept_manual=False):
+    """第一阶段之二：辩论① → 预研 → 因子采集 → 辩论② → 撰写简报。
+
+    **五个模型环节逐个立刻落盘。** 今天的实测里这五个各自都失败过；没有中间
+    落盘点的话，失败会丢掉已完成的部分。
+    """
+    import json
+
+    # **不要在这里 `from ir_agent.analyst import write_body`。** 它在
+    # `full.py` 顶部（第 16 行）已是模块级名字；函数内再导一次会在每次调用时
+    # 重新绑定成本地名，`monkeypatch.setattr(full, "write_body", ...)` 于是
+    # patch 不到 —— 测试会静默地去调真模型。
+    out = Path(out_dir)
+    arts, skipped = {}, []
+    client = make_client(model=model)
+    md, pr = _restore_state(out)             # state.json 的 md / pr
+    _analyse_facts(code, r, as_of, snapshot_dir)      # 重建派生事实，不调模型
+    cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=as_of,
+                                  extra_periods=_catalog_periods(r))
+    cat.evidence = _build_evidence(r, code)
+    ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
+
+    # ── 多空辩论①：定方向 ───────────────────────────────────────
+    themes = ["需求", "价格", "成本", "份额", "政策"]
+    sa = _stance_round(client, out, STANCE_A, "A", themes, ctx,
+                       cat, r, as_of, accept_manual, verified_by, skipped)
+    if sa is None:
+        return _stop_for_manual(code, r, as_of, out, arts, skipped, client,
+                                round_="A")
+    arts["多空辩论①"] = str(out / "stance_a.md")
+
+    # ── 方法论预研（现在能看到全部证据与多空结论）──────────────
+    meth, merr = _research_methodology(code, r, out, client,
+                                       stance_note=sa.summary())
+    if merr:
+        skipped.append(merr)
+
+    # ── 因子定向采集 ───────────────────────────────────────────
+    factor_data = None
+    if meth is not None:
+        factor_data = _collect_factors(r, as_of, client, md,
+                                       meth.decompositions, meth.industry,
+                                       skipped)
+
+    # ── 多空辩论②：定取值 ─────────────────────────────────────
+    subjects = ([f.label for d in meth.decompositions for f in d.factors]
+                if meth is not None else list(assume.DRIVERS))
+    sb = _stance_round(client, out, STANCE_B, "B", subjects,
+                       ctx + "\n\n【因子采集】\n" + _factor_ctx(factor_data),
+                       cat, r, as_of, accept_manual, verified_by, skipped)
+    if sb is None:
+        return _stop_for_manual(code, r, as_of, out, arts, skipped, client,
+                                round_="B")
+    arts["多空辩论②"] = str(out / "stance_b.md")
+
+    # ── 撰写简报（应用多空平衡点）──────────────────────────────
+    print(f"撰写研究简报（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
+    try:
+        body, _ = write_body(cat, client, code=code, period=r.period, brief=True,
+                             context=f"**多空平衡点**\n\n{sb.summary()}",
+                             **{k: v or None for k, v in _prompt_bundle(pr).items()})
+    except (AnalystRefused, ClaudeCliError) as e:
+        dumped = _dump_refused(out, getattr(e, "raw", ""), WRITE_FAILED_BRIEF)
+        skipped.append(f"研究简报（{e.__class__.__name__}: {str(e)[:160]}）"
+                       + (f"（最后一稿已落盘：{dumped}）" if dumped else ""))
+        body = None
+    if body:
+        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
+        (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
+        arts["研究简报"] = str(out / BRIEF)
+        if (note := _audit_note("研究简报", r.audit)):
+            skipped.append(note)
+        _write_review(out, sa, sb, _snapshot_gaps(r))   # 门② 的待核清单
+        arts["待核清单"] = str(out / REVIEW_MD)
+    # ── 看板与工作簿 ────────────────────────────────────────────
+    # **这两件产物今天在 `run_analysis` 末尾生成；`run_analysis` 删掉之后
+    # 必须有人接着做，否则它们无声消失** —— 没有任何测试断言这两个文件，
+    # 所以全量绿不代表它们还在。放在本次调用而不是第①次：`md["因子数据"]`
+    # 是上面刚采集的，看板要拿最完整的那份 md。
+    build_dashboard(r, path=out / "dashboard.html", context=md)
+    arts["看板"] = str(out / "dashboard.html")
+    build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
+                   path=out / "model.xlsx", verdicts=r.verdicts)
+    arts["工作簿"] = str(out / "model.xlsx")
+
+    # 依据核验过、但来源分级是 MEDIA 的记录 —— 警告，不拒绝。放在最后一刻
+    # 读：本次调用所有会调 `basis.validate()` 的环节此时都已跑完。
+    skipped += _media_tier_note(r.corpus)
+    _save_state(out, code, r, as_of, md, pr, verified_by=verified_by)
+    return ResearchOutcome(code=code, period=r.period, as_of=as_of,
+                           stage=Stage.AWAITING_BRIEF_REVIEW if body
+                           else Stage.INCOMPLETE,
+                           artifacts=arts, skipped=skipped,
+                           cost_usd=Decimal(str(client.total_cost_usd)),
+                           phase="brief")
+```
+
+配套三个私有助手（`_stance_round` 负责「跑或读回人工补写、失败则落盘模板并返回 None」；`_stop_for_manual` 组装「请选一条」的指引；`_write_review` 生成门②的待核清单）：
+
+```python
+def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
+                  as_of, accept_manual, by, skipped):
+    """跑一轮多空辩论，或读回人工补写。失败则落盘失败稿与模板，返回 None。
+
+    **不存在「跳过」**：每份研报的多空输入要么来自模型、要么来自人。
+    """
+    import json
+
+    from ir_agent import stance
+
+    path = out / fname
+    if accept_manual and path.exists():
+        res = stance.load_manual(path, round_=round_, by=by)
+        skipped.append(f"多空辩论{round_}：由 {by} 人工补写")
+    else:
+        try:
+            res = stance.run_stance(client, round_=round_, subjects=subjects,
+                                    context=ctx, catalog=cat, ledger=r.ledger,
+                                    as_of=as_of, corpus=getattr(r, "corpus", None))
+        except stance.StanceFailed as e:
+            _dump_refused(out, getattr(e, "raw", ""),
+                          f"stance_{round_.lower()}_failed_raw.md")
+            (out / f"stance_{round_.lower()}.template.json").write_text(
+                json.dumps(stance.template_json(round_, subjects),
+                           ensure_ascii=False, indent=2), encoding="utf-8")
+            skipped.append(f"多空辩论{round_} 未完成（{str(e)[:160]}）")
+            return None
+    path.write_text(json.dumps(res.to_json(), ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    (out / f"stance_{round_.lower()}.md").write_text(res.summary(),
+                                                     encoding="utf-8")
+    return res
+
+
+def _write_review(out, sa, sb, gaps_rows) -> None:
+    """门② 的待核清单：把所有「代码没把握」的东西聚到一处。"""
+    lines = ["# 待核清单（门②：请在批准简报结论前过一遍）", ""]
+    for name, s in (("多空辩论①", sa), ("多空辩论②", sb)):
+        if s is not None and s.unverified:
+            lines += [f"## {name}：{len(s.unverified)} 条证据代码核验不过", ""]
+            lines += [f"- [{e.side}] {e.subject}：{e.unverified}"
+                      for e in s.unverified] + [""]
+    # **不要写成 `getattr(audit_res, "unsnapshotted", None)`。** `audit()`
+    # 的返回值没有这个属性（全仓库查无此名），`getattr` 带默认值会让这一节
+    # 永远不打印 —— 待核清单上写着它会列这件事，而它一次也不会列。这正是
+    # 本项目反复踩的「声明与现实之间的缝」。改为传入 `_snapshot_gaps(r)`
+    # 已经算好的那份清单。
+    if gaps_rows:
+        lines += ["## 本轮账本事实缺原始接口快照（结构性限制，非本轮故障）", ""]
+        lines += [f"- {name}：{n} 条" for name, n in gaps_rows] + [""]
+    if len(lines) == 2:
+        lines.append("本轮没有需要人工复核的标注项。")
+    (out / REVIEW_MD).write_text("\n".join(lines), encoding="utf-8")
+```
+
+- [ ] **Step 5: 实现 `run_assume`**
+
+```python
+def run_assume(code: str, r, as_of: date, out_dir: str | Path,
+               reviewed_by: str, *, model: str | None = None,
+               snapshot_dir: str | Path = "snapshots",
+               accept_manual: bool = False) -> ResearchOutcome:
+    """第一阶段之三：AI 填 DCF 判断项 + 四道检查。
+
+    判断项的三档候选输入来自 `stance_b.json` 的平衡三元组；偏离该三元组的
+    行必须填 `deviation`（Task 7，只查存在性）。
+    """
+    import json
+
+    from ir_agent import stance
+
+    out = Path(out_dir)
+    brief = out / BRIEF
+    sb_path = out / STANCE_B
+    for f in (brief, sb_path):
+        if not f.exists():
+            raise SystemExit(
+                f"找不到 {f} —— 请先运行第一阶段之二：\n"
+                f"  python -m ir_agent {code} --year {r.period[:4]} "
+                f"--brief {out} --verified-by <名字>")
+    if not reviewed_by.strip():
+        raise SystemExit("必须署名审阅人 —— 简报结论要有人审过才谈得上可据以建模。")
+
+    arts: dict[str, str] = {}
+    skipped: list[str] = []
+    body = brief.read_text(encoding="utf-8")
+    sb = stance.StanceResult.from_json(
+        json.loads(sb_path.read_text(encoding="utf-8")))
+    md, pr = _restore_state(out)
+    # **重建派生事实必须排在填判断项之前。** industry.* / comps.* / macro.*
+    # 只存在于内存账本，由 `_analyse_facts` 算出来；判断项的依据完全可以
+    # 合法地引用它们（写成 `[[industry.dtl@2025FY]]`），而本次调用是一个
+    # 新进程，账本刚从接口重建、还没跑派生层。与 `run_valuation` 里那条
+    # 同源的实测教训（600584 端到端）：不重建的话，人已经批准的假设会在
+    # 下一步被判为「引用的事实在账本中不存在」—— 理由不是假设有问题，
+    # 是校验时账本还没建好。
+    _analyse_facts(code, r, as_of, snapshot_dir)
+
+    # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出最长
+    # 的一次调用（7~8 个因子 × 5 年 × 3 档），瓶颈在输出而不在提示词长度。
+    # 实测（生益科技 2026-10-06）：它 900s 超时，整轮 $11.09 作废。
+    client = make_client(model=model, timeout=ASSUME_TIMEOUT,
+                         retry_timeout=True)
+    meth, derr = _read_drivers(out)    # 只读 drivers.md，不联网重新预研
+    if derr:
+        skipped.append(derr)
+    aerr = _propose_assumptions(
+        code, r, body, md, as_of, out, client, arts,
+        decomps=(meth.decompositions if meth is not None else None),
+        factor_data=None, balances=sb.balances)
+    if aerr:
+        skipped.append(aerr)
+    _save_state(out, code, r, as_of, md, pr, reviewed_by=reviewed_by)
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of,
+        stage=(Stage.AWAITING_ASSUME_REVIEW
+               if (out / ASSUMPTIONS_JSON).exists() else Stage.INCOMPLETE),
+        artifacts=arts, skipped=skipped,
+        cost_usd=Decimal(str(client.total_cost_usd)), phase="assume")
+```
+
+`_propose_assumptions` 加一个 `balances=None` 参数并透传给 `assume.decide`
+（Task 7 已给 `decide` / `check` / `_decide_once` 加好同名参数）：
+
+```python
+def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
+                         decomps=None, factor_data=None, balances=None) -> str:
+```
+
+调用 `assume.decide(...)` 处补 `balances=balances`。
+
+`_read_drivers(out)` 已在 Step 0a 从 `_research_methodology` 提取出来。
+**这里必须用只读的那一半**：`_research_methodology` 在 drivers.md 缺失时会
+联网重新预研，而本次调用若那样做，人在门② 审过的简报与接下来要填的判断项
+就依据两个不同的分解式 —— 而产物上看不出来。
+
+- [ ] **Step 6: 删除 `run_analysis` 并把旧测试指向新函数**
+
+```bash
+python -m pytest -q -m "not live" -W error
+```
+Expected: 原先引用 `run_analysis` 的测试会失败，逐个改为对应的新函数；`test_预研排在数据采集之前` 整条删除（已被 Step 1 的新测试替换）。
+
+- [ ] **Step 7: 机械确认第二阶段没被碰到**
+
+```bash
+git diff main -- ir_agent/full.py | grep -c "^[+-].*\(run_valuation\|_write_full_report\|_debate_and_revise\)"
+```
+Expected: `0`
+
+本 Task 重写的 `run_analysis` 与 `run_valuation` 在同一个文件里相邻，删一个
+200 行的函数时很容易多带走几行。非零就逐行看那几处是什么 —— 若确实只是
+`run_valuation` 的调用方改名之类，在提交信息里写明；否则改回去。
+
+- [ ] **Step 8: 提交**
+
+```bash
+git add ir_agent/full.py tests/test_full_context.py
+git commit -m "full: 第一阶段拆为 analyse/brief/assume 三段，新顺序与逐步落盘"
+```
+
+---
+
+### Task 9: CLI 三个新子命令与签名参数
 
 **Files:**
 - Modify: `ir_agent/__main__.py`
 - Modify: `tests/test_full_context.py`
 
 **Interfaces:**
-- Consumes: Task 9 的 `full.run_analyse` / `full.run_brief` / `full.run_assume`
+- Consumes: Task 8 的 `full.run_analyse` / `full.run_brief` / `full.run_assume`（已实现）
 - Produces: `--brief DIR`、`--assume DIR`、`--verified-by`、`--reviewed-by`、`--accept-manual`
 
 - [ ] **Step 1: 写失败测试**
@@ -1484,291 +2198,10 @@ git add ir_agent/__main__.py tests/test_full_context.py
 git commit -m "cli: 新增 --brief / --assume 与三个签名参数"
 ```
 
-> 注：此时 `run_brief` / `run_assume` 还不存在，`--brief` 实跑会 ImportError。Task 9 补上。两个 Task 之间仓库处于「CLI 已声明、实现未到」的状态 —— 这是有意的切分：参数协议先定，实现跟上。
-
----
-
-### Task 9: `full.py` 拆三段与新顺序
-
-**Files:**
-- Modify: `ir_agent/full.py`
-- Modify: `tests/test_full_context.py`
-
-**Interfaces:**
-- Consumes: Task 4/5 的 `stance.run_stance` / `load_manual` / `template_json`；Task 6 的 `sources.manifest`；Task 7 的 `check_deviation`
-- Produces:
-  - `run_analyse(code, r, as_of, out_dir, *, model=None, snapshot_dir="snapshots") -> ResearchOutcome`
-  - `run_brief(code, r, as_of, out_dir, verified_by, *, model=None, snapshot_dir="snapshots", accept_manual=False) -> ResearchOutcome`
-  - `run_assume(code, r, as_of, out_dir, reviewed_by, *, model=None, snapshot_dir="snapshots", accept_manual=False) -> ResearchOutcome`
-  - 文件名常量：`SOURCES_MD="sources.md"`、`SOURCES_JSON="sources.json"`、`STANCE_A="stance_a.json"`、`STANCE_B="stance_b.json"`、`REVIEW_MD="review.md"`
-
-- [ ] **Step 1: 写行为测试（不是源码字符串匹配）**
-
-```python
-# 追加到 tests/test_full_context.py
-def _stub_phase(monkeypatch, full):
-    """把三个阶段里所有模型调用打掉，只留流程与落盘。
-
-    **用行为测试而不是源码字符串匹配。** 本会话有四次「结构式断言盯着源码
-    字面量」而误报或漏报的记录：断言被一条注释满足、被另一处同名调用满足、
-    被「调用存在但没有绑定」满足、被「字符串在但顺序反了」满足。
-    """
-    calls = []
-
-    def rec(name, ret=None):
-        def f(*a, **k):
-            calls.append(name)
-            return ret
-        return f
-
-    monkeypatch.setattr(full, "make_client", lambda **k: (lambda p: ""))
-    monkeypatch.setattr(full, "_analyse_facts", rec("定量采集"))
-    monkeypatch.setattr(full, "_load_openweb", rec("开放网络"))
-    monkeypatch.setattr(full, "_load_announce", rec("公司公告"))
-    monkeypatch.setattr(full, "_analyse_qualitative",
-                        rec("定性分析", (lambda p: "")))
-    return calls
-
-
-def test_第一阶段之一只跑到定性分析并产出来源清单(tmp_path, monkeypatch):
-    from ir_agent import full
-    calls = _stub_phase(monkeypatch, full)
-    monkeypatch.setattr(full, "_write_sources", rec_done := (lambda *a, **k: None))
-
-    class _R:
-        period, as_of, ledger, quotes, corpus = "2025FY", None, None, None, None
-        verdicts, store = [], None
-
-    full.run_analyse("600183", _R(), __import__("datetime").date(2026, 10, 12),
-                     tmp_path)
-    assert "定量采集" in calls and "定性分析" in calls
-    assert "方法论预研" not in calls, "预研不再属于第一次调用"
-    assert "撰写" not in calls, "撰写不再属于第一次调用"
-
-
-def test_预研排在因子采集之前():
-    """**替换掉旧的 `test_预研排在数据采集之前`。** 旧不变量（预研在**所有**
-    采集之前）按 spec 已废除 —— 新顺序让分解式能基于全部证据与多空结论设计。
-    但预研仍须在**因子**采集之前，否则「按分解式定向采集」无从谈起。"""
-    import inspect
-
-    from ir_agent import full
-
-    src = inspect.getsource(full.run_brief)
-    assert src.index("_research_methodology(") < src.index("gaps.collect("), \
-        "预研必须排在因子采集之前"
-
-
-def test_多空辩论一排在预研之前而辩论二排在撰写之前():
-    import inspect
-
-    from ir_agent import full
-
-    src = inspect.getsource(full.run_brief)
-    a = src.index('round_="A"')
-    m = src.index("_research_methodology(")
-    b = src.index('round_="B"')
-    w = src.index("write_body(")
-    assert a < m < b < w, "顺序应为 辩论① → 预研 → 因子采集 → 辩论② → 撰写"
-```
-
-- [ ] **Step 2: 跑测试确认红**
-
-Run: `python -m pytest tests/test_full_context.py -q -k "第一阶段之一 or 预研排在因子 or 多空辩论一"`
-Expected: FAIL，`AttributeError: module 'ir_agent.full' has no attribute 'run_analyse'`
-
-- [ ] **Step 3: 实现 `run_analyse`**
-
-把现有 `run_analysis` 复制为 `run_analyse`，**只保留**到定性分析为止的部分（取数 → `_analyse_facts` → `_load_openweb` → `_load_announce` → `_analyse_qualitative`），然后：
-
-```python
-    # ── 门①：来源清单 ───────────────────────────────────────────
-    from ir_agent.sources.manifest import collect_rows, missing_files, render
-
-    rows = collect_rows(r.ledger, corpus=getattr(r, "corpus", None),
-                        pdf_dir=out / "pdf", peers=getattr(r, "peers", ()))
-    gaps = _snapshot_gaps(r)          # [(来源名, 条数)]，见下一步
-    (out / SOURCES_MD).write_text(render(rows, gaps), encoding="utf-8")
-    (out / SOURCES_JSON).write_text(
-        json.dumps({"rows": [vars(x) for x in rows], "verified_by": ""},
-                   ensure_ascii=False, indent=2), encoding="utf-8")
-    arts["资料来源清单"] = str(out / SOURCES_MD)
-    for bad in missing_files(rows):
-        skipped.append(f"来源清单：{bad}")
-    stage = Stage.AWAITING_SOURCES
-```
-
-并新增私有助手：
-
-```python
-def _snapshot_gaps(r) -> list[tuple[str, int]]:
-    """统计本轮涉及的「缺原始接口快照」来源及条数。
-
-    这条告警此前每轮都在终端重复一遍。它属于**来源质量**，归门①说一次。
-    """
-    from collections import Counter
-    from ir_agent.sources.manifest import KNOWN_GAPS
-
-    c: Counter = Counter()
-    for (key, per), f in getattr(r.ledger, "_facts", {}).items():   # noqa: SLF001
-        sid = (getattr(f, "source_id", "") or "").split("#")[0]
-        for name in KNOWN_GAPS:
-            if sid.startswith(name):
-                c[name] += 1
-    return sorted(c.items())
-```
-
-- [ ] **Step 4: 实现 `run_brief`**
-
-```python
-def run_brief(code, r, as_of, out_dir, verified_by, *, model=None,
-              snapshot_dir="snapshots", accept_manual=False):
-    """第一阶段之二：辩论① → 预研 → 因子采集 → 辩论② → 撰写简报。
-
-    **五个模型环节逐个立刻落盘。** 今天的实测里这五个各自都失败过；没有中间
-    落盘点的话，失败会丢掉已完成的部分。
-    """
-    import json
-
-    from ir_agent import stance
-    from ir_agent.analyst import FactCatalog, write_body
-
-    out = Path(out_dir)
-    arts, skipped = {}, []
-    client = make_client(model=model)
-    md, pr = _restore_state(out)             # state.json 的 md / pr
-    _analyse_facts(code, r, as_of, snapshot_dir)      # 重建派生事实，不调模型
-    cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=as_of,
-                                  extra_periods=_catalog_periods(r))
-    cat.evidence = _build_evidence(r, code)
-    ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
-
-    # ── 多空辩论①：定方向 ───────────────────────────────────────
-    themes = ["需求", "价格", "成本", "份额", "政策"]
-    sa = _stance_round(stance, client, out, STANCE_A, "A", themes, ctx,
-                       cat, r, as_of, accept_manual, verified_by, skipped)
-    if sa is None:
-        return _stop_for_manual(code, r, as_of, out, arts, skipped, client)
-    arts["多空辩论①"] = str(out / "stance_a.md")
-
-    # ── 方法论预研（现在能看到全部证据与多空结论）──────────────
-    meth, merr = _research_methodology(code, r, out, client,
-                                       stance_note=sa.summary())
-    if merr:
-        skipped.append(merr)
-
-    # ── 因子定向采集 ───────────────────────────────────────────
-    factor_data = None
-    if meth is not None:
-        factor_data = _collect_factors(code, r, as_of, out, client, md,
-                                       meth.decompositions)
-
-    # ── 多空辩论②：定取值 ─────────────────────────────────────
-    subjects = ([f.label for d in meth.decompositions for f in d.factors]
-                if meth is not None else list(assume.DRIVERS))
-    sb = _stance_round(stance, client, out, STANCE_B, "B", subjects,
-                       ctx + "\n\n【因子采集】\n" + _factor_ctx(factor_data),
-                       cat, r, as_of, accept_manual, verified_by, skipped)
-    if sb is None:
-        return _stop_for_manual(code, r, as_of, out, arts, skipped, client)
-    arts["多空辩论②"] = str(out / "stance_b.md")
-
-    # ── 撰写简报（应用多空平衡点）──────────────────────────────
-    print(f"撰写研究简报（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
-    try:
-        body, _ = write_body(cat, client, code=code, period=r.period, brief=True,
-                             context=f"**多空平衡点**\n\n{sb.summary()}",
-                             **{k: v or None for k, v in _prompt_bundle(pr).items()})
-    except (AnalystRefused, ClaudeCliError) as e:
-        dumped = _dump_refused(out, getattr(e, "raw", ""), WRITE_FAILED_BRIEF)
-        skipped.append(f"研究简报（{e.__class__.__name__}: {str(e)[:160]}）"
-                       + (f"（最后一稿已落盘：{dumped}）" if dumped else ""))
-        body = None
-    if body:
-        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
-        (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
-        arts["研究简报"] = str(out / BRIEF)
-        if (note := _audit_note("研究简报", r.audit)):
-            skipped.append(note)
-        _write_review(out, sa, sb, r.audit)       # 门② 的待核清单
-        arts["待核清单"] = str(out / REVIEW_MD)
-    _save_state(out, code, r, as_of, md, pr, verified_by=verified_by)
-    return ResearchOutcome(code=code, period=r.period, as_of=as_of,
-                           stage=Stage.AWAITING_BRIEF_REVIEW if body
-                           else Stage.INCOMPLETE,
-                           artifacts=arts, skipped=skipped,
-                           cost_usd=Decimal(str(client.total_cost_usd)),
-                           phase="brief")
-```
-
-配套三个私有助手（`_stance_round` 负责「跑或读回人工补写、失败则落盘模板并返回 None」；`_stop_for_manual` 组装「请选一条」的指引；`_write_review` 生成门②的待核清单）：
-
-```python
-def _stance_round(stance, client, out, fname, round_, subjects, ctx, cat, r,
-                  as_of, accept_manual, by, skipped):
-    """跑一轮多空辩论，或读回人工补写。失败则落盘失败稿与模板，返回 None。
-
-    **不存在「跳过」**：每份研报的多空输入要么来自模型、要么来自人。
-    """
-    import json
-
-    path = out / fname
-    if accept_manual and path.exists():
-        res = stance.load_manual(path, round_=round_, by=by)
-        skipped.append(f"多空辩论{round_}：由 {by} 人工补写")
-    else:
-        try:
-            res = stance.run_stance(client, round_=round_, subjects=subjects,
-                                    context=ctx, catalog=cat, ledger=r.ledger,
-                                    as_of=as_of, corpus=getattr(r, "corpus", None))
-        except stance.StanceFailed as e:
-            _dump_refused(out, getattr(e, "raw", ""),
-                          f"stance_{round_.lower()}_failed_raw.md")
-            (out / f"stance_{round_.lower()}.template.json").write_text(
-                json.dumps(stance.template_json(round_, subjects),
-                           ensure_ascii=False, indent=2), encoding="utf-8")
-            skipped.append(f"多空辩论{round_} 未完成（{str(e)[:160]}）")
-            return None
-    path.write_text(json.dumps(res.to_json(), ensure_ascii=False, indent=2),
-                    encoding="utf-8")
-    (out / f"stance_{round_.lower()}.md").write_text(res.summary(),
-                                                     encoding="utf-8")
-    return res
-
-
-def _write_review(out, sa, sb, audit_res) -> None:
-    """门② 的待核清单：把所有「代码没把握」的东西聚到一处。"""
-    lines = ["# 待核清单（门②：请在批准简报结论前过一遍）", ""]
-    for name, s in (("多空辩论①", sa), ("多空辩论②", sb)):
-        if s is not None and s.unverified:
-            lines += [f"## {name}：{len(s.unverified)} 条证据代码核验不过", ""]
-            lines += [f"- [{e.side}] {e.subject}：{e.unverified}"
-                      for e in s.unverified] + [""]
-    if getattr(audit_res, "unsnapshotted", None):
-        lines += [f"## 简报引用缺原始接口快照："
-                  f"{len(audit_res.unsnapshotted)} 条", ""]
-    if len(lines) == 2:
-        lines.append("本轮没有需要人工复核的标注项。")
-    (out / REVIEW_MD).write_text("\n".join(lines), encoding="utf-8")
-```
-
-- [ ] **Step 5: 实现 `run_assume`**
-
-把现有 `run_analysis` 里「AI 填写 DCF 判断项」那一段整体搬进 `run_assume`，并在调用 `assume.decide` 时透传 `balances=sb.balances`（从 `stance_b.json` 读回）。
-
-- [ ] **Step 6: 删除 `run_analysis` 并把旧测试指向新函数**
-
-```bash
-python -m pytest -q -m "not live" -W error
-```
-Expected: 原先引用 `run_analysis` 的测试会失败，逐个改为对应的新函数；`test_预研排在数据采集之前` 整条删除（已被 Step 1 的新测试替换）。
-
-- [ ] **Step 7: 提交**
-
-```bash
-git add ir_agent/full.py tests/test_full_context.py
-git commit -m "full: 第一阶段拆为 analyse/brief/assume 三段，新顺序与逐步落盘"
-```
+> 注：本 Task 排在 Task 8 之后，所以提交完成时 `--brief` / `--assume` 立刻可实跑。
+> 最初的排法是反的（CLI 先、实现后），理由写的是「参数协议先定，实现跟上」——
+> 那个理由只在多人并行实现、需要先对齐接口时成立；单线执行没有这个收益，
+> 代价却是实打实的：那段时间打给用户的命令会 ImportError。
 
 ---
 
@@ -1780,8 +2213,8 @@ git commit -m "full: 第一阶段拆为 analyse/brief/assume 三段，新顺序�
 - Modify: `tests/test_research.py`
 
 **Interfaces:**
-- Consumes: Task 9 的产物文件名常量
-- Produces: `Stage.AWAITING_SOURCES`、`Stage.AWAITING_BRIEF_REVIEW`、`Stage.AWAITING_ASSUME_REVIEW`；`_PREFIX` 新增三条前缀
+- Consumes: Task 8 的产物文件名常量；Task 8 已建好的 `Stage.AWAITING_SOURCES` / `AWAITING_BRIEF_REVIEW` / `AWAITING_ASSUME_REVIEW`（本 Task 只读，不再新增）
+- Produces: `_PREFIX` 新增三条前缀；`next_actions` 认四状态
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1825,12 +2258,8 @@ def test_新前缀都注册进了白名单():
 
 - [ ] **Step 2: 跑测试确认红，然后实现**
 
-```python
-# ir_agent/research.py：Stage 新增三态
-    AWAITING_SOURCES = "awaiting_sources"            # 停在门①：来源待核验
-    AWAITING_BRIEF_REVIEW = "awaiting_brief_review"  # 停在门②：简报待审阅
-    AWAITING_ASSUME_REVIEW = "awaiting_assume_review"  # 停在门③：判断项待核实
-```
+三个 `Stage` 成员已在 Task 8 Step 0c 建好（Task 8 的 `run_analyse` / `run_brief`
+就要返回它们），**本 Task 不要再加一遍** —— 直接用。
 
 ```python
 # ir_agent/research.py：_PREFIX 新增三条
@@ -1925,6 +2354,9 @@ def test_四次调用的产物集合与停止点(tmp_path, monkeypatch):
     monkeypatch.setattr(st, "run_stance", lambda *a, **k: st.StanceResult(
         round_=k.get("round_", "A"),
         balances=st.parse_balance("平衡｜营收增速｜0.05｜0.12｜0.20｜理由")))
+    # `run_assume` 那一步不真的跑模型填判断项：这条测试守的是「每次调用产出
+    # 哪些文件、停在哪个 Stage」，判断项本身由 tests/test_assume.py 守。
+    monkeypatch.setattr(full, "_propose_assumptions", lambda *a, **k: "")
 
     o1 = full.run_analyse("600183", _FakeR(), date(2026, 10, 12), tmp_path)
     assert (tmp_path / "sources.md").exists()
@@ -1939,12 +2371,41 @@ def test_四次调用的产物集合与停止点(tmp_path, monkeypatch):
     assert o3.stage is full.Stage.AWAITING_ASSUME_REVIEW
 ```
 
-> `_FakeR` / `_FakeCat` / `_FakeAudit` / `_FakeMeth` 四个替身类在本测试文件顶部定义：
-> `_FakeR` 带 `period="2025FY"` / `as_of` / `ledger`（空 `FactLedger`）/ `quotes=None` /
-> `corpus=None` / `store=None` / `verdicts=[]`；`_FakeCat` 带 `entries=()`、
-> `evidence=None`、`render_for_prompt()` 返回空串、`tokens=()`；`_FakeAudit` 带
-> `with_sources()` 返回正文、`unrendered=[]`、`unsnapshotted=[]`；`_FakeMeth` 带
-> `decompositions=[]`。
+四个替身类，**写在本测试文件顶部**（不是「类似上面」—— 照抄下面这段）：
+
+```python
+# tests/test_full_context.py 顶部
+class _FakeR:
+    period, as_of = "2025FY", date(2026, 10, 12)
+    quotes = corpus = store = sections = None
+    verdicts, audit, annual_url = [], None, ""
+
+    def __init__(self):
+        self.ledger = FactLedger()          # 空账本，清单生成要能跑
+
+
+class _FakeCat:
+    entries, tokens, evidence = (), (), None
+
+    def render_for_prompt(self, *a, **k):
+        return ""
+
+
+class _FakeAudit:
+    unrendered: list = []
+
+    def with_sources(self):
+        return "## 一节\n正文。"
+
+
+class _FakeMeth:
+    decompositions, industry = [], "测试业"
+```
+
+**`_FakeAudit` 不要加 `unsnapshotted`。** 真实的 `audit()` 返回值没有这个
+属性 —— 给替身加上它，`_write_review` 里那条用 `getattr` 读它的分支就会在
+测试里走通、在实跑里永不触发，而测试变成「证明了一件不成立的事」。那条分支
+已按本计划改为读 `_snapshot_gaps(r)`；替身也就不该有这个名字。
 
 - [ ] **Step 2: 更新 README 的流程段**
 
@@ -1982,7 +2443,7 @@ git commit -m "test: 四次调用的端到端行为测试；README 更新为四�
 
 **2. 占位符扫描**：Task 11 Step 1 的 `...` 是唯一一处，已就地说明「由实现者按 `_stub_phase` 的模式补全」并给出补全依据。Task 6 Step 2 的导入路径错误是有意保留的——它演示了「`ir_agent/sources` 已是包」这个容易踩的坑，并在 Step 3 给出修正命令。
 
-**3. 类型一致性**：`StanceResult.round_`（带下划线，避免与内置 `round` 冲突）在 Task 1/4/5/9 中一致；`Balance.bear/mid/bull` 为 `Decimal | None`，`check_interval` 与 `check_deviation` 都按 `mid is None` 跳过；`Row.deviation` 为 `str`，`check_deviation` 读 `r.deviation.strip()`。
+**3. 类型一致性**：`StanceResult.round_`（带下划线，避免与内置 `round` 冲突）在 Task 1/4/5/8 中一致；`Balance.bear/mid/bull` 为 `Decimal | None`，`check_interval` 与 `check_deviation` 都按 `mid is None` 跳过；`Row.deviation` 为 `str`，`check_deviation` 读 `r.deviation.strip()`。
 
 ## 不做（YAGNI，照搬 spec）
 
