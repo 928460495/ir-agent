@@ -367,3 +367,30 @@ def run_stance(client, *, round_: str, subjects: list[str], context: str,
         last = "；".join(probs)
         prompt = f"{base}\n---\n**上一稿被驳回**：{last}\n请据此重写全部行。\n"
     raise StanceFailed(f"连续 {max_attempts} 次给不出可用的平衡点：{last}", raw=raw)
+
+
+def load_manual(path, *, round_: str, by: str) -> StanceResult:
+    """读回人工补写的多空输入。
+
+    **区间校验对人和模型一视同仁。** 它守的是「平衡点对两侧可问责」，与谁
+    填的无关 —— 人也会填错，而填错的后果和模型填错一样。
+
+    未填的模板（全 None 的平衡点）判为「还没填」而不是「没有输入」：
+    「没有」这条路已经被取消，每份研报的多空输入要么来自模型、要么来自人。
+    """
+    import json
+    from pathlib import Path
+
+    if not by.strip():
+        raise StanceFailed("人工补写必须给出署名（--accept-manual 需配合 "
+                           "--verified-by/--reviewed-by）—— 要有人负责才"
+                           "谈得上「已补写」。")
+    d = json.loads(Path(path).read_text(encoding="utf-8"))
+    r = StanceResult.from_json(d)
+    r.round_, r.manual = round_, by.strip()
+    if round_ == "B" and not any(b.mid is not None for b in r.balances):
+        raise StanceFailed(f"{path} 的平衡点还没填 —— 模板里的三档仍是空的。")
+    probs = check_interval(r.balances)
+    if probs:
+        raise StanceFailed("人工补写的平衡点不合法：" + "；".join(probs))
+    return r

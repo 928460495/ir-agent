@@ -289,3 +289,54 @@ class TestTemplate:
         assert subjects == {"销量", "售价"}
         assert all(x["mid"] is None for x in t["balances"])
         assert t["manual"] == ""
+
+
+class TestLoadManual:
+    """**取消自动降级之后，人工补写是唯一的兜底。** 不存在「跳过」——
+    每份研报的多空输入要么来自模型、要么来自人，不会「没有」。
+    """
+
+    def _write(self, tmp_path, d):
+        import json
+        p = tmp_path / "stance_b.json"
+        p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def test_读回人填的平衡点并记下署名(self, tmp_path):
+        from ir_agent.stance import load_manual, template_json
+        t = template_json("B", ["销量"])
+        t["balances"][0].update(bear="-0.02", mid="0.08", bull="0.18",
+                                note="人工判断")
+        p = self._write(tmp_path, t)
+        r = load_manual(p, round_="B", by="xhl")
+        assert r.manual == "xhl" and r.balances[0].mid == D("0.08")
+        assert "人工补写" in r.summary() and "xhl" in r.summary()
+
+    def test_人填的平衡点同样要过区间校验(self):
+        """**人也会填错。** 区间校验对人和模型一视同仁 —— 它守的是
+        「平衡点对两侧可问责」，与谁填的无关。"""
+        from ir_agent.stance import StanceFailed, load_manual, template_json
+        import json, pathlib, tempfile
+        t = template_json("B", ["销量"])
+        t["balances"][0].update(bear="-0.02", mid="0.25", bull="0.18", note="越界")
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "stance_b.json").write_text(json.dumps(t, ensure_ascii=False),
+                                         encoding="utf-8")
+        with pytest.raises(StanceFailed, match="区间"):
+            load_manual(d / "stance_b.json", round_="B", by="xhl")
+
+    def test_模板没填就报错(self, tmp_path):
+        """未填的模板读回去会得到一组全 None 的平衡点 —— 那等于没有输入，
+        而「没有」这条路已经被取消了。"""
+        from ir_agent.stance import StanceFailed, load_manual, template_json
+        p = self._write(tmp_path, template_json("B", ["销量"]))
+        with pytest.raises(StanceFailed, match="还没填"):
+            load_manual(p, round_="B", by="xhl")
+
+    def test_署名缺失就报错(self, tmp_path):
+        from ir_agent.stance import StanceFailed, load_manual, template_json
+        t = template_json("B", ["销量"])
+        t["balances"][0].update(bear="-0.02", mid="0.08", bull="0.18", note="x")
+        p = self._write(tmp_path, t)
+        with pytest.raises(StanceFailed, match="署名"):
+            load_manual(p, round_="B", by="")
