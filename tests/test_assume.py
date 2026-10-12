@@ -2458,3 +2458,97 @@ def test_行业增速优先用多年CAGR而不是最近单年():
     b = assume.parse(_full(years=2), 2)
     assume.check(b, 2, ledger=_led(revenue_yoy="0.258"), body=BODY, as_of=AS_OF)
     assert b.implied.industry_growth == D("0.258"), "CAGR 缺失时没回落到 yoy"
+
+
+class TestDeviation:
+    """**让「无视辩论」和「有理由地偏离」在产物上长得不一样。**
+
+    没有这个字段时，判断项中性档 18%（平衡点 12%）这件事，无论是模型看到了
+    因子细节而上调、还是模型压根没读辩论，产物上完全一样。
+
+    同构的实测案例：判断项被锚定覆盖（批准 19.12% → 实际用 −1.58%）之所以
+    能被人看见，唯一原因是代码专门为它生成了一行说明。
+    """
+
+    def _bal(self, mid="0.12"):
+        from ir_agent.stance import parse_balance
+        return parse_balance(f"平衡｜营收增速｜0.05｜{mid}｜0.20｜理由")
+
+    def _rows(self, base="0.12", deviation=""):
+        a = assume.parse(_full(years=1), 1)
+        for r in a.rows:
+            if r.driver == "growth":
+                r.base = D(base)
+                r.deviation = deviation
+                r.factor_key = "营收增速"
+        return a
+
+    def test_与平衡点一致时不要求说明(self):
+        from ir_agent.assume import check_deviation
+        assert check_deviation(self._rows("0.12"), self._bal()) == []
+
+    def test_容差之内不算偏离(self):
+        from ir_agent.assume import check_deviation
+        assert check_deviation(self._rows("0.125"), self._bal()) == []
+
+    def test_偏离且没填说明就报错(self):
+        from ir_agent.assume import check_deviation
+        probs = check_deviation(self._rows("0.18"), self._bal())
+        assert probs and "营收增速" in probs[0] and "0.18" in probs[0]
+        assert "0.12" in probs[0], "驳回信息要同时给出平衡点，否则无从改"
+
+    def test_偏离且填了说明就通过(self):
+        from ir_agent.assume import check_deviation
+        assert check_deviation(
+            self._rows("0.18", deviation="平衡点未计入 Q3 新产线投产"),
+            self._bal()) == []
+
+    def test_代码只查存在性不查合理性(self):
+        """**这条线不能模糊。** 代码只能查「有没有填」；填得对不对由结构
+        审查（第 3 道）对账。实测教训：我的隐含份额检查想用算术判断一件该由
+        语义判断的事，结果 10 份存档上 10/10 惰性。"""
+        from ir_agent.assume import check_deviation
+        assert check_deviation(self._rows("0.18", deviation="因为我想这么填"),
+                               self._bal()) == []
+
+    def test_没有平衡点时这条检查不生效(self):
+        """辩论失败并由人工补写为空时，不能凭空要求说明。"""
+        from ir_agent.assume import check_deviation
+        assert check_deviation(self._rows("0.18"), []) == []
+
+    def test_纯文字平衡点不参与数值比对(self):
+        from ir_agent.assume import check_deviation
+        from ir_agent.stance import parse_balance
+        bal = parse_balance("平衡｜营收增速｜—｜—｜—｜方向性结论")
+        assert check_deviation(self._rows("0.18"), bal) == []
+
+    def test_这条检查真的被接进了check(self):
+        """**计划原本只测 check_deviation 本身，没测它有没有被接上。**
+
+        删掉 `check()` 里那三行 `if balances: …`，上面七条测试照样全绿 ——
+        而实跑时偏离说明缺失就再也不会被驳回。本会话已有四次「结构式断言
+        盯着源码字面量」而漏报的记录，这里用行为断言：真的调 check()，
+        断言它抛 AssumeFailed。
+        """
+        from ir_agent.ledger import FactLedger
+
+        # **三档要先拉开。** `_check_scalar` 排在偏离检查之前，`_rows` 只改
+        # `base` 会让它先抛「三档未拉开」—— 那样这条测试即使在偏离检查被
+        # 摘掉之后也照样红，就测不出接线有没有断。
+        a = self._rows("0.18")                      # 偏离平衡点 0.12，未填说明
+        for r in a.rows:
+            if r.driver == "growth":
+                r.bear, r.bull = D("0.10"), D("0.26")
+        with pytest.raises(assume.AssumeFailed, match="偏离说明"):
+            assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                         balances=self._bal())
+
+    def test_不传balances时check不受影响(self):
+        """这条约束只在有平衡点时生效 —— 老的调用点一个都不该因此变红。"""
+        from ir_agent.ledger import FactLedger
+
+        a = self._rows("0.18")
+        for r in a.rows:
+            if r.driver == "growth":
+                r.bear, r.bull = D("0.10"), D("0.26")
+        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)

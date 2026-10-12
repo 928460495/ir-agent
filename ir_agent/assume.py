@@ -131,6 +131,13 @@ class Row:
     # 分解模式下这一行对应哪个因子。空串表示旧的两标量模式 ——
     # 预研失败时的降级路径，必须保留。
     factor_key: str = ""
+    # 偏离多空平衡点时的说明。**代码只查存在性，不查合理性** —— 填得对不对
+    # 由结构审查（factor_review）对账。它的作用是让「无视辩论」和「有理由地
+    # 偏离」在产物上长得不一样：没有它的话，判断项中性档 18%（平衡点 12%）
+    # 这件事，无论是模型看到了因子细节而上调、还是模型压根没读辩论，产物上
+    # 完全一样。同构的实测案例：判断项被锚定覆盖（批准 19.12% → 实际用
+    # −1.58%）之所以能被人看见，唯一原因是代码专门为它生成了一行说明。
+    deviation: str = ""
     # 因子模式的取舍（放宽因子依据审核）：引文类依据（BasisKind.REPORT）
     # 逐字核验不过时不再致命——真实实跑（600584，9 因子×5 年×3 档=45
     # 行）显示这道闸门约拦下一半产出，卡点几乎都是模型对正文的**概括**
@@ -1156,13 +1163,61 @@ def _implied_for(a: AssumptionSet, ledger: FactLedger, as_of: date,
                          or _latest(ledger, "industry.revenue_yoy", as_of)))
 
 
+# 判断项与平衡点的容差。小于它视为「采纳了平衡点」，不要求说明 ——
+# 模型为了对齐小数位微调一两个基点，不该被当成偏离。
+DEVIATION_TOL = Decimal("0.01")
+
+
+def check_deviation(a: AssumptionSet, balances: list,
+                    tol: Decimal = DEVIATION_TOL) -> list[str]:
+    """判断项偏离平衡点时，该行必须填 `deviation`。返回问题列表。
+
+    **只查存在性。** 填得对不对由结构审查对账 —— 代码能确定判断的是「有没有
+    填」，不是「这个理由站不站得住」。实测教训: 隐含份额检查想用算术判断一件
+    该由语义判断的事，10 份存档上 10/10 惰性。
+
+    没有平衡点（辩论失败后人工补写为空）或平衡点是纯文字（辩论①）时，这条
+    检查不生效 —— 不能凭空要求说明。
+
+    **按 `_row_label` 取名字，不要直接读 `r.factor_key`。** 两标量降级模式下
+    `factor_key` 是空串，而那时辩论② 的 subjects 用的是 `DRIVERS` 的键
+    （「营收增速」/「毛利率」）—— 直接比 `factor_key` 会让这条检查在降级
+    路径上恒不生效，而 Global Constraints 要求它一律生效。`_row_label`
+    已经做了这件事：分解模式下把 factor_key 解析成因子标签，两标量模式下
+    返回中文驱动名。
+    """
+    mids = {b.subject: b.mid for b in balances
+            if getattr(b, "mid", None) is not None}
+    if not mids:
+        return []
+    out: list[str] = []
+    for r in sorted(a.rows, key=lambda x: (x.factor_key, x.year)):
+        name = _row_label(r, a.decomps or [])
+        mid = mids.get(name)
+        if mid is None:
+            continue
+        if abs(r.base - mid) <= tol or r.deviation.strip():
+            continue
+        out.append(
+            f"第 {r.year} 年「{name}」的中性档 {r.base} 偏离多空平衡点 "
+            f"{mid}（容差 {tol}），但没有给出偏离说明 —— 请在该行的第 7 字段"
+            f"填一句话说明为什么偏离；若采纳平衡点，把取值改成 {mid}。")
+    return out
+
+
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
           as_of: date, decomps: list[Decomposition] | None = None,
-          base_margin: Decimal | None = None, anchor: dict | None = None) -> None:
+          base_margin: Decimal | None = None, anchor: dict | None = None,
+          balances: list | None = None) -> None:
     if decomps:
         _check_factors(a, years, decomps, base_margin, anchor)
     else:
         _check_scalar(a, years)
+    # 多空平衡点的偏离说明。**接在隐含份额之前** —— 偏离说明缺失是格式问题，
+    # 隐含份额越界是实质问题，先让模型把格式补齐，驳回信息才不会混在一起。
+    if balances:
+        if (probs := check_deviation(a, balances)):
+            raise AssumeFailed("；".join(probs))
     # **增速路径的算术后果。** 阻断的含义是退回让模型重算（本函数抛
     # AssumeFailed 会进 `_decide_once` 的重试循环并把理由附进提示词），
     # 不是毙掉整轮 —— 连续失败后 `decide()` 仍会降级到两标量模式。
@@ -1549,7 +1604,8 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
                  max_attempts: int, decomps: list[Decomposition] | None,
                  factor_data: dict | None,
                  base_margin: Decimal | None,
-                 anchor: dict | None = None) -> AssumptionSet:
+                 anchor: dict | None = None,
+                 balances: list | None = None) -> AssumptionSet:
     """单一模式（因子或两标量）内的重试循环。
 
     只管一种模式，失败就抛 `AssumeFailed`——**模式之间要不要降级，是
@@ -1566,7 +1622,8 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
             a = parse(raw, len(labels), decomps=decomps,
                      factor_data=factor_data, as_of=as_of)
             check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
-                  decomps=decomps, base_margin=base_margin, anchor=anchor)
+                  decomps=decomps, base_margin=base_margin, anchor=anchor,
+                  balances=balances)
         except AssumeFailed as e:
             last = str(e)
             prompt = (f"{prompt}\n\n---\n"
@@ -1595,7 +1652,8 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
            max_attempts: int = 3, decomps: list[Decomposition] | None = None,
            factor_data: dict | None = None,
            base_margin: Decimal | None = None,
-           anchor: dict | None = None) -> AssumptionSet:
+           anchor: dict | None = None,
+           balances: list | None = None) -> AssumptionSet:
     """AI 填判断项，因子模式连续失败时回落到两标量路径（I4）。
 
     因子模式要填 N 因子 × Y 年 × 3 档，比两标量模式的 2×5×3 重数倍，
@@ -1613,14 +1671,19 @@ def decide(client, judg: dict, labels: list[str], context: str, *,
                             body=body, as_of=as_of, code=code,
                             max_attempts=max_attempts, decomps=decomps,
                             factor_data=factor_data, base_margin=base_margin,
-                            anchor=anchor)
+                            anchor=anchor, balances=balances)
     except AssumeFailed as e:
         if not decomps:
             raise
         a = _decide_once(client, judg, labels, context, ledger=ledger,
                          body=body, as_of=as_of, code=code,
                          max_attempts=max_attempts, decomps=None,
-                         factor_data=None, base_margin=None)
+                         # **降级路径也要带 balances。** 两标量模式下
+                         # `_row_label` 返回中文驱动名，而辩论② 在预研失败时
+                         # 正是用 `DRIVERS` 的键做 subjects —— 匹配得上。
+                         # 不传就等于「降级之后这条约束静默失效」。
+                         factor_data=None, base_margin=None,
+                         balances=balances)
         a.degraded_raw = getattr(e, "raw", "")
         a.degraded = (f"因子模式连续 {max_attempts} 次填不出合格的判断项"
                       f"（{str(e)[:160]}）—— 已退回两标量模式（营收增速/"

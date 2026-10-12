@@ -1387,6 +1387,22 @@ def check_deviation(a: AssumptionSet, balances: list,
 ```
 
 并给 `check()` 增加参数 `balances: list | None = None`，以及 `_decide_once` / `decide` 的同名透传参数（默认 `None`）。
+**`decide` 的降级路径（`decomps=None` 那次重试）也要传 `balances`** —— 不传
+就等于「降级之后这条约束静默失效」。
+
+> 实跑时改了两处：
+>
+> 1. **按 `_row_label(r, a.decomps or [])` 取名字，不要直接读 `r.factor_key`。**
+>    两标量降级模式下 `factor_key` 是空串，而那时辩论② 的 subjects 用的是
+>    `DRIVERS` 的键（「营收增速」/「毛利率」）—— 直接比 `factor_key` 会让这条
+>    检查在降级路径上恒不生效，与 Global Constraints 矛盾。`_row_label`
+>    （`assume.py:212`）已经做了这件事，不必新写。
+> 2. **补两条接线测试。** 计划原本只测 `check_deviation` 本身，没测它有没有
+>    被接进 `check()` —— 删掉那三行，七条测试照样全绿。变异验证：摘掉接线，
+>    只有新加的 `test_这条检查真的被接进了check` 变红。
+>    注意那条测试要先把三档拉开（`_check_scalar` 排在偏离检查之前，`_rows`
+>    只改 `base` 会让它先抛「三档未拉开」，那样测试即使在接线断掉后也照样红，
+>    就测不出接线有没有断）。
 
 - [ ] **Step 5: 跑测试确认绿并提交**
 
