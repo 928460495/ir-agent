@@ -106,3 +106,47 @@ class TestStanceResult:
         assert back.round_ == "B"
         assert [e.claim for e in back.evidence] == [e.claim for e in r.evidence]
         assert back.balances[0].mid == D("0.08")
+
+
+class TestCheckInterval:
+    """**这是这套设计里唯一能确定性保证的东西：裁决者不能自己造数。**
+
+    平衡值必须落在两侧划出的区间内 —— 否则「平衡点」就是第三个独立观点，
+    对两侧不可问责。
+    """
+
+    def test_平衡值在区间内通过(self):
+        from ir_agent.stance import check_interval
+        assert check_interval(parse_balance("平衡｜销量｜-2%｜8%｜18%｜理由")) == []
+
+    def test_平衡值高于多方被拦(self):
+        from ir_agent.stance import check_interval
+        probs = check_interval(parse_balance("平衡｜销量｜-2%｜25%｜18%｜理由"))
+        assert probs and "销量" in probs[0] and "区间" in probs[0]
+
+    def test_平衡值低于空方被拦(self):
+        from ir_agent.stance import check_interval
+        probs = check_interval(parse_balance("平衡｜销量｜-2%｜-5%｜18%｜理由"))
+        assert probs
+
+    def test_两侧值本身倒挂也被拦(self):
+        """空方给的比多方还高 —— 那不是区间，是两侧搞反了。"""
+        from ir_agent.stance import check_interval
+        probs = check_interval(parse_balance("平衡｜销量｜20%｜10%｜5%｜理由"))
+        assert probs and "倒挂" in probs[0]
+
+    def test_边界值算通过(self):
+        """平衡点取在端点上是合法的结论（一侧完全说服了裁决者）。"""
+        from ir_agent.stance import check_interval
+        assert check_interval(parse_balance("平衡｜销量｜-2%｜18%｜18%｜理由")) == []
+
+    def test_纯文字的平衡点不校验区间(self):
+        """辩论① 没有数值，这条检查对它无从适用。"""
+        from ir_agent.stance import check_interval
+        assert check_interval(parse_balance("平衡｜需求侧｜—｜—｜—｜量增价稳")) == []
+
+    def test_问题列表逐项指名(self):
+        from ir_agent.stance import check_interval
+        probs = check_interval(parse_balance(
+            "平衡｜销量｜-2%｜25%｜18%｜理由\n平衡｜售价｜0%｜5%｜10%｜理由"))
+        assert len(probs) == 1 and "销量" in probs[0]

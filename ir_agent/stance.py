@@ -197,3 +197,28 @@ class StanceResult:
                                 note=x.get("note", "")))
         return cls(round_=d.get("round", ""), evidence=evs, balances=bals,
                    manual=d.get("manual", ""))
+
+
+def check_interval(balances: list[Balance]) -> list[str]:
+    """平衡值必须落在两侧划出的区间内。返回问题列表，空列表 = 通过。
+
+    **裁决者不能自己造数，它只能在两侧给出的区间里选。** 这是这套设计里
+    唯一能确定性保证的东西 —— 平衡点对两侧可问责。若允许它越界，「平衡点」
+    就变成第三个独立观点，而那个观点没有任何一侧为它背书。
+
+    端点算通过：平衡点取在端点上是合法结论（一侧完全说服了裁决者）。
+    纯文字的平衡点（辩论①）跳过 —— 这条检查对它无从适用。
+    """
+    out: list[str] = []
+    for b in balances:
+        if b.mid is None:
+            continue
+        if b.bear > b.bull:
+            out.append(f"「{b.subject}」两侧值倒挂：空方 {b.bear} 高于多方 "
+                       f"{b.bull} —— 两侧搞反了，不是一个区间")
+            continue
+        if not (b.bear <= b.mid <= b.bull):
+            out.append(f"「{b.subject}」的平衡值 {b.mid} 落在两侧区间 "
+                       f"[{b.bear}, {b.bull}] 之外 —— 裁决者只能在两侧给出的"
+                       f"区间里选，不能自己造一个数")
+    return out
