@@ -202,3 +202,90 @@ class TestAnnotateNotBlock:
         got = annotate(evs, ledger=self._led(), body="", as_of=date(2026, 6, 1))
         s = StanceResult(round_="B", evidence=got).summary()
         assert "1 条证据代码核验不过" in s and "未阻断" in s
+
+
+class TestRunStance:
+    BULL = "多方｜销量｜需求放量｜[[revenue.yoy@2025FY]]"
+    BEAR = "空方｜销量｜周期下行｜[[revenue.yoy@2025FY]]"
+    BAL = "平衡｜销量｜-2%｜8%｜18%｜中性取份额小幅提升"
+    BAD_BAL = "平衡｜销量｜-2%｜25%｜18%｜越界的平衡值"
+
+    def _client(self, *rs):
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return rs[min(len(seen) - 1, len(rs) - 1)]
+        c.seen = seen
+        return c
+
+    def _cat(self):
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.ledger import Fact, FactLedger, Method
+        l = FactLedger()
+        l.put(Fact(key="revenue.yoy", value=D("-0.0121"), unit="ratio",
+                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="calc_x", method=Method.COMPUTED))
+        return FactCatalog.from_ledger(l, "2025FY", as_of=date(2026, 6, 1)), l
+
+    def test_三次调用各司其职(self):
+        from ir_agent.stance import run_stance
+        cat, led = self._cat()
+        c = self._client(self.BULL, self.BEAR, self.BAL)
+        r = run_stance(c, round_="B", subjects=["销量"], context="（证据）",
+                       catalog=cat, ledger=led, as_of=date(2026, 6, 1))
+        assert len(c.seen) == 3, "多方、空方、裁决各一次"
+        assert "多方" in c.seen[0] and "空方" in c.seen[1]
+        assert len(r.evidence) == 2 and len(r.balances) == 1
+
+    def test_裁决者拿到两侧的材料(self):
+        """**裁决者必须看到两侧，否则它不是在裁决。**"""
+        from ir_agent.stance import run_stance
+        cat, led = self._cat()
+        c = self._client(self.BULL, self.BEAR, self.BAL)
+        run_stance(c, round_="B", subjects=["销量"], context="（证据）",
+                   catalog=cat, ledger=led, as_of=date(2026, 6, 1))
+        assert "需求放量" in c.seen[2] and "周期下行" in c.seen[2]
+
+    def test_越界的平衡值被驳回重写(self):
+        from ir_agent.stance import run_stance
+        cat, led = self._cat()
+        c = self._client(self.BULL, self.BEAR, self.BAD_BAL, self.BAL)
+        r = run_stance(c, round_="B", subjects=["销量"], context="（证据）",
+                       catalog=cat, ledger=led, as_of=date(2026, 6, 1))
+        assert len(c.seen) == 4, "裁决被驳回一次后重写"
+        assert "区间" in c.seen[3], "驳回信息要说清为什么"
+        assert r.balances[0].mid == D("0.08")
+
+    def test_反复越界则抛错并带最后一稿(self):
+        from ir_agent.stance import StanceFailed, run_stance
+        cat, led = self._cat()
+        c = self._client(self.BULL, self.BEAR, self.BAD_BAL)
+        with pytest.raises(StanceFailed) as e:
+            run_stance(c, round_="B", subjects=["销量"], context="（证据）",
+                       catalog=cat, ledger=led, as_of=date(2026, 6, 1),
+                       max_attempts=2)
+        assert "25" in e.value.raw, "最后一稿要带出来给人工补写做底本"
+
+    def test_核验不过的依据不影响流程(self):
+        """annotate 不阻断 —— 这条钉住编排层没有把它变成阻断。"""
+        from ir_agent.stance import run_stance
+        cat, led = self._cat()
+        bad = "多方｜销量｜需求放量｜[[fabricated.key@2025FY]]"
+        c = self._client(bad, self.BEAR, self.BAL)
+        r = run_stance(c, round_="B", subjects=["销量"], context="（证据）",
+                       catalog=cat, ledger=led, as_of=date(2026, 6, 1))
+        assert len(r.unverified) == 1 and r.balances
+
+
+class TestTemplate:
+    def test_模板按主题列出待填行(self):
+        """人工补写的底本。**代码给模板，而不是让人猜格式** —— 格式猜错
+        的失败模式是「填完还是读不回」。"""
+        from ir_agent.stance import template_json
+        t = template_json("B", ["销量", "售价"])
+        assert t["round"] == "B"
+        subjects = {x["subject"] for x in t["balances"]}
+        assert subjects == {"销量", "售价"}
+        assert all(x["mid"] is None for x in t["balances"])
+        assert t["manual"] == ""

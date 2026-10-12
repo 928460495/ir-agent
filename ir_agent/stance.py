@@ -245,3 +245,125 @@ def annotate(evs: list[Evidence], *, ledger, body: str, as_of,
                             bases=e.bases,
                             unverified="；".join(probs)[:200] if probs else ""))
     return out
+
+
+_RULES_COMMON = """本轮为内部研究评审。你的产出只进辩论记录，不进研报正文。
+
+**格式严格如下，每条一行，用全角竖线分隔，不要表格、不要编号：**
+
+  <侧别>｜<主题>｜<论点>｜<依据>
+
+依据只能是三种之一：
+  · 账本占位符    [[字段@期间]]
+  · 正文引文      「逐字照抄的一句话」
+  · 外部资料      URL（抓取日期）「逐字引文」
+
+**依据是这套机制的全部价值所在。** 给不出依据的论点请直接不写 —— 写了会被
+标注为「代码核验不过」并原样交给人复核，那对谁都没有帮助。
+"""
+
+_BULL = _RULES_COMMON + """
+你的角色是**多方**。从下面给定的证据里，挑出**支持更高估值**的材料。
+
+只挑你能找到依据的。不要编造，不要为了凑数把中性的材料说成利好。
+每条用「多方」开头。
+"""
+
+_BEAR = _RULES_COMMON + """
+你的角色是**空方**。从下面给定的证据里，挑出**不利于估值**的材料。
+
+只挑你能找到依据的。不要编造，不要为了凑数把中性的材料说成利空。
+每条用「空方」开头。
+"""
+
+_JUDGE_A = """你的角色是**裁决者**。多空两侧各自挑出了材料，请就每个主题给出
+一个双方都能接受的平衡判断。
+
+**本轮还没有因子分解式，因此只给文字结论，三个数值位一律写破折号：**
+
+  平衡｜<主题>｜—｜—｜—｜<平衡判断>
+
+平衡判断要说清：多方的哪一条成立、空方的哪一条成立、合起来指向什么方向。
+"""
+
+_JUDGE_B = """你的角色是**裁决者**。多空两侧各自挑出了材料，请就每个因子给出
+三档取值。
+
+  平衡｜<因子>｜<空方值>｜<平衡值>｜<多方值>｜<理由>
+
+**硬性约束：平衡值必须落在空方值与多方值之间**（端点可取）。你不能自己造一个
+区间外的数 —— 平衡点要对两侧可问责。数值写成 0.08 或 8% 这类可解析的形式，
+不要写「约」「左右」。
+"""
+
+
+def template_json(round_: str, subjects: list[str]) -> dict:
+    """人工补写的待填模板。**代码给模板，不让人猜格式。**
+
+    猜错格式的失败模式是「填完还是读不回」—— 人白做一遍工，而错在我们没给
+    底本。
+    """
+    return {
+        "round": round_,
+        "manual": "",
+        "evidence": [{"side": "多方", "subject": s, "claim": "",
+                      "bases": [], "quotes": [], "unverified": ""}
+                     for s in subjects],
+        "balances": [{"subject": s, "bear": None, "mid": None, "bull": None,
+                      "note": ""} for s in subjects],
+    }
+
+
+def run_stance(client, *, round_: str, subjects: list[str], context: str,
+               catalog, ledger, as_of, body: str = "", corpus=None,
+               max_attempts: int = 3) -> StanceResult:
+    """跑一轮多空辩论：多方采证 → 空方采证 → 裁决平衡点。
+
+    `round_` 为 "A" 时裁决只给文字结论（预研之前没有因子）；为 "B" 时给三档
+    数值并强制区间校验。
+
+    失败抛 `StanceFailed`，`raw` 带最后一次输出 —— 调用方据此落盘，人工补写
+    时有底本可改。
+
+    **`max_attempts` 管的不是「失败还是交人工」**，两者都会发生、只是先后：
+    驳回重写是模型自己纠错，连续 `max_attempts` 次不行才落盘模板、停下来等人
+    （`full._stop_for_manual`）。取 3 而不是 2，因为多一次模型重试约 $0.3，
+    而交给人工的代价是一个人手写一份 JSON；`methodology.research` 的默认值
+    同样是 3。
+    """
+    import sys
+
+    facts = catalog.render_for_prompt()
+    topics = "、".join(subjects)
+    ctx = (f"\n**本轮要覆盖的{'因子' if round_ == 'B' else '主题'}**\n{topics}\n"
+           f"\n**可用事实**\n{facts}\n\n**已采集的证据面**\n{context}\n")
+
+    print(f"多空辩论{round_}：多方采证…", file=sys.stderr)
+    bull_raw = client(_BULL + ctx)
+    print(f"多空辩论{round_}：空方采证…", file=sys.stderr)
+    bear_raw = client(_BEAR + ctx)
+    evs = annotate(parse_evidence(bull_raw + "\n" + bear_raw),
+                   ledger=ledger, body=body, as_of=as_of, corpus=corpus)
+
+    listed = "\n".join(f"{e.side}｜{e.subject}｜{e.claim}" for e in evs)
+    base = ((_JUDGE_A if round_ == "A" else _JUDGE_B) + ctx
+            + f"\n**两侧挑出的材料**\n{listed}\n")
+    # `raw` 要在循环外先绑定：`max_attempts` 若被传成 0，下面那句
+    # `raise StanceFailed(..., raw=raw)` 会是 UnboundLocalError —— 本会话
+    # 已经因为一个同形的 UnboundLocalError 崩掉过一整轮实跑。
+    prompt, last, raw = base, "", ""
+    for _ in range(max_attempts):
+        print(f"多空辩论{round_}：裁决平衡点…", file=sys.stderr)
+        raw = client(prompt)
+        try:
+            bals = parse_balance(raw)
+        except StanceFailed as e:
+            last = str(e)
+            prompt = f"{base}\n---\n**上一稿被驳回**：{last}\n请据此重写全部行。\n"
+            continue
+        probs = check_interval(bals)
+        if not probs:
+            return StanceResult(round_=round_, evidence=evs, balances=bals)
+        last = "；".join(probs)
+        prompt = f"{base}\n---\n**上一稿被驳回**：{last}\n请据此重写全部行。\n"
+    raise StanceFailed(f"连续 {max_attempts} 次给不出可用的平衡点：{last}", raw=raw)
