@@ -382,12 +382,12 @@ class StanceResult:
 - [ ] **Step 4: 跑测试确认全绿**
 
 Run: `python -m pytest tests/test_stance.py -q`
-Expected: PASS（18 项）
+Expected: PASS（14 项）　← 实跑核实
 
 - [ ] **Step 5: 全量回归**
 
 Run: `python -m pytest -q -m "not live" -W error`
-Expected: 2095 passed + 18 新增，零警告
+Expected: 2109 passed（基线 2095 + 新增 14），零警告　← 实跑核实
 
 - [ ] **Step 6: 提交**
 
@@ -494,7 +494,7 @@ def check_interval(balances: list[Balance]) -> list[str]:
 - [ ] **Step 4: 跑测试确认绿**
 
 Run: `python -m pytest tests/test_stance.py -q`
-Expected: PASS（25 项）
+Expected: PASS（约 21 项，以实跑为准）
 
 - [ ] **Step 5: 变异验证这条检查不是空心的**
 
@@ -624,7 +624,7 @@ def annotate(evs: list[Evidence], *, ledger, body: str, as_of,
 - [ ] **Step 4: 跑测试确认绿**
 
 Run: `python -m pytest tests/test_stance.py -q`
-Expected: PASS（30 项）
+Expected: PASS（约 26 项，以实跑为准）
 
 - [ ] **Step 5: 提交**
 
@@ -874,7 +874,7 @@ def run_stance(client, *, round_: str, subjects: list[str], context: str,
 - [ ] **Step 4: 跑测试确认绿**
 
 Run: `python -m pytest tests/test_stance.py -q`
-Expected: PASS（37 项）
+Expected: PASS（约 33 项，以实跑为准）
 
 - [ ] **Step 5: 全量回归并提交**
 
