@@ -2085,7 +2085,7 @@ def test_公告采集失败不阻断整轮研究(monkeypatch, tmp_path):
                         lambda *a, **k: (_ for _ in ()).throw(
                             RuntimeError("巨潮超时")))
     skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
-                                  tmp_path, lambda p: "", {}, ["名义产能"])
+                                  tmp_path, {})
     assert skipped and "公司公告采集未执行" in skipped[0]
     assert "巨潮超时" in skipped[0]
 
@@ -2118,7 +2118,7 @@ def test_公告采集成功但全部取文失败清单区分候选挑选与入�
 
     md: dict = {}
     skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
-                                  tmp_path, lambda p: "", md, ["名义产能"])
+                                  tmp_path, md)
 
     assert skipped == [
         "公司公告：一篇都没入库（候选 220 条，模型挑 3 条，取文失败 1 篇）"]
@@ -2336,7 +2336,7 @@ def test_公告落盘失败不阻断整轮研究(monkeypatch, tmp_path):
 
     md = {}
     skipped = full._load_announce("600183", _R(), date(2026, 9, 30),
-                                  tmp_path, object(), md, ["名义产能"])
+                                  tmp_path, md)
     joined = "；".join(skipped)
     assert "落盘" in joined or "存活" in joined, "落盘失败没进清单"
     assert "核验" in joined, \
@@ -2465,8 +2465,7 @@ def test_第一阶段落盘第二阶段读回_含零入库也要落盘(monkeypat
         corpus = Corpus(as_of=date(2026, 9, 30))
         as_of = date(2026, 9, 30)
 
-    full._load_announce("600183", _R(), date(2026, 9, 30), tmp_path,
-                        object(), {}, ["名义产能"])
+    full._load_announce("600183", _R(), date(2026, 9, 30), tmp_path, {})
     assert seen.get("cache_dir") == tmp_path / "pdf", \
         "没把 out/pdf 作为 cache_dir 传给 announce.gather——PDF 缓存仍是关的，" \
         "或原始 PDF 落进了交付目录"
@@ -2601,7 +2600,7 @@ def test_公告部分取文失败的清单条目不被渲染成未生成(monkeyp
         as_of = date(2026, 9, 30)
 
     entries = full._load_announce("600183", _R(), date(2026, 9, 30),
-                                  tmp_path, object(), {}, ["名义产能"])
+                                  tmp_path, {})
     caveat = [e for e in entries if "取文失败" in e]
     assert caveat, "部分取文失败没进清单"
     line = f"  {research._mark(caveat[0])}{caveat[0]}"
@@ -2670,8 +2669,7 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
             monkeypatch.setattr(A, "gather", gather)
         if save is not None:
             monkeypatch.setattr(A, "save", save)
-        return full._load_announce("600183", _R(), asof, tmp_path, object(),
-                                   {}, ["名义产能"])
+        return full._load_announce("600183", _R(), asof, tmp_path, {})
 
     def boom(*a, **k):
         raise RuntimeError("巨潮超时")

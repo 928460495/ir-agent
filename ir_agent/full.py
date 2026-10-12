@@ -462,14 +462,20 @@ def _restore_announce(r, out: Path) -> list[str]:
             "若是后者，公告引文可能核验不过"]
 
 
-def _load_announce(code: str, r, as_of: date, out: Path, client, md: dict,
-                   factors: list[str]) -> list[str]:
+def _load_announce(code: str, r, as_of: date, out: Path,
+                   md: dict) -> list[str]:
     """公司公告入语料库并落盘。返回要记进产物清单的条目。
 
-    **不能放进 `_analyse_facts`。** 那一层的不变量写在它自己的
-    docstring 上：「不调模型，因此两个阶段都要跑」。本函数要调模型从
-    候选清单里挑标题，放进去第二阶段会重新挑选，挑出**与第一阶段不同的
-    公告**，第一阶段正文里写下的公告引文因此在第二阶段核验不过。
+    **没有 `client`，也没有 `factors`。** 挑选改为 `announce.is_substantive`
+    的确定性标题分类：`factors` 此前来自方法论预研的分解式，而预研已挪到
+    辩论① 之后 —— 那条依赖会让挑选的唯一判据恒为空。因子定向挪到消费端，
+    由 `gaps._match_announce` 按因子做全文检索，那时因子已经知道了。
+
+    **仍然不能放进 `_analyse_facts`。** 挑选确定性化之后，原本禁止它的
+    理由（模型会在第二阶段重新挑、挑出与第一阶段不同的公告）已经消失；
+    但搬进去会让第二阶段每轮重抓 PDF，而收益只是省掉一套正在正常工作的
+    落盘读回机制（`_restore_announce`）。那是独立的清理，不混进这次重构。
+    下面这段原有的说明保留，因为它记着那个洞当初是怎么出现的：
 
     这个失败在 Task 7.5 之前**无条件成立**——公告当时既不落盘也无读回，
     第二阶段的语料库里压根没有它们，不是什么假想的理由。是本函数的落盘
@@ -486,8 +492,8 @@ def _load_announce(code: str, r, as_of: date, out: Path, client, md: dict,
     if r.corpus is None:
         r.corpus = Corpus(as_of=as_of)
     try:
-        res = announce.gather(client, code=code, company=_company_name(code),
-                              factors=factors, as_of=as_of, corpus=r.corpus,
+        res = announce.gather(code=code, company=_company_name(code),
+                              as_of=as_of, corpus=r.corpus,
                               cache_dir=out / "pdf")
     except Exception as e:                                  # noqa: BLE001
         return [f"公司公告采集未执行（{e.__class__.__name__}: {str(e)[:120]}）"]
@@ -950,6 +956,23 @@ def _macro_periods(r) -> tuple[str, ...]:
     return tuple(sorted(out, key=lambda p: out[p], reverse=True)[:12])
 
 
+def _industry_path(code: str) -> str:
+    """申万行业分类路径。**确定性查表，与预研无关。**
+
+    此前这个值从 `meth.industry` 取，于是「开放网络检索」隐式依赖了方法论
+    预研先跑完。预研挪到辩论① 之后以后，那条依赖会让 `industry=` 恒为
+    空串。它本来就不该经过模型 —— `_research_methodology` 自己也是这么
+    拿的（`taxonomy.fetch_all()` 的 `me.path`）。
+    """
+    try:
+        from ir_agent.sources.taxonomy import fetch_all
+        rows = fetch_all()
+    except Exception:                                       # noqa: BLE001
+        return ""
+    me = next((e for e in rows if e.code == code), None)
+    return me.path if me is not None else ""
+
+
 def _peer_names(code: str) -> tuple[str, ...]:
     """本标的与同业的公司名，用于豁免出处核验里的机构名误伤。
 
@@ -1210,13 +1233,7 @@ def _research_methodology(code: str, r, out: Path, client):
                           "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
         return m, ""
 
-    try:
-        from ir_agent.sources.taxonomy import fetch_all
-        rows = fetch_all()
-        me = next((e for e in rows if e.code == code), None)
-        industry = me.path if me else ""
-    except Exception:                                       # noqa: BLE001
-        industry = ""
+    industry = _industry_path(code)
     if not industry:
         return None, "方法论预研（取不到申万行业分类）"
 
@@ -1525,8 +1542,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 产业链 / 宏观定性要引用其中的原文）。**不能并进 _analyse_facts** ——
     # 理由见 _load_openweb 的 docstring。
     skipped += _load_openweb(
-        code, r, as_of, out, research_client,
-        industry=(meth.industry if meth is not None else ""))
+        code, r, as_of, out, research_client, industry=_industry_path(code))
     # **清单要按语料库的实际内容重渲染。** `_load_external` 渲染的是研报
     # 入库那一刻的语料库；上面这一步往同一个 Corpus 里又加了最多 10 篇
     # 文档，且它们确实进了下面定性三节的提示词。不重渲染，md（进看板、
@@ -1548,11 +1564,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 上网（同一条理由见 `_load_announce` 的 docstring）——所以不必像
     # `_load_openweb` 那样借用已开工具的 `research_client`，单独开一个
     # 默认不开工具的 client 即可，费用照样累计进下面的 `cost`。
-    announce_client = make_client(model=model)
-    skipped += _load_announce(
-        code, r, as_of, out, announce_client, md,
-        [f.label for d in (meth.decompositions if meth is not None else [])
-         for f in d.factors])
+    skipped += _load_announce(code, r, as_of, out, md)
     # 公告入的是同一个 Corpus，清单要按语料库的实际内容重渲染一遍
     # ——不重渲染，md（进看板、进 state.json、第二阶段读回）说的就是
     # 加公告之前的篇数与分级构成。与子项目 A 终审 C1 是同一个失败模式。
@@ -1623,9 +1635,8 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 而字符串在不在说明不了先后。见 test_判断项客户端的创建早于开销累加。
     body, upheld, debate_md, cost, err = _write_and_debate(
         code=code, r=r, model=model, out=out, brief=True, **_prompt_bundle(pr))
-    cost += (assume_client.total_cost_usd
-             + qual_client.total_cost_usd + research_client.total_cost_usd
-             + announce_client.total_cost_usd)
+    cost += (assume_client.total_cost_usd + qual_client.total_cost_usd
+             + research_client.total_cost_usd)
     if err and body is None:
         print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
         skipped.append("研究简报")

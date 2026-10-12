@@ -261,6 +261,36 @@ class Corpus:
             self.skipped.append(f"{doc.title}（{doc.published}）")
             return False
 
+    def prompt_docs(self, company_limit: int | None = None) -> list[Document]:
+        """进提示词的文档。**只截断 COMPANY 级，其余分级照旧全给。**
+
+        入库的公告放宽到 `announce.MAX_INGEST` 篇之后，三个定性模块若仍
+        `for d in corpus.docs` 无差别全喂，提示词会是原先的 2.5 倍、而且是
+        三个模块各一份。
+
+        **截断放在这里而不是入库处。** 入库的文档供 `gaps._match_announce`
+        按因子做全文检索，池子越大召回越高 —— 那是放宽条数的全部收益。
+        此前 `MAX_ANNOUNCEMENTS = 8` 这个数的注释自己写着上限的理由是
+        「同一批文档会同时压到战略/产业链/宏观定性三个模块的提示词上」：
+        **消费方的约束被实现成了生产方的上限。**
+
+        只动 COMPANY 级，因为只有它放宽了（研报走 `corpus.gather` 的 24 个
+        月窗口、开放网络本来就最多 10 篇，两者条数没变）。
+
+        **保持 `self.docs` 的原顺序。** 下游三个模块按顺序渲染，而
+        `_external_md` 统计的篇数读的是 `self.docs` —— 这里重排会让提示词
+        里的次序和清单上的次序对不上。
+        """
+        from ir_agent.sources.announce import PROMPT_DOCS   # noqa: PLC0415
+
+        if company_limit is None:
+            company_limit = PROMPT_DOCS
+        company = sorted((d for d in self.docs if d.tier is Tier.COMPANY),
+                         key=lambda d: d.published, reverse=True)[:company_limit]
+        keep = {id(d) for d in company}
+        return [d for d in self.docs
+                if d.tier is not Tier.COMPANY or id(d) in keep]
+
     def by_tier(self, tier: Tier) -> list[Document]:
         return [d for d in self.docs if d.tier is tier]
 

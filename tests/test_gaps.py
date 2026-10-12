@@ -1289,3 +1289,30 @@ def test_标注按字符串比较而非按位置():
     # 命中的候选词确实等于 search_term，所以这里**应当**标注——
     # 本测试要钉住的是实现方式（比较字符串，不数位置），不是标不标。
     assert "靠模型给的检索词" in G.summary(data)
+
+
+def test_放宽条数带来的召回就是本次改动的全部收益():
+    """**同一个因子，在 8 篇池子里搜不到、在 20 篇池子里搜到。**
+
+    若这条测不出差别，放宽条数就没有收益，整个 Task 的理由不成立。
+    牧原股份那次因子搜不到证据，有一半原因是可搜的池子太小。
+    """
+    from datetime import date
+
+    from ir_agent.gaps import _match_announce
+    from ir_agent.sources.external import Corpus, Document, Tier
+
+    def _cp(n):
+        cp = Corpus(as_of=date(2026, 10, 12))
+        for i in range(n):
+            # 只有第 12 篇提到「铜箔采购价」
+            txt = "本期铜箔采购价同比下降 8%。" if i == 12 else "例行披露内容。"
+            cp.docs.append(Document(
+                doc_id=f"a{i}", url=f"http://x/{i}", title=f"公告{i}",
+                publisher="某公司", tier=Tier.COMPANY,
+                published=date(2026, 1, 1 + i), retrieved=date(2026, 10, 12),
+                text=txt))
+        return cp
+
+    assert _match_announce(_cp(8), "铜箔采购价", search_term="铜箔") is None
+    assert _match_announce(_cp(20), "铜箔采购价", search_term="铜箔") is not None

@@ -318,7 +318,13 @@ def for_prompt(corpus, ledger: FactLedger, period: str, as_of: date,
             if t not in seen_tiers:
                 continue
             lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
-        for d in corpus.docs:
+        # **只给 `prompt_docs()`，不是全部 `corpus.docs`。** 公告入库放宽到
+        # 20 篇之后，无差别全喂会让提示词变成原先的 2.5 倍、而且三个模块
+        # 各一份。上限在这里（消费方）而不在入库处：入库的文档供
+        # `gaps._match_announce` 按因子做全文检索，池子越大召回越高。
+        # 紧邻的 `seen_tiers` 仍读 `corpus.docs` —— 它算的是「本轮语料库
+        # 涉及哪几个分级」，那是语料库的属性，不是提示词给了哪几篇的属性。
+        for d in corpus.prompt_docs():
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
             lines.append("  " + d.for_prompt().replace("\n", "\n  "))
         for t in Tier:

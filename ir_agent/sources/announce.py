@@ -36,6 +36,7 @@ from pathlib import Path
 from ir_agent.lineparse import keyed
 from ir_agent.sources.annual_pdf import _download
 from ir_agent.sources.cninfo import Announcement
+from ir_agent.sources.cninfo import classify as _classify
 from ir_agent.sources.cninfo import search as _search
 from ir_agent.sources.external import Document, Tier
 from ir_agent.sources.openweb import (TEXT_LIMIT, _doc_from_json, _doc_to_json,
@@ -46,98 +47,67 @@ from ir_agent.sources.openweb import (TEXT_LIMIT, _doc_from_json, _doc_to_json,
 # 会翻倍、把模型要读的候选清单撑长。
 ANNOUNCE_MONTHS = 12
 
-# 单轮最多入库几篇。同一批文档会同时压到战略/产业链/宏观定性三个模块的
-# 提示词上，长度是三倍的。
-MAX_ANNOUNCEMENTS = 8
+# 单轮最多**入库**几篇。**这是入库上限，不是提示词上限** —— 后者在
+# `Corpus.prompt_docs` 里，由 `PROMPT_DOCS` 控制。两者分开的理由：入库的
+# 文档供 `gaps._match_announce` 按因子做全文检索（池子越大召回越高），而
+# 进提示词的文档要控长度。此前这两件事共用一个 `MAX_ANNOUNCEMENTS = 8`，
+# 而那个数的注释里写的理由是「同一批文档会同时压到战略/产业链/宏观定性
+# 三个模块的提示词上」—— **消费方的约束被实现成了生产方的上限**。
+MAX_INGEST = 20
+
+# 三个定性模块的提示词里，COMPANY 级最多给几篇。沿用旧的 8。
+PROMPT_DOCS = 8
+
+# `classify` 判成这两类的直接拒绝。
+#   定期报告 —— 动辄数百页，且年报正文已经由 `r.sections` 单独走一条路
+#               （`_load_sections` 从 annual_url 抓 PDF 切节）。放它进来的
+#               代价不是「多一篇无用文档」，是下载一个几十 MB 的 PDF 并
+#               全文抽取。
+#   股东大会 —— 纯程序性。
+# 其余三类（业绩预告 / 股份变动 / 重大事项）是正面类别，直接接受。
+_REJECT_CATEGORIES = ("定期报告", "股东大会")
+
+# 落进 `classify` 的「其他」时再过一道。**这些是 `classify` 认不出来的
+# 程序类** —— 它只有五个正面类别，董事会决议/监事会/独董/会计师改聘/
+# 业绩说明会全归「其他」。
+#
+# **不另写一个并行的分类器。** `cninfo.classify` 已经在用（`Announcement.
+# category` 就是它算的），再写一套词表意味着两套会漂 —— 它们现在就已经
+# 不一致：`classify` 的定期报告模式带 `(?!.*摘要)`，所以「年度报告摘要」
+# 归「其他」。这条黑名单因此要接住 `报告摘要`。
+_PROCEDURAL = re.compile(
+    r"董事会[^，。]{0,12}决议|监事会|独立董事|会计师事务所"
+    r"|业绩说明会|业绩预约披露|投资者关系活动"
+    r"|报告摘要|公司章程|章程修订|持股计划[^，。]{0,6}摘要"
+    r"|募集资金[^，。]{0,8}存放|内部控制[^，。]{0,6}评价")
+
+
+def is_substantive(title: str) -> bool:
+    """这条公告值不值得下载正文入库。**确定性，不调模型。**
+
+    判的是**公告类型**，与本轮有哪些因子无关 —— 因子定向发生在消费端
+    （`gaps._match_announce` 按因子做全文检索），那时因子已经知道了。
+
+    **黑名单而非白名单。** 本项目有一条相反方向的教训：`analyst._ask` 的
+    过滤器曾是黑名单，每放宽一次就撞上下一类，最后改成 `is_fabrication`
+    白名单。那条教训在**拒绝模型输出**的方向上成立（漏放一条伪造是实质
+    损害）。这里方向相反，要的是**高召回**：误判成实质类 = 多下一篇无用
+    PDF（便宜）；误判成程序类 = 丢掉一个可直接引为依据的 COMPANY 级来源
+    （贵，而且无声）。所以 `classify` 认不出来的一律放过去。
+    """
+    t = (title or "").strip()
+    if not t:
+        return False
+    cat = _classify(t)
+    if cat in _REJECT_CATEGORIES:
+        return False
+    if cat != "其他":                   # 业绩预告 / 股份变动 / 重大事项
+        return True
+    return not _PROCEDURAL.search(t)
 
 # PDF 取文的页数上限。多数公告只有一两页，但「定期报告」可能两百页以上，
 # 全文取回既无必要也会让单篇挤掉其余七篇的额度。
 PDF_MAX_PAGES = 30
-
-_LINE = keyed("选取")
-_INT = re.compile(r"^-?\d+$")
-
-
-def format_candidates(anns: list[Announcement]) -> str:
-    """渲染给模型看的候选清单。**只有序号、标题、披露日，没有下载地址。**
-
-    给了 URL 反而让模型有机会把它改掉再交回来——正文的地址必须始终来自
-    `cninfo` 的接口响应，不经模型的手。
-    """
-    return "\n".join(
-        f"{i}. {a.ann_date:%Y-%m-%d}　{a.title}" for i, a in enumerate(anns))
-
-
-def parse_picks(text: str, n_candidates: int) -> tuple[list[int], list[str]]:
-    """解析 `选取:` 行，返回 (下标列表, 被忽略项的说明列表)。
-
-    四道守卫，其中三道（非数字、越界、超过单轮上限）被触发时记一条
-    说明——**被忽略的挑选要说得出来**，否则读者看到「入库 3 篇」无从
-    判断模型是只挑了 3 条，还是挑了 8 条但 5 条不合法。
-
-    第四道（重复下标）不记说明，是刻意的：重复不是一次无效挑选，该
-    公告最终仍会入库一次，「挑了哪些文档」这件事没有信息被丢——这与
-    越界/超限那种「模型想要的东西被丢弃、必须让读者看见」的情况性质
-    不同。给每条重复都记一句「序号 1 重复」只会是提示词里的噪音。
-
-    负数单独拦：`-1` 在 Python 里是合法索引，不拦会静默取到最后一条
-    公告，而那不是模型的意思。
-    """
-    picks: list[int] = []
-    ignored: list[str] = []
-    for hit in _LINE.finditer(text):
-        raw = hit.group(1).split("|")[0].strip()
-        if not _INT.match(raw):
-            ignored.append(f"「{raw[:20]}」不是序号")
-            continue
-        idx = int(raw)
-        if idx < 0 or idx >= n_candidates:
-            ignored.append(f"序号 {idx} 超出候选范围（0~{n_candidates - 1}）")
-            continue
-        if idx in picks:
-            continue
-        if len(picks) >= MAX_ANNOUNCEMENTS:
-            ignored.append(f"序号 {idx} 超出单轮上限 {MAX_ANNOUNCEMENTS} 篇")
-            continue
-        picks.append(idx)
-    return picks, ignored
-
-
-# `PROMPT` 混用了两种模板机制，是刻意的：
-# - `{{company}}`/`{{code}}`/`{{factors}}`/`{{candidates}}` 用双花括号转义，
-#   在本模块里保持字面量，留给调用方在运行期用 `.format()` 填入——每次
-#   调用的公司、因子、候选清单都不同，不能在模块加载时定死。
-# - `MAX_ANNOUNCEMENTS` 用 f-string 在模块加载时就烧成字面量，因为它是
-#   跨模块共享的常量（`parse_picks` 的上限判断也读它），提示词里写的
-#   数字必须和代码实际执行的上限永远一致；写成 `{limit}` 交给调用方会
-#   打开两者失配的口子——调用方传错 `limit=` 或忘记传，提示词里的数字
-#   就会和 `parse_picks` 实际执行的上限对不上。
-# 因此：**不要**把 `MAX_ANNOUNCEMENTS` 改回 `{{limit}}`（会关闭上面那个
-# 一致性保证）；也**不要**在调用 `.format()` 时传入 `limit=`（模板里没
-# 有 `{{limit}}` 占位符，这个参数不会生效）。
-PROMPT = f"""从下面这家公司的法定披露公告里，挑出与本次估值分解式相关的几条。
-
-公司：{{company}}（{{code}}）
-本次分解式关注的驱动因子：{{factors}}
-
-候选公告（代码已从巨潮资讯取回，**只能从这个清单里挑**）：
-{{candidates}}
-
-每条一行，只给序号：
-
-`选取: <序号> | <一句话：与哪个因子相关>`
-
-**硬性要求**
-- **只能给上面清单里的序号**，最多 {MAX_ANNOUNCEMENTS} 条。序号之外的内容会被忽略。
-- 优先挑能给出**具体数字**的：扩产/投产、产能、价格调整、重大合同、
-  对外投资。纯程序性公告（股东大会通知、董事会决议、独立董事声明、
-  会计师事务所改聘）对因子取值没有帮助，不要挑。
-- **不要挑「关于召开业绩说明会的公告」这类只是通知会议将要举行的公告**
-  ——它们没有内容。
-- 一条都不相关就不要输出任何 `选取:` 行，不要为了凑数而挑。
-
-只输出上述格式的行。
-"""
 
 # 失败原因单条的存储上限，与 openweb 的同名约定一致：清单是给人看的，
 # 一条原因长到几百字就没人读了。
@@ -151,10 +121,13 @@ class AnnounceResult:
     # 「候选 220 条里挑了 3 条」与「候选 3 条全挑了」含义完全不同。
     candidates: int = 0
     picked: int = 0
+    # 按标题判为程序类而被跳过的条数。**必须能说出来** —— 与 `candidates`
+    # 同一条理由：读者看到「入库 14 篇」时要能知道另外多少篇是被筛掉的、
+    # 筛掉的理由是类型而不是故障。
+    rejected: int = 0
     fetch_failed: int = 0
     fetch_failed_reasons: list[str] = field(default_factory=list)
-    # 模型给了但不合法的挑选（越界/非数字/超上限）。不说出来的话，
-    # 读者无从判断是模型只挑了几条，还是挑了很多但大半不合法。
+    # 保留但不再有模型挑选那条来源。`_load_announce` 仍读它。
     ignored: list[str] = field(default_factory=list)
 
 
@@ -183,27 +156,32 @@ def _doc_id(ann_id: str) -> str:
     return "ann_" + hashlib.sha256(ann_id.encode("utf-8")).hexdigest()[:12]
 
 
-def gather(client, *, code: str, company: str, factors: list[str],
-           as_of: date, corpus, cache_dir: Path | str | None = None
-           ) -> AnnounceResult:
-    """公告入语料库：代码取清单 → 模型挑下标 → 代码抓 PDF。
+def gather(*, code: str, company: str, as_of: date, corpus,
+           cache_dir: Path | str | None = None) -> AnnounceResult:
+    """公告入语料库：代码取清单 → **确定性按标题筛** → 代码抓 PDF。
 
-    `client` 不需要联网工具——模型只从代码给的清单里挑，不上网。
+    **没有 `client` 参数。** 挑选改为 `is_substantive`，与本轮因子无关
+    （见该函数）。此前它需要 `factors=`，而那个值来自方法论预研的分解式
+    —— 预研挪到辩论① 之后以后，那条依赖会让挑选的唯一判据恒为空。
+
+    确定性化的附带性质：整步变得可复现（同一个 as_of 下 `_search` 返回同
+    一份清单、筛选无随机性）。**但本函数仍然不该放进 `_analyse_facts`**
+    ——搬进去会让第二阶段每轮重抓 PDF，而收益只是省掉一套正在正常工作的
+    落盘读回机制（`_restore_announce`）。那是独立的清理。
     """
     res = AnnounceResult()
     start = as_of - timedelta(days=int(ANNOUNCE_MONTHS * 30.5))
     anns = _search(code, start, as_of)
     res.candidates = len(anns)
     if not anns:
-        # 没有候选就没有可挑的，省一次模型调用。
         return res
 
-    raw = client(PROMPT.format(
-        company=company or code, code=code,
-        factors="、".join(factors) or "（未产出分解式）",
-        candidates=format_candidates(anns)))
-    picks, res.ignored = parse_picks(raw, len(anns))
-    res.picked = len(picks)
+    # 实质类按披露日倒序取前 MAX_INGEST 篇。
+    picked = [a for a in anns if is_substantive(a.title)]
+    res.rejected = len(anns) - len(picked)
+    picked.sort(key=lambda a: a.ann_date, reverse=True)
+    picked = picked[:MAX_INGEST]
+    res.picked = len(picked)
 
     seen = {d.url for d in corpus.docs}
     # 去重键集合：存的是**未截断**、由异常结构算出的原因键
@@ -211,8 +189,7 @@ def gather(client, *, code: str, company: str, factors: list[str],
     # （已截断、给人看的展示字符串）解耦——与 openweb.gather 的
     # `seen_diagnoses` 同一处置。
     seen_failure_keys: set[str] = set()
-    for idx in picks:
-        a = anns[idx]
+    for a in picked:
         if a.url in seen:
             continue
         try:

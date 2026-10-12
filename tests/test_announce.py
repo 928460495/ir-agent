@@ -1,21 +1,20 @@
-"""公司公告入语料库。**模型只挑下标，正文由代码抓。**
+"""公司公告入语料库。**挑选与正文都由代码做，不经模型。**
 
-这个契约比 openweb 的 discover/fetch 更强：openweb 里模型给的是 URL
-（一个它可以凭空构造的字符串），这里模型给的是指向代码已有列表的下标，
-可编造的空间从「任意网址」缩到「这些条目里的哪几条」。
+此前模型从代码给的候选清单里挑下标。现在连这一步也取消了：挑选的唯一
+判据曾是方法论预研产出的因子清单，而预研已挪到辩论① 之后 —— 那条依赖会
+让判据恒为空。改为按公告类型的确定性标题分类（`is_substantive`），因子
+定向挪到消费端由 `gaps._match_announce` 做全文检索，那时因子已经知道了。
 """
 
 from __future__ import annotations
 
 import errno as _errno
-from datetime import date
+from datetime import date, timedelta
 
 import requests
 from urllib3.connectionpool import HTTPConnectionPool
 from urllib3.exceptions import MaxRetryError, NewConnectionError
 
-from ir_agent.sources.announce import (MAX_ANNOUNCEMENTS, PROMPT,
-                                       format_candidates, parse_picks)
 from ir_agent.sources.cninfo import Announcement
 from ir_agent.sources.retry import RetryExhausted, with_retry
 
@@ -37,93 +36,8 @@ ANNS = [
 ]
 
 
-def test_候选清单带序号标题与披露日():
-    text = format_candidates(ANNS)
-    # 逐行核对「序号. 」前缀本身，而不是在整段文本里裸找数字——测试数据
-    # 的披露日（2026-08-01/08-28/05-20）本身就含 0/1/2，裸找会在序号被
-    # 整个漏掉时也误判通过。
-    lines = text.split("\n")
-    assert len(lines) == len(ANNS)
-    for i, line in enumerate(lines):
-        assert line.startswith(f"{i}. ")
-    assert "高频高速覆铜板扩产项目投产" in text
-    assert "2026-08-01" in text
-
-
-def test_候选清单不含下载地址():
-    """正文的下载地址由代码按 ann_id 取，不经模型——清单里给了 URL 反而
-    让模型有机会把它改掉再交回来。"""
-    text = format_candidates(ANNS)
-    for a in ANNS:
-        assert a.url not in text
-
-
-def test_解析挑选出的下标():
-    picks, ignored = parse_picks(
-        "选取: 0 | 与名义产能相关\n选取: 2 | 与ASP相关\n", 3)
-    assert picks == [0, 2]
-    assert ignored == []
-
-
-def test_越界的下标被忽略并记录():
-    picks, ignored = parse_picks("选取: 0\n选取: 99\n", 3)
-    assert picks == [0]
-    assert len(ignored) == 1 and "99" in ignored[0]
-
-
-def test_重复的下标只取一次():
-    picks, ignored = parse_picks("选取: 1\n选取: 1\n选取: 1\n", 3)
-    assert picks == [1]
-
-
-def test_非数字的下标被忽略并记录():
-    picks, ignored = parse_picks("选取: 第一条 | 相关\n选取: 2\n", 3)
-    assert picks == [2]
-    assert len(ignored) == 1
-
-
-def test_超过上限只取前若干条():
-    lines = "".join(f"选取: {i}\n" for i in range(20))
-    picks, _ = parse_picks(lines, 20)
-    assert len(picks) == MAX_ANNOUNCEMENTS
-
-
-def test_负数下标被忽略():
-    """`-1` 在 Python 里是合法索引，会静默取到最后一条——不是模型的意思。"""
-    picks, ignored = parse_picks("选取: -1\n选取: 0\n", 3)
-    assert picks == [0]
-    assert len(ignored) == 1
-
-
-def test_容忍列表前缀与加粗():
-    picks, _ = parse_picks("1. **选取**: 2 | 相关\n", 3)
-    assert picks == [2]
-
-
-def test_一条都没挑出来时返回空():
-    picks, ignored = parse_picks("我觉得都不相关。\n", 3)
-    assert picks == [] and ignored == []
-
-
-def test_提示词说明只给下标且逐字含上限():
-    assert "序号" in PROMPT
-    assert str(MAX_ANNOUNCEMENTS) in PROMPT
-    assert "选取:" in PROMPT
-
-
 from ir_agent.sources.announce import AnnounceResult, gather, pdf_text
 from ir_agent.sources.external import Corpus, Tier
-
-
-class _Client:
-    """与 tests/test_openweb.py 的 _Client 同一形状：文本进、文本出。"""
-
-    def __init__(self, *replies):
-        self.replies, self.prompts = list(replies), []
-
-    def __call__(self, prompt):
-        self.prompts.append(prompt)
-        return self.replies.pop(0)
 
 
 def _patch(monkeypatch, anns, pages):
@@ -148,9 +62,8 @@ PAGES = {a.url: f"正文{i}：本公司本次扩产新增产能若干万平方�
 def test_挑中的公告入库且分级为COMPANY(monkeypatch):
     _patch(monkeypatch, ANNS, PAGES)
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0 | 名义产能\n选取: 2 | ASP\n"),
-                 code="600183", company="生益科技",
-                 factors=["名义产能", "ASP"], as_of=AS_OF, corpus=cp)
+    res = gather(code="600183", company="生益科技",
+                 as_of=AS_OF, corpus=cp)
     assert len(cp.docs) == 2
     assert all(d.tier is Tier.COMPANY for d in cp.docs)
     assert res.candidates == 3 and res.picked == 2
@@ -162,8 +75,8 @@ def test_入库文档的时点用披露日不是抓取日(monkeypatch):
     cninfo.py 模块注释记着这条。"""
     _patch(monkeypatch, ANNS, PAGES)
     cp = Corpus(as_of=AS_OF)
-    gather(_Client("选取: 0\n"), code="600183", company="生益科技",
-           factors=["名义产能"], as_of=AS_OF, corpus=cp)
+    gather(code="600183", company="生益科技",
+           as_of=AS_OF, corpus=cp)
     assert cp.docs[0].published == ANNS[0].ann_date
     assert cp.docs[0].retrieved == AS_OF
 
@@ -172,8 +85,8 @@ def test_披露日晚于as_of的公告被挡下(monkeypatch):
     late = [_ann(9, "生益科技关于扩产的公告", date(2026, 12, 31))]
     _patch(monkeypatch, late, {late[0].url: "正文"})
     cp = Corpus(as_of=AS_OF)
-    gather(_Client("选取: 0\n"), code="600183", company="生益科技",
-           factors=["名义产能"], as_of=AS_OF, corpus=cp)
+    gather(code="600183", company="生益科技",
+           as_of=AS_OF, corpus=cp)
     assert cp.docs == []
     assert cp.skipped != []
 
@@ -182,40 +95,50 @@ def test_单篇下载失败不牵连其余(monkeypatch):
     partial = {k: v for k, v in PAGES.items() if "a0" not in k}
     _patch(monkeypatch, ANNS, partial)
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"),
-                 code="600183", company="生益科技",
-                 factors=["名义产能"], as_of=AS_OF, corpus=cp)
-    assert len(cp.docs) == 2
+    res = gather(code="600183", company="生益科技",
+                 as_of=AS_OF, corpus=cp)
+    # ANNS 三条里只有 0 和 2 是实质类（1 是半年度报告，按类型筛掉）；
+    # a0 下载失败，于是剩 1 篇入库。此前模型会挑 0/1/2 三条，所以这里
+    # 原本断言的是 2。
+    assert len(cp.docs) == 1
     assert res.fetch_failed == 1
     assert res.fetch_failed_reasons and "a0" in res.fetch_failed_reasons[0]
 
 
 def test_取文为空的公告不入库(monkeypatch):
-    _patch(monkeypatch, ANNS, {ANNS[0].url: "   \n  "})
+    # 只给一条候选，免得另一条的下载失败混进 fetch_failed 的计数里。
+    _patch(monkeypatch, [ANNS[0]], {ANNS[0].url: "   \n  "})
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n"), code="600183", company="生益科技",
-                 factors=["名义产能"], as_of=AS_OF, corpus=cp)
+    res = gather(code="600183", company="生益科技",
+                 as_of=AS_OF, corpus=cp)
     assert cp.docs == []
     assert res.fetch_failed == 1
     assert "取文为空" in res.fetch_failed_reasons[0]
 
 
-def test_被忽略的挑选传到结果里(monkeypatch):
+def test_按类型筛掉的条数要说得出来(monkeypatch):
+    """**替换掉 `test_被忽略的挑选传到结果里`。** 模型挑选那条路已经没有了，
+    `ignored`（模型给了但不合法的挑选）于是永远是空的。
+
+    取而代之要能说出的是 `rejected`：读者看到「入库 2 篇」时，要知道另外
+    多少篇是被筛掉的、筛掉的理由是**类型**而不是故障 —— 与 `candidates`
+    同一条理由。
+    """
     _patch(monkeypatch, ANNS, PAGES)
-    res = gather(_Client("选取: 0\n选取: 99\n"),
-                 code="600183", company="生益科技",
-                 factors=["名义产能"], as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
-    assert len(res.ignored) == 1 and "99" in res.ignored[0]
+    res = gather(code="600183", company="生益科技",
+                 as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert res.candidates == 3
+    assert res.picked == 2
+    assert res.rejected == 1, "半年度报告该被按类型筛掉"
 
 
-def test_一条公告都没取到时不调模型(monkeypatch):
-    """候选为空就没有可挑的，省一次模型调用。"""
+def test_候选为空时直接返回(monkeypatch):
+    """没有候选就没有可筛的。此前这条测的是「省一次模型调用」，而现在
+    整个函数一次模型都不调 —— 那件事由 `test_入库不调模型` 守签名。"""
     _patch(monkeypatch, [], {})
-    c = _Client()          # 没有预备回复：一旦被调用就 IndexError
-    res = gather(c, code="600183", company="生益科技",
-                 factors=["名义产能"], as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
-    assert res.candidates == 0 and res.docs == []
-    assert c.prompts == []
+    res = gather(code="600183", company="生益科技",
+                 as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert res.candidates == 0 and res.docs == [] and res.rejected == 0
 
 
 def test_入库文档带截断长度(monkeypatch):
@@ -231,8 +154,8 @@ def test_入库文档带截断长度(monkeypatch):
     monkeypatch.setattr(A, "TEXT_LIMIT", sentinel)
     _patch(monkeypatch, ANNS, PAGES)
     cp = Corpus(as_of=AS_OF)
-    gather(_Client("选取: 0\n"), code="600183", company="生益科技",
-           factors=["名义产能"], as_of=AS_OF, corpus=cp)
+    gather(code="600183", company="生益科技",
+           as_of=AS_OF, corpus=cp)
     assert cp.docs[0].prompt_limit == sentinel
 
 
@@ -243,8 +166,8 @@ def test_已在语料库里的URL不重复入库(monkeypatch):
     cp.add(Document(doc_id="x", url=ANNS[0].url, title="已有",
                     publisher="生益科技", tier=Tier.COMPANY,
                     published=ANNS[0].ann_date, retrieved=AS_OF, text="已有"))
-    gather(_Client("选取: 0\n选取: 1\n"), code="600183", company="生益科技",
-           factors=["名义产能"], as_of=AS_OF, corpus=cp)
+    gather(code="600183", company="生益科技",
+           as_of=AS_OF, corpus=cp)
     assert [d.url for d in cp.docs].count(ANNS[0].url) == 1
 
 
@@ -399,8 +322,8 @@ def test_三次真实连接失败合并为一条(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n选取: 2\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     # `fetch_failed`（口径：失败了几次）不受去重影响，`reasons`
     # （口径：有几种不同的原因）才是被去重的那个。
@@ -425,8 +348,8 @@ def test_两个真实404合并为一条(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 1
@@ -450,8 +373,8 @@ def test_404与403分别记录(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -476,8 +399,8 @@ def test_404与连接失败分别记录(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -505,8 +428,8 @@ def test_取文为空与下载失败分别记录(monkeypatch):
         lambda data: "" if data == b"EMPTY" else data.decode("utf-8"))
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -540,8 +463,8 @@ def test_ENOSPC与EIO分别记录(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -564,8 +487,8 @@ def test_相同errno的OSError合并为一条(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 1
@@ -591,8 +514,8 @@ def test_ENETUNREACH与EHOSTUNREACH分别记录(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -640,8 +563,8 @@ def test_ConnectionRefusedError与同errno裸OSError分别记录(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -670,8 +593,8 @@ def test_原因过长按上限截断且仍按原因去重(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     # 同一种原因（都是 ENOSPC），即使两次拼出的展示字符串都超过上限，
@@ -700,8 +623,8 @@ def test_不同类型链的重试耗尽异常分别记录(monkeypatch):
     monkeypatch.setattr(A, "_download", _raise)
 
     cp = Corpus(as_of=AS_OF)
-    res = gather(_Client("选取: 0\n选取: 1\n"), code="600183",
-                 company="生益科技", factors=["名义产能"], as_of=AS_OF,
+    res = gather(code="600183",
+                 company="生益科技", as_of=AS_OF,
                  corpus=cp)
     assert res.fetch_failed == 2
     assert len(res.fetch_failed_reasons) == 2
@@ -837,3 +760,186 @@ def test_单条文档损坏只跳过那一条(tmp_path):
     assert [d.doc_id for d in back.docs] == ["ok"], \
         "合法条目没被读回，或非法条目被放了进来"
     assert back.candidates == 220, "头部字段不该被单条损坏连坐"
+
+
+class TestIsSubstantive:
+    """**挑选改为确定性，因为它本来就与因子无关。**
+
+    现有提示词那段硬性要求（优先挑扩产/投产/产能/价格调整/重大合同/对外投资；
+    不要挑股东大会通知/董事会决议/独董声明/会计师改聘/业绩说明会通知）
+    分的是**公告类型**，不是「与哪个因子相关」。类型判断不需要模型。
+    """
+
+    SUBSTANTIVE = (
+        "关于全资子公司投资建设年产 5 万吨高频高速覆铜板项目的公告",
+        "关于部分产品价格调整的公告",
+        "关于签订重大销售合同的公告",
+        "关于对外投资设立控股子公司的公告",
+        "关于控股股东协议转让公司部分股份的公告",
+        "关于生产线技术改造项目投产的公告",
+    )
+    PROCEDURAL = (
+        "关于召开 2025 年第一次临时股东大会的通知",
+        "第八届董事会第十二次会议决议公告",
+        "第八届监事会第九次会议决议公告",
+        "独立董事关于关联交易的独立意见",
+        "关于改聘会计师事务所的公告",
+        "关于召开 2025 年度业绩说明会的公告",
+        "2025 年年度报告",
+        "2025 年第三季度报告",
+    )
+
+    def test_实质类全部通过(self):
+        from ir_agent.sources.announce import is_substantive
+        for s in self.SUBSTANTIVE:
+            assert is_substantive(s), s
+
+    def test_程序类全部拒绝(self):
+        from ir_agent.sources.announce import is_substantive
+        for s in self.PROCEDURAL:
+            assert not is_substantive(s), s
+
+    def test_定期报告被排除(self):
+        """**年报/季报走 `r.sections`，不走公告语料库。**
+
+        它们动辄数百页；黑名单放过去的代价不是「多一篇无用文档」，是
+        下载一个几十 MB 的 PDF 并全文抽取。
+        """
+        from ir_agent.sources.announce import is_substantive
+        for s in ("2025 年年度报告", "2025 年半年度报告",
+                  "2025 年第一季度报告", "2025 年年度报告（更正后）"):
+            assert not is_substantive(s), s
+
+    def test_认不出来的标题放过去(self):
+        """**这里用黑名单，不用白名单。**
+
+        本项目有一条相反方向的教训：`analyst._ask` 的过滤器曾是黑名单，
+        每放宽一次就撞上下一类，最后改成 `is_fabrication` 白名单。那条
+        教训在**拒绝模型输出**的方向上成立 —— 漏放一条伪造是实质损害。
+
+        这里方向相反：我们要的是**高召回**。误判成实质类 = 多下一篇无用
+        PDF（便宜）；误判成程序类 = 丢掉一个可直接引为依据的 COMPANY 级
+        来源（贵，而且无声）。所以认不出来的一律放过去。
+        """
+        from ir_agent.sources.announce import is_substantive
+        assert is_substantive("关于公司经营情况的说明")
+
+
+class TestGatherNoModel:
+    def test_入库不调模型(self, monkeypatch):
+        """**钉住「不调模型」这件事本身。** `gather` 的签名里不再有 client；
+        这条测试防的是将来有人加一个「可疑就调模型兜底」的分支 —— 那会把
+        确定性又换回去。
+        """
+        import inspect
+        from ir_agent.sources import announce
+
+        assert "client" not in inspect.signature(announce.gather).parameters
+        assert "factors" not in inspect.signature(announce.gather).parameters
+
+
+class TestPromptDocs:
+    def test_上限在提示词层而不在入库层(self):
+        """**这是本 Task 的全部要点。** `MAX_ANNOUNCEMENTS = 8` 的注释自己
+        写着上限的理由是「同一批文档会同时压到战略/产业链/宏观定性三个模块
+        的提示词上」—— 那是消费方的约束，被实现成了生产方的上限。
+        """
+        from datetime import date
+
+        from ir_agent.sources.external import Corpus, Document, Tier
+
+        cp = Corpus(as_of=date(2026, 10, 12))
+        for i in range(20):
+            cp.docs.append(Document(
+                doc_id=f"a{i}", url=f"http://x/{i}", title=f"公告{i}",
+                publisher="某公司", tier=Tier.COMPANY,
+                published=date(2026, 1, 1 + i), retrieved=date(2026, 10, 12),
+                text="正文"))
+        assert len(cp.docs) == 20, "入库的是全部 20 篇"
+        assert len(cp.prompt_docs(company_limit=8)) == 8, "进提示词的只有 8 篇"
+
+    def test_只截断COMPANY级其余照旧全给(self):
+        from datetime import date
+
+        from ir_agent.sources.external import Corpus, Document, Tier
+
+        cp = Corpus(as_of=date(2026, 10, 12))
+        for i, tier in enumerate([Tier.COMPANY] * 20 + [Tier.SELLSIDE] * 5):
+            cp.docs.append(Document(
+                doc_id=f"d{i}", url=f"http://x/{i}", title=f"文档{i}",
+                publisher="某处", tier=tier,
+                published=date(2026, 1, 1), retrieved=date(2026, 10, 12),
+                text="正文"))
+        got = cp.prompt_docs(company_limit=8)
+        assert sum(1 for d in got if d.tier is Tier.COMPANY) == 8
+        assert sum(1 for d in got if d.tier is Tier.SELLSIDE) == 5
+
+    def test_留下的是最近的那几篇但次序跟语料库(self):
+        """**「留哪几篇」按新旧选，「以什么次序出现」跟 `corpus.docs`。**
+
+        计划原本断言返回 `["公告9", "公告8", "公告7"]`（降序）。实跑时改成
+        保持原顺序，理由是返回的是**混合分级**的列表 —— COMPANY 级被筛、
+        研报与开放网页原样留着。只把其中一部分重排，会让提示词里的次序和
+        `_external_md` 统计的那份清单对不上，而那份清单会进看板、进
+        state.json、第二阶段读回。
+
+        公告本身的新旧信息不靠次序传递：每篇都带 `published`，而
+        `Document.cite()` 把它印在引用行上。
+        """
+        from datetime import date
+
+        from ir_agent.sources.external import Corpus, Document, Tier
+
+        cp = Corpus(as_of=date(2026, 10, 12))
+        for i in range(10):
+            cp.docs.append(Document(
+                doc_id=f"a{i}", url=f"http://x/{i}", title=f"公告{i}",
+                publisher="某公司", tier=Tier.COMPANY,
+                published=date(2026, 1, 1 + i), retrieved=date(2026, 10, 12),
+                text="正文"))
+        got = [d.title for d in cp.prompt_docs(company_limit=3)]
+        assert got == ["公告7", "公告8", "公告9"], got
+
+
+def test_入库条数放宽到MAX_INGEST而且留的是最近的(monkeypatch):
+    """**这条才是放宽条数的真证据。**
+
+    计划里那条「收益」测试（tests/test_gaps.py 的 `test_放宽条数带来的召回`）
+    直接拿手搭的两个语料库调 `_match_announce` —— 它证明的是「文档在库里就
+    搜得到」，而那在改动之前就成立（`_match_announce` 从来没有条数上限，
+    上限在入库处）。**它测不出流程会不会把 20 篇放进库。** 实跑时它一次就
+    绿，正是因为如此。
+
+    这里直接驱动 `gather`：给 30 条实质类候选，断言入库 `MAX_INGEST` 篇，
+    且留下的是披露日最近的那 20 条。
+    """
+    from ir_agent.sources.announce import MAX_INGEST
+
+    anns = [_ann(i, f"关于第{i}号产线投产的公告", date(2026, 1, 1) + timedelta(days=i))
+            for i in range(30)]
+    pages = {a.url: f"正文{i}" for i, a in enumerate(anns)}
+    _patch(monkeypatch, anns, pages)
+    cp = Corpus(as_of=AS_OF)
+    res = gather(code="600183", company="生益科技", as_of=AS_OF, corpus=cp)
+
+    assert res.candidates == 30
+    assert res.rejected == 0, "这 30 条都是实质类"
+    assert res.picked == MAX_INGEST == 20
+    assert len(cp.docs) == MAX_INGEST
+    # 留下的是最近的 20 条：第 10~29 号（第 0~9 号是最早的十条）
+    kept = sorted(d.title for d in cp.docs)
+    assert "关于第29号产线投产的公告" in kept
+    assert "关于第9号产线投产的公告" not in kept, "该被挤掉的是最早的那几条"
+
+
+def test_旧上限8篇已经不再是入库上限():
+    """**钉住「上限搬了层」这件事本身。**
+
+    `PROMPT_DOCS` 仍是 8（提示词层），`MAX_INGEST` 是 20（入库层）。
+    若有人把两者又合成一个数，这条测试会红 —— 而那次合并正是本次要拆开的
+    东西：消费方的约束被实现成了生产方的上限。
+    """
+    from ir_agent.sources.announce import MAX_INGEST, PROMPT_DOCS
+
+    assert PROMPT_DOCS == 8
+    assert MAX_INGEST > PROMPT_DOCS

@@ -1810,6 +1810,37 @@ def _industry_path(code: str) -> str:
 **漏删会是 NameError**，而那正是本会话已经崩过一整轮的那个形状
 （`assume_client` 的 `UnboundLocalError`）。
 
+> **实跑与本 Task 计划的五处出入：**
+>
+> 1. **`is_substantive` 复用 `cninfo.classify`，不另写 `_PERIODIC`/`_PROCEDURAL`
+>    两条正则。** `classify`（`cninfo.py:49`）已经在用 —— `Announcement.category`
+>    就是它算的，分成 定期报告/业绩预告/股东大会/股份变动/重大事项/其他。
+>    再写一套词表意味着两套会漂，而它们**当时就已经不一致**：`classify` 的
+>    定期报告模式带 `(?!.*摘要)`，所以「年度报告摘要」归「其他」，而计划的
+>    `_PERIODIC` 把它归定期报告。新实现是：`classify` 判成定期报告/股东大会
+>    → 拒绝；判成另三类 → 接受；落「其他」→ 再过一道黑名单（董事会决议/
+>    监事会/独董/会计师改聘/业绩说明会/报告摘要…，这些 `classify` 认不出来）。
+> 2. **`prompt_docs` 保持 `corpus.docs` 的原顺序**，不按披露日降序返回。
+>    计划的测试断言 `["公告9","公告8","公告7"]`；改成原顺序，因为返回的是
+>    **混合分级**的列表，只把 COMPANY 那一部分重排会让提示词里的次序和
+>    `_external_md` 统计的那份清单对不上（而那份清单进看板、进 state.json、
+>    第二阶段读回）。「留哪几篇」仍按新旧选。
+> 3. **`MAX_ANNOUNCEMENTS` 整个删掉**，不留别名 —— 读它的 `parse_picks` 一起
+>    删了，留着只会让人以为还有人在用。
+> 4. **计划那条「收益」测试证不了收益。** `tests/test_gaps.py` 的
+>    `test_放宽条数带来的召回` 直接拿手搭的两个语料库调 `_match_announce`，
+>    证明的是「文档在库里就搜得到」—— 而那在改动之前就成立（`_match_announce`
+>    从来没有条数上限，上限在入库处）。实跑时它**一次就绿**。补了两条真的：
+>    `test_入库条数放宽到MAX_INGEST而且留的是最近的`（直接驱动 `gather`，
+>    30 条候选 → 入库 20 篇，且留下的是最近的）和 `test_旧上限8篇已经不再是入库上限`
+>    （钉住 `PROMPT_DOCS == 8 < MAX_INGEST`，防止有人又把两个数合回一个）。
+> 5. **要删的旧测试是 11 条不是 10 条**，且 `gather` 的调用点有 21 处（含
+>    重试/错误处理那一大批），`_load_announce` 在 `tests/test_full_context.py`
+>    里还有 6 处 —— 计划没提后两项。
+>
+> 两个变异都验证过：`MAX_INGEST` 改回 8 → 2 条红；`prompt_docs` 不截断 →
+> 3 条红。
+
 - [ ] **Step 9: 全量回归并提交**
 
 ```bash
