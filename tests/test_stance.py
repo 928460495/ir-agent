@@ -150,3 +150,55 @@ class TestCheckInterval:
         probs = check_interval(parse_balance(
             "平衡｜销量｜-2%｜25%｜18%｜理由\n平衡｜售价｜0%｜5%｜10%｜理由"))
         assert len(probs) == 1 and "销量" in probs[0]
+
+
+class TestAnnotateNotBlock:
+    """**核验但不阻断。** 实测三场辩论被契约杀掉（占位符缺失、裸数字、
+    分位数后多写一个单位），每次损失一整场。而「核验 + 标注」是这个项目
+    已在用的模式 —— 判断项那边写着「N 行依据未能逐字核验（已标注，未阻断，
+    需人工复核）」。它不降低成功率，又保留检出能力。
+
+    不阻断的代价是真实的：若某条证据是编的，人要到门②才看到标注。所以标注
+    必须进产物、进摘要，而不是只写日志。
+    """
+
+    def _led(self):
+        from ir_agent.ledger import Fact, FactLedger, Method
+        l = FactLedger()
+        l.put(Fact(key="revenue.yoy", value=D("-0.0121"), unit="ratio",
+                   currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                   source_id="calc_x", method=Method.COMPUTED))
+        return l
+
+    def test_账本里有的依据不标注(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence("多方｜销量｜需求放量｜[[revenue.yoy@2025FY]]")
+        got = annotate(evs, ledger=self._led(), body="", as_of=date(2026, 6, 1))
+        assert got[0].unverified == ""
+
+    def test_账本里没有的依据被标注但保留(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence("多方｜销量｜需求放量｜[[fabricated.key@2025FY]]")
+        got = annotate(evs, ledger=self._led(), body="", as_of=date(2026, 6, 1))
+        assert len(got) == 1, "核验不过的证据不能被丢掉"
+        assert got[0].unverified and "账本" in got[0].unverified
+        assert got[0].claim == "需求放量", "原内容必须原样保留"
+
+    def test_正文引文核验走同一套规范化(self):
+        """`basis.norm` 剥引号、折叠破折号 —— 茅台那次 `\"十五五` vs
+        `“十五五”` 就是在这里判死的。"""
+        from ir_agent.stance import annotate
+        evs = parse_evidence("空方｜政策｜十五五提法｜「\"十五五」")
+        got = annotate(evs, ledger=self._led(),
+                       body="中央提出“十五五”时期的新质生产力方向。",
+                       as_of=date(2026, 6, 1))
+        assert got[0].unverified == ""
+
+    def test_摘要把标注数报出来(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence(
+            "多方｜销量｜需求放量｜[[fabricated.key@2025FY]]\n"
+            "空方｜销量｜周期下行｜[[revenue.yoy@2025FY]]")
+        got = annotate(evs, ledger=self._led(), body="", as_of=date(2026, 6, 1))
+        s = StanceResult(round_="B", evidence=got).summary()
+        assert "1 条证据代码核验不过" in s and "未阻断" in s

@@ -222,3 +222,26 @@ def check_interval(balances: list[Balance]) -> list[str]:
                        f"[{b.bear}, {b.bull}] 之外 —— 裁决者只能在两侧给出的"
                        f"区间里选，不能自己造一个数")
     return out
+
+
+def annotate(evs: list[Evidence], *, ledger, body: str, as_of,
+             corpus=None) -> list[Evidence]:
+    """逐条核验证据的依据，**核验不过的打标记，不丢弃、不驳回**。
+
+    为什么不阻断: 实测三场辩论被占位符契约杀掉（占位符缺失、裸数字、
+    分位数后多写一个单位），每次损失一整场。而这个项目已经有一个现成的
+    折中 —— 判断项那边的「N 行依据未能逐字核验（已标注，未阻断，需人工
+    复核）」。核验+标注不降低成功率，又保留检出能力。
+
+    代价：若某条证据是编的，人要到门②才看到标注（而那时预研、因子采集、
+    简报都已基于它跑完）。所以标注必须进产物与摘要，不能只写日志。
+    """
+    from ir_agent.basis import validate
+
+    out: list[Evidence] = []
+    for e in evs:
+        probs = validate(e.bases, ledger, body, as_of, corpus=corpus)
+        out.append(Evidence(side=e.side, subject=e.subject, claim=e.claim,
+                            bases=e.bases,
+                            unverified="；".join(probs)[:200] if probs else ""))
+    return out
