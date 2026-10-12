@@ -1003,7 +1003,7 @@ git commit -m "stance: 人工补写的读回，区间校验对人和模型一视
 
 **Files:**
 - Create: `ir_agent/sources/manifest.py` —— **包内模块**。`ir_agent/sources/` 已经是一个包（内有 `external.py` / `web.py` / `announce.py`），在 `ir_agent/` 下新建同名 `sources.py` 会与它冲突
-- Create: `tests/test_sources.py`
+- Create: `tests/test_sources_manifest.py` —— **不要叫 `tests/test_sources.py`**。那个文件自 `7d84a57` 起就存在（腾讯行情解析、巨潮公告解析、live 源共 18 项）。实跑时我用 `>` 重定向写进去，把它整个覆盖了：全量从 2130 掉到 2127、deselected 从 19 掉到 17，而没有任何报错 —— 一个测试文件被删掉，表现就是总数变小
 
 **Interfaces:**
 - Consumes: `ir_agent.ledger.FactLedger`（`_facts` 的 `(key, period)` 与 `Fact.source_id`）；`ir_agent.sources.external.Document`（`url` / `title` / `publisher` / `tier` / `published` / `path`）
@@ -3619,6 +3619,17 @@ git commit -m "test: 四次调用的端到端行为测试；README 更新为四�
 | next_actions 四状态 | 12 |
 | 语料库入库：挑选确定性化、上限移到提示词层 | 8 |
 | 预研框架重写（五处实质改动 + 覆盖标注不阻断 + 四级命中标注） | 9 |
+
+**2a. `Create:` 的文件必须真的不存在**（实跑踩到）：
+
+```bash
+grep -o '^- Create: `[^`]*`' docs/superpowers/plans/2026-10-12-phase1-restructure.md \
+  | sed 's/.*`\(.*\)`/\1/' | while read f; do [ -e "$f" ] && echo "✗ 已存在: $f"; done
+```
+
+写文件一律先看目标。`>` 重定向对已有文件无声覆盖，而删掉一个测试文件的
+唯一症状是「全量总数变小」—— 没有报错、没有告警。本轮就是这么把
+`tests/test_sources.py` 的 18 项删掉的。
 
 **2. 占位符扫描**：零处。执行前评审（`12857b5`）清掉了七处「引用任何任务都没定义的名字」，通读又清掉八处（含两处空心测试、一处缺 `return`、一处过期的 `-k` 选择器）。机械复查的办法记在这里，便于每次改完重跑：提取计划里所有被调用的 `_xxx(` 名字，减去计划与仓库里 `def`/`class` 定义过的，差集必须为空。
 
