@@ -5989,3 +5989,19 @@ python -m ir_agent 600183 --year 2025 --brief out/600183-p2 --verified-by xhl --
 `gaps.summary` 鸭子类型读）；`FactorData.findings` 注释为 `list`；`Row.basis_flag: str` 与
 `basis_unverified` 同为派生、不进 `to_json`；`_write_review(out, sa, sb, missing=(), factor_data=None)`
 唯一调用点在 `run_brief`。
+
+## 执行记录（Task 14–20，2026-10-14，当前会话内联执行）
+
+| Task | 提交 | 全量 |
+|---|---|---|
+| 14 | `7bbec31` | — |
+| 15 | `acc65fd` | — |
+| 16 | `34e71b5` | 2244 |
+| 17 | `8b3511a` | — |
+| 18 | `67096fa` | 2261 |
+| 19 | `1b61411` | 2264 |
+| 20 | `65425f4` | **2268**（与 Task 21 预计一致） |
+
+每个任务都是「测试先红 → 实现转绿 → 计划里写的变异逐个变红再还原」。偏离计划一处：
+Task 18 的 `test_外部来源状态不填source_url_结论版` 实现前就通过（旧代码解析不了新格式、
+落「无数据」时 `source_url` 同样是空串），补了 `status == "外部来源"` 前提断言，上文已同步。
