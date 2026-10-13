@@ -1267,7 +1267,7 @@ def _read_factors(out: Path, meth) -> tuple[dict | None, list[str]]:
                       "作依据。重跑 --brief 可补"]
     try:
         data, notes = gaps.from_json(json.loads(f.read_text(encoding="utf-8")),
-                                     meth.decompositions)
+                                     meth.model)
     except (OSError, ValueError, KeyError, TypeError) as e:
         return None, [f"因子采集结果读不回（{e.__class__.__name__}: "
                       f"{str(e)[:120]}）—— 判断项按「未采集」处理"]
@@ -1514,18 +1514,17 @@ def _research_methodology(code: str, r, out: Path, client, *,
     # 就是凭空问责。
     themes = list(STANCE_THEMES) if stance_note.strip() else []
     cov, cov_notes = methodology.coverage(m, themes)
-    hits = methodology.term_hits(m.decompositions,
+    hits = methodology.term_hits(m.model,
                                  sections=getattr(r, "sections", None),
                                  corpus=getattr(r, "corpus", None))
     refs: dict = {}
     led, as_of = getattr(r, "ledger", None), getattr(r, "as_of", None)
     if led is not None and as_of is not None:
         from ir_agent import gaps
-        for d in m.decompositions:
-            for f in d.factors:
-                have, miss = gaps.ledger_refs(f.source_hint, led, as_of)
-                if have or miss:
-                    refs[f.label] = (have, miss)
+        for f in m.factors():
+            have, miss = gaps.ledger_refs(f.source_hint, led, as_of)
+            if have or miss:
+                refs[f.label] = (have, miss)
     path.write_text(methodology.to_markdown(m, coverage=cov, hits=hits,
                                                 coverage_notes=cov_notes,
                                                 key_refs=refs),
@@ -2150,7 +2149,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     factor_data: dict = {}
     if meth is not None:
         factor_data = _collect_factors(r, as_of, research_client, md,
-                                       meth.decompositions, meth.industry,
+                                       meth.model, meth.industry,
                                        skipped)
         # 落盘给第三次调用。空字典也写 —— 让「采过、一个都没采到」与「没落盘」
         # 在第三次调用里可区分。
@@ -2160,7 +2159,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
             encoding="utf-8")
 
     # ── 多空辩论②：定取值 ─────────────────────────────────────
-    subjects = ([f.label for d in meth.decompositions for f in d.factors]
+    subjects = ([f.label for f in meth.factors()]
                 if meth is not None else list(assume.DRIVERS))
     sb = _stance_round(client, out, STANCE_B, "B", subjects,
                        ctx + "\n\n【因子采集】\n" + _factor_ctx(factor_data),
@@ -2261,7 +2260,7 @@ def run_assume(code: str, r, as_of: date, out_dir: str | Path,
     skipped += fnotes
     aerr = _propose_assumptions(
         code, r, body, md, as_of, out, assume_client, arts,
-        decomps=(meth.decompositions if meth is not None else None),
+        decomps=(meth.model if meth is not None else None),
         factor_data=factor_data, balances=sb.balances)
     if aerr:
         skipped.append(aerr)
@@ -2377,9 +2376,9 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         from ir_agent import factor_review
         try:
             a.review = factor_review.review(
-                client, a.decomps, checklist=a.describe(),
+                client, a._m() or a.decomps, checklist=a.describe(),
                 implied=a.implied.describe(),
-                drivers=tuple(assume.DRIVERS) if not a.decomps else ())
+                drivers=tuple(assume.DRIVERS) if not assume.has_model(a) else ())
         except Exception as e:                              # noqa: BLE001
             # **审查失败不该毙掉判断项。** 它是一道补充意见，不是闸门 ——
             # 与本仓库「这一步失败不该毙掉已经写好的正文」同一条原则。
@@ -2577,7 +2576,10 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
         # 漏掉某一年，都会让模型算出一个看起来正常的错数。
         assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of,
-                     decomps=a.decomps or None, base_margin=base_margin,
+                     # **读 `a._m()`，不读 `a.decomps`**：公式化写法下 decomps 是空
+                     # 列表，`decomps=a.decomps or None` 会让第二阶段悄悄退回两标量
+                     # 校验，人批准的公式在这里一行都不生效。
+                     decomps=a._m(), base_margin=base_margin,
                      anchor=anchor)
     except assume.AssumeFailed as e:
         raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")

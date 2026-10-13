@@ -482,7 +482,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     if assumptions is not None:
         from ir_agent import assume
         cal = assume.apply_to(cal, assumptions)
-        if getattr(assumptions, "decomps", None):
+        if assume.has_model(assumptions):
             # **只有方法论预研成功过才有分解式。** 预研失败退回两标量
             # 模式时 assumptions.decomps 是空列表，此时不建「1b_驱动
             # 分解」表 —— 工作簿形状与从前完全一致，不留一张空表。

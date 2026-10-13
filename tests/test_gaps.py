@@ -1108,3 +1108,22 @@ class TestFactorsJsonV2:
         from ir_agent.gaps import from_json
         with pytest.raises(ValueError, match="schema"):
             from_json({"capacity": {"status": "无数据"}}, [])
+
+
+def test_水平模式共用因子只采集一次():
+    """「单价」同时出现在营收与毛利率两条公式里（公式化，2026-10-14），采集只做一次。"""
+    from ir_agent.gaps import DISCLOSED
+    from ir_agent.methodology import parse as parse_meth
+
+    m = parse_meth("""模式: 水平
+因子: 量 | 出货量 | 万吨 | 年报 | 出货量
+因子: 价 | 单价 | 元 | 年报 | 单价
+因子: 本 | 单位成本 | 元 | 年报 | 单位成本
+公式: 营收 = 量 × 价
+公式: 毛利率 = (价 − 本) ÷ 价
+""").model
+    keys = [f.key for f in m.factors]
+    data = collect(_ExplodingClient(), m, _led(*keys), Corpus(as_of=AS_OF),
+                   "电子", AS_OF)
+    assert list(data) == keys
+    assert all(fd.status == DISCLOSED for fd in data.values())

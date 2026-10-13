@@ -151,3 +151,20 @@ class TestTwoScalarMode:
                    drivers=("营收增速", "毛利率"))
         assert len(seen) == 1 and len(r.findings) == 2
         assert len(r.flagged) == 1
+
+
+def test_公式化分解式的条目按公式分组且共用因子不重复():
+    from ir_agent.factor_review import expected_items
+    from ir_agent.methodology import parse as parse_meth
+
+    m = parse_meth("""模式: 水平
+因子: 量 | 出货量 | 万吨 | 年报 | 出货量
+因子: 价 | 单价 | 元 | 年报 | 单价
+因子: 本 | 单位成本 | 元 | 年报 | 单位成本
+公式: 营收 = 量 × 价
+公式: 毛利率 = (价 − 本) ÷ 价
+""").model
+    items = expected_items(m)
+    assert items.count(("因子", "单价")) == 1
+    assert ("正交", "出货量 × 单价") in items and ("正交", "单价 × 单位成本") in items
+    assert ("对账", "revenue") in items and ("对账", "gross_margin") in items

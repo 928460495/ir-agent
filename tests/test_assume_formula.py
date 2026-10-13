@@ -214,3 +214,19 @@ class TestDriverBlock:
         assert drv["base"]["factors"] == {"量": 100.0, "价": 9.5, "本": 7.2}
         assert drv["values"]["base"] == [[110.0, 10.0, 7.4]]
         assert ["name", "量"] in drv["formulas"]["revenue"]
+
+
+class TestPhase2:
+    def test_只有model时校验仍走因子路径(self):
+        """第二阶段从 assumptions.json 读回，公式化写法下只有 `model`、没有
+        `decomps`。传 `decomps=a._m()` 才走因子校验；传 `a.decomps or None`
+        （改动前的写法）会退回两标量校验 —— 那条路找不到营收增速/毛利率行。"""
+        a = assume.parse(_level_lines(), 1, decomps=LEVEL)
+        _check(a, 1, LEVEL)
+        back, _ = assume.from_json(assume.to_json(a))
+        assert back.decomps == [] and back._m() is not None
+        _check(back, 1, back._m())                       # 走因子路径，通过
+        # 改动前的写法：退回两标量校验，把因子行当成营收增速/毛利率行去查
+        # （`path()` 是两标量路径专用的措辞）。
+        with pytest.raises(AssumeFailed, match=r"path\(\)"):
+            _check(back, 1, back.decomps or None)

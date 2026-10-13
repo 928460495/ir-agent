@@ -36,6 +36,7 @@ from datetime import date
 from ir_agent.drivers import Decomposition, Factor
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.sources.external import Document, Tier
+from ir_agent.formula import flat_factors
 from ir_agent.sources import conclusions
 from ir_agent.sources.conclusions import Article, Conclusion, number_marks
 from ir_agent.sources.openweb import TEXT_LIMIT
@@ -211,7 +212,7 @@ def identify(d: Decomposition, ledger: FactLedger, as_of: date) -> list[Factor]:
     在这个时点上就是不存在的，不能因为账本里"有"就当作已披露。
     """
     out = []
-    for f in d.factors:
+    for f in getattr(d, "factors", d):
         try:
             ledger.get(f.key, _latest(ledger, f.key), as_of=as_of)
         except (KeyError, LookAheadError):
@@ -413,111 +414,113 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
     现有调用方。
     """
     out: dict[str, FactorData] = {}
-    for d in decomps:
-        gaps = {f.key for f in identify(d, ledger, as_of)}
-        for f in d.factors:
-            if f.key in out:
-                continue
-            if f.key not in gaps:
-                out[f.key] = FactorData(factor=f, status=DISCLOSED)
-                continue
-            have, _ = ledger_refs(f.source_hint, ledger, as_of)
-            if have:
-                out[f.key] = FactorData(
-                    factor=f, status=DISCLOSED,
-                    note="账本 " + "、".join(f"[[{x}]]" for x in have)
-                         + "（模型在数据线索中声明，口径是否与因子一致待人工确认）")
-                continue
+    # `decomps` 可以是旧分解式列表或 `FormulaModel`；水平模式下同一因子被两条
+    # 公式共用，按 key 去重（`flat_factors`）。
+    factors = flat_factors(decomps)
+    gaps = {f.key for f in identify(factors, ledger, as_of)}
+    for f in factors:
+        if f.key in out:
+            continue
+        if f.key not in gaps:
+            out[f.key] = FactorData(factor=f, status=DISCLOSED)
+            continue
+        have, _ = ledger_refs(f.source_hint, ledger, as_of)
+        if have:
+            out[f.key] = FactorData(
+                factor=f, status=DISCLOSED,
+                note="账本 " + "、".join(f"[[{x}]]" for x in have)
+                     + "（模型在数据线索中声明，口径是否与因子一致待人工确认）")
+            continue
 
-            hit = _match_annual(sections, f.label, f.search_term)
-            if hit is not None:
-                excerpt, src, core = hit
-                out[f.key] = FactorData(
-                    factor=f, status=ANNUAL,
-                    note=f"「{excerpt}」——{src}"
-                         "（文字依据，是否给出具体数值待人工确认）"
-                         + _via_note(core, f),
-                    source_url=annual_url, source_retrieved=as_of,
-                    # 与 note 里包在「」中的那段是同一份文字——note 是
-                    # 拼给人看的，这里是给 assume._match_excerpt 用的，
-                    # 两者必须来自同一个 excerpt 变量，不能事后各改各的。
-                    source_excerpt=excerpt)
-                continue
+        hit = _match_annual(sections, f.label, f.search_term)
+        if hit is not None:
+            excerpt, src, core = hit
+            out[f.key] = FactorData(
+                factor=f, status=ANNUAL,
+                note=f"「{excerpt}」——{src}"
+                     "（文字依据，是否给出具体数值待人工确认）"
+                     + _via_note(core, f),
+                source_url=annual_url, source_retrieved=as_of,
+                # 与 note 里包在「」中的那段是同一份文字——note 是
+                # 拼给人看的，这里是给 assume._match_excerpt 用的，
+                # 两者必须来自同一个 excerpt 变量，不能事后各改各的。
+                source_excerpt=excerpt)
+            continue
 
-            hit = _match_announce(corpus, f.label, f.search_term)
-            if hit is not None:
-                excerpt, doc, core = hit
-                out[f.key] = FactorData(
-                    factor=f, status=ANNOUNCE,
-                    note=f"「{excerpt}」——{doc.cite()}"
-                         "（文字依据，是否给出具体数值待人工确认）"
-                         + _via_note(core, f),
-                    source_url=doc.url, source_retrieved=doc.retrieved,
-                    source_excerpt=excerpt)
-                continue
+        hit = _match_announce(corpus, f.label, f.search_term)
+        if hit is not None:
+            excerpt, doc, core = hit
+            out[f.key] = FactorData(
+                factor=f, status=ANNOUNCE,
+                note=f"「{excerpt}」——{doc.cite()}"
+                     "（文字依据，是否给出具体数值待人工确认）"
+                     + _via_note(core, f),
+                source_url=doc.url, source_retrieved=doc.retrieved,
+                source_excerpt=excerpt)
+            continue
 
-            hit = _match_report(corpus, f.label, f.search_term)
-            if hit is not None:
-                excerpt, doc, core = hit
-                out[f.key] = FactorData(
-                    factor=f, status=REPORT,
-                    note=f"「{excerpt}」——{doc.cite()}"
-                         "（文字依据，是否给出具体数值待人工确认）"
-                         + _via_note(core, f),
-                    source_url=doc.url, source_retrieved=doc.retrieved,
-                    source_excerpt=excerpt)
-                continue
+        hit = _match_report(corpus, f.label, f.search_term)
+        if hit is not None:
+            excerpt, doc, core = hit
+            out[f.key] = FactorData(
+                factor=f, status=REPORT,
+                note=f"「{excerpt}」——{doc.cite()}"
+                     "（文字依据，是否给出具体数值待人工确认）"
+                     + _via_note(core, f),
+                source_url=doc.url, source_retrieved=doc.retrieved,
+                source_excerpt=excerpt)
+            continue
 
-            try:
-                got = conclusions.search(client, f.label, f.key, industry, as_of)
-            except WebUnavailable as e:
-                # 能力边界不是故障，整轮研究不该因此停摆。措辞里显式写
-                # 「不能联网」而不是只转述异常原文。
-                out[f.key] = FactorData(
-                    factor=f, status=MISSING,
-                    note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
-                continue
+        try:
+            got = conclusions.search(client, f.label, f.key, industry, as_of)
+        except WebUnavailable as e:
+            # 能力边界不是故障，整轮研究不该因此停摆。措辞里显式写
+            # 「不能联网」而不是只转述异常原文。
+            out[f.key] = FactorData(
+                factor=f, status=MISSING,
+                note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
+            continue
 
-            # ── ④：模型综合结论 + 引用文章（spec 2026-10-13 ②）─────
-            # 结论可以综合、可以改写；代码只做了机械比对，结果全是标注。
-            # 有结论就落 EXTERNAL（决定 A：带 ⚠ 的也能作依据，门③ 那一行
-            # 带标记），交给门② 的人复核（决定 B）。
-            if not got.items:
-                why = "；".join(got.dropped) or "没搜到可用的结论"
-                out[f.key] = FactorData(factor=f, status=MISSING,
-                                        note=f"{why} —— 取值为估计")
-                continue
-            arts: list[Article] = []
-            for c in got.items:
-                for a in c.articles:
-                    if all(a is not x for x in arts):
-                        arts.append(a)
-            for a in arts:
-                if a.opened:
-                    # **入库的是代码抓回的全文，不是模型的结论。** 辩论② 与
-                    # 撰写简报引的是文章原文 ——「不得引用本系统的分析结论」
-                    # 那条规矩照样成立。
-                    corpus.add_if_visible(Document(
-                        doc_id=f"web_{f.key}_{len(corpus.docs)}",
-                        url=a.final_url, title=f"{f.label}：文章{a.no}",
-                        publisher=a.publisher, tier=a.tier,
-                        published=a.published, retrieved=as_of,
-                        text=a.text, prompt_limit=TEXT_LIMIT,
-                        date_source="model"))
-            flagged = sum(1 for c in got.items if c.flags())
-            note = (f"{len(got.items)} 条模型综合结论，待人工复核"
-                    + (f"（其中 {flagged} 条带 ⚠）" if flagged else ""))
-            if got.dropped:
-                note += "；" + "；".join(got.dropped)
-            degraded = any(a.degraded for a in arts)
-            if degraded:
-                n = sum(1 for a in arts if a.degraded)
-                note += (f"；其中 {n} 篇文章抓取时主机安全校验降级（本机 DNS "
-                         "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮"
-                         "依赖代理侧")
-            out[f.key] = FactorData(factor=f, status=EXTERNAL,
-                                    findings=got.items, note=note,
-                                    host_check_degraded=degraded)
+        # ── ④：模型综合结论 + 引用文章（spec 2026-10-13 ②）─────
+        # 结论可以综合、可以改写；代码只做了机械比对，结果全是标注。
+        # 有结论就落 EXTERNAL（决定 A：带 ⚠ 的也能作依据，门③ 那一行
+        # 带标记），交给门② 的人复核（决定 B）。
+        if not got.items:
+            why = "；".join(got.dropped) or "没搜到可用的结论"
+            out[f.key] = FactorData(factor=f, status=MISSING,
+                                    note=f"{why} —— 取值为估计")
+            continue
+        arts: list[Article] = []
+        for c in got.items:
+            for a in c.articles:
+                if all(a is not x for x in arts):
+                    arts.append(a)
+        for a in arts:
+            if a.opened:
+                # **入库的是代码抓回的全文，不是模型的结论。** 辩论② 与
+                # 撰写简报引的是文章原文 ——「不得引用本系统的分析结论」
+                # 那条规矩照样成立。
+                corpus.add_if_visible(Document(
+                    doc_id=f"web_{f.key}_{len(corpus.docs)}",
+                    url=a.final_url, title=f"{f.label}：文章{a.no}",
+                    publisher=a.publisher, tier=a.tier,
+                    published=a.published, retrieved=as_of,
+                    text=a.text, prompt_limit=TEXT_LIMIT,
+                    date_source="model"))
+        flagged = sum(1 for c in got.items if c.flags())
+        note = (f"{len(got.items)} 条模型综合结论，待人工复核"
+                + (f"（其中 {flagged} 条带 ⚠）" if flagged else ""))
+        if got.dropped:
+            note += "；" + "；".join(got.dropped)
+        degraded = any(a.degraded for a in arts)
+        if degraded:
+            n = sum(1 for a in arts if a.degraded)
+            note += (f"；其中 {n} 篇文章抓取时主机安全校验降级（本机 DNS "
+                     "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮"
+                     "依赖代理侧")
+        out[f.key] = FactorData(factor=f, status=EXTERNAL,
+                                findings=got.items, note=note,
+                                host_check_degraded=degraded)
     return out
 
 
@@ -568,7 +571,7 @@ def from_json(raw: dict, decomps: list[Decomposition]
     if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
         raise ValueError(f"factors.json 是旧格式（没有 \"schema\": {SCHEMA}）"
                          "—— 重跑 --brief 生成新格式")
-    factors = {f.key: f for d in decomps for f in d.factors}
+    factors = {f.key: f for f in flat_factors(decomps)}
     out: dict[str, FactorData] = {}
     notes: list[str] = []
     for key, x in (raw.get("factors") or {}).items():

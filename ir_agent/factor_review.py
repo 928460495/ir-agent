@@ -91,11 +91,23 @@ def expected_items(decomps: list,
         # 而那正是最该看一眼的一轮。此时没有因子、谈不上两两正交，但「取值
         # 与它自己的理由是否自洽」照样要对账。
         return [("对账", d) for d in drivers]
-    for d in decomps or []:
-        labels = [f.label for f in d.factors]
-        out += [("因子", l) for l in labels]
-        out += [("正交", f"{a} × {b}") for a, b in combinations(labels, 2)]
-        out.append(("对账", d.target))
+    from ir_agent.formula import FormulaModel
+
+    if isinstance(decomps, FormulaModel):
+        groups = [(t, [f.label for f in decomps.factors_of(t)])
+                  for t in ("revenue", "gross_margin") if t in decomps.formulas]
+    else:
+        groups = [(d.target, [f.label for f in d.factors]) for d in decomps or []]
+    # 水平模式下同一因子被两条公式共用：「因子」「正交」条目去重，否则同一条
+    # 要答两遍。
+    seen: set[tuple[str, str]] = set()
+    for target, labels in groups:
+        for it in ([("因子", l) for l in labels]
+                   + [("正交", f"{a} × {b}") for a, b in combinations(labels, 2)]
+                   + [("对账", target)]):
+            if it not in seen:
+                seen.add(it)
+                out.append(it)
     return out
 
 

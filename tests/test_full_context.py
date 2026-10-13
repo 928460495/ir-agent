@@ -3443,7 +3443,10 @@ def _stub_brief(monkeypatch, full, seq):
         return _Bal(note=f"辩论{round_}的平衡结论")
 
     class _M:
-        decompositions, industry = [], "测试业"
+        decompositions, industry, model = [], "测试业", None
+
+        def factors(self):
+            return []
 
     def meth(code, r, out, client, **k):
         seq.append("预研")
@@ -4187,3 +4190,87 @@ def test_待核清单_快照一节逐条_因子结论一节警示在前(tmp_path
     assert md.index("7628规格满产") < md.index("稼动率约78%"), "带 ⚠ 的排最前"
     assert "7628 ⚠ 找不到" in md
     assert "factors.json" in md, "要告诉人有异议直接改哪个文件"
+
+
+def test_第二阶段重新校验带着公式模型():
+    """**写计划时实测发现（2026-10-14 公式化）。** `run_valuation` 原先传
+    `decomps=a.decomps or None`；公式化写法下 `a.decomps` 是空列表，于是第二
+    阶段悄悄退回两标量校验，人批准的公式一行都不生效。源码断言同上一条
+    （真流程要联网建模，单测里跑不动）；后果的行为测试见
+    `tests/test_assume_formula.py::TestPhase2::test_只有model时校验仍走因子路径`。
+    """
+    import inspect
+
+    from ir_agent import full
+
+    src = inspect.getsource(full.run_valuation)
+    i_check = src.index("assume.check(")
+    call = src[i_check:src.index("anchor=anchor", i_check)]
+    code = [ln.split("#")[0] for ln in call.splitlines()]   # 去掉注释，只看代码
+    assert any("decomps=a._m()" in ln for ln in code)
+    assert not any("a.decomps or None" in ln for ln in code)
+
+
+def test_公式化分解式从第二次调用一路传到判断项(tmp_path, monkeypatch):
+    """**新写法（2026-10-14 公式化）走一遍第二、三次调用。** 下游原先读
+    `meth.decompositions`；新写法下它是空列表 —— 漏改一处，因子分解就在那一处
+    静默消失（采集不跑、辩论② 没有议题、判断项退回两标量）。"""
+    from ir_agent import full, gaps
+    from ir_agent.formula import FormulaModel
+    from ir_agent.methodology import parse as parse_meth
+
+    meth = parse_meth("""模式: 水平
+因子: 量 | 覆铜板出货量 | 万平方米 | 年报产销量 | 产销量
+因子: 价 | 覆铜板平均单价 | 元/平方米 | 研报价格跟踪 | 平均单价
+因子: 本 | 覆铜板单位成本 | 元/平方米 | 年报成本构成 | 单位成本
+公式: 营收 = 量 × 价
+公式: 毛利率 = (价 − 本) ÷ 价
+""")
+    meth.industry = "测试业"
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
+
+    def meth_stub(code, r, out, client, **k):
+        (out / "drivers.md").write_text(
+            __import__("ir_agent.methodology", fromlist=["x"]).to_markdown(meth),
+            encoding="utf-8")
+        return meth, ""
+
+    collected: dict = {}
+
+    def collect(r, as_of, client, md, decomps, industry, skipped):
+        collected["decomps"] = decomps
+        return {f.key: gaps.FactorData(factor=f, status=gaps.MISSING, note="无")
+                for f in meth.factors()}
+
+    subjects: dict = {}
+    real_round = full._stance_round
+
+    def stance_round(client, out, path, round_, subj, *a, **k):
+        subjects[round_] = list(subj)
+        return real_round(client, out, path, round_, subj, *a, **k)
+
+    monkeypatch.setattr(full, "_research_methodology", meth_stub)
+    monkeypatch.setattr(full, "_collect_factors", collect)
+    monkeypatch.setattr(full, "_stance_round", stance_round)
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 13), tmp_path, "xhl")
+    assert isinstance(collected["decomps"], FormulaModel), "采集拿到的不是公式模型"
+    assert subjects.get("B") == ["覆铜板出货量", "覆铜板平均单价", "覆铜板单位成本"]
+
+    import json as _j
+    from ir_agent import stance
+    (tmp_path / "brief.md").write_text("## 一节\n正文。", encoding="utf-8")
+    (tmp_path / "stance_b.json").write_text(_j.dumps(stance.StanceResult(
+        round_="B", balances=[]).to_json()), encoding="utf-8")
+    got: dict = {}
+
+    def propose(code, r, body, md, as_of, out, client, arts, **k):
+        got.update(k)
+        return ""
+
+    monkeypatch.setattr(full, "_propose_assumptions", propose)
+    full.run_assume("600183", _PhaseR(), date(2026, 10, 13), tmp_path, "xhl")
+    m = got["decomps"]
+    assert isinstance(m, FormulaModel) and m.mode == "水平" and not m.legacy, \
+        "第三次调用交给判断项的不是从 drivers.md 读回的公式模型"
+    assert set(got["factor_data"]) == {f.key for f in m.factors}
