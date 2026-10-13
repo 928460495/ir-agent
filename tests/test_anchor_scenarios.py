@@ -189,23 +189,44 @@ def test_calibrate把三档写进中期块(cal):
     assert it["share3"][0] == pytest.approx(min(it["share_hist"]), abs=1e-4)
 
 
-def _with_drivers(cal, base_levels=None):
-    """给夹具 cal 注入一份最小的因子分解块（ir-agent 的 to_driver_block 产出形状）。"""
+# 旧乘/加分解式经 ir-agent `formula.from_decomps` 翻译后的两条公式的记号序列
+# （`Formula.tokens()`，全括号）：营收 = 上期(营收)*(1+产能)*(1+单价)；
+# 毛利率 = 基期(毛利率)+(结构+成本)/100。
+_REV_TOKENS = [["lp", "("], ["lp", "("], ["prev", "营收"], ["op", "*"],
+               ["lp", "("], ["num", "1"], ["op", "+"], ["name", "产能"], ["rp", ")"],
+               ["rp", ")"], ["op", "*"],
+               ["lp", "("], ["num", "1"], ["op", "+"], ["name", "单价"], ["rp", ")"],
+               ["rp", ")"]]
+_GM_TOKENS = [["lp", "("], ["base", "毛利率"], ["op", "+"],
+              ["lp", "("], ["lp", "("], ["name", "结构"], ["op", "+"],
+              ["name", "成本"], ["rp", ")"], ["op", "/"], ["num", "100"], ["rp", ")"],
+              ["rp", ")"]]
+
+
+def _with_drivers(cal, base_levels=None, anchor_y1=None):
+    """给夹具 cal 注入一份最小的因子分解块（ir-agent 的 to_driver_block 产出形状，
+    schema 2：一个块、公式以记号交付）。"""
     c = copy.deepcopy(cal)
     n = len(c["periods"]["proj"])
-    rev = {"op": "乘",
-           "factors": [{"key": "cap", "label": "产能", "unit": "变化率"},
-                       {"key": "asp", "label": "单价", "unit": "变化率"}],
-           "values": {k: [[0.05, 0.01]] * n for k in ("bull", "base", "bear")}}
-    gm = {"op": "加",
-          "factors": [{"key": "mix", "label": "结构", "unit": "pp"},
-                      {"key": "cost", "label": "成本", "unit": "pp"}],
-          "values": {"bull": [[1.0, 0.5]] * n, "base": [[0.5, 0.2]] * n,
-                     "bear": [[0.0, -0.2]] * n},
-          "base_level": 0.2647}
+    annual = c["periods"]["annual"]
+    drv = {"schema": 2, "mode": "变化",
+           "factors": [{"key": "cap", "short": "产能", "label": "产能", "unit": "变化率"},
+                       {"key": "asp", "short": "单价", "label": "单价", "unit": "变化率"},
+                       {"key": "mix", "short": "结构", "label": "结构", "unit": "pp"},
+                       {"key": "cost", "short": "成本", "label": "成本", "unit": "pp"}],
+           "constants": [],
+           "formulas": {"revenue": _REV_TOKENS, "gross_margin": _GM_TOKENS},
+           "formula_text": {"revenue": "营收 = 上期(营收)*(1+产能)*(1+单价)",
+                            "gross_margin": "毛利率 = 基期(毛利率)+(结构+成本)/100"},
+           "base": {"revenue": c["rev"][annual[-1]], "margin": 0.2647, "factors": {}},
+           "values": {"bull": [[0.05, 0.01, 1.0, 0.5]] * n,
+                      "base": [[0.05, 0.01, 0.5, 0.2]] * n,
+                      "bear": [[0.05, 0.01, 0.0, -0.2]] * n}}
     if base_levels:
-        gm["base_levels"] = base_levels
-    c["judg"]["drivers"] = {"revenue": rev, "gross_margin": gm}
+        drv["base_levels"] = base_levels
+    if anchor_y1:
+        drv["anchor_y1"] = anchor_y1
+    c["judg"]["drivers"] = drv
     return c
 
 
@@ -226,18 +247,20 @@ def test_1b毛利率合成可以按档按年用不同基期(cal, tmp_path):
     p = tmp_path / "w.xlsx"
     B.build(_with_drivers(cal, bl), str(p))
     y1, y2 = cal["periods"]["proj"][0], cal["periods"]["proj"][1]
-    assert _gm_synth_formula(p, y1, "B").startswith("=0.2647+")
-    assert _gm_synth_formula(p, y2, "B").startswith("=0.301+")
-    assert _gm_synth_formula(p, y2, "C").startswith("=0.29+")
-    assert _gm_synth_formula(p, y2, "D").startswith("=0.28+")
+    assert _gm_synth_formula(p, y1, "B").startswith("=(0.2647+")
+    assert _gm_synth_formula(p, y2, "B").startswith("=(0.301+")
+    assert _gm_synth_formula(p, y2, "C").startswith("=(0.29+")
+    assert _gm_synth_formula(p, y2, "D").startswith("=(0.28+")
 
 
 def test_不给按年基期时维持单一基期(cal, tmp_path):
     p = tmp_path / "w.xlsx"
     B.build(_with_drivers(cal), str(p))
     y2 = cal["periods"]["proj"][1]
+    ds = load_workbook(p)["1b_驱动分解"]
+    gm0 = _rowmap(ds)["基期 毛利率"]
     for col in "BCD":
-        assert _gm_synth_formula(p, y2, col).startswith("=0.2647+")
+        assert _gm_synth_formula(p, y2, col).startswith(f"=($B${gm0}+")
 
 
 def test_按年基期之下公式引擎验算仍然全过(cal, tmp_path):
@@ -266,3 +289,45 @@ def test_旧形状的中期块也能建表且三档口径一致(cal, tmp_path):
         r = m[label]
         got = tuple(a.cell(r, c).value for c in (2, 3, 4))
         assert got == tuple(cal["interim"][key]), label
+
+
+def _level_block(cal):
+    """水平模式：营收 = 量 × 价；毛利率 = (价 − 本) ÷ 价；带一个常量。"""
+    c = copy.deepcopy(cal)
+    n = len(c["periods"]["proj"])
+    lp, rp = ["lp", "("], ["rp", ")"]
+    c["judg"]["drivers"] = {
+        "schema": 2, "mode": "水平",
+        "factors": [{"key": "q", "short": "量", "label": "出货量", "unit": "万吨"},
+                    {"key": "p", "short": "价", "label": "单价", "unit": "元"},
+                    {"key": "c", "short": "本", "label": "单位成本", "unit": "元"}],
+        "constants": [{"name": "系数", "value": 1.0, "source": "示意"}],
+        "formulas": {
+            "revenue": [lp, lp, ["name", "量"], ["op", "*"], ["name", "价"], rp,
+                        ["op", "*"], ["name", "系数"], rp],
+            "gross_margin": [lp, lp, ["name", "价"], ["op", "-"], ["name", "本"], rp,
+                             ["op", "/"], ["name", "价"], rp]},
+        "base": {"revenue": None, "margin": 0.25,
+                 "factors": {"量": 100.0, "价": 9.5, "本": 7.2}},
+        "values": {"bull": [[100.0 * 1.08 ** (y + 1), 11.0, 7.3] for y in range(n)],
+                   "base": [[100.0 * 1.05 ** (y + 1), 10.0, 7.4] for y in range(n)],
+                   "bear": [[100.0 * 1.02 ** (y + 1), 9.0, 7.5] for y in range(n)]}}
+    return c
+
+
+def test_水平模式的基期营收由公式算出_常量区可引用(cal, tmp_path):
+    p = tmp_path / "w.xlsx"
+    B.build(_level_block(cal), str(p))
+    ds = load_workbook(p)["1b_驱动分解"]
+    m = _rowmap(ds)
+    assert str(ds.cell(m["基期 营收（亿元）"], 2).value).startswith("=((")
+    assert "常量 系数" in m and ds.cell(m["常量 系数"], 6).value == "示意"
+    y1 = cal["periods"]["proj"][0]
+    assert f"$B${m['常量 系数']}" in str(ds[f"C{m[f'{y1} 营收（合成）']}"].value)
+
+
+def test_水平模式公式引擎验算全过(cal, tmp_path):
+    p = tmp_path / "w.xlsx"
+    B.build(_level_block(cal), str(p))
+    fails, _ = V.verify(str(p), quiet=True)
+    assert not fails
