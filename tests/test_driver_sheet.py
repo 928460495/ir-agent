@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pickle
 import sys
 from datetime import date
@@ -10,7 +11,11 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, "/Users/ariasleo/Desktop/谢海量作品集/ashare-dcf")
+from ir_agent import dcf
+
+# 与 `dcf._load` 同一个查找规则（环境变量优先），不写死主仓库路径 —— 写死时，
+# 在别的工作树里改 ashare-dcf 会悄悄导入主仓库的旧版。
+sys.path.insert(0, os.environ.get(dcf.ENV_DIR) or str(dcf.DEFAULT_DIR))
 
 # 建表需要一份真实的 calibrate 输出 —— 它有六十多个键，手写夹具既繁琐又会
 # 与真实结构漂移（本项目已因「固件编码我想象的结构」栽过一次: stmts 被写成
@@ -38,20 +43,27 @@ def _minimal_cal():
 
 
 def _drivers():
-    return {
-        "revenue": {
-            "op": "乘",
-            "factors": [{"key": "capacity", "label": "产能", "unit": "变化率"},
-                        {"key": "asp", "label": "单价", "unit": "变化率"}],
-            "values": {"bull": [[0.14, 0.01]], "base": [[0.10, -0.02]],
-                       "bear": [[0.05, -0.06]]}},
-        "gross_margin": {
-            "op": "加",
-            "base_level": 0.1415,
-            "factors": [{"key": "util", "label": "稼动率摊薄", "unit": "pp"},
-                        {"key": "cost", "label": "上游成本", "unit": "pp"}],
-            "values": {"bull": [[0.5, 0.3]], "base": [[-1.0, -0.5]],
-                       "bear": [[-2.5, -1.5]]}}}
+    """schema 2 驱动块（2026-10-14 公式化）。公式记号由 ir-agent 自己的
+    `formula.from_decomps` 生成，不手写 —— 夹具与真实产出同源。"""
+    from ir_agent.drivers import Decomposition, Factor, Op
+    from ir_agent.formula import from_decomps
+
+    m = from_decomps([
+        Decomposition("revenue", Op.MULTIPLY, [Factor("capacity", "产能", "变化率"),
+                                                Factor("asp", "单价", "变化率")]),
+        Decomposition("gross_margin", Op.ADD_PP, [Factor("util", "稼动率摊薄", "pp"),
+                                                   Factor("cost", "上游成本", "pp")])])
+    return {"schema": 2, "mode": m.mode,
+            "factors": [{"key": f.key, "short": f.short, "label": f.label,
+                         "unit": f.unit} for f in m.factors],
+            "constants": [],
+            "formulas": {t: [list(x) for x in fm.tokens()]
+                         for t, fm in m.formulas.items()},
+            "formula_text": {t: m.describe(t) for t in m.formulas},
+            "base": {"revenue": 100.0, "margin": 0.1415, "factors": {}},
+            "values": {"bull": [[0.14, 0.01, 0.5, 0.3]],
+                       "base": [[0.10, -0.02, -1.0, -0.5]],
+                       "bear": [[0.05, -0.06, -2.5, -1.5]]}}
 
 
 def test_无drivers时不建表(tmp_path):
@@ -93,9 +105,11 @@ def test_合成行是公式不是常量(tmp_path):
     ws = load_workbook(p)["1b_驱动分解"]
     cells = {ws.cell(r, 1).value: r for r in range(1, 40)
              if ws.cell(r, 1).value}
-    v = ws.cell(cells["2026E 营收增速（合成）"], 2).value
+    v = ws.cell(cells["2026E 营收（合成）"], 2).value
     assert isinstance(v, str) and v.startswith("=")
-    assert "1+" in v or "(1" in v
+    assert "(1+" in v
+    g = ws.cell(cells["2026E 营收增速（合成）"], 2).value
+    assert isinstance(g, str) and g.startswith("=") and g.endswith("-1")
 
 
 def test_假设表改为跨表引用(tmp_path):
