@@ -1132,6 +1132,13 @@ STATE = "state.json"
 # brief.md 的某一段：它要在数据采集之前就能被人看到、改坏了可以直接
 # 改这个文件覆盖重跑，不必等简报写完。
 DRIVERS_MD = "drivers.md"
+# 第一阶段拆成三次调用之后新增的产物（Task 10）。门① 的来源清单、两轮
+# 多空辩论、门② 的待核清单。
+SOURCES_MD = "sources.md"
+SOURCES_JSON = "sources.json"
+STANCE_A = "stance_a.json"
+STANCE_B = "stance_b.json"
+REVIEW_MD = "review.md"
 # 多空辩论① 的五个驱动主题。预研的覆盖标注逐个核对它们 —— 同一份清单
 # 两处用（辩论① 的 subjects、覆盖标注的 themes），不各写一遍。
 STANCE_THEMES = ("需求", "价格", "成本", "份额", "政策")
@@ -1203,6 +1210,106 @@ def _analyse_qualitative(code: str, r, as_of: date, model,
     take("战略", lambda: _load_strategy(r, as_of, qual_client, spot))
     take("产业链", lambda: _load_value_chain(r, as_of, qual_client))
     return qual_client
+
+
+def _restore_state(out: Path) -> tuple[dict, dict]:
+    """读回上一次调用落盘的定性分析结果（`state.json` 的 `md` / `pr`）。
+
+    与 `run_valuation` 读 `state.json` 的那两行同源 —— 第一阶段拆成三次
+    调用之后有三处要读它，形状必须是同一个：缺文件时给空壳而不是抛错，
+    因为「上一阶段没留下 md」与「state.json 不存在」对调用方是同一件事。
+    `or {}` 不能省：人手改过的 state.json 里 `"md": null` 是合法 JSON，
+    `.get("md")` 会返回 None，下游 `md.items()` 当场崩。
+    """
+    f = out / STATE
+    state = json.loads(f.read_text(encoding="utf-8")) if f.exists() \
+        else {"md": {}, "pr": {}}
+    return state.get("md") or {}, state.get("pr") or {}
+
+
+def _save_state(out: Path, code: str, r, as_of: date, md: dict, pr: dict,
+                *, upheld: int | None = None, **signoff: str) -> None:
+    """落盘 `state.json`。三次调用都写它，每次把自己那道门的签名补进去。
+
+    **先读旧的再 update，不能整份覆盖。** `upheld` 只有跑过辩论的那次调用
+    算得出来；若无条件按默认值写入，后一次调用会把它清成 0 —— 读回时
+    「这轮确实是 0」和「这轮没算」长得一样。这正是本项目反复踩的那条缝：
+    产物上两种情形不可区分，人就看不见。
+    """
+    f = out / STATE
+    old = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    old.update({"code": code, "period": r.period, "as_of": as_of.isoformat(),
+                "md": md, "pr": pr})
+    if upheld is not None:
+        old["upheld"] = upheld
+    old.update({k: v for k, v in signoff.items() if v})
+    f.write_text(json.dumps(old, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
+
+
+def _read_drivers(out: Path):
+    """只读 `drivers.md`，读不回就说为什么。**不联网。**
+
+    这段逻辑原本内联在 `_research_methodology` 开头：文件在就读回、不在就
+    往下走去联网预研。`run_assume` 需要的是**只有读回那一半** —— 它绝不能
+    在 drivers.md 缺失时悄悄重新联网预研一个新分解式：那样人在门② 审过的
+    简报与接下来要填的判断项，依据的是两个不同的分解式，而产物上看不出来。
+
+    返回 `(分解式或 None, 说明)`。文件不存在时返回 `(None, "")` —— 调用方
+    据此区分「不存在」（`_research_methodology` 往下走去预研）与「存在但读
+    不回」（停下，不覆盖人的修改）。
+    """
+    from ir_agent import methodology
+
+    path = out / DRIVERS_MD
+    if not path.exists():
+        return None, ""
+    try:
+        return methodology.from_markdown(path.read_text(encoding="utf-8")), ""
+    except methodology.MethodologyFailed as e:
+        return None, (f"方法论预研（{path} 已存在但读不回：{str(e)[:160]}）"
+                      "—— 未重新联网预研（避免悄悄覆盖你的修改），"
+                      "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+
+
+def _collect_factors(r, as_of: date, client, md: dict, decomps,
+                     industry: str, skipped: list[str]) -> dict:
+    """按分解式定向采集因子数据。整段从 `run_analysis` 原样搬出。
+
+    **`_refresh_external_md` 必须留在 `finally` 里，不能紧跟在 try 块成功
+    路径的末尾。** `gaps.collect` 按分解出的因子逐个循环，④外部网络分支
+    命中时会在循环内部调 `corpus.add_if_visible` 往 `r.corpus` 里加文档 ——
+    这发生在循环体里，早于整个函数 return 或 raise。真实故障形状：第 N 个
+    因子已经把文档塞进 `r.corpus`，第 N+1 个因子采集时才报错，`gaps.collect`
+    整体以异常退出。此前把 `_refresh_external_md(r, md)` 放在 try 块内、
+    `md["因子数据"] = ...` 之后，异常一抛，这行跟着被跳过，第 N 个因子已经
+    写进语料库的文档，`md["外部资料"]` 从未被告知过，读者看到的篇数与分级
+    构成停在这次采集之前那一刻。`finally` 保证不论成功、部分成功后抛异常、
+    还是从一开始就抛异常，都会重渲染一次。
+    """
+    from ir_agent import gaps
+    from ir_agent.sources.external import Corpus
+
+    factor_data: dict = {}
+    try:
+        factor_data = gaps.collect(
+            client, decomps, r.ledger, r.corpus or Corpus(as_of=as_of),
+            industry, as_of, sections=getattr(r, "sections", None),
+            annual_url=getattr(r, "annual_url", ""))
+        md["因子数据"] = gaps.summary(factor_data)
+    except Exception as e:                                  # noqa: BLE001
+        skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
+    finally:
+        _refresh_external_md(r, md)
+    # 轮次级主机安全校验降级聚合。不必放进上面的 `finally`：这里读的是已经
+    # 算好的 `factor_data`。**异常路径上确有欠计数，且这一层治不好** ——
+    # `gaps.collect` 跑到第 N 个因子才抛异常时，前 N-1 个因子里任何一次
+    # `openweb.verify_finding` 记下的降级，都只活在那个从未 return 出来、
+    # 被异常丢弃的局部字典里；`factor_data` 在这条路径上是空字典，
+    # `_factor_host_check_note` 对空字典自然返回空列表，但那不是「没有漏报」，
+    # 是「漏了也报不出来」。详见 `_factor_host_check_note` 自己的文档字符串。
+    skipped += _factor_host_check_note(factor_data)
+    return factor_data
 
 
 def _methodology_failed(out: Path, e) -> tuple[None, str]:
@@ -1309,14 +1416,9 @@ def _research_methodology(code: str, r, out: Path, client, *,
     from ir_agent import methodology
 
     path = out / DRIVERS_MD
-    if path.exists():
-        try:
-            m = methodology.from_markdown(path.read_text(encoding="utf-8"))
-        except methodology.MethodologyFailed as e:
-            return None, (f"方法论预研（{path} 已存在但读不回：{str(e)[:160]}）"
-                          "—— 未重新联网预研（避免悄悄覆盖你的修改），"
-                          "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
-        return m, ""
+    m, derr = _read_drivers(out)
+    if m is not None or derr:
+        return m, derr
 
     industry = _industry_path(code)
     if not industry:
@@ -1663,47 +1765,9 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
     # 两级文本命中）、撰写正文之前（采集结果要能进 DCF 判断项的提示词）。
     factor_data: dict = {}
     if meth is not None:
-        from ir_agent import gaps
-        from ir_agent.sources.external import Corpus
-        try:
-            factor_data = gaps.collect(
-                research_client, meth.decompositions, r.ledger,
-                r.corpus or Corpus(as_of=as_of), meth.industry, as_of,
-                sections=getattr(r, "sections", None),
-                annual_url=getattr(r, "annual_url", ""))
-            md["因子数据"] = gaps.summary(factor_data)
-        except Exception as e:                              # noqa: BLE001
-            skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
-        finally:
-            # **必须在 finally 里，不能紧跟在 try 块成功路径的末尾。**
-            # `gaps.collect` 按分解出的因子逐个循环，④外部网络分支命中
-            # 时会在循环内部调 `corpus.add_if_visible` 往 `r.corpus` 里
-            # 加文档（见 gaps.py）——这发生在循环体里，早于整个函数
-            # return 或 raise。真实故障形状：第 N 个因子已经把文档塞进
-            # `r.corpus`，第 N+1 个因子采集时才报错，`gaps.collect` 整体
-            # 以异常退出——这条修复此前把 `_refresh_external_md(r, md)`
-            # 放在 try 块内、`md["因子数据"] = ...` 之后，异常一抛，这行
-            # 跟着被跳过，第 N 个因子已经写进语料库的文档，`md["外部
-            # 资料"]` 从未被告知过，读者看到的篇数与分级构成停在这次
-            # 采集之前那一刻——与上面 `_load_openweb` 之后那次重渲染是
-            # 同一类"污染了语料库却没让 md 知道"的洞（见
-            # `_external_md`），只是这次洞出在异常路径上。`finally`
-            # 保证不论 `gaps.collect` 成功、部分成功后抛异常、还是从
-            # 一开始就抛异常，都会重渲染一次。
-            _refresh_external_md(r, md)
-        # `gaps.collect` ④分支——轮次级主机安全校验降级聚合。不必放进
-        # 上面的 `finally`：这里读的是已经算好的 `factor_data` 字典。
-        # **异常路径上确有欠计数，且这里治不好。** `gaps.collect` 按
-        # 分解出的因子逐个循环，跑到第 N 个因子才抛异常时，前 N-1 个
-        # 因子里任何一次 `openweb.verify_finding` 记下的降级，都只活
-        # 在那个从未 return 出来、被异常丢弃的局部字典里——`factor_data`
-        # 在这条路径上维持着函数开头的空字典默认值，`_factor_host_
-        # check_note` 对空字典自然返回空列表，但那不是「没有漏报」，
-        # 是「漏了也报不出来」：`gaps.collect` 不对外暴露异常路径上的
-        # 部分结果，这一层拿不到那半份 `factor_data`，修不了，只能在
-        # `gaps.collect` 自己那一层堵。详见 `_factor_host_check_note`
-        # 自己的文档字符串。
-        skipped += _factor_host_check_note(factor_data)
+        factor_data = _collect_factors(r, as_of, research_client, md,
+                                       meth.decompositions, meth.industry,
+                                       skipped)
 
     # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出
     # 最长的一次调用（7~8 个因子 × 5 年 × 3 档，几十行结构化文本），瓶颈在
@@ -1755,10 +1819,7 @@ def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
                    path=out / "model.xlsx", verdicts=r.verdicts)
     arts["工作簿"] = str(out / "model.xlsx")
 
-    (out / STATE).write_text(json.dumps(
-        {"code": code, "period": r.period, "as_of": as_of.isoformat(),
-         "md": md, "pr": pr, "upheld": upheld}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
+    _save_state(out, code, r, as_of, md, pr, upheld=upheld)
 
     # 依据核验过、但来源分级是 MEDIA 的记录——警告，不拒绝，见
     # `_media_tier_note`。放在写产物清单的最后一刻读：本阶段所有会调

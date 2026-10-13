@@ -1593,14 +1593,35 @@ def test_因子数据采集之后重渲染外部资料清单():
     篇数与分级构成停留在这次采集之前那一刻。"""
     from ir_agent import full
 
-    calls = _calls(full.run_analysis)
+    calls = _calls(full._collect_factors)
     names = [n for n, _ in calls]
     assert "gaps.collect" in names, names
     collect_ln = min(ln for n, ln in calls if n == "gaps.collect")
     refresh_lns = [ln for n, ln in calls if n == "_refresh_external_md"]
-    assert refresh_lns, "run_analysis 里没有对 _refresh_external_md 的真实调用"
+    assert refresh_lns, "_collect_factors 里没有对 _refresh_external_md 的真实调用"
     assert any(ln > collect_ln for ln in refresh_lns), \
         "_refresh_external_md 必须在 gaps.collect 成功之后再调一次"
+
+
+def test_因子采集的三条不变量所在的函数确实被流水线调用():
+    """**不变量搬了家，就得证明新家有人住。**
+
+    上下三条测试（重渲染在 gaps.collect 之后、重渲染落在 finally、降级聚合
+    接进 skipped）原本检查 `run_analysis` 的语法树。Task 10 Step 0a 把那段
+    代码原样搬进了 `_collect_factors`，三条测试随之改指它 —— 而那只证明
+    `_collect_factors` 内部正确，不证明它被调用。若有人在流水线里把调用
+    换成内联的旧写法、或干脆删掉，三条测试照样全绿。
+
+    这里按语法树找第一阶段流水线里对 `_collect_factors` 的真实调用。
+    Task 10 Step 6 删除 `run_analysis` 之后，流水线函数是 `run_brief`。
+    """
+    from ir_agent import full
+
+    pipeline = getattr(full, "run_brief", None) or full.run_analysis
+    names = [n for n, _ in _calls(pipeline)]
+    assert "_collect_factors" in names, (
+        f"{pipeline.__name__} 没有调用 _collect_factors —— 因子采集的三条"
+        "不变量守在一个没人调用的函数里")
 
 
 def test_因子采集抛异常时重渲染仍必须发生():
@@ -1620,7 +1641,7 @@ def test_因子采集抛异常时重渲染仍必须发生():
     `finally` 才能对异常路径生效，行号判断天然分不清这个区别。"""
     from ir_agent import full
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full._collect_factors)))
     target = None
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try):
@@ -1630,7 +1651,7 @@ def test_因子采集抛异常时重渲染仍必须发生():
         if "gaps.collect" in body_calls:
             target = node
             break
-    assert target is not None, "run_analysis 里没找到包住 gaps.collect 的 try 块"
+    assert target is not None, "_collect_factors 里没找到包住 gaps.collect 的 try 块"
 
     finally_calls = {_call_name(c) for stmt in target.finalbody
                      for c in ast.walk(stmt) if isinstance(c, ast.Call)}
@@ -2249,7 +2270,7 @@ def test_factor_host_check_note_只读结构化字段不碰note文本():
 
 
 def test_gaps_collect调用点会把降级聚合追加进skipped():
-    """接线本身：`run_analysis` 里 `gaps.collect` 那段必须真的调用
+    """接线本身：`_collect_factors` 里 `gaps.collect` 那段必须真的调用
     `_factor_host_check_note` **并把结果拼进 `skipped`**——只有
     `_factor_host_check_note` 自身正确、调用点没接上，效果一样是零。
 
@@ -2266,7 +2287,7 @@ def test_gaps_collect调用点会把降级聚合追加进skipped():
     import textwrap
 
     from ir_agent import full
-    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full._collect_factors)))
     target = None
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try):
@@ -2276,7 +2297,7 @@ def test_gaps_collect调用点会把降级聚合追加进skipped():
         if "gaps.collect" in body_calls:
             target = node
             break
-    assert target is not None, "run_analysis 里没找到包住 gaps.collect 的 try 块"
+    assert target is not None, "_collect_factors 里没找到包住 gaps.collect 的 try 块"
 
     # `_factor_host_check_note` 的调用点不要求恰好落在 try/finally
     # 哪个分支——它读的是 factor_data 这个已经算出来的字典，不像
@@ -2298,7 +2319,7 @@ def test_gaps_collect调用点会把降级聚合追加进skipped():
             binding = node
             break
     assert binding is not None, (
-        "run_analysis 里没有把 _factor_host_check_note(...) 的返回值拼进"
+        "_collect_factors 里没有把 _factor_host_check_note(...) 的返回值拼进"
         " skipped（需要 skipped += _factor_host_check_note(...)，裸调用"
         "不算）")
     assert binding.lineno > try_end_ln, (
