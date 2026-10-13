@@ -26,6 +26,9 @@ from ir_agent.lineparse import keyed, pick
 
 _DECOMP = keyed("分解")
 _PITFALL = keyed("陷阱")
+# `keyed("覆盖")` 不会误中「未覆盖:」行：行首前缀只吃列表符号与加粗，吃不掉「未」。
+_COVER = keyed("覆盖")
+_UNCOVER = keyed("未覆盖")
 
 _TARGETS = {"营收": "revenue", "毛利率": "gross_margin"}
 _OPS = {"乘": Op.MULTIPLY, "加": Op.ADD_PP}
@@ -65,6 +68,9 @@ class Methodology:
     decompositions: list[Decomposition] = field(default_factory=list)
     pitfalls: list[str] = field(default_factory=list)
     rationale: str = ""
+    # 辩论① 主题的覆盖声明：(「覆盖」|「未覆盖」, 主题, 因子名或理由)。
+    # **写进 drivers.md 的原始定义块**，人改过再重跑不丢（spec 2026-10-13 ④）。
+    coverage_decl: list[tuple[str, str, str]] = field(default_factory=list)
 
     def of(self, target: str) -> Decomposition | None:
         return next((d for d in self.decompositions if d.target == target),
@@ -173,6 +179,10 @@ def parse(text: str) -> Methodology:
             seen_keys[f.key] = (tgt_label, f.label)
 
     m.pitfalls = [h.group(1).strip() for h in _PITFALL.finditer(text)]
+    for kind, rx in (("覆盖", _COVER), ("未覆盖", _UNCOVER)):
+        for h in rx.finditer(text):
+            th, _, rest = h.group(1).partition("|")
+            m.coverage_decl.append((kind, th.strip(), rest.strip()))
     return m
 
 
@@ -276,12 +286,13 @@ PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。
 
 上面「多空平衡点」那一节（若有）列出了双方争执的主题。**每个主题都应有一个
 因子承载它** —— 某个主题多空分歧最大、而分解式里没有对应因子，下一轮辩论就
-无从给出三档取值、判断项也无从反映这个分歧。确实无法因子化的，用一行说明：
+无从给出三档取值、判断项也无从反映这个分歧。对每个主题写一行声明：
 
+`覆盖: <主题> | <承载它的因子名，与分解式里写的一字不差>`
 `未覆盖: <主题> | <为什么不能因子化>`
 
-代码会逐个核对并把结果标注在产物顶部。**不会因此驳回你**，但人会在审核时
-看到哪些主题没进分解式。
+代码会核对你声明的因子名是否真在分解式里，并把结果标注在产物顶部。
+**不会因此驳回你**，但人会在审核时看到。
 
 最后，针对**你刚给出的这组因子**，指出它们自身的误用方式，每条一行：
 
@@ -373,6 +384,8 @@ def _to_dsl(m: Methodology) -> str:
         parts += [f"{f.label}:{f.unit}:{f.source_hint}:{f.search_term}"
                   for f in d.factors]
         lines.append("分解: " + " | ".join(parts))
+    for kind, th, rest in m.coverage_decl:
+        lines.append(f"{kind}: {th} | {rest}")
     for p in m.pitfalls:
         lines.append(f"陷阱: {p}")
     return "\n".join(lines)
@@ -410,6 +423,58 @@ def theme_coverage(decomps: list, themes: list[str]) -> list[tuple[str, str]]:
                     break
         out.append((th, hit))
     return out
+
+
+@dataclass(frozen=True)
+class Cover:
+    """一个辩论主题的覆盖情况。
+
+    mark：✓ 模型声明由某因子承载（代码核对过因子名真实存在）/ ✗ 模型声明
+    未覆盖 / ？ 模型没交代（detail 是词面匹配到的因子名，可能为空）。
+    """
+    theme: str
+    mark: str
+    detail: str
+
+
+def coverage(m: Methodology, themes: list[str]) -> tuple[list[Cover], list[str]]:
+    """辩论① 主题覆盖：**模型的声明为主，词面匹配兜底**。返回 (逐主题, 问题)。
+
+    词面匹配（`theme_coverage`）报过假阴性：生益科技「行业产值同比增速」承载
+    需求、「公司市占率同比变化率」承载份额，标签里没有那两个字。「这个因子承载
+    哪个主题」是语义判断，该由给出分解式的模型声明；代码只核对声明里的因子名
+    真实存在。
+
+    全部是标注：清单外主题、因子名不存在、自相矛盾只列进问题，不驳回。
+    `themes` 为空（辩论① 没有结论）时什么都不做 —— 不能凭空要求覆盖。
+    """
+    if not themes:
+        return [], []
+    labels = {f.label for d in m.decompositions for f in d.factors}
+    cov: dict[str, str] = {}
+    unc: dict[str, str] = {}
+    notes: list[str] = []
+    for kind, th, rest in m.coverage_decl:
+        if th not in themes:
+            notes.append(f"声明了清单外的主题「{th}」（{kind}: {rest}）")
+        elif kind == "未覆盖":
+            unc.setdefault(th, rest)
+        elif rest in labels:
+            cov.setdefault(th, rest)
+        else:
+            notes.append(f"「{th}」声明由「{rest}」承载，但分解式里没有这个因子")
+    word = dict(theme_coverage(m.decompositions, themes))
+    out: list[Cover] = []
+    for th in themes:
+        if th in cov and th in unc:
+            notes.append(f"「{th}」既声明了覆盖又声明了未覆盖（自相矛盾），按覆盖显示")
+        if th in cov:
+            out.append(Cover(th, "✓", cov[th]))
+        elif th in unc:
+            out.append(Cover(th, "✗", unc[th]))
+        else:
+            out.append(Cover(th, "？", word.get(th, "")))
+    return out, notes
 
 
 def term_hits(decomps: list, *, sections=None, corpus=None
@@ -450,7 +515,8 @@ def term_hits(decomps: list, *, sections=None, corpus=None
     return out
 
 
-def to_markdown(m: Methodology, coverage=(), hits=None) -> str:
+def to_markdown(m: Methodology, coverage=(), hits=None,
+                coverage_notes=(), key_refs=None) -> str:
     """分解式落盘为 drivers.md。
 
     `coverage` / `hits` 是**标注**，不参与 `from_markdown` 的往返解析 ——
@@ -462,14 +528,22 @@ def to_markdown(m: Methodology, coverage=(), hits=None) -> str:
              "以及批准清单上能检查到什么** —— 清单上若没有某个因子，"
              "说明这个因素没被纳入。", ""]
     if coverage:
-        miss = [th for th, who in coverage if not who]
         lines += ["## 辩论① 主题覆盖（标注，未阻断）", ""]
-        lines += [f"- {th}：{('✓ ' + who) if who else '✗ 未进入分解式'}"
-                  for th, who in coverage]
-        if miss:
-            lines += ["", f"⚠ {len(miss)} 个辩论主题未进入分解式"
-                          f"（{'、'.join(miss)}）—— 请在门② 复核：这几点"
-                          f"多空有分歧，而判断项将无从反映它们。"]
+        for c in coverage:
+            if c.mark == "✓":
+                lines.append(f"- {c.theme}：✓ 模型声明由「{c.detail}」承载")
+            elif c.mark == "✗":
+                lines.append(f"- {c.theme}：✗ 模型声明未覆盖 —— "
+                             f"{c.detail or '（没写理由）'}")
+            else:
+                lines.append(f"- {c.theme}：？ 模型未交代 —— 仅词面匹配："
+                             + (f"「{c.detail}」" if c.detail else "无"))
+        lines += [f"- ⚠ {x}" for x in coverage_notes]
+        open_ = [c.theme for c in coverage if c.mark != "✓"]
+        if open_:
+            lines += ["", f"⚠ {len(open_)} 个辩论主题没有声明由哪个因子承载"
+                          f"（{'、'.join(open_)}）—— 请在门② 复核：这几点"
+                          "多空有分歧，而判断项可能无从反映它们。"]
         lines.append("")
     if hits:
         lines += ["## 因子候选词在本轮语料里的命中次数（标注，未阻断）", "",

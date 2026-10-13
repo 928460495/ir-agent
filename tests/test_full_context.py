@@ -3238,9 +3238,9 @@ def test_预研没收到辩论结论时不做覆盖标注(tmp_path):
         m2, err2 = full._research_methodology(
             "600183", _R(), tmp_path, lambda p: lines,
             stance_note="需求：多方看 AI 放量；份额：空方看份额在丢")
-        assert "辩论主题未进入分解式" in err2, err2
+        assert "辩论主题没有声明由哪个因子承载" in err2, err2
         md2 = (tmp_path / "drivers.md").read_text(encoding="utf-8")
-        assert "主题覆盖" in md2 and "✗ 未进入分解式" in md2
+        assert "主题覆盖" in md2 and "？ 模型未交代" in md2
     finally:
         full._industry_path = orig
 

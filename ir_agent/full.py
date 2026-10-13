@@ -1513,16 +1513,17 @@ def _research_methodology(code: str, r, out: Path, client, *,
     # 压根没看到过主题清单，拿五个主题去核对它、再在产物上标「4 个未覆盖」
     # 就是凭空问责。
     themes = list(STANCE_THEMES) if stance_note.strip() else []
-    cov = methodology.theme_coverage(m.decompositions, themes)
+    cov, cov_notes = methodology.coverage(m, themes)
     hits = methodology.term_hits(m.decompositions,
                                  sections=getattr(r, "sections", None),
                                  corpus=getattr(r, "corpus", None))
-    path.write_text(methodology.to_markdown(m, coverage=cov, hits=hits),
+    path.write_text(methodology.to_markdown(m, coverage=cov, hits=hits,
+                                                coverage_notes=cov_notes),
                     encoding="utf-8")
     note = ""
-    if (miss := [th for th, who in cov if not who]):
-        note = (f"方法论预研：{len(miss)} 个辩论主题未进入分解式"
-                f"（{'、'.join(miss)}）—— 已标注，未阻断，需在门② 复核")
+    if (open_ := [c.theme for c in cov if c.mark != "✓"]):
+        note = (f"方法论预研：{len(open_)} 个辩论主题没有声明由哪个因子承载"
+                f"（{'、'.join(open_)}）—— 已标注，未阻断，需在门② 复核")
     return m, note
 
 

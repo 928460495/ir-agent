@@ -511,11 +511,13 @@ class TestTermHits:
 
 class TestMarkdownAnnotations:
     def test_两段标注进drivers_md顶部(self):
-        from ir_agent.methodology import to_markdown
-        out = to_markdown(_meth(), coverage=[("需求", _REV_LABEL), ("份额", "")],
+        from ir_agent.methodology import Cover, to_markdown
+        out = to_markdown(_meth(),
+                          coverage=[Cover("需求", "✓", _REV_LABEL),
+                                    Cover("份额", "？", "")],
                           hits={_REV_LABEL: [(_REV_LABEL, 1), ("铜箔", 3)]})
         assert "主题覆盖" in out and "份额" in out
-        assert "未进入分解式" in out
+        assert "？ 模型未交代" in out
         assert "命中次数" in out and "铜箔:3" in out
 
     def test_不传标注时与改之前一样(self):
@@ -532,10 +534,10 @@ class TestMarkdownAnnotations:
         下次重跑由代码重算。这条测试防的是「标注里写了个看起来像 DSL 的
         东西，被 from_markdown 当真」。
         """
-        from ir_agent.methodology import from_markdown, to_markdown
+        from ir_agent.methodology import Cover, from_markdown, to_markdown
         m = _meth()
         back = from_markdown(to_markdown(
-            m, coverage=[("需求", _REV_LABEL)],
+            m, coverage=[Cover("需求", "✓", _REV_LABEL)],
             hits={_REV_LABEL: [("铜箔", 3)]}))
         assert len(back.decompositions) == len(m.decompositions)
         assert [f.label for f in back.decompositions[0].factors] == \
@@ -624,3 +626,56 @@ class TestSearchTermLabel:
         from ir_agent import methodology
         assert "因子名:单位:数据线索:检索词" not in methodology.PROMPT
         assert "<因子名>:<单位>:<数据线索>:<检索词>" in methodology.PROMPT
+
+
+# ══ 第二次调用试跑后的修订 ④：主题覆盖以模型声明为主 ═══════════════
+
+_DECL = (_DSL
+         + "覆盖: 需求 | 服务器用高频覆铜板出货量（含通信）\n"
+         + "未覆盖: 政策 | 补贴口径无公开数据\n"
+         + "覆盖: 份额 | 不存在的因子\n"
+         + "覆盖: 估值 | 平均单价\n")
+
+
+class TestCoverageDeclared:
+    """词面匹配报过假阴性：生益科技「行业产值同比增速」承载需求、「公司市占率
+    同比变化率」承载份额，标签里没有那两个字，被标「未进入分解式」。"""
+
+    def test_三档_声明覆盖_声明未覆盖_未交代退回词面(self):
+        from ir_agent.methodology import coverage, parse
+        cov, notes = coverage(parse(_DECL), ["需求", "价格", "份额", "政策"])
+        got = {c.theme: (c.mark, c.detail) for c in cov}
+        assert got["需求"] == ("✓", _REV_LABEL)
+        assert got["政策"] == ("✗", "补贴口径无公开数据")
+        assert got["价格"] == ("？", "平均单价"), "未交代的退回词面匹配"
+        assert got["份额"][0] == "？", "声明的因子名不存在，不能算覆盖"
+        assert any("不存在的因子" in x for x in notes)
+        assert any("清单外的主题「估值」" in x for x in notes)
+
+    def test_自相矛盾被标出(self):
+        from ir_agent.methodology import coverage, parse
+        m = parse(_DSL + "覆盖: 需求 | 平均单价\n未覆盖: 需求 | 无数据\n")
+        cov, notes = coverage(m, ["需求"])
+        assert cov[0].mark == "✓"
+        assert any("自相矛盾" in x for x in notes)
+
+    def test_未覆盖行不被当成覆盖行(self):
+        from ir_agent.methodology import parse
+        assert parse(_DSL + "未覆盖: 政策 | x\n").coverage_decl == [
+            ("未覆盖", "政策", "x")]
+
+    def test_声明随drivers_md往返不丢(self):
+        """人改过 drivers.md 再重跑，声明不能丢——此前 `未覆盖:` 行解析时
+        直接被丢，drivers.md 里也没有，读回即丢。"""
+        from ir_agent.methodology import from_markdown, parse, to_markdown
+        m = parse(_DECL)
+        assert from_markdown(to_markdown(m)).coverage_decl == m.coverage_decl
+
+    def test_没有主题时什么都不做(self):
+        from ir_agent.methodology import coverage, parse
+        assert coverage(parse(_DECL), []) == ([], [])
+
+    def test_提示词要求两种声明行(self):
+        from ir_agent import methodology
+        assert "`覆盖: <主题> | <" in methodology.PROMPT
+        assert "`未覆盖: <主题> | <" in methodology.PROMPT
