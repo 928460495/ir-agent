@@ -25,8 +25,8 @@ from ir_agent.drivers import (MAX_FACTORS, MIN_FACTORS, TARGET_LABEL,
                               check_closure)
 from ir_agent.formula import (MODES, RESERVED, TARGETS as _FORMULA_TARGETS,
                               Constant, FormulaInvalid, FormulaModel,
-                              from_decomps, parse_constant, parse_formula,
-                              valid_name)
+                              flat_factors as _flat, from_decomps,
+                              parse_constant, parse_formula, valid_name)
 from ir_agent.lineparse import keyed, pick
 
 _DECOMP = keyed("分解")
@@ -548,25 +548,6 @@ def _to_dsl(m: Methodology) -> str:
     for p in m.pitfalls:
         lines.append(f"陷阱: {p}")
     return "\n".join(lines)
-
-
-def _flat(xs) -> list[Factor]:
-    """分解式列表 / `FormulaModel` / 因子列表 → 因子列表（按 key 去重、保序）。
-
-    旧调用方传 `m.decompositions`（每条带 `.factors`），新调用方传 `m.model`；
-    两者在这里归一，下游函数不必各写一套。"""
-    if xs is None:
-        return []
-    if isinstance(xs, FormulaModel):
-        xs = xs.factors
-    out: list[Factor] = []
-    seen: set[str] = set()
-    for x in xs:
-        for f in (getattr(x, "factors", None) or [x]):
-            if f.key not in seen:
-                seen.add(f.key)
-                out.append(f)
-    return out
 
 
 def theme_coverage(decomps: list, themes: list[str]) -> list[tuple[str, str]]:

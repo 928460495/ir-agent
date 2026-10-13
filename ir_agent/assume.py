@@ -31,8 +31,13 @@ from enum import Enum
 
 from ir_agent import gaps
 from ir_agent.basis import Basis, BasisKind, InvalidBasis, validate
+from ir_agent.formula import (FormulaError, FormulaInvalid, FormulaModel,
+                              as_model, evaluate, flat_factors, from_decomps,
+                              parse_formula, simulate, Constant as _Constant,
+                              parse_constant)
 from ir_agent.drivers import (Decomposition, DecompositionInvalid, Factor, Op,
-                              TARGET_LABEL, check_dimensions, compose, reconcile)
+                              TARGET_LABEL, Residual, check_dimensions, compose,
+                              reconcile)
 from ir_agent.gaps import FactorData
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.lineparse import keyed, pick
@@ -67,6 +72,10 @@ _LINE = keyed("假设")
 _QUOTE = re.compile(r"[「\"'“](.+?)[」”\"']", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 _NUM = re.compile(r"-?\d+(?:\.\d+)?%?")
+# 水平模式（或公式用到 上期/基期(因子) 时）因子第 0 年的取值，AI 在门③ 补填。
+_BASE_LINE = keyed("基期")
+# 按百分比填的单位：必须带 %。pp 不带 %；其他单位（万吨、元…）按原数、不带 %。
+_PCT_UNITS = frozenset({"变化率", "%", "百分比"})
 
 
 def _normalize_num(raw: str) -> str:
@@ -154,6 +163,18 @@ class Row:
     basis_flag: str = ""
 
 
+@dataclass
+class BaseValue:
+    """一个因子第 0 年的取值。`source`：「账本」（数据线索里 `[[key]]` 声明且
+    账本有上年值，代码取）或「AI」（门③ 由 AI 补填并给依据）。"""
+
+    value: Decimal
+    bases: list = field(default_factory=list)
+    note: str = ""
+    source: str = "AI"
+    basis_unverified: str = ""
+
+
 def _decomp_to_dict(d: Decomposition) -> dict:
     return {"target": d.target, "op": d.op.value,
             "factors": [{"key": f.key, "label": f.label, "unit": f.unit,
@@ -178,31 +199,81 @@ def to_json(a: "AssumptionSet", **extra) -> dict:
     同时记下 AI 的原始取值: 人改过之后，原来的依据未必还支撑新数字，
     那件事必须被看见而不是悄悄放行。
 
-    **分解模式下 `decomps` 与每行的 `factor_key` 必须一起存下来。**
-    漏掉它们不会立刻报错 —— 第二阶段照样能读出一个 AssumptionSet，
-    只是 `factor_key` 全变空串、`decomps` 变空列表：`synthesize()` 按
-    factor_key 分组，空 key 的行会被整体滤掉，`apply_to`/`to_driver_block`
-    因此拿到空列表，人在第一阶段批准的因子分解在第二阶段悄悄消失，
-    却不会有任何异常提示——这正是本模块要防的「静默出错」。
+    **分解模式下分解式与每行的 `factor_key` 必须一起存下来。** 漏掉它们
+    不会立刻报错 —— 第二阶段照样能读出一个 AssumptionSet，只是因子分解
+    悄悄消失，这正是本模块要防的「静默出错」。
+
+    **schema 2（2026-10-14 公式化）**：公式化的分解式存进 `model`（模式、因子、
+    常量、两条公式），因子第 0 年取值存进 `base_values`。旧的乘/加分解式仍存
+    `decomps`，读回时翻译成公式（`formula.from_decomps`）。
     """
-    return {"labels": a.labels,
-            "decomps": [_decomp_to_dict(d) for d in a.decomps],
-            "rows": [{"driver": r.driver, "year": r.year,
-                      "bear": str(r.bear), "base": str(r.base),
-                      "bull": str(r.bull), "note": r.note,
-                      "factor_key": r.factor_key,
-                      "bases": [b.to_dict() for b in r.bases],
-                      "proposed": {"bear": str(r.bear), "base": str(r.base),
-                                   "bull": str(r.bull)}}
-                     for r in a.rows],
-            **extra}
+    m = a.model
+    out = {"schema": 2, "labels": a.labels,
+           "decomps": [_decomp_to_dict(d) for d in a.decomps],
+           "rows": [{"driver": r.driver, "year": r.year,
+                     "bear": str(r.bear), "base": str(r.base),
+                     "bull": str(r.bull), "note": r.note,
+                     "factor_key": r.factor_key,
+                     "bases": [b.to_dict() for b in r.bases],
+                     "proposed": {"bear": str(r.bear), "base": str(r.base),
+                                  "bull": str(r.bull)}}
+                    for r in a.rows],
+           **extra}
+    if m is not None and not m.legacy:
+        out["model"] = _model_to_dict(m)
+    if a.base_values:
+        out["base_values"] = {
+            k: {"value": str(v.value), "bases": [b.to_dict() for b in v.bases],
+                "note": v.note, "source": v.source}
+            for k, v in a.base_values.items()}
+    return out
+
+
+def _model_to_dict(m: FormulaModel) -> dict:
+    return {"mode": m.mode,
+            "factors": [{"key": f.key, "label": f.label, "unit": f.unit,
+                         "source_hint": f.source_hint,
+                         "search_term": f.search_term, "short": f.short}
+                        for f in m.factors],
+            "constants": [{"name": c.name, "value": str(c.value),
+                           "source": c.source} for c in m.constants],
+            "formulas": {t: fm.text for t, fm in m.formulas.items()}}
+
+
+def _model_from_dict(d: dict) -> FormulaModel:
+    """读回公式化分解式。**构造即校验**：人手改坏的公式在这里给一句看得懂的
+    话（「请重跑第一阶段」），不让第二阶段崩成 traceback。"""
+    factors = [Factor(key=f["key"], label=f["label"], unit=f["unit"],
+                      source_hint=f.get("source_hint", ""),
+                      search_term=f.get("search_term", ""), short=f["short"])
+               for f in d.get("factors") or []]
+    consts = [_Constant(c["name"], Decimal(c["value"]), c.get("source", ""))
+              for c in d.get("constants") or []]
+    declared = {f.short for f in factors} | {c.name for c in consts}
+    try:
+        m = FormulaModel(
+            mode=d.get("mode", ""), factors=factors, constants=consts,
+            formulas={t: parse_formula(txt, t, declared)
+                      for t, txt in (d.get("formulas") or {}).items()})
+        m.validate()
+    except FormulaInvalid as e:
+        raise AssumeFailed(f"判断项里的分解式已不合法：{e}　——请重跑第一阶段，"
+                           "重新预研分解式后再填判断项。") from e
+    return m
 
 
 def from_json(d: dict, code: str = "") -> tuple["AssumptionSet", list[str]]:
-    """读回，并报出人改过哪些值。"""
+    """读回，并报出人改过哪些值。旧格式（没有 `model`）的乘/加分解式照旧读回。"""
     decomps = [_decomp_from_dict(x) for x in (d.get("decomps") or [])]
+    model = _model_from_dict(d["model"]) if d.get("model") else None
     a = AssumptionSet(code=code or d.get("code", ""),
-                      labels=d.get("labels") or [], decomps=decomps)
+                      labels=d.get("labels") or [], decomps=decomps,
+                      model=model)
+    for k, v in (d.get("base_values") or {}).items():
+        a.base_values[k] = BaseValue(
+            value=Decimal(v["value"]),
+            bases=[Basis.from_dict(b) for b in (v.get("bases") or [])],
+            note=v.get("note", ""), source=v.get("source", "AI"))
     edits: list[str] = []
     for x in d.get("rows") or []:
         r = Row(driver=x["driver"], year=int(x["year"]),
@@ -214,23 +285,22 @@ def from_json(d: dict, code: str = "") -> tuple["AssumptionSet", list[str]]:
         p = x.get("proposed") or {}
         for case in ("bear", "base", "bull"):
             if case in p and Decimal(p[case]) != getattr(r, case):
-                cn = _row_label(r, decomps)
+                cn = _row_label(r, a._m() or decomps)
                 edits.append(
                     f"{cn} 第{r.year}年 {case}：模型给 {p[case]}，"
                     f"核实后改为 {getattr(r, case)}")
     return a, edits
 
 
-def _row_label(r: "Row", decomps: list[Decomposition]) -> str:
+def _row_label(r: "Row", decomps) -> str:
     """人改过的值要报得出名字。分解模式下 `r.driver` 是 revenue/
     gross_margin，不是因子本身 —— 要报的是具体改了哪个因子（否则改了
     「产能」和改了「单价」在提示里会长得一模一样，都写成同一个笼统的
-    目标名）。"""
+    目标名）。`decomps` 可以是旧分解式列表，也可以是 `FormulaModel`。"""
     if r.factor_key:
-        for d in decomps:
-            for f in d.factors:
-                if f.key == r.factor_key:
-                    return f.label
+        for f in flat_factors(decomps):
+            if f.key == r.factor_key:
+                return f.label
         return r.factor_key
     return "营收增速" if r.driver == "growth" else "毛利率"
 
@@ -275,6 +345,18 @@ class AssumptionSet:
     # 降级时最后一次的**完整**模型输出，供调用方落盘排查（见 AssumeFailed.raw）。
     # 不进 describe()——它是给人批准用的清单，不该混进几十行失败草稿。
     degraded_raw: str = ""
+    # 公式化后的分解式（`formula.FormulaModel`）。新写法直接给；旧的 `decomps`
+    # 由 `_m()` 惰性翻译。**合成、清单、落盘一律经它。**
+    model: object = None
+    # 因子第 0 年的取值 {短名: BaseValue}（水平模式，或公式用到 上期/基期(因子)）。
+    base_values: dict = field(default_factory=dict)
+    # 第 0 年营收（亿元，与工作簿同口径）。旧的乘法链与尺度无关，缺省按 1。
+    base_revenue: Decimal | None = None
+
+    def _m(self) -> FormulaModel | None:
+        if self.model is None and self.decomps:
+            self.model = from_decomps(list(self.decomps))
+        return self.model
 
     def path(self, driver: str, case: Case) -> list[Decimal]:
         got = sorted((r for r in self.rows if r.driver == driver),
@@ -318,7 +400,10 @@ class AssumptionSet:
                       f"{(c.rationale or c.objection).strip()[:140]}"
                       for c in up]
             lines += [""]
-        if self.decomps:
+        m = self._m()
+        if m is not None and not m.legacy:
+            lines += self._describe_formula()
+        elif m is not None:
             lines += self._describe_factors()
         else:
             lines += self._describe_scalar()
@@ -353,67 +438,160 @@ class AssumptionSet:
                         f" —— {d.describe()}")
             lines.append("")
             for f in d.factors:
-                got = sorted((r for r in self.rows if r.factor_key == f.key),
-                             key=lambda r: r.year)
-                lines.append(f"### {f.label}（{f.unit}）")
-                lines.append("")
-                lines.append("| 年 | 悲观 | 中性 | 乐观 | 理由 | 依据 |")
-                lines.append("| --- | --- | --- | --- | --- | --- |")
-                if not got:
-                    # **遗漏必须可见。** 因子在分解式里，却一行取值都
-                    # 没有——不能悄悄不显示，得让人一眼看出这里空着。
-                    lines.append("| — | — | — | — | **未填写** | — |")
-                for r in got:
-                    lab = self.labels[r.year - 1] \
-                        if r.year <= len(self.labels) else f"第{r.year}年"
-                    # 出口二落地为空 `bases`——不能让这一格跟"有依据"的
-                    # 行看起来一样（一样都是拿 join 拼一遍，空列表拼出的
-                    # 是空字符串，读者会当成"依据列忘了填"而不是"这本来
-                    # 就是没有依据的估计"）。必须显式标出来，一眼分得清。
-                    #
-                    # `basis_unverified` 非空——引文逐字核验不过、但因子
-                    # 模式下已放宽为标注而非驳回：这一格同样不能跟"核验
-                    # 通过"的行长得一样，否则放宽换来的就是"审核形同虚
-                    # 设却连标注都看不见"。引文本身（quote）仍然原样显示
-                    # ——它不是编造，只是没能逐字对应，人要看到具体写的
-                    # 是什么才能判断这段转述靠不靠谱。
-                    #
-                    # **理由自称「无数据（估计）」的行，挂了占位符也还是
-                    # 估计。** 600584 实跑当场抓到：4 个因子的理由白纸黑字
-                    # 写着无数据、取值为估计，依据列却挂着一个真实存在、
-                    # 方向上沾边的账本占位符（折旧摊销之于固定成本分摊、
-                    # 营收增速之于扩产节奏），于是判据 `not r.bases` 认为
-                    # 它们"有依据"，底部那份「没有证据支撑」的名单里五个
-                    # 该在的因子只剩一个。等于用一个合法但不直接支撑取值的
-                    # 占位符，把"这个数是拍的"从清单上抹掉——而清单是人工
-                    # 批准唯一能看的东西。占位符本身照常显示（它是真的、
-                    # 有参考价值），只是改称「方向性参照」，不再冒充
-                    # 「这个取值的证据」。
-                    est = _looks_like_estimate(r.note)
-                    parts: list[str] = []
-                    if est or not r.bases:
-                        parts.append("⚠ 估计（无数据支撑）")
-                    if r.basis_flag:
-                        parts.append("⚠ " + r.basis_flag)
-                    if r.bases:
-                        body = "；".join(b.describe() for b in r.bases)
-                        if r.basis_unverified:
-                            parts.append("⚠ 依据未能逐字核验：" + body)
-                        elif est:
-                            parts.append("方向性参照：" + body)
-                        else:
-                            parts.append(body)
-                    ref = "；".join(parts)
-                    lines.append(
-                        f"| {lab} | {_fmt_factor(r.bear, f.unit)} "
-                        f"| {_fmt_factor(r.base, f.unit)} "
-                        f"| {_fmt_factor(r.bull, f.unit)} "
-                        f"| {r.note or '—'} | {ref} |")
-                lines.append("")
+                lines += self._factor_table(f)
             lines += self._describe_composed(d)
             lines += self._describe_residuals(d)
         lines += self._describe_estimated()
         lines += self._describe_unverified()
+        return lines
+
+    def _factor_table(self, f) -> list[str]:
+        """一个因子的逐年表。新旧两种清单共用。"""
+        lines: list[str] = []
+        got = sorted((r for r in self.rows if r.factor_key == f.key),
+                     key=lambda r: r.year)
+        lines.append(f"### {f.label}（{f.unit}）")
+        lines.append("")
+        lines.append("| 年 | 悲观 | 中性 | 乐观 | 理由 | 依据 |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        if not got:
+            # **遗漏必须可见。** 因子在分解式里，却一行取值都
+            # 没有——不能悄悄不显示，得让人一眼看出这里空着。
+            lines.append("| — | — | — | — | **未填写** | — |")
+        for r in got:
+            lab = self.labels[r.year - 1] \
+                if r.year <= len(self.labels) else f"第{r.year}年"
+            # 出口二落地为空 `bases`——不能让这一格跟"有依据"的
+            # 行看起来一样（一样都是拿 join 拼一遍，空列表拼出的
+            # 是空字符串，读者会当成"依据列忘了填"而不是"这本来
+            # 就是没有依据的估计"）。必须显式标出来，一眼分得清。
+            #
+            # `basis_unverified` 非空——引文逐字核验不过、但因子
+            # 模式下已放宽为标注而非驳回：这一格同样不能跟"核验
+            # 通过"的行长得一样，否则放宽换来的就是"审核形同虚
+            # 设却连标注都看不见"。引文本身（quote）仍然原样显示
+            # ——它不是编造，只是没能逐字对应，人要看到具体写的
+            # 是什么才能判断这段转述靠不靠谱。
+            #
+            # **理由自称「无数据（估计）」的行，挂了占位符也还是
+            # 估计。** 600584 实跑当场抓到：4 个因子的理由白纸黑字
+            # 写着无数据、取值为估计，依据列却挂着一个真实存在、
+            # 方向上沾边的账本占位符（折旧摊销之于固定成本分摊、
+            # 营收增速之于扩产节奏），于是判据 `not r.bases` 认为
+            # 它们"有依据"，底部那份「没有证据支撑」的名单里五个
+            # 该在的因子只剩一个。等于用一个合法但不直接支撑取值的
+            # 占位符，把"这个数是拍的"从清单上抹掉——而清单是人工
+            # 批准唯一能看的东西。占位符本身照常显示（它是真的、
+            # 有参考价值），只是改称「方向性参照」，不再冒充
+            # 「这个取值的证据」。
+            est = _looks_like_estimate(r.note)
+            parts: list[str] = []
+            if est or not r.bases:
+                parts.append("⚠ 估计（无数据支撑）")
+            if r.basis_flag:
+                parts.append("⚠ " + r.basis_flag)
+            if r.bases:
+                body = "；".join(b.describe() for b in r.bases)
+                if r.basis_unverified:
+                    parts.append("⚠ 依据未能逐字核验：" + body)
+                elif est:
+                    parts.append("方向性参照：" + body)
+                else:
+                    parts.append(body)
+            ref = "；".join(parts)
+            lines.append(
+                f"| {lab} | {_fmt_factor(r.bear, f.unit)} "
+                f"| {_fmt_factor(r.base, f.unit)} "
+                f"| {_fmt_factor(r.bull, f.unit)} "
+                f"| {r.note or '—'} | {ref} |")
+        lines.append("")
+        return lines
+
+    def _describe_formula(self) -> list[str]:
+        """公式化分解式的清单（spec 2026-10-14 三）：公式、常量、基期值、每个
+        因子一张逐年表、三档逐年的合成结果、历史对账。"""
+        m = self.model
+        lines = [f"## 分解式（{m.mode}模式）", ""]
+        lines += [f"- {m.describe(t)}" for t in ("revenue", "gross_margin")
+                  if t in m.formulas]
+        lines.append("")
+        if m.constants:
+            lines += ["**常量**", ""]
+            lines += [f"- {c.name} = {c.value}（{c.source}）" for c in m.constants]
+            lines.append("")
+        need = m.needs_base()
+        if need:
+            lines += ["**基期值（第 0 年）**", "",
+                      "| 因子 | 取值 | 来源 | 依据 |", "| --- | --- | --- | --- |"]
+            for f in need:
+                bv = self.base_values.get(f.short)
+                if bv is None:
+                    lines.append(f"| {f.label} | **未填写** | — | — |")
+                    continue
+                ref = "；".join(b.describe() for b in bv.bases)
+                if not bv.bases or _looks_like_estimate(bv.note):
+                    ref = "⚠ 估计（无数据支撑）" + (f"；{ref}" if ref else "")
+                if bv.basis_unverified:
+                    ref = "⚠ 依据未能逐字核验：" + ref
+                lines.append(f"| {f.label} | {_fmt_factor(bv.value, f.unit)} "
+                             f"| {bv.source} | {ref}{('（' + bv.note + '）') if bv.note else ''} |")
+            lines.append("")
+        for f in m.factors:
+            lines += self._factor_table(f)
+        lines += self._describe_synthesis()
+        for t in ("revenue", "gross_margin"):
+            lines += self._residual_lines(t)
+        lines += self._describe_estimated()
+        lines += self._describe_unverified()
+        return lines
+
+    def _describe_synthesis(self) -> list[str]:
+        lines = ["## 合成结果（代码按公式算出，不是模型直接填的数）", ""]
+        m = self.model
+        if m.mode == "变化" and self.base_margin is None:
+            return lines + ["基期毛利率未知，暂无法显示合成结果——因子取值仍已"
+                            "生效，只是这里算不出用于展示的数。", ""]
+        try:
+            got = {c: synthesize(self, c, self.base_margin, self.margin_bases)
+                   for c in (Case.BEAR, Case.BASE, Case.BULL)}
+        except AssumeFailed as e:
+            return lines + [f"算不出来：{e}", ""]
+        lines += ["| 年 | 营收增速 悲观 | 中性 | 乐观 | 毛利率 悲观 | 中性 | 乐观 |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for y in range(len(got[Case.BASE][0])):
+            lab = self.labels[y] if y < len(self.labels) else f"第{y+1}年"
+            g = [got[c][0][y] for c in (Case.BEAR, Case.BASE, Case.BULL)]
+            mg = [got[c][1][y] for c in (Case.BEAR, Case.BASE, Case.BULL)]
+            lines.append(f"| {lab} | " + " | ".join(f"{x:.2%}" for x in g)
+                         + " | " + " | ".join(f"{x:.2%}" for x in mg) + " |")
+        lines.append("")
+        lagged = {n for _, n in m.formulas["gross_margin"].lagged()}
+        if self.margin_bases and "毛利率" not in lagged:
+            lines += ["⚠ 半年报锚定只影响第 1 年：毛利率公式不读 上期/基期(毛利率)，"
+                      "第 2 年起承接不上锚定值。", ""]
+        return lines
+
+    def _residual_lines(self, target: str) -> list[str]:
+        info = self.residuals.get(target)
+        if not info:
+            return []
+        cn = TARGET_LABEL.get(target, target)
+        lines = [f"**{cn}历史回算残差**（仅供核对分解式抓没抓住主要矛盾，"
+                 "不作为通过/不通过的判据）", ""]
+        res = info.get("residuals") or []
+        if res:
+            lines.append("| 期间 | 合成 | 实际 | 残差 |")
+            lines.append("| --- | --- | --- | --- |")
+            for r in res:
+                lines.append(f"| {r.period} | {r.composed:.2%} "
+                             f"| {r.actual:.2%} | {r.gap:+.2%} |")
+            lines.append("")
+        no_hist = info.get("no_history") or []
+        if no_hist:
+            lines.append(f"无历史校验：{'、'.join(no_hist)}"
+                         "（账本里取不到足够的历史序列，不是没有偏差，"
+                         "是这里没法核验）")
+            lines.append("")
         return lines
 
     def _describe_unverified(self) -> list[str]:
@@ -450,29 +628,15 @@ class AssumptionSet:
         """展示用的合成结果，**按目标单独判断能不能算**，不是「任一
         分解式缺基期就全部显示不出来」（I7）。
 
-        营收是乘法链 Π(1+r)−1，永远算得出来，不需要基期；毛利率是加法
-        链，缺基期却硬要合成，会显示一个用假基期算出来、看起来正常的
-        错数——比不显示更糟，所以只有这一条线才返回 None 让调用方改
-        显示说明文字，而不会连坐到营收那一节。
+        营收增速永远算得出来，不需要基期毛利率；毛利率缺基期却硬要合成，会
+        显示一个用假基期算出来、看起来正常的错数——比不显示更糟，所以只有
+        这一条线才返回 None 让调用方改显示说明文字。
         """
-        if d.op is not Op.MULTIPLY and self.base_margin is None:
+        if d.target != "revenue" and self.base_margin is None:
             return None
-        attr = {Case.BULL: "bull", Case.BASE: "base",
-                Case.BEAR: "bear"}[case]
-        keys = {f.key for f in d.factors}
-        years = max((r.year for r in self.rows if r.factor_key in keys),
-                    default=0)
-        out: list[Decimal] = []
-        for y in range(1, years + 1):
-            vals = {r.factor_key: getattr(r, attr) for r in self.rows
-                    if r.year == y and r.factor_key in keys}
-            if d.op is Op.MULTIPLY:
-                out.append(compose(d, vals))
-            else:
-                base = (self.margin_bases[attr][y - 1] if self.margin_bases
-                        else self.base_margin)
-                out.append(compose(d, vals, base=base))
-        return out
+        bm = self.base_margin if self.base_margin is not None else Decimal(0)
+        g, m = synthesize(self, case, bm, self.margin_bases)
+        return g if d.target == "revenue" else m
 
     def _describe_composed(self, d: Decomposition) -> list[str]:
         lines = ["**合成结果**（代码按分解式算出，不是模型直接填的数）", ""]
@@ -531,8 +695,13 @@ def _fmt_factor(v: Decimal, unit: str) -> str:
     """因子取值按单位格式化。**pp 不能用 :.2% 显示**——C4 的字面量
     百分号 bug 一旦漏网，`-0.03` 用 :.2% 会显示成 "-3.00%"，和正确的
     `-3`（应显示 "-3.00pp"）看起来一模一样，人从清单上根本发现不了。
-    pp 按原始数字显示，才能让写错单位的字面量露出马脚。"""
-    return f"{v:+.2f}pp" if unit == "pp" else f"{v:.2%}"
+    pp 按原始数字显示，才能让写错单位的字面量露出马脚。
+    其他单位（万吨、元…，公式化后允许）按「数值 + 单位」显示。"""
+    if unit == "pp":
+        return f"{v:+.2f}pp"
+    if unit in _PCT_UNITS:
+        return f"{v:.2%}"
+    return f"{v:,} {unit}"
 
 
 def parse(text: str, years: int,
@@ -551,6 +720,41 @@ def parse(text: str, years: int,
     if not decomps:
         return _parse_scalar(text, years)
     return _parse_factors(text, years, decomps, factor_data, as_of)
+
+
+def _unit_guard(unit: str, label: str, cells: list[str]) -> None:
+    """按单位挡字面量。C4：pp 与 % 不是一回事；I1：变化率必须显式带 %、不认 bp；
+    公式化后的其他单位（万吨、元…）按原数，不带 % 也不带 bp。"""
+    norm = [c.replace("％", "%") for c in cells]
+    if unit == "pp":
+        if any("%" in c for c in norm):
+            raise AssumeFailed(
+                f"因子「{label}」按 pp 计，不按 %：{' / '.join(cells)} 里带了 % "
+                "—— pp 与 % 不是一回事，85%→82% 是 −3pp，写成 −3% 会被当成 "
+                "−0.03pp，缩小 100 倍。请直接填数字（如 −3），不要带 %。")
+        return
+    if unit in _PCT_UNITS:
+        for raw, n in zip(cells, norm):
+            if "bp" in n.lower():
+                raise AssumeFailed(
+                    f"因子「{label}」按变化率（%）计，不认 bp：{raw} —— "
+                    "bp 与 % 不是同一套单位，不做隐式换算，请直接换算"
+                    f"成百分比再填（如 −350bp 请写成 −3.5%）。")
+            # I-a（final-fix-D）：守卫必须复用 `_pct` 自己会用到的那个 token
+            # 来判断，"0.5 %" 这样的空格骗不过去。
+            if not (_pct_token(raw) or "").endswith("%"):
+                raise AssumeFailed(
+                    f"因子「{label}」按变化率计，必须带 %：{raw} —— "
+                    "裸数会被当成小数直接使用而不是百分比（0.5 会被"
+                    "解释成 50%，而不是你想表达的 0.5%），且这类错误"
+                    "合成后看起来仍然合理，人从清单上发现不了。"
+                    "请直接填百分比，如 −3.5%。")
+        return
+    for raw, n in zip(cells, norm):
+        if "%" in n or "bp" in n.lower():
+            raise AssumeFailed(
+                f"因子「{label}」的单位是「{unit}」，按原数填，不要带 % 或 bp："
+                f"{raw}")
 
 
 def _parse_scalar(text: str, years: int) -> AssumptionSet:
@@ -610,31 +814,34 @@ def _parse_scalar(text: str, years: int) -> AssumptionSet:
 
 
 def _parse_factors(text: str, years: int,
-                   decomps: list[Decomposition],
+                   decomps,
                    factor_data: dict | None = None,
                    as_of: date | None = None) -> AssumptionSet:
     """按因子解析。每一行对应分解式里的一个因子，而不是营收增速/毛利率
     本身 —— 合成交给 `synthesize`，模型只负责填因子。
 
-    `factor_data`/`as_of` 传给 `_factor_basis` 判断依据是否合法——见
-    该函数文档，这里只负责把每个因子对应的 `FactorData` 找出来传过去。
+    `decomps` 是旧分解式列表或 `FormulaModel`。因子按**短名或完整名**认（公式化
+    后提示词让模型写短名）。另认 `基期: <短名> | <值> | <依据>` 行：需要第 0 年
+    取值、而账本里没有的因子由 AI 补填（spec 2026-10-14 三）。
     """
     factor_data = factor_data or {}
-    by_label = {f.label: f for d in decomps for f in d.factors}
-    target_of = {f.key: d.target for d in decomps for f in d.factors}
-    out = AssumptionSet(code="", labels=[], decomps=list(decomps))
-    # C2：同一因子同一年出现两行时，合成侧（synthesize/_synthesized_for）
-    # 用字典推导式取最后一行，to_driver_block 曾经用 next() 取第一行，
-    # 清单显示的是其中一行、工作簿实际建模用的是另一行——人批准的数字
-    # 与真正驱动估值的数字不是同一个。重复行本身就说明模型在一次回复
-    # 里生成了「修正前/修正后」两版，没想清楚，应当直接驳回重填，
-    # 而不是替它决定该采信哪一行。
+    model = as_model(decomps)
+    names: dict = {}
+    for f in model.factors:
+        names[f.label] = f
+        if f.short:
+            names.setdefault(f.short, f)
+    target_of: dict[str, str] = {}
+    for t in ("revenue", "gross_margin"):
+        for f in model.factors_of(t):
+            target_of.setdefault(f.key, t)
+    out = AssumptionSet(code="", labels=[],
+                        decomps=list(decomps) if isinstance(decomps, list) else [],
+                        model=model)
+    # C2：同一因子同一年出现两行，重复行本身说明模型在一次回复里生成了
+    # 「修正前/修正后」两版，应当直接驳回重填，而不是替它决定该采信哪一行。
     seen: set[tuple[str, int]] = set()
-    # 「同上」出口③要按因子回指"上一行"——不是文本里紧邻的上一行
-    # （那可能是别的因子），而是同一个 `factor_key` 之前处理过的那
-    # 一行。按因子分别记录，出现过的因子才有"上一行"可回指；键不存在
-    # （`.get()` 返回 `None`）与"上一行是空依据"（存的是 `[]`）要能
-    # 区分，前者必须驳回，后者允许原样复用一个空列表。
+    # 「同上」出口③按因子回指同一个 `factor_key` 之前处理过的那一行。
     last_basis: dict[str, list[Basis]] = {}
     for m in _LINE.finditer(text):
         parts = [p.strip() for p in m.group(1).split("|")]
@@ -642,12 +849,13 @@ def _parse_factors(text: str, years: int,
             raise AssumeFailed(
                 f"假设一行字段不足（需 6 段：因子|年|悲观|中性|乐观|依据），"
                 f"得到 {len(parts)}：{m.group(1)}")
-        label = pick(parts[0], list(by_label))
-        if label is None:
+        hit = pick(parts[0], list(names))
+        if hit is None:
             raise AssumeFailed(
                 f"未知的因子 {parts[0]!r}，本次分解式里只有："
-                + "、".join(by_label))
-        f = by_label[label]
+                + "、".join(f.short or f.label for f in model.factors))
+        f = names[hit]
+        label = f.label
         try:
             year = int(re.search(r"\d+", parts[1]).group(0))
         except (AttributeError, ValueError) as e:
@@ -661,54 +869,30 @@ def _parse_factors(text: str, years: int,
                 "修正后两版都留在同一次回复里。重复行本身说明这个因子还"
                 "没想清楚，请只保留一行，不要让代码替你决定该采信哪一行。")
         seen.add((f.key, year))
-        # C4：pp 与 % 不是一回事——85%→82% 是 −3pp，写成 −3% 会被 _pct
-        # 解析成 −0.03，缩小 100 倍。单调性/闭合校验都抓不住这个错，
-        # 只能在这里把字面量本身挡下来。
-        # I1：全角 ％ 与半角 % 一视同仁，否则 "-3％" 能绕过这道守卫
-        # （对 pp 而言"碰巧对"，但下一次全角换成 "-3.5％" 就会被当成
-        # 裸数 -3.5，渲染成 -350%）。
-        if f.unit == "pp" and any(
-                "%" in parts[i].replace("％", "%") for i in (2, 3, 4)):
-            raise AssumeFailed(
-                f"因子「{label}」按 pp 计，不按 %：{parts[2]} / {parts[3]} "
-                f"/ {parts[4]} 里带了 % —— pp 与 % 不是一回事，85%→82% "
-                "是 −3pp，写成 −3% 会被当成 −0.03pp，缩小 100 倍。"
-                "请直接填数字（如 −3），不要带 %。")
-        # I1：单位守卫此前只挡了 pp 侧的字面量 %，变化率侧完全没有防护——
-        # 裸数 0.5 会被当成小数直接使用（渲染成 50.00%），对一个扩产
-        # 故事看起来完全正常，人根本看不出这里其实想表达 0.5%；
-        # -3.5pp / -350bp 这类把 pp/bp 误当变化率填的写法也会被静默
-        # 当裸数吞下去。变化率必须显式带 %（全角 ％ 等价，直接规范化；
-        # bp 是另一套单位，不做隐式换算，明确拒绝并提示换算方法）。
-        if f.unit != "pp":
-            for i in (2, 3, 4):
-                raw, norm = parts[i], parts[i].replace("％", "%")
-                if "bp" in norm.lower():
-                    raise AssumeFailed(
-                        f"因子「{label}」按变化率（%）计，不认 bp：{raw} —— "
-                        "bp 与 % 不是同一套单位，不做隐式换算，请直接换算"
-                        f"成百分比再填（如 −350bp 请写成 −3.5%）。")
-                # I-a（final-fix-D）：不能只查"整段字符串里有没有 %"——
-                # 一个 "0.5 %" 这样的空格就能骗过这道守卫（_pct 实际
-                # 解析出的 token 是不带 % 的裸数 "0.5"，%被空白隔开、
-                # 整个丢弃），"2026年+5%" 这类字面量也会因为字符串
-                # 末尾不相干的一个 % 而放行。守卫必须复用 `_pct` 自己
-                # 会用到的那个 token 来判断，两处才是同一套判据。
-                if not (_pct_token(raw) or "").endswith("%"):
-                    raise AssumeFailed(
-                        f"因子「{label}」按变化率计，必须带 %：{raw} —— "
-                        "裸数会被当成小数直接使用而不是百分比（0.5 会被"
-                        "解释成 50%，而不是你想表达的 0.5%），且这类错误"
-                        "合成后看起来仍然合理，人从清单上发现不了。"
-                        "请直接填百分比，如 −3.5%。")
+        _unit_guard(f.unit, label, parts[2:5])
         bases = _factor_basis(parts[5], label, factor_data.get(f.key),
                              as_of, prior=last_basis.get(f.key))
         last_basis[f.key] = bases
         out.rows.append(Row(
-            driver=target_of[f.key], year=year,
+            driver=target_of.get(f.key, "factor"), year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
             bases=bases, note=_note(parts[5]), factor_key=f.key,
             basis_flag=_conclusion_flags(bases, factor_data.get(f.key))))
+    for m in _BASE_LINE.finditer(text):
+        parts = [p.strip() for p in m.group(1).split("|")]
+        if len(parts) < 3:
+            raise AssumeFailed(
+                f"基期一行字段不足（需 3 段：因子|取值|依据），得到：{m.group(1)}")
+        hit = pick(parts[0], list(names))
+        if hit is None:
+            raise AssumeFailed(f"基期行里未知的因子 {parts[0]!r}")
+        f = names[hit]
+        if f.short in out.base_values:
+            raise AssumeFailed(f"因子「{f.label}」的基期出现了不止一行，只保留一行。")
+        _unit_guard(f.unit, f.label, [parts[1]])
+        bases = _factor_basis(parts[2], f.label, factor_data.get(f.key), as_of)
+        out.base_values[f.short] = BaseValue(
+            value=_pct(parts[1]), bases=bases, note=_note(parts[2]), source="AI")
     return out
 
 
@@ -729,40 +913,83 @@ def anchor_from_cal(cal: dict) -> dict | None:
             "base_rev": float(base_rev)}
 
 
-def margin_bases(a: AssumptionSet, base_margin: Decimal,
-                 anchor: dict | None) -> dict[str, list[Decimal]] | None:
-    """锚定开启时毛利率的按档、按年基期；没有锚定返回 None（维持单一年报基期）。
-
-    **生益科技实跑**：Base 档 2026 被半年报锚定在 30.69%，2027 却回到「年报
-    基期 26.47% + 累计 pp」= 25.87%，一年凭空掉 4.8pp。加法链对全部年份用同
-    一个年报基期，而首年已被实际数覆盖——两个起点混用了。
-
-    第 1 年仍用年报基期（该年由工作簿锚定覆盖，清单横幅已说明）；第 2 年起
-    用「该档锚定后的首年毛利率 − 该档首年累计 pp」，于是第 t 年 = 锚定水平 +
-    （第 t 年累计 − 第 1 年累计）：保留模型判断的逐年变化，起点换成实际水平。
-    """
-    if anchor is None:
-        return None
-    gm_d = next((d for d in a.decomps if d.target == "gross_margin"), None)
-    if gm_d is None:
-        return None
-    keys = {f.key for f in gm_d.factors}
-    years = max((r.year for r in a.rows if r.factor_key in keys), default=0)
-    if years == 0:
-        return None
+def _anchor_values(anchor: dict) -> dict[str, Decimal]:
+    """半年报锚定后三档各自的第 1 年毛利率。四舍五入到 6 位，与旧 `margin_bases`
+    逐位一致（工作簿用的也是这一份）。"""
     from ir_agent.dcf import anchored_year1
 
-    out: dict[str, list[Decimal]] = {}
+    out: dict[str, Decimal] = {}
     for i, name in enumerate(("bull", "base", "bear")):
         _, gm1 = anchored_year1(rev_h=anchor["rev"], cogs_h=anchor["cogs"],
                                 share=float(anchor["share3"][i]),
                                 gm_rest=float(anchor["gm_rest3"][i]),
                                 base_rev=anchor["base_rev"])
-        cum1 = sum((getattr(r, name) for r in a.rows
-                    if r.year == 1 and r.factor_key in keys), Decimal(0))
-        shifted = Decimal(str(round(gm1, 6))) - cum1 / 100
-        out[name] = [base_margin] + [shifted] * (years - 1)
+        out[name] = Decimal(str(round(gm1, 6)))
     return out
+
+
+def margin_bases(a: AssumptionSet, base_margin: Decimal,
+                 anchor: dict | None) -> dict[str, list[Decimal]] | None:
+    """锚定开启时 `基期(毛利率)` 的按档、按年取值；没有锚定返回 None。
+
+    **生益科技实跑**：Base 档 2026 被半年报锚定在 30.69%，2027 却回到「年报
+    基期 26.47% + 累计 pp」= 25.87%，一年凭空掉 4.8pp。加法链对全部年份用同
+    一个年报基期，而首年已被实际数覆盖——两个起点混用了。
+
+    第 1 年仍用基期（该年由工作簿锚定覆盖）；第 2 年起把基期平移为
+    `基期 + (锚定值 − 第 1 年公式值)`，即「让第 1 年公式结果正好等于锚定值」的
+    基期（spec 2026-10-14「写计划时的补充」2）。旧加法链下就是「锚定值 − 第 1 年
+    累计 pp/100」，与改动前逐位一致。
+    """
+    if anchor is None or a._m() is None:
+        return None
+    anchors = _anchor_values(anchor)
+    out: dict[str, list[Decimal]] = {}
+    for c in (Case.BULL, Case.BASE, Case.BEAR):
+        p = _simulate(a, c, base_margin)
+        if not p.margin:
+            return None
+        name = c.name.lower()
+        shifted = p.margin0 + (anchors[name] - p.margin[0])
+        out[name] = [p.margin0] + [shifted] * (len(p.margin) - 1)
+    return out
+
+
+def _values_for(a: AssumptionSet, case: Case) -> dict[str, list[Decimal]]:
+    """某一档每个因子第 1..N 年的取值 {短名: [...]}。同一因子同一年若有重复行，
+    后写入覆盖先写入（与改动前的字典推导式同一规则）。"""
+    attr = {Case.BULL: "bull", Case.BASE: "base", Case.BEAR: "bear"}[case]
+    m = a._m()
+    short_of = {f.key: f.short for f in m.factors}
+    by: dict[tuple[str, int], Decimal] = {}
+    for r in a.rows:
+        if r.factor_key in short_of:
+            by[(short_of[r.factor_key], r.year)] = getattr(r, attr)
+    years = max((y for _, y in by), default=0)
+    out: dict[str, list[Decimal]] = {}
+    for f in m.factors:
+        seq: list[Decimal] = []
+        for y in range(1, years + 1):
+            if (f.short, y) not in by:
+                break
+            seq.append(by[(f.short, y)])
+        out[f.short] = seq
+    return out
+
+
+def _simulate(a: AssumptionSet, case: Case, base_margin: Decimal | None,
+              anchor_y1: Decimal | None = None):
+    m = a._m()
+    base_rev = a.base_revenue
+    if base_rev is None and m.legacy:
+        base_rev = Decimal(1)          # 旧乘法链与尺度无关
+    try:
+        return simulate(m, _values_for(a, case),
+                        base_factors={k: v.value for k, v in a.base_values.items()},
+                        base_revenue=base_rev, base_margin=base_margin,
+                        anchor_y1=anchor_y1)
+    except FormulaError as e:
+        raise AssumeFailed(f"合成算不下去：{e}") from e
 
 
 def synthesize(a: AssumptionSet, case: Case, base_margin: Decimal,
@@ -772,25 +999,18 @@ def synthesize(a: AssumptionSet, case: Case, base_margin: Decimal,
     若让模型自己算出结果再填进去，分解就退化成一层装饰 —— 它可以先想好
     结果，再倒推几个因子凑出来。所以这里真的从因子值算，模型只填因子。
 
-    注意: 本函数本身**不做单调性校验** —— 校验属于 `check`（它要跨三档
-    分别调用本函数再比较），这里只管合成这一步。
+    `bases`（`margin_bases` 的结果，锚定开启时给）第 2 年起的值是平移后的
+    `基期(毛利率)`；这里把它换回该档的锚定值再推演，两者是同一件事的两种写法。
+
+    注意: 本函数本身**不做单调性校验** —— 校验属于 `check`。
     """
-    attr = {Case.BULL: "bull", Case.BASE: "base", Case.BEAR: "bear"}[case]
-    years = max((r.year for r in a.rows), default=0)
-    growth, margin = [], []
-    for y in range(1, years + 1):
-        vals = {r.factor_key: getattr(r, attr)
-                for r in a.rows if r.year == y and r.factor_key}
-        for d in a.decomps:
-            picked = {k: v for k, v in vals.items()
-                      if k in {f.key for f in d.factors}}
-            if d.target == "revenue":
-                growth.append(compose(d, picked))
-            else:
-                # bases 给了（锚定开启）就按档按年取，见 margin_bases。
-                base = bases[case.name.lower()][y - 1] if bases else base_margin
-                margin.append(compose(d, picked, base=base))
-    return growth, margin
+    p = _simulate(a, case, base_margin)
+    if bases:
+        seq = bases[case.name.lower()]
+        if len(seq) > 1 and p.margin:
+            p = _simulate(a, case, base_margin,
+                          anchor_y1=seq[1] - p.margin0 + p.margin[0])
+    return p.growth, p.margin
 
 
 def _note(raw: str) -> str:
@@ -1163,14 +1383,14 @@ def _latest(ledger: FactLedger, key: str, as_of: date) -> Decimal | None:
 
 
 def _implied_for(a: AssumptionSet, ledger: FactLedger, as_of: date,
-                 decomps: list[Decomposition] | None):
+                 decomps=None):
     """中性档营收路径的隐含份额。算不出来就返回 None。"""
-    rev = next((d for d in (decomps or []) if d.op is Op.MULTIPLY), None)
-    if rev is None:
+    if as_model(decomps) is None:
         rates = [r.base for r in sorted(a.rows, key=lambda x: x.year)
                  if r.driver == "growth"]
     else:
-        rates = a._synthesized_for(rev, Case.BASE)             # noqa: SLF001
+        bm = a.base_margin if a.base_margin is not None else Decimal(0)
+        rates, _ = synthesize(a, Case.BASE, bm)
     if not rates:
         return None
     return implied_scale(
@@ -1181,9 +1401,6 @@ def _implied_for(a: AssumptionSet, ledger: FactLedger, as_of: date,
         # 2026-10-06）: `industry.revenue_yoy` 取到的是 AI 爆发那一年的
         # 25.8%，把一个景气年外推五年会让行业涨 3.15 倍，分母被撑大，
         # 隐含份额算出来反而低于当前份额 —— 这道检查在景气行业里接近失效。
-        # 清单自己的理由栏引用的就是 `industry.revenue_cagr`（12.8%，并注明
-        # 「行业多年营收CAGR，中性路径的收敛锚点」）: **模型知道该用哪个数，
-        # 而这里原先用错了那个数。**
         industry_growth=(_latest(ledger, "industry.revenue_cagr", as_of)
                          or _latest(ledger, "industry.revenue_yoy", as_of)))
 
@@ -1217,7 +1434,7 @@ def check_deviation(a: AssumptionSet, balances: list,
         return []
     out: list[str] = []
     for r in sorted(a.rows, key=lambda x: (x.factor_key, x.year)):
-        name = _row_label(r, a.decomps or [])
+        name = _row_label(r, a._m() or a.decomps or [])
         mid = mids.get(name)
         if mid is None:
             continue
@@ -1234,7 +1451,12 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
           as_of: date, decomps: list[Decomposition] | None = None,
           base_margin: Decimal | None = None, anchor: dict | None = None,
           balances: list | None = None) -> None:
-    if decomps:
+    model = as_model(decomps)
+    if model is not None:
+        a.model = model
+        if a.base_margin is None:
+            a.base_margin = base_margin
+        _fill_from_ledger(a, ledger, as_of)
         _check_factors(a, years, decomps, base_margin, anchor)
     else:
         _check_scalar(a, years)
@@ -1296,6 +1518,20 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
     # 为空）完全不受影响——那条路径引的是正文，正文本来就覆盖增速/
     # 毛利率两项，逐字核验在那里可满足，这次放宽只针对因子行。
     fatal: list[str] = []
+    for short, bv in a.base_values.items():
+        if bv.source != "AI" or not bv.bases:
+            continue
+        soft_b: list[str] = []
+        for b in bv.bases:
+            problems = validate([b], ledger=ledger, body=body, as_of=as_of)
+            if not problems:
+                continue
+            if b.kind is BasisKind.REPORT:
+                soft_b.extend(problems)
+            else:
+                fatal.append(f"基期 {short}：" + "；".join(problems))
+        if soft_b:
+            bv.basis_unverified = "；".join(soft_b)
     for r in a.rows:
         if not r.bases:
             continue
@@ -1313,7 +1549,7 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
                 # 过整段估值漏成未替换占位符）。EXTERNAL：外部资料核验
                 # 不过。两者都与"对正文的转述 vs 逐字"不是一类问题，
                 # 不在这次放宽范围内，继续致命。
-                fatal.append(f"{_row_label(r, a.decomps)} 第{r.year}年："
+                fatal.append(f"{_row_label(r, a._m() or a.decomps)} 第{r.year}年："
                             + "；".join(problems))
         if soft:
             r.basis_unverified = "；".join(soft)
@@ -1357,37 +1593,54 @@ def _check_scalar(a: AssumptionSet, years: int) -> None:
                 " —— 必须严格递增，否则情景分析没有意义")
 
 
-def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
+def _fill_from_ledger(a: AssumptionSet, ledger: FactLedger, as_of: date) -> None:
+    """第 0 年取值里账本拿得到的部分（spec 2026-10-14 决定 9：账本有就用账本）。
+
+    - 需要基期值的因子：数据线索里 `[[key]]` 声明、账本有上年值的，代码取；
+    - 营收₀：账本最近一个完整年度的营收，换算成亿元（与工作簿同口径）。
+    """
+    from ir_agent import gaps
+
+    m = a._m()
+    for f in m.needs_base():
+        have, _ = gaps.ledger_refs(f.source_hint, ledger, as_of)
+        if not have:
+            continue
+        key, per = have[0].rsplit("@", 1)
+        a.base_values[f.short] = BaseValue(
+            value=ledger.get(key, per, as_of=as_of).value,
+            bases=[Basis.fact(f"[[{key}@{per}]]")], source="账本")
+    if a.base_revenue is None:
+        pers = annual_periods(ledger, as_of, years=1)
+        if pers:
+            try:
+                a.base_revenue = (ledger.get("revenue", pers[-1], as_of=as_of).value
+                                  / Decimal(10 ** 8))
+            except (KeyError, LookAheadError):
+                pass
+
+
+def _check_factors(a: AssumptionSet, years: int, decomps,
                    base_margin: Decimal | None, anchor: dict | None = None) -> None:
     """分解模式下的校验。
 
-    **不在这里逐因子比较 bear<base<bull。** 单个因子档位的方向性因子而异
-    （例如同一因子在悲观档被写得很极端，未必意味着它对目标的方向也是
-    悲观的），代码判断不了「这个因子往哪个方向走算悲观」。真正要卡的是
-    **合成结果**——三档营收增速 / 毛利率必须严格拉开，这是唯一能客观
-    判定方向对不对的地方。因子层面各自拉开不等于合成后拉开：产能悲观档
-    偏高、单价悲观档偏低，相乘后完全可能悲观反而高于中性，而那正是这道
-    校验要抓住的错数。
+    **不在这里逐因子比较 bear<base<bull。** 单个因子档位的方向性因子而异，
+    代码判断不了「这个因子往哪个方向走算悲观」。真正要卡的是**合成结果**——
+    三档营收增速 / 毛利率必须严格拉开。
     """
-    # **读回的分解式要重过闸门。** `_decomp_from_dict` 直接构造对象，
-    # 预研时的闸门在读回路径上一次都没跑。生益科技目录里残留
-    # 的 9/14 那份 assumptions.json，营收链里还有「高端产品收入占比」——新
-    # 闸门在预研时会拒收它，读回时却能一路走进建模。与「人手改 JSON 可能
-    # 引入重复行」同一类：不依赖上游一定已经查过。
-    # 只跑量纲类检查（check_dimensions），不跑因子个数——见其文档字符串。
-    for d in decomps:
-        try:
-            check_dimensions(d)
-        except DecompositionInvalid as e:
-            raise AssumeFailed(
-                f"判断项里的分解式已不合法：{e}　——请重跑第一阶段，"
-                "重新预研分解式后再填判断项。") from e
-    # C2 纵深防御：`_parse_factors` 已经在解析阶段拒绝重复行，但
-    # `check()` 也会在人工核实之后、`from_json` 读回时被再跑一遍
-    # （`full.run_valuation`）——那时的 `AssumptionSet` 未必经过
-    # `_parse_factors`，人手改 JSON 也可能引入重复行。这里再挡一次，
-    # 不依赖上游一定已经查过重。
-    label_of = {f.key: f.label for d in decomps for f in d.factors}
+    # **读回的旧分解式要重过闸门。** `_decomp_from_dict` 直接构造对象，预研时的
+    # 闸门在读回路径上一次都没跑。只对旧的乘/加分解式（公式化写法不跑这些字面
+    # 闸门，spec 2026-10-14 五）。
+    if isinstance(decomps, list):
+        for d in decomps:
+            try:
+                check_dimensions(d)
+            except DecompositionInvalid as e:
+                raise AssumeFailed(
+                    f"判断项里的分解式已不合法：{e}　——请重跑第一阶段，"
+                    "重新预研分解式后再填判断项。") from e
+    m = a._m()
+    label_of = {f.key: f.label for f in m.factors}
     seen: set[tuple[str, int]] = set()
     for r in a.rows:
         if not r.factor_key:
@@ -1399,13 +1652,8 @@ def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
                 f"第 {r.year} 年出现了不止一行——重复行会让清单显示的值"
                 "与实际参与合成的值不是同一行，必须只保留一行。")
         seen.add(key)
-        # 出口二（「无数据（估计）」）落地为空的 `bases`——`_factor_basis`
-        # 已经在解析阶段确认过这个因子确实是「无数据」才放行，但那不能
-        # 免除「说明依据什么估的」这一要求：空依据 + 空理由 = 一个数字
-        # 凭空出现在清单上，读者连"这是怎么估出来的"都无从判断。这里
-        # 再挡一次而不依赖解析阶段——`check()` 在第二阶段人工核实之后
-        # 会脱离 `_parse_factors` 单独重跑，人手改 JSON 同样可能把
-        # note 清空。
+        # 出口二（「无数据（估计）」）落地为空的 `bases`——那不能免除「说明
+        # 依据什么估的」这一要求：空依据 + 空理由 = 一个数字凭空出现在清单上。
         if not r.bases and not r.note.strip():
             raise AssumeFailed(
                 f"因子「{label_of.get(r.factor_key, r.factor_key)}」"
@@ -1413,19 +1661,27 @@ def _check_factors(a: AssumptionSet, years: int, decomps: list[Decomposition],
                 "理由要说明这个估计依据什么给出（参照哪个可比公司、"
                 "哪个行业惯例……），不能只留一句「无数据」。")
 
-    for d in decomps:
-        for f in d.factors:
-            got = {r.year for r in a.rows if r.factor_key == f.key}
-            missing = sorted(set(range(1, years + 1)) - got)
-            if missing:
-                raise AssumeFailed(
-                    f"因子「{f.label}」缺第 {missing} 年 —— 预测期每一年都要给，"
-                    "漏掉的年份会沿用模板默认值，而那不是你的判断")
+    for f in m.factors:
+        got = {r.year for r in a.rows if r.factor_key == f.key}
+        missing = sorted(set(range(1, years + 1)) - got)
+        if missing:
+            raise AssumeFailed(
+                f"因子「{f.label}」缺第 {missing} 年 —— 预测期每一年都要给，"
+                "漏掉的年份会沿用模板默认值，而那不是你的判断")
+
+    lacking = [f for f in m.needs_base() if f.short not in a.base_values]
+    if lacking:
+        raise AssumeFailed(
+            "以下因子需要第 0 年（基期）的取值，账本里没有："
+            + "、".join(f"{f.short}（{f.label}）" for f in lacking)
+            + " —— 请各补一行「基期: <短名> | <值> | <依据>」（已发生的实际值，"
+            "单值不分档）。")
 
     # **合成后再验一次单调。** 这是本模块真正的闸门。
     if base_margin is None:
         base_margin = Decimal("0.10")
-    a.decomps = list(decomps)
+    if isinstance(decomps, list):
+        a.decomps = list(decomps)
     # 锚定开启时查的必须是平移后的路径——那才是建模用的。
     a.margin_bases = margin_bases(a, base_margin, anchor)
     _check_monotonic(a, base_margin, a.margin_bases)
@@ -1496,53 +1752,8 @@ _SCALAR_HEAD = """**你只填这两项**：逐年营收增速、逐年毛利率�
 `假设: <营收增速|毛利率> | 第N年 | <悲观> | <中性> | <乐观> | 「正文原话」或 [[占位符]]`"""
 
 
-def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
-    """分解模式下替换 `_SCALAR_HEAD` 的提示词头部。
-
-    **逐因子填、代码合成**——不是把「你只填这两项」换成「你只填一堆
-    因子」这么简单，还要把单位规则钉死在提示词里，否则模型很容易把 pp
-    填进乘法链（稼动率 85%→82% 写成 −3pp 混进变化率链）。
-    """
-    lines = ["**本次按驱动因子分解填写。** 分解式："]
-    for d in decomps:
-        lines.append(f"  {d.describe()}")
-    lines += ["", "逐个因子填，代码会把它们合成回营收增速与毛利率——",
-              "**不要自己算出增速或毛利率再倒推因子**，那样分解就没有意义。",
-              "", "| 因子 | 单位 | 数据 |", "| --- | --- | --- |"]
-    for d in decomps:
-        for f in d.factors:
-            fd = factor_data.get(f.key)
-            if fd is None:
-                st = "未采集"
-            elif fd.note:
-                # I2：这里此前只印状态词、不印原文片段——模型看到「年报
-                # 披露」会直接当成有数据可用去填数字。「年报披露/研报
-                # 测算」只是文字命中，未必真给出了数值（甚至可能命中的
-                # 是一句「未披露 XX」），必须把 gaps.collect 摘出来的
-                # 原文片段一起摆出来，让模型自己判断这到底是不是能当
-                # 数值依据用的原文，而不是被一个状态词代为下结论。
-                st = f"{fd.status}（{fd.note}）"
-            else:
-                st = fd.status
-            # Minor-3（final-fix-D）：`fd.note` 抄的是 gaps.collect 摘出
-            # 来的年报/研报原文片段——PDF 抽出的章节带表格竖线很常见，
-            # 未转义的 "|" 会被当成这一行提示词表格自己的列分隔符，把
-            # 单位这一列错位到别处去。转义成 markdown 认得的 "\|"。
-            lines.append(f"| {_esc_pipe(f.label)} | {_esc_pipe(f.unit)} "
-                        f"| {_esc_pipe(st)} |")
-    lines += ["",
-              "**pp 不能进乘法链**：营收链的因子一律填变化率（含稼动率）——"
-              "稼动率 85%→82% 是 −3pp，但变化率是 −3.5%。",
-              "毛利率链的因子一律填 pp，且**pp 一律不带 %**——"
-              "写 −3，不要写 −3%（−3% 会被当成 −0.03pp，缩小 100 倍）。",
-              "**pp 的参照点是基期，且是累计值，不是逐年再变一次**："
-              "毛利率 = 基期 + Σpp，基期对预测期每一年都是同一个数，"
-              "所以第 N 年的 pp 要填「相对基期」累计的变动，不是「相对"
-              "第 N−1 年」又变了多少。例如基期 14.15%，你判断毛利率会"
-              "逐年走低到 13.15%/12.15%/11.15%，三年应分别填 "
-              "−1、−2、−3（相对基期累计），而不是 −1、−1、−1"
-              "（那样合成出来三年会是同一个数 13.15%，不会继续下滑）。",
-              "",
+# 依据的写法规则。旧的乘/加清单与公式化清单共用这一段，不各写一份。
+_BASIS_RULES = (
               "**引文只能出自三处**：你的分析简报正文、账本占位符 "
               "[[key@period]]、或下表「数据」列里这个因子自己采集到的"
               "原文片段/发现。下面各节（宏观、行业、可比公司、外部资料、"
@@ -1596,6 +1807,57 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
               "之一），没有上一行可回指的「同上」会被直接驳回。理由"
               "（为什么这一年这么判断）不受影响，仍然要每年单独写"
               "清楚——「同上」只省依据，不省理由。",
+)
+
+
+def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
+    """分解模式下替换 `_SCALAR_HEAD` 的提示词头部。
+
+    **逐因子填、代码合成**——不是把「你只填这两项」换成「你只填一堆
+    因子」这么简单，还要把单位规则钉死在提示词里，否则模型很容易把 pp
+    填进乘法链（稼动率 85%→82% 写成 −3pp 混进变化率链）。
+    """
+    lines = ["**本次按驱动因子分解填写。** 分解式："]
+    for d in decomps:
+        lines.append(f"  {d.describe()}")
+    lines += ["", "逐个因子填，代码会把它们合成回营收增速与毛利率——",
+              "**不要自己算出增速或毛利率再倒推因子**，那样分解就没有意义。",
+              "", "| 因子 | 单位 | 数据 |", "| --- | --- | --- |"]
+    for d in decomps:
+        for f in d.factors:
+            fd = factor_data.get(f.key)
+            if fd is None:
+                st = "未采集"
+            elif fd.note:
+                # I2：这里此前只印状态词、不印原文片段——模型看到「年报
+                # 披露」会直接当成有数据可用去填数字。「年报披露/研报
+                # 测算」只是文字命中，未必真给出了数值（甚至可能命中的
+                # 是一句「未披露 XX」），必须把 gaps.collect 摘出来的
+                # 原文片段一起摆出来，让模型自己判断这到底是不是能当
+                # 数值依据用的原文，而不是被一个状态词代为下结论。
+                st = f"{fd.status}（{fd.note}）"
+            else:
+                st = fd.status
+            # Minor-3（final-fix-D）：`fd.note` 抄的是 gaps.collect 摘出
+            # 来的年报/研报原文片段——PDF 抽出的章节带表格竖线很常见，
+            # 未转义的 "|" 会被当成这一行提示词表格自己的列分隔符，把
+            # 单位这一列错位到别处去。转义成 markdown 认得的 "\|"。
+            lines.append(f"| {_esc_pipe(f.label)} | {_esc_pipe(f.unit)} "
+                        f"| {_esc_pipe(st)} |")
+    lines += ["",
+              "**pp 不能进乘法链**：营收链的因子一律填变化率（含稼动率）——"
+              "稼动率 85%→82% 是 −3pp，但变化率是 −3.5%。",
+              "毛利率链的因子一律填 pp，且**pp 一律不带 %**——"
+              "写 −3，不要写 −3%（−3% 会被当成 −0.03pp，缩小 100 倍）。",
+              "**pp 的参照点是基期，且是累计值，不是逐年再变一次**："
+              "毛利率 = 基期 + Σpp，基期对预测期每一年都是同一个数，"
+              "所以第 N 年的 pp 要填「相对基期」累计的变动，不是「相对"
+              "第 N−1 年」又变了多少。例如基期 14.15%，你判断毛利率会"
+              "逐年走低到 13.15%/12.15%/11.15%，三年应分别填 "
+              "−1、−2、−3（相对基期累计），而不是 −1、−1、−1"
+              "（那样合成出来三年会是同一个数 13.15%，不会继续下滑）。",
+              "",
+              *_BASIS_RULES,
               "",
               "对每一个因子、每一年给出一行：",
               "`假设: <因子名> | 第N年 | <悲观> | <中性> | <乐观> | "
@@ -1604,9 +1866,59 @@ def _factor_head(decomps: list[Decomposition], factor_data: dict) -> str:
     return "\n".join(lines)
 
 
+def _formula_head(m: FormulaModel, factor_data: dict,
+                  ledger_bases: dict | None = None) -> str:
+    """公式化分解式的提示词头部（spec 2026-10-14 三）。旧的乘/加分解式仍用
+    `_factor_head`，提示词与改动前一字不差。"""
+    ledger_bases = ledger_bases or {}
+    lines = [f"**本次按公式化分解填写（{m.mode}模式）。**",
+             ("每个因子逐年填**变化**（增速、pp 变动…），营收与毛利率的第 0 年取账本。"
+              if m.mode == "变化" else
+              "每个因子逐年填**水平**（量、价、成本…），第 0 年的营收与毛利率由基期"
+              "因子值代入公式算出。"),
+             "", "公式："]
+    lines += [f"  {m.describe(t)}" for t in ("revenue", "gross_margin")
+              if t in m.formulas]
+    if m.constants:
+        lines += ["", "常量："]
+        lines += [f"  {c.name} = {c.value}（{c.source}）" for c in m.constants]
+    lines += ["", "逐个因子填，代码会按公式把它们合成回营收增速与毛利率——",
+              "**不要自己算出增速或毛利率再倒推因子**，那样分解就没有意义。",
+              "", "| 短名 | 因子 | 单位 | 数据 |", "| --- | --- | --- | --- |"]
+    for f in m.factors:
+        fd = factor_data.get(f.key)
+        st = "未采集" if fd is None else (f"{fd.status}（{fd.note}）"
+                                         if fd.note else fd.status)
+        lines.append(f"| {_esc_pipe(f.short)} | {_esc_pipe(f.label)} "
+                     f"| {_esc_pipe(f.unit)} | {_esc_pipe(st)} |")
+    need = m.needs_base()
+    if need:
+        have = [f for f in need if f.short in ledger_bases]
+        todo = [f for f in need if f.short not in ledger_bases]
+        lines += ["", "**基期值（第 0 年）**："]
+        lines += [f"  - {f.short} = {ledger_bases[f.short].value}（账本，已取到）"
+                  for f in have]
+        if todo:
+            lines.append("  - 需要你补：" + "、".join(f.short for f in todo)
+                         + " —— 各补一行 `基期: <短名> | <值> | <依据>`。基期是"
+                         "已经发生的实际值，单值，不分三档；依据规则与下面相同。")
+    lines += ["",
+              "**单位规则**：单位是变化率或 % 的，取值带 %（如 −3.5%）；单位是 pp "
+              "的，填数字不带 %（如 −3）；其他单位（万吨、元/平方米…）按原数填，"
+              "不带 %。",
+              "",
+              *_BASIS_RULES,
+              "",
+              "对每一个因子、每一年给出一行（因子写短名）：",
+              "`假设: <短名> | 第N年 | <悲观> | <中性> | <乐观> | "
+              "「正文原话/证据原文」或 [[占位符]] 或 无数据（估计）或 同上`"]
+    return "\n".join(lines)
+
+
 def build_prompt(judg: dict, labels: list[str], context: str,
-                 brief: str = "", decomps: list[Decomposition] | None = None,
-                 factor_data: dict | None = None) -> str:
+                 brief: str = "", decomps=None,
+                 factor_data: dict | None = None,
+                 ledger_bases: dict | None = None) -> str:
     g, gm = judg.get("g_stats") or (), judg.get("gm_stats") or ()
     hist = []
     if g:
@@ -1618,7 +1930,13 @@ def build_prompt(judg: dict, labels: list[str], context: str,
                     f"{(judg.get('gm_hist') or [0])[-1] * 100:.1f}%、"
                     f"历史均值 {gm[0] * 100:.1f}%、标准差 {gm[1] * 100:.1f}pp、"
                     f"区间 {gm[2] * 100:.1f}%~{gm[3] * 100:.1f}%")
-    head = _factor_head(decomps, factor_data or {}) if decomps else _SCALAR_HEAD
+    m = as_model(decomps)
+    if m is None:
+        head = _SCALAR_HEAD
+    elif m.legacy:
+        head = _factor_head(decomps, factor_data or {})
+    else:
+        head = _formula_head(m, factor_data or {}, ledger_bases)
     return PROMPT.format(head=head, years=len(labels), labels="、".join(labels),
                          history="\n".join(hist) or "  （无）",
                          context=context, brief=brief or "（无）")
@@ -1626,7 +1944,7 @@ def build_prompt(judg: dict, labels: list[str], context: str,
 
 def _decide_once(client, judg: dict, labels: list[str], context: str, *,
                  ledger: FactLedger, body: str, as_of: date, code: str,
-                 max_attempts: int, decomps: list[Decomposition] | None,
+                 max_attempts: int, decomps,
                  factor_data: dict | None,
                  base_margin: Decimal | None,
                  anchor: dict | None = None,
@@ -1638,8 +1956,14 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
     模式再试一次，但两标量模式本身连续失败没有更低的台阶可退，必须
     原样拒绝。两件事分开才不会在这里意外递归。
     """
+    model = as_model(decomps)
+    ledger_bases = {}
+    if model is not None and not model.legacy:
+        probe = AssumptionSet(code="", labels=[], model=model)
+        _fill_from_ledger(probe, ledger, as_of)
+        ledger_bases = probe.base_values
     prompt = build_prompt(judg, labels, context, brief=body, decomps=decomps,
-                          factor_data=factor_data)
+                          factor_data=factor_data, ledger_bases=ledger_bases)
     last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
         raw = client(prompt)
@@ -1656,15 +1980,14 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
                       "请修正后重新输出全部行。\n")
             continue
         a.code, a.labels = code, labels
-        a.decomps = list(decomps or [])
+        a.decomps = list(decomps) if isinstance(decomps, list) else []
+        a.model = model
         a.factor_data = dict(factor_data or {})
         a.base_margin = base_margin
-        if a.decomps:
+        if model is not None:
             # C2：reconcile() 写得对、测试充分，缺的是「在真实流程里被
-            # 调用一次并把结果交给人看」这个动作——此前它只在
-            # drivers.py 自己的单测里被调用过。
-            a.residuals = {d.target: _reconcile_decomp(d, ledger, as_of)
-                          for d in a.decomps}
+            # 调用一次并把结果交给人看」这个动作。
+            a.residuals = _reconcile_model(model, ledger, as_of)
         return a
     raise AssumeFailed(
         f"连续 {max_attempts} 次给不出可核验的假设：{last}"
@@ -1674,7 +1997,7 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
 
 def decide(client, judg: dict, labels: list[str], context: str, *,
            ledger: FactLedger, body: str, as_of: date, code: str = "",
-           max_attempts: int = 3, decomps: list[Decomposition] | None = None,
+           max_attempts: int = 3, decomps=None,
            factor_data: dict | None = None,
            base_margin: Decimal | None = None,
            anchor: dict | None = None,
@@ -1729,59 +2052,106 @@ def _historical_series(ledger: FactLedger, key: str, periods: list[str],
     return out
 
 
-def _reconcile_decomp(d: Decomposition, ledger: FactLedger,
-                      as_of: date, years: int = 5) -> dict:
-    """对一个分解式做历史回算，报残差 + 标出取不到历史的因子。
+def _change(cur: Decimal, prev: Decimal, unit: str) -> Decimal | None:
+    """相邻两期水平值 → 变化（变化模式历史对账用）。换算规则与提示词里的单位
+    规则同一套；其他单位换算不出来，返回 None（列入「无历史」）。"""
+    if unit == "pp":
+        return (cur - prev) * 100
+    if unit in _PCT_UNITS:
+        return cur / prev - 1 if prev != 0 else None
+    return None
 
-    账本里存的因子是**水平值**（产能、单价……的原始数字），而
-    `drivers.reconcile` 要的是**期间变化**（乘法链要变化率，加法链要
-    pp 变化）——按 `d.op` 把相邻两期的水平值换算成变化，换算规则与
-    提示词里对模型的单位要求（见 `_factor_head`）是同一套。
+
+def _history_key(f) -> str:
+    """因子在账本里的历史序列用哪个 key：数据线索里 `[[key]]` 声明的优先，
+    否则按因子 key（旧分解式的口径）。"""
+    from ir_agent.gaps import _KEY_DECL
+
+    have = _KEY_DECL.findall(f.source_hint or "")
+    return have[0] if have else f.key
+
+
+def _reconcile_model(model: FormulaModel, ledger: FactLedger, as_of: date,
+                     years: int = 5) -> dict:
+    """对公式化分解式做历史回算，报残差 + 标出取不到历史的因子。
+
+    每个历史年份按**单步预测**核对：`上期(·)`、`基期(·)` 都取上一期实际值
+    （spec 2026-10-14「写计划时的补充」3）。变化模式下因子历史按单位把相邻两期
+    水平换成变化；水平模式直接用水平，营收增速按公式在本期与上期的值之比算。
+    旧乘/加分解式下与改动前的 `_reconcile_decomp` 逐位一致。
 
     某个因子在账本里完全找不到历史序列，**不能因此把它从残差报告里
-    静默拿掉**——要在 `no_history` 里明说，人得知道这里没法核验，
-    而不是误以为「没提到就是没问题」。
+    静默拿掉**——要在 `no_history` 里明说。
     """
     periods = annual_periods(ledger, as_of, years=years + 1)
-    if len(periods) < 2:
-        return {"residuals": [], "no_history": [f.label for f in d.factors]}
-
-    levels = {f.key: _historical_series(ledger, f.key, periods, as_of)
-             for f in d.factors}
-    no_history = [f.label for f in d.factors if len(levels[f.key]) < 2]
-
-    history: dict[str, dict[str, Decimal]] = {}
-    for i in range(1, len(periods)):
-        cur, prev = periods[i], periods[i - 1]
-        row: dict[str, Decimal] = {}
-        for f in d.factors:
-            lv = levels[f.key]
-            if cur not in lv or prev not in lv or lv[prev] == 0:
-                continue
-            row[f.key] = (lv[cur] / lv[prev] - 1) if d.op is Op.MULTIPLY \
-                else (lv[cur] - lv[prev]) * 100
-        if row:
-            history[cur] = row
-
-    target_key = "revenue" if d.target == "revenue" else "gross_margin"
-    tgt = _historical_series(ledger, target_key, periods, as_of)
-    actual: dict[str, Decimal] = {}
-    base: dict[str, Decimal] | None = {} if d.op is Op.ADD_PP else None
-    for i in range(1, len(periods)):
-        cur, prev = periods[i], periods[i - 1]
-        if cur not in tgt:
+    consts = {c.name: c.value for c in model.constants}
+    out: dict = {}
+    levels = {f.short: _historical_series(ledger, _history_key(f), periods, as_of)
+              for f in model.factors}
+    rev = _historical_series(ledger, "revenue", periods, as_of)
+    gm = _historical_series(ledger, "gross_margin", periods, as_of)
+    for target, fm in model.formulas.items():
+        used = model.factors_of(target)
+        if len(periods) < 2:
+            out[target] = {"residuals": [], "no_history": [f.label for f in used]}
             continue
-        if d.op is Op.MULTIPLY:
-            if prev not in tgt or tgt[prev] == 0:
+        no_history = [f.label for f in used if len(levels[f.short]) < 2]
+        res: list[Residual] = []
+        for i in range(1, len(periods)):
+            cur_p, prev_p = periods[i], periods[i - 1]
+            cur: dict = {}
+            prev: dict = {"营收": rev.get(prev_p), "毛利率": gm.get(prev_p)}
+            ok = True
+            for f in used:
+                lv = levels[f.short]
+                if model.mode == "水平":
+                    if cur_p not in lv:
+                        ok = False
+                        break
+                    cur[f.short] = lv[cur_p]
+                    if prev_p in lv:
+                        prev[f.short] = lv[prev_p]
+                else:
+                    if cur_p not in lv or prev_p not in lv or lv[prev_p] == 0:
+                        ok = False
+                        break
+                    ch = _change(lv[cur_p], lv[prev_p], f.unit)
+                    if ch is None:
+                        ok = False
+                        break
+                    cur[f.short] = ch
+            if not ok:
                 continue
-            actual[cur] = tgt[cur] / tgt[prev] - Decimal(1)
-        else:
-            actual[cur] = tgt[cur]
-            if prev in tgt:
-                base[cur] = tgt[prev]
+            try:
+                if target == "revenue":
+                    if cur_p not in rev or not rev.get(prev_p):
+                        continue
+                    actual = rev[cur_p] / rev[prev_p] - Decimal(1)
+                    if model.mode == "水平":
+                        denom = evaluate(fm, prev, None, prev, consts)
+                        composed = evaluate(fm, cur, prev, prev, consts) / denom - 1
+                    else:
+                        # 旧乘法链与尺度无关：上期营收按 1 代入，与旧 compose 逐位一致。
+                        scale = Decimal(1) if model.legacy else rev[prev_p]
+                        pv = dict(prev, 营收=scale)
+                        composed = evaluate(fm, cur, pv, pv, consts) / scale - 1
+                else:
+                    if cur_p not in gm or (model.mode == "变化" and prev_p not in gm):
+                        continue
+                    actual = gm[cur_p]
+                    composed = evaluate(fm, cur, prev, prev, consts)
+            except FormulaError:
+                continue
+            res.append(Residual(period=cur_p, composed=composed, actual=actual,
+                                gap=actual - composed))
+        out[target] = {"residuals": res, "no_history": no_history}
+    return out
 
-    res = reconcile(d, history, actual, base=base)
-    return {"residuals": res, "no_history": no_history}
+
+def _reconcile_decomp(d: Decomposition, ledger: FactLedger,
+                      as_of: date, years: int = 5) -> dict:
+    """单条旧分解式的历史回算（保留给旧调用方）。翻译成公式后走同一个实现。"""
+    return _reconcile_model(from_decomps([d]), ledger, as_of, years)[d.target]
 
 
 def _annual_gm_hist(cal: dict) -> list:
@@ -1880,7 +2250,7 @@ def estimated_labels(a: AssumptionSet) -> list[str]:
     不能拿它把"这个数是拍的"从清单上抹掉——清单是人工批准唯一能看的
     东西，**遗漏必须可见**这条约束正是在这里被绕过的。
     """
-    return sorted({_row_label(r, a.decomps) for r in a.rows
+    return sorted({_row_label(r, a._m() or a.decomps) for r in a.rows
                    if r.factor_key and (not r.bases
                                         or _looks_like_estimate(r.note))})
 
@@ -1892,7 +2262,7 @@ def unverified_labels(a: AssumptionSet) -> list[str]:
     （`full._unverified_disclosure`）都用它——两处各写一遍"怎么给这些行
     起名"，早晚会分叉成人在清单上看到的和研报里写的对不上号。
     """
-    return sorted({f"{_row_label(r, a.decomps)}第{r.year}年"
+    return sorted({f"{_row_label(r, a._m() or a.decomps)}第{r.year}年"
                    for r in a.rows if r.factor_key and r.basis_unverified})
 
 
@@ -1912,8 +2282,11 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
     否则两处各算各的，会在第一年的毛利率上重复计入一次 pp 增量。
     """
     ju = dict(cal["judg"])
-    if a.decomps:
+    if a._m() is not None:
         base_margin = _base_margin_of(cal)
+        # 第 0 年营收按工作簿口径（亿元）——公式用到绝对金额时，ir-agent 与
+        # 工作簿必须代入同一个数。
+        a.base_revenue = _base_revenue_of(cal)
         # 锚定开启时毛利率第 2 年起从各档锚定水平接着走（见 margin_bases）；
         # 第二阶段的 check() 不做这一步，所以这里要再查一次单调。
         bases = margin_bases(a, base_margin, anchor_from_cal(cal))
@@ -1940,73 +2313,81 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
     return out
 
 
+def has_model(a) -> bool:
+    """这份判断项是不是按分解式填的（新写法或旧的乘/加）。"""
+    m = getattr(a, "_m", None)
+    return bool(m and m() is not None)
+
+
+def _base_revenue_of(cal: dict) -> Decimal | None:
+    """第 0 年营收（亿元）：calibrate 的最近完整年度营收。取不到返回 None。"""
+    annual = (cal.get("periods") or {}).get("annual") or []
+    v = (cal.get("rev") or {}).get(annual[-1]) if annual else None
+    return Decimal(str(v)) if v is not None else None
+
+
 def to_driver_block(a: AssumptionSet, cal: dict) -> dict:
-    """AssumptionSet → ashare_build 要的 `drivers` 结构。
+    """AssumptionSet → ashare_build 要的 `drivers` 结构（schema 2，公式化）。
+
+    公式以**已校验的记号序列**交付（`Formula.tokens()`）：`ashare-dcf` 只把记号
+    换成单元格引用，**不做解析** —— 解析只在 ir-agent 一处（spec 2026-10-14 四）。
 
     三档顺序固定为 bull/base/bear，与工作簿 B/C/D 列绑定 ——
     顺序写反不会让验算失败，只是「选悲观」会选出乐观值。
 
-    **base_level 取 `_base_margin_of`，不是 `cal["judg"]["gm"][0]`。**
-    `apply_to` 若已跑过，`gm[0]` 是**合成之后**的年度水平（基期 + 第一年
-    的 pp 增量），拿它当基期会让 1b_驱动分解 的公式把第一年的增量算
-    两遍：先被吸进 base_level，又被工作表公式再加一次。`gm_hist` 是
-    calibrate 的原始历史序列，不受 apply_to 影响，才是真正「不随年份
-    滚动」的基期。
+    **基期毛利率取 `_base_margin_of`，不是 `cal["judg"]["gm"][0]`。** `apply_to`
+    若已跑过，`gm[0]` 是合成之后的年度水平，拿它当基期会把第一年的增量算两遍。
 
-    **取值规则与 synthesize()/_synthesized_for() 保持一致（C2 纵深防御）。**
-    同一因子同一年出现两行本应在 `_parse_factors`/`check()` 就被拒绝，
-    但这里不依赖那道门一定挡住了一切——`next(... )` 会取**第一行**，
-    与合成侧的字典推导式取**最后一行**是两条不同的规则，一旦有重复行
-    绕过检查混进来，清单显示的数字与这里实际写进工作簿的数字就会是
-    两行不同的取值。改成与合成侧同样的「后写入覆盖先写入」，即便查重
-    将来被放开，两侧至少不会各算各的。
+    **取值规则与 synthesize 保持一致（C2 纵深防御）**：同一因子同一年若有重复行，
+    后写入覆盖先写入。
     """
-    base_margin = float(_base_margin_of(cal))
-    out = {}
-    years = max((r.year for r in a.rows), default=0)
+    m = a._m()
+    base_margin = _base_margin_of(cal)
+    base_rev = _base_revenue_of(cal)
+    years = max((r.year for r in a.rows if r.factor_key), default=0)
     by_year_key: dict[tuple[int, str], Row] = {}
     for r in a.rows:
         if r.factor_key:
             by_year_key[(r.year, r.factor_key)] = r
-    for d in a.decomps:
-        keys = [f.key for f in d.factors]
-        label_of = {f.key: f.label for f in d.factors}
-        vals = {}
-        for case in ("bull", "base", "bear"):
-            rows_by_year = []
-            for y in range(1, years + 1):
-                vals_for_year = []
-                for k in keys:
-                    try:
-                        row = by_year_key[(y, k)]
-                    except KeyError as e:
-                        # Minor-4（final-fix-D）：此前这里是裸 KeyError，
-                        # 一路冒到 run_valuation 的兜底里显示成「估值
-                        # （KeyError: (2, 'asp')）」——排障看不出是哪个
-                        # 因子哪一年缺了取值。`check()` 用 len(a.labels)
-                        # 定年数，这里用 max(r.year) 定年数，两者本应
-                        # 一致，但人手改 JSON 把某个因子的年份改到超出
-                        # labels 范围时会错开：那个因子多出的年份把这里
-                        # 的 years 撑大，其它因子在那一年却没有取值。
-                        raise AssumeFailed(
-                            f"因子「{label_of.get(k, k)}」第 {y} 年缺"
-                            "取值，无法写入 1b_驱动分解 工作表——多半是"
-                            "人手改 JSON 把某个因子的年份改到了超出预测"
-                            "期范围，让不同因子的年份对不上。") from e
-                    vals_for_year.append(float(getattr(row, case)))
-                rows_by_year.append(vals_for_year)
-            vals[case] = rows_by_year
-        block = {"op": d.op.value,
-                 "factors": [{"key": f.key, "label": f.label, "unit": f.unit}
-                             for f in d.factors],
-                 "values": vals}
-        if d.target == "gross_margin":
-            block["base_level"] = base_margin
-            # 与 apply_to 同一个函数算出的按档按年基期，1b 表公式按它写——否则
-            # 工作簿三档列（跨表引用 1b）与 apply_to 写进 judg 的数就对不上。
-            bases = margin_bases(a, _base_margin_of(cal), anchor_from_cal(cal))
-            if bases:
-                block["base_levels"] = {k: [float(x) for x in v]
-                                        for k, v in bases.items()}
-        out[d.target] = block
-    return out
+    vals: dict[str, list] = {}
+    for case in ("bull", "base", "bear"):
+        rows_by_year = []
+        for y in range(1, years + 1):
+            vals_for_year = []
+            for f in m.factors:
+                try:
+                    row = by_year_key[(y, f.key)]
+                except KeyError as e:
+                    # Minor-4（final-fix-D）：排障要看得出是哪个因子哪一年缺了取值。
+                    raise AssumeFailed(
+                        f"因子「{f.label}」第 {y} 年缺取值，无法写入 1b_驱动分解 "
+                        "工作表——多半是人手改 JSON 把某个因子的年份改到了超出"
+                        "预测期范围，让不同因子的年份对不上。") from e
+                vals_for_year.append(float(getattr(row, case)))
+            rows_by_year.append(vals_for_year)
+        vals[case] = rows_by_year
+    block = {
+        "schema": 2, "mode": m.mode,
+        "factors": [{"key": f.key, "short": f.short, "label": f.label,
+                     "unit": f.unit} for f in m.factors],
+        "constants": [{"name": c.name, "value": float(c.value),
+                       "source": c.source} for c in m.constants],
+        "formulas": {t: [list(tok) for tok in fm.tokens()]
+                     for t, fm in m.formulas.items()},
+        "formula_text": {t: m.describe(t) for t in m.formulas},
+        "base": {"revenue": float(base_rev) if base_rev is not None else None,
+                 "margin": float(base_margin),
+                 "factors": {k: float(v.value) for k, v in a.base_values.items()}},
+        "values": vals,
+    }
+    anchor = anchor_from_cal(cal)
+    bases = margin_bases(a, base_margin, anchor)
+    if bases:
+        # 锚定开启时 `基期(毛利率)` 的按档按年取值、各档锚定后的第 1 年毛利率
+        # （`上期(毛利率)` 在第 2 年取它）—— 与 apply_to 同一个函数算出，否则
+        # 工作簿三档列与 apply_to 写进 judg 的数就对不上。
+        block["base_levels"] = {k: [float(x) for x in v] for k, v in bases.items()}
+        block["anchor_y1"] = {k: float(v) for k, v in _anchor_values(anchor).items()}
+    return block
+
+

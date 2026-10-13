@@ -337,19 +337,25 @@ def simulate(model: FormulaModel, values: dict[str, list], *,
     取锚定值；`基期(毛利率)` 平移为 `基期 + (锚定值 − 第 1 年公式值)` —— 与旧
     `assume.margin_bases` 的平移逐位一致（spec「写计划时的补充」2）。第 1 年的
     合成值本身不被锚定替换（工作簿另行锚定覆盖）。
+
+    **有哪条公式就算哪条。** 新写法两条都必须给（`FormulaModel.validate`），但由
+    旧文件翻译来的分解式可能只分解了一项 —— 与改动前的 `synthesize` 一致，缺的
+    那项返回空列表。
     """
     base_factors = dict(base_factors or {})
     consts = {c.name: c.value for c in model.constants}
     years = max((len(v) for v in values.values()), default=0)
-    rev_f, gm_f = model.formulas["revenue"], model.formulas["gross_margin"]
+    rev_f = model.formulas.get("revenue")
+    gm_f = model.formulas.get("gross_margin")
     if model.mode == "水平":
         y0 = dict(base_factors)
-        r0 = evaluate(rev_f, y0, None, y0, consts, "第 0 年营收")
-        m0 = evaluate(gm_f, y0, None, y0, consts, "第 0 年毛利率")
+        r0 = evaluate(rev_f, y0, None, y0, consts, "第 0 年营收") if rev_f else None
+        m0 = evaluate(gm_f, y0, None, y0, consts, "第 0 年毛利率") if gm_f else None
     else:
-        if base_revenue is None or base_margin is None:
+        if (rev_f and base_revenue is None) or (gm_f and base_margin is None):
             raise FormulaError("变化模式需要第 0 年的营收与毛利率（账本），没有给")
-        r0, m0 = Decimal(base_revenue), Decimal(base_margin)
+        r0 = Decimal(base_revenue) if base_revenue is not None else None
+        m0 = Decimal(base_margin) if base_margin is not None else None
     base = dict(base_factors)
     base["营收"], base["毛利率"] = r0, m0
     prev = dict(base)
@@ -360,21 +366,52 @@ def simulate(model: FormulaModel, values: dict[str, list], *,
             if len(seq) < t:
                 raise FormulaError(f"缺「{short}」第 {t} 年的取值")
             cur[short] = seq[t - 1]
-        r = evaluate(rev_f, cur, prev, base, consts, f"第 {t} 年营收")
-        m = evaluate(gm_f, cur, prev, base, consts, f"第 {t} 年毛利率")
-        if prev["营收"] == 0:
-            raise FormulaError(f"第 {t} 年：上一年营收为零，增速算不出来")
-        growth.append(r / prev["营收"] - 1)
-        revenue.append(r)
-        margin.append(m)
+        r = evaluate(rev_f, cur, prev, base, consts, f"第 {t} 年营收") \
+            if rev_f else None
+        m = evaluate(gm_f, cur, prev, base, consts, f"第 {t} 年毛利率") \
+            if gm_f else None
+        if rev_f:
+            if prev["营收"] == 0:
+                raise FormulaError(f"第 {t} 年：上一年营收为零，增速算不出来")
+            growth.append(r / prev["营收"] - 1)
+            revenue.append(r)
+        if gm_f:
+            margin.append(m)
         prev = dict(cur)
         prev["营收"], prev["毛利率"] = r, m
-        if t == 1 and anchor_y1 is not None:
+        if t == 1 and anchor_y1 is not None and gm_f:
             prev["毛利率"] = Decimal(anchor_y1)
             base = dict(base)
             base["毛利率"] = m0 + (Decimal(anchor_y1) - m)
     return Path(revenue0=r0, margin0=m0, revenue=revenue, growth=growth,
                 margin=margin)
+
+
+def flat_factors(xs) -> list:
+    """分解式列表 / `FormulaModel` / 因子列表 → 因子列表（按 key 去重、保序）。
+
+    旧调用方传 `decompositions`（每条带 `.factors`），新调用方传 `FormulaModel`；
+    水平模式下同一个因子被两条公式共用，迭代时要去重。assume、gaps、
+    factor_review、methodology 共用这一份，不各写一套。"""
+    if xs is None:
+        return []
+    if isinstance(xs, FormulaModel):
+        xs = xs.factors
+    out: list = []
+    seen: set[str] = set()
+    for x in xs:
+        for f in (getattr(x, "factors", None) or [x]):
+            if f.key not in seen:
+                seen.add(f.key)
+                out.append(f)
+    return out
+
+
+def as_model(decomps) -> "FormulaModel | None":
+    """`decomps` 参数的三种形态归一：None/[]（两标量）、旧分解式列表、FormulaModel。"""
+    if isinstance(decomps, FormulaModel):
+        return decomps
+    return from_decomps(list(decomps)) if decomps else None
 
 
 # ── 旧格式翻译 ────────────────────────────────────────────────────

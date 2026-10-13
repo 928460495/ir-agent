@@ -414,21 +414,22 @@ def test_to_driver_block产出结构():
     a.labels = ["2026E"]
     cal = assume.apply_to(_cal_for_apply(), a)
     drv = assume.to_driver_block(a, cal)
-    assert set(drv) == {"revenue", "gross_margin"}
-
-    rev = drv["revenue"]
-    assert rev["op"] == "乘"
-    assert [f["key"] for f in rev["factors"]] == ["capacity", "asp"]
+    # schema 2（2026-10-14 公式化）：一个块，因子按声明顺序，公式以记号交付。
+    assert drv["schema"] == 2 and drv["mode"] == "变化"
+    assert [f["key"] for f in drv["factors"]] == [
+        "capacity", "asp", "util_leverage", "input_cost"]
     # **三档顺序固定为 bull/base/bear**，与工作簿 B/C/D 列绑定——
     # 顺序写反不会让验算失败，只是「选悲观」会选出乐观值。
-    assert rev["values"]["bull"][0] == [0.14, 0.01]
-    assert rev["values"]["base"][0] == [0.10, -0.02]
-    assert rev["values"]["bear"][0] == [0.05, -0.06]
-    assert "base_level" not in rev
-
-    gm = drv["gross_margin"]
-    assert gm["op"] == "加"
-    assert abs(gm["base_level"] - 0.1415) < 1e-9
+    assert drv["values"]["bull"][0] == [0.14, 0.01, 0.5, 0.3]
+    assert drv["values"]["base"][0] == [0.10, -0.02, -1.0, -0.5]
+    assert drv["values"]["bear"][0] == [0.05, -0.06, -2.5, -1.5]
+    assert drv["formula_text"]["revenue"] == "营收 = 上期(营收)*(1+产能)*(1+单价)"
+    assert drv["formula_text"]["gross_margin"] == \
+        "毛利率 = 基期(毛利率)+(稼动率摊薄+上游成本)/100"
+    assert drv["formulas"]["revenue"][:3] == [["lp", "("], ["lp", "("],
+                                              ["prev", "营收"]]
+    assert abs(drv["base"]["margin"] - 0.1415) < 1e-9
+    assert "base_levels" not in drv
 
 
 def test_to_driver_block基期不受apply_to合成结果污染():
@@ -443,7 +444,7 @@ def test_to_driver_block基期不受apply_to合成结果污染():
     assert abs(applied["judg"]["gm"][0] - 0.1265) < 1e-6, \
         "前置断言：apply_to 之后 gm[0] 已经是合成后的年度水平"
     drv = assume.to_driver_block(a, applied)
-    assert abs(drv["gross_margin"]["base_level"] - 0.1415) < 1e-9
+    assert abs(drv["base"]["margin"] - 0.1415) < 1e-9
 
 
 def test_json往返保留分解式与因子key():
@@ -896,7 +897,7 @@ def test_to_driver_block与synthesize取值规则一致():
     cal = {"periods": {"annual": ["p0"]}, "rev": {"p0": 1.0},
           "cogs": {"p0": 1.0}, "judg": {"gm_hist": [0.1415]}}
     block = assume.to_driver_block(a, cal)
-    capacity_base = block["revenue"]["values"]["base"][0][0]
+    capacity_base = block["values"]["base"][0][0]
     assert capacity_base == pytest.approx(0.30), \
         "to_driver_block 应与 synthesize 一样取最后一行（30%），不是 next() 的第一行（1%）"
     # 两处应合成出同一个营收增速——用同一份（含重复行的）取值。
@@ -2167,7 +2168,7 @@ def test_工作簿三档列与1b表用同一套按年基期():
     a, _ = _two_year_set()
     cal = _cal_600183()
     out = assume.apply_to(cal, a)
-    block = assume.to_driver_block(a, cal)["gross_margin"]
+    block = assume.to_driver_block(a, cal)
     bm = assume._base_margin_of(cal)
     bases = assume.margin_bases(a, bm, assume.anchor_from_cal(cal))
     assert block["base_levels"]["base"] == [float(x) for x in bases["base"]]
