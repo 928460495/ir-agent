@@ -36,7 +36,6 @@ from pathlib import Path
 from ir_agent.lineparse import keyed
 from ir_agent.sources.annual_pdf import _download
 from ir_agent.sources.cninfo import Announcement
-from ir_agent.sources.cninfo import classify as _classify
 from ir_agent.sources.cninfo import search as _search
 from ir_agent.sources.external import Document, Tier
 from ir_agent.sources.openweb import (TEXT_LIMIT, _doc_from_json, _doc_to_json,
@@ -47,63 +46,124 @@ from ir_agent.sources.openweb import (TEXT_LIMIT, _doc_from_json, _doc_to_json,
 # 会翻倍、把模型要读的候选清单撑长。
 ANNOUNCE_MONTHS = 12
 
-# 单轮最多**入库**几篇。**这是入库上限，不是提示词上限** —— 后者在
-# `Corpus.prompt_docs` 里，由 `PROMPT_DOCS` 控制。两者分开的理由：入库的
-# 文档供 `gaps._match_announce` 按因子做全文检索（池子越大召回越高），而
-# 进提示词的文档要控长度。此前这两件事共用一个 `MAX_ANNOUNCEMENTS = 8`，
-# 而那个数的注释里写的理由是「同一批文档会同时压到战略/产业链/宏观定性
-# 三个模块的提示词上」—— **消费方的约束被实现成了生产方的上限**。
-MAX_INGEST = 20
+# 单轮最多**入库**几篇 —— **安全上限，不是挑选手段**。挑选靠分档
+# （`type_tier`），截断按档排序后只截第二档的尾巴，截了多少记进
+# `AnnounceResult.truncated`、说出来。取 150：快照里 30 家公司 12 个月窗口的
+# 入库篇数中位 66、P90 110、最大 140（华天科技）。它防的是一年几百条公告的
+# 公司把下载拖到十几分钟。
+#
+# **上一版的 20 是错的，错在与挑选方式叠加之后。** 「最近 20 篇」配上按标题
+# 认字的黑名单，每一篇误放的噪声都会把一篇有用的公告挤出去 —— 生益科技实跑
+# 时，投资建设高性能覆铜板项目、年度业绩快报全被股东会决议和律师意见书挤掉。
+# 当时为黑名单辩护的理由是「误判成实质类 = 多下一篇无用 PDF（便宜）」，
+# 这个推理在有上限时不成立：上限把「放过」换算成了「丢掉」。
+MAX_INGEST = 150
 
-# 三个定性模块的提示词里，COMPANY 级最多给几篇。沿用旧的 8。
+# 三个定性模块的提示词里，COMPANY 级最多给几篇（`Corpus.prompt_docs`）。
 PROMPT_DOCS = 8
 
-# `classify` 判成这两类的直接拒绝。
-#   定期报告 —— 动辄数百页，且年报正文已经由 `r.sections` 单独走一条路
-#               （`_load_sections` 从 annual_url 抓 PDF 切节）。放它进来的
-#               代价不是「多一篇无用文档」，是下载一个几十 MB 的 PDF 并
-#               全文抽取。
-#   股东大会 —— 纯程序性。
-# 其余三类（业绩预告 / 股份变动 / 重大事项）是正面类别，直接接受。
-_REJECT_CATEGORIES = ("定期报告", "股东大会")
-
-# 落进 `classify` 的「其他」时再过一道。**这些是 `classify` 认不出来的
-# 程序类** —— 它只有五个正面类别，董事会决议/监事会/独董/会计师改聘/
-# 业绩说明会全归「其他」。
+# ── 按交易所分类代码分档 ──────────────────────────────────────
 #
-# **不另写一个并行的分类器。** `cninfo.classify` 已经在用（`Announcement.
-# category` 就是它算的），再写一套词表意味着两套会漂 —— 它们现在就已经
-# 不一致：`classify` 的定期报告模式带 `(?!.*摘要)`，所以「年度报告摘要」
-# 归「其他」。这条黑名单因此要接住 `报告摘要`。
-_PROCEDURAL = re.compile(
-    r"董事会[^，。]{0,12}决议|监事会|独立董事|会计师事务所"
-    r"|业绩说明会|业绩预约披露|投资者关系活动"
-    r"|报告摘要|公司章程|章程修订|持股计划[^，。]{0,6}摘要"
-    r"|募集资金[^，。]{0,8}存放|内部控制[^，。]{0,6}评价")
+# 巨潮 `announcementType` 形如 `01010503||010113||011705`：0101 开头的是板块
+# 与报告类别，不参与判档；其余是披露系统按公告**性质**给的类型码。
+#
+# **代码表的依据是实证，不是官方定义。** 沪深上市公司这套代码没有找到公开
+# 的官方出处（JR/T 0220.1—2021 是新三板挂牌公司的标准，文中没有这套编码）。
+# 下表每个码都在快照里 30 家公司、7301 条公告上逐个看过跨公司样本，注释里
+# 写着「样本条数 / 公司家数 / 代表性标题」。换公司、换措辞，类型码不变 ——
+# 实证：`011905` 同时收了贵州茅台的「2025年度**股东会**决议公告」与长电科技
+# 的「2025年第二次临时**股东大会**决议公告」。
+#
+# **排除要保守**：判错一个码，排除一侧丢文档（无声）、保留一侧只多下载几篇。
+# 所以只排除跨公司样本一致、明确是程序性的类型；拿不准的进第二档。
+
+# 第一档：对估值因子有实质信息。
+TIER1_CODES = frozenset({
+    "011701",   # 60/11 收购资产（收购股权、竞得土地使用权）
+    "011705",   # 150/25 对外投资（投资建设项目、设立子公司、项目投资协议）
+                #   注：也收了「委托理财」—— 代码偏粗，可接受
+    "012111",   # 78/25 业绩预告 / 业绩快报
+    "012305",   # 226/23 经营数据（月度营收简报、主产品销售简报、养殖经营数据）
+                #   注：也收了「会计政策变更」—— 代码偏粗，可接受
+})
+
+# 排除：程序性。前缀整组排除 + 逐个码排除。
+EXCLUDE_PREFIXES = (
+    "0103",     # 定期报告（年报/半年报/季报及摘要）—— 年报正文走 r.sections，
+                #   各期财务数字已在账本（东财/新浪三表）；而它们动辄数百页
+    "0109",     # 可转债发行、转股、回售、赎回、付息
+    "0119",     # 股东（大）会：通知、补充通知、决议、会议资料、法律意见书
+    "0131",     # 公司章程、议事规则、各项管理制度、述职报告
+)
+EXCLUDE_CODES = frozenset({
+    "011301",   # 160/30 权益分派实施
+    "011303",   # 69/17 限售股解禁、股权激励解除限售
+    "012103",   # 40/18 股票交易异常波动
+    "012109",   # 36/11 风险提示（交易风险、可转债适当性）
+    "012301",   # 208/30 续聘会计师、章程修订对照表
+    "012303",   # 243/30 董监高任免、独董候选人声明
+    "012317",   # 11/9 内幕信息知情人自查报告
+    "012325",   # 447/18 股权激励（授予、归属、行权条件）
+    "012903",   # 315/30 律师法律意见书
+    "012911",   # 39/10 保荐书
+    "012917",   # 7/3 持续督导报告
+    "01239901",  # 512/30 董事会决议
+    "01239910",  # 142/29 监事会决议
+})
+
+# 第二档里**看过样本、决定保留**的码。只用于区分「已知」与「未知」：
+# 不在任何一张表里的码按第二档保留，但会被计入 `AnnounceResult.untyped`、
+# 在门① 的清单里说出来 —— 让人看见披露系统新出了什么类型。
+TIER2_KNOWN = frozenset({
+    "010215",   # IPO 相关
+    "010701", "010703", "010705", "010713", "010799",   # 定增预案/募集说明书/重组
+                #   （定增的募投项目常常就是扩产，保留）
+    "011103",   # 债务融资工具
+    "011501", "011507", "011513",   # 股东增减持、股权过户、回购
+    "011709", "011711", "011713", "011715", "011719", "011799",
+                # 授信贷款、担保、财务资助、捐赠、日常关联交易、套期保值
+    "012307", "012309", "012315", "012330", "012333",
+                # 质押、诉讼仲裁、募集资金使用、ESG、提质增效
+    "012399",   # 1274/30 其他（混杂，保留）
+    "01230350",  # 董监高增减持
+    "012703",   # 补充/更正公告（混有「扩产投资计划的补充公告」）
+    "012901", "012905", "012913",   # 独立财务顾问、资产评估、审计报告
+    "013905", "013999",   # 债券兑付、其他债券事项
+})
 
 
-def is_substantive(title: str) -> bool:
-    """这条公告值不值得下载正文入库。**确定性，不调模型。**
+def _type_codes(type_codes: str) -> list[str]:
+    """拆出参与判档的类型码：去掉 0101 开头的板块与报告类别码。"""
+    return [c for c in (type_codes or "").split("||")
+            if c and not c.startswith("0101")]
 
-    判的是**公告类型**，与本轮有哪些因子无关 —— 因子定向发生在消费端
-    （`gaps._match_announce` 按因子做全文检索），那时因子已经知道了。
 
-    **黑名单而非白名单。** 本项目有一条相反方向的教训：`analyst._ask` 的
-    过滤器曾是黑名单，每放宽一次就撞上下一类，最后改成 `is_fabrication`
-    白名单。那条教训在**拒绝模型输出**的方向上成立（漏放一条伪造是实质
-    损害）。这里方向相反，要的是**高召回**：误判成实质类 = 多下一篇无用
-    PDF（便宜）；误判成程序类 = 丢掉一个可直接引为依据的 COMPANY 级来源
-    （贵，而且无声）。所以 `classify` 认不出来的一律放过去。
+def type_tier(type_codes: str) -> int:
+    """按交易所分类代码给一条公告分档。**不看标题。**
+
+    0 = 排除（程序性）；1 = 第一档（对估值因子有实质信息）；2 = 第二档。
+
+    一条公告常带多个类型码（如 `…||011303||012325`）：**任一码在第一档就算
+    第一档**；**全部**码都在排除表里才排除；其余（含无类型码、未知码）进
+    第二档 —— 默认分支选最弱的那个断言：判不了就保留。丢掉一篇是无声的，
+    多下载一篇只是慢一点。
     """
-    t = (title or "").strip()
-    if not t:
-        return False
-    cat = _classify(t)
-    if cat in _REJECT_CATEGORIES:
-        return False
-    if cat != "其他":                   # 业绩预告 / 股份变动 / 重大事项
-        return True
-    return not _PROCEDURAL.search(t)
+    codes = _type_codes(type_codes)
+    if not codes:
+        return 2
+    if any(c in TIER1_CODES for c in codes):
+        return 1
+    if all(c in EXCLUDE_CODES or c.startswith(EXCLUDE_PREFIXES) for c in codes):
+        return 0
+    return 2
+
+
+def is_known_type(type_codes: str) -> bool:
+    """所有类型码都在三张表里之一（或命中排除前缀）。用于在门① 说出未知码。"""
+    codes = _type_codes(type_codes)
+    return bool(codes) and all(
+        c in TIER1_CODES or c in EXCLUDE_CODES or c in TIER2_KNOWN
+        or c.startswith(EXCLUDE_PREFIXES) for c in codes)
 
 # PDF 取文的页数上限。多数公告只有一两页，但「定期报告」可能两百页以上，
 # 全文取回既无必要也会让单篇挤掉其余七篇的额度。
@@ -121,13 +181,19 @@ class AnnounceResult:
     # 「候选 220 条里挑了 3 条」与「候选 3 条全挑了」含义完全不同。
     candidates: int = 0
     picked: int = 0
-    # 按标题判为程序类而被跳过的条数。**必须能说出来** —— 与 `candidates`
-    # 同一条理由：读者看到「入库 14 篇」时要能知道另外多少篇是被筛掉的、
+    # 按分类代码判为程序性而跳过的条数。**必须能说出来** —— 与 `candidates`
+    # 同一条理由：读者看到「入库 51 篇」时要能知道另外多少篇是被筛掉的、
     # 筛掉的理由是类型而不是故障。
     rejected: int = 0
+    # 因安全上限没入库的条数（只会是第二档的尾巴）。
+    truncated: int = 0
+    # 无类型码或含未知类型码、按第二档保留的条数 —— 让人看见披露系统新出了
+    # 什么类型，而不是被默认分支悄悄吞掉。
+    untyped: int = 0
     fetch_failed: int = 0
     fetch_failed_reasons: list[str] = field(default_factory=list)
-    # 保留但不再有模型挑选那条来源。`_load_announce` 仍读它。
+    # 历史字段：模型挑选时代记录「模型给了但不合法的挑选」。挑选已不经模型，
+    # 新采集恒为空；保留它是为了读回旧的 announce.json 不出错。
     ignored: list[str] = field(default_factory=list)
 
 
@@ -158,10 +224,10 @@ def _doc_id(ann_id: str) -> str:
 
 def gather(*, code: str, company: str, as_of: date, corpus,
            cache_dir: Path | str | None = None) -> AnnounceResult:
-    """公告入语料库：代码取清单 → **确定性按标题筛** → 代码抓 PDF。
+    """公告入语料库：代码取清单 → **按交易所分类代码分档** → 代码抓 PDF。
 
-    **没有 `client` 参数。** 挑选改为 `is_substantive`，与本轮因子无关
-    （见该函数）。此前它需要 `factors=`，而那个值来自方法论预研的分解式
+    **没有 `client` 参数，也不看标题。** 挑选按 `type_tier`，与本轮因子无关、
+    与公司措辞无关（见那个函数）。此前它需要 `factors=`，而那个值来自方法论预研的分解式
     —— 预研挪到辩论① 之后以后，那条依赖会让挑选的唯一判据恒为空。
 
     确定性化的附带性质：整步变得可复现（同一个 as_of 下 `_search` 返回同
@@ -176,11 +242,14 @@ def gather(*, code: str, company: str, as_of: date, corpus,
     if not anns:
         return res
 
-    # 实质类按披露日倒序取前 MAX_INGEST 篇。
-    picked = [a for a in anns if is_substantive(a.title)]
-    res.rejected = len(anns) - len(picked)
-    picked.sort(key=lambda a: a.ann_date, reverse=True)
-    picked = picked[:MAX_INGEST]
+    # 先按档、再按新旧排序，**之后**才截断 —— 第一档无论多旧都先进。
+    ranked = [(type_tier(a.type_codes), a) for a in anns]
+    kept = [(t, a) for t, a in ranked if t != 0]
+    res.rejected = len(anns) - len(kept)
+    res.untyped = sum(1 for _, a in kept if not is_known_type(a.type_codes))
+    kept.sort(key=lambda ta: (ta[0], -ta[1].ann_date.toordinal()))
+    res.truncated = max(0, len(kept) - MAX_INGEST)
+    picked = kept[:MAX_INGEST]
     res.picked = len(picked)
 
     seen = {d.url for d in corpus.docs}
@@ -189,7 +258,7 @@ def gather(*, code: str, company: str, as_of: date, corpus,
     # （已截断、给人看的展示字符串）解耦——与 openweb.gather 的
     # `seen_diagnoses` 同一处置。
     seen_failure_keys: set[str] = set()
-    for a in picked:
+    for rank, a in picked:
         if a.url in seen:
             continue
         try:
@@ -215,7 +284,7 @@ def gather(*, code: str, company: str, as_of: date, corpus,
             tier=Tier.COMPANY,
             # **时点用披露日**（announcementTime），不是抓取日。
             published=a.ann_date, retrieved=as_of,
-            text=text, prompt_limit=TEXT_LIMIT)
+            text=text, prompt_limit=TEXT_LIMIT, rank=rank)
         if not corpus.add_if_visible(doc):
             continue
         seen.add(doc.url)
@@ -339,8 +408,17 @@ def _note_failure(res: AnnounceResult, seen_keys: set[str], reason: str,
 
 def summary(res: AnnounceResult) -> str:
     """给人看的采集结果。**缺什么必须说出来。**"""
+    # 挑选早已不经模型（先是标题分类，后改交易所分类代码）。此前这里一直
+    # 写着「模型挑 N 条」—— 进看板、进 state.json、被后两次调用读回。
     lines = [f"公司公告 {len(res.docs)} 篇"
-             f"（候选 {res.candidates} 条，模型挑 {res.picked} 条）"]
+             f"（候选 {res.candidates} 条，按分类代码排除程序性 "
+             f"{res.rejected} 条，入库 {res.picked} 条）"]
+    if res.truncated:
+        lines.append(f"  – {res.truncated} 篇第二档因安全上限 {MAX_INGEST} "
+                     "未入库（第一档不受影响）")
+    if res.untyped:
+        lines.append(f"  · {res.untyped} 篇无类型码或含未知类型码，按第二档"
+                     "保留 —— 披露系统可能新增了类型，值得看一眼")
     if res.fetch_failed:
         lines.append(f"  – {res.fetch_failed} 篇取文失败")
         for r in res.fetch_failed_reasons:
@@ -359,6 +437,9 @@ def save(res: AnnounceResult, path: Path | str) -> None:
         "docs": [_doc_to_json(d) for d in res.docs],
         "candidates": res.candidates,
         "picked": res.picked,
+        "rejected": res.rejected,
+        "truncated": res.truncated,
+        "untyped": res.untyped,
         "fetch_failed": res.fetch_failed,
         "fetch_failed_reasons": res.fetch_failed_reasons,
         "ignored": res.ignored,
@@ -392,6 +473,10 @@ def load(path: Path | str, corpus) -> AnnounceResult:
         res = AnnounceResult(
             candidates=int(raw.get("candidates", 0)),
             picked=int(raw.get("picked", 0)),
+            # 旧落盘文件没有这三个计数 —— 缺省 0，与「没有发生」同读法。
+            rejected=int(raw.get("rejected", 0)),
+            truncated=int(raw.get("truncated", 0)),
+            untyped=int(raw.get("untyped", 0)),
             fetch_failed=int(raw.get("fetch_failed", 0)),
             fetch_failed_reasons=_str_list_field(raw, "fetch_failed_reasons"),
             ignored=_str_list_field(raw, "ignored"))

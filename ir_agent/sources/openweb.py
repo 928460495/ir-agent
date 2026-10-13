@@ -1127,7 +1127,8 @@ def _doc_to_json(d: Document) -> dict:
             "publisher": d.publisher, "tier": d.tier.value,
             "published": d.published.isoformat(),
             "retrieved": d.retrieved.isoformat(), "text": d.text,
-            "prompt_limit": d.prompt_limit, "date_source": d.date_source}
+            "prompt_limit": d.prompt_limit, "date_source": d.date_source,
+            "rank": d.rank}
 
 
 def _str_field(raw: dict, key: str) -> str:
@@ -1190,6 +1191,10 @@ def _doc_from_json(raw: dict) -> Document:
         # 不必为这个理论上的边角另设判断。
         raise TypeError(
             f"prompt_limit 应为 int 或 None，实际是 {type(prompt_limit).__name__}")
+    # 旧落盘文件没有 rank —— 缺省按第二档读回，不报错。类型不对才抛。
+    rank = raw.get("rank", 2)
+    if not isinstance(rank, int) or isinstance(rank, bool):
+        raise TypeError(f"rank 应为 int，实际是 {type(rank).__name__}")
     return Document(doc_id=_str_field(raw, "doc_id"),
                     url=_str_field(raw, "url"),
                     title=_str_field(raw, "title"),
@@ -1198,7 +1203,7 @@ def _doc_from_json(raw: dict) -> Document:
                     published=date.fromisoformat(raw["published"]),
                     retrieved=date.fromisoformat(raw["retrieved"]),
                     text=_str_field(raw, "text"),
-                    prompt_limit=prompt_limit,
+                    prompt_limit=prompt_limit, rank=rank,
                     date_source=_str_field(raw, "date_source")
                     if "date_source" in raw else "")
 

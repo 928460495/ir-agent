@@ -28,7 +28,8 @@ _HEADERS = {
 _CATEGORIES: list[tuple[str, re.Pattern[str]]] = [
     ("定期报告", re.compile(r"(年度报告|半年度报告|第[一三]季度报告|季度报告)(?!.*摘要)")),
     ("业绩预告", re.compile(r"业绩(预告|快报|预增|预减|预亏)")),
-    ("股东大会", re.compile(r"股东大会")),
+    # 2024 年新《公司法》把「股东大会」改名「股东会」，两种写法并存。
+    ("股东大会", re.compile(r"股东(?:大)?会")),
     ("股份变动", re.compile(r"(增持|减持|回购|股份变动|限售股|解禁)")),
     ("重大事项", re.compile(r"(重大|收购|重组|合并|资产出售|对外投资)")),
 ]
@@ -44,6 +45,10 @@ class Announcement:
     name: str
     category: str
     source_id: str
+    # 巨潮 `announcementType`：披露系统按公告**性质**给的分类代码，形如
+    # `01010503||010113||011705`。公告挑选按它分档（`announce.type_tier`），
+    # **不按标题认字** —— 见那个函数的文档字符串。
+    type_codes: str = ""
 
 
 def classify(title: str) -> str:
@@ -68,6 +73,7 @@ def parse_announcements(payload: dict, source_id: str) -> list[Announcement]:
             name=a.get("secName", ""),
             category=classify(a["announcementTitle"]),
             source_id=source_id,
+            type_codes=a.get("announcementType") or "",
         ))
     return out
 

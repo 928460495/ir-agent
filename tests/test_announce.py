@@ -2,8 +2,14 @@
 
 此前模型从代码给的候选清单里挑下标。现在连这一步也取消了：挑选的唯一
 判据曾是方法论预研产出的因子清单，而预研已挪到辩论① 之后 —— 那条依赖会
-让判据恒为空。改为按公告类型的确定性标题分类（`is_substantive`），因子
-定向挪到消费端由 `gaps._match_announce` 做全文检索，那时因子已经知道了。
+让判据恒为空。改为按**交易所分类代码**（巨潮 `announcementType`）分档，
+因子定向挪到消费端由 `gaps._match_announce` 做全文检索，那时因子已经知道了。
+
+**不按标题认字。** 第一版按标题关键词判（`is_substantive`），生益科技实跑
+时入库的 20 篇有 15 篇是程序性噪声：2024 年新《公司法》把「股东大会」改名
+「股东会」，标题词表与 `cninfo.classify` 同时失效；而「最近 20 篇」的上限把
+每一篇误放的噪声换算成一篇被挤掉的有用公告 —— 投资建设高性能覆铜板项目、
+年度业绩快报全被挤掉。分类代码由披露系统按公告性质给出，与措辞无关。
 """
 
 from __future__ import annotations
@@ -21,18 +27,23 @@ from ir_agent.sources.retry import RetryExhausted, with_retry
 AS_OF = date(2026, 9, 30)
 
 
-def _ann(i: int, title: str, when: date) -> Announcement:
+def _ann(i: int, title: str, when: date, codes: str = "") -> Announcement:
     return Announcement(
         ann_id=f"a{i}", title=title, ann_date=when,
         url=f"http://static.cninfo.com.cn/finalpage/{when}/a{i}.PDF",
         code="600183", name="生益科技", category="其他",
-        source_id=f"src{i}")
+        source_id=f"src{i}", type_codes=codes)
 
 
+# 类型码照真实响应的形状给（「板块码||报告类码||类型码」）。真实数据里总是有
+# 类型码；不给的话按「无类型码」进第二档、不排除 —— 那是另一条测试的事。
 ANNS = [
-    _ann(0, "生益科技关于高频高速覆铜板扩产项目投产的公告", date(2026, 8, 1)),
-    _ann(1, "生益科技2026年半年度报告", date(2026, 8, 28)),
-    _ann(2, "生益科技关于部分产品价格调整的公告", date(2026, 5, 20)),
+    _ann(0, "生益科技关于高频高速覆铜板扩产项目投产的公告", date(2026, 8, 1),
+         "01010503||010113||011705"),
+    _ann(1, "生益科技2026年半年度报告", date(2026, 8, 28),
+         "01010503||010113||010303"),
+    _ann(2, "生益科技关于部分产品价格调整的公告", date(2026, 5, 20),
+         "01010503||010113||012399"),
 ]
 
 
@@ -762,67 +773,141 @@ def test_单条文档损坏只跳过那一条(tmp_path):
     assert back.candidates == 220, "头部字段不该被单条损坏连坐"
 
 
-class TestIsSubstantive:
-    """**挑选改为确定性，因为它本来就与因子无关。**
+_FIX = None
 
-    现有提示词那段硬性要求（优先挑扩产/投产/产能/价格调整/重大合同/对外投资；
-    不要挑股东大会通知/董事会决议/独董声明/会计师改聘/业绩说明会通知）
-    分的是**公告类型**，不是「与哪个因子相关」。类型判断不需要模型。
+
+def _fixture() -> dict:
+    """生益科技 2026-10-13 试跑的真实候选（136 条），加跨公司对照。"""
+    global _FIX
+    if _FIX is None:
+        import json
+        import pathlib
+        _FIX = json.loads((pathlib.Path(__file__).parent / "fixtures" /
+                           "cninfo_600183_2026.json").read_text(encoding="utf-8"))
+    return _FIX
+
+
+def _real_anns(key: str = "shengyi") -> list:
+    """**过真实解析器**：顺带验了 announcementType 从响应流进 Announcement。"""
+    from ir_agent.sources.cninfo import parse_announcements
+    return parse_announcements({"announcements": _fixture()[key]}, "fixture")
+
+
+class TestTypeTier:
+    """**按交易所分类代码分档，不按标题认字。**
+
+    0 = 排除（程序性）；1 = 第一档（对估值因子有实质信息）；2 = 第二档（其余，
+    保留）。代码表的依据是快照里 30 家公司、7301 条公告的跨公司样本 —— 沪深
+    上市公司 announcementType 的官方代码表没有公开出处（JR/T 0220.1—2021 是
+    新三板挂牌公司的标准，文中没有这套编码）。
     """
 
-    SUBSTANTIVE = (
-        "关于全资子公司投资建设年产 5 万吨高频高速覆铜板项目的公告",
-        "关于部分产品价格调整的公告",
-        "关于签订重大销售合同的公告",
-        "关于对外投资设立控股子公司的公告",
-        "关于控股股东协议转让公司部分股份的公告",
-        "关于生产线技术改造项目投产的公告",
-    )
-    PROCEDURAL = (
-        "关于召开 2025 年第一次临时股东大会的通知",
-        "第八届董事会第十二次会议决议公告",
-        "第八届监事会第九次会议决议公告",
-        "独立董事关于关联交易的独立意见",
-        "关于改聘会计师事务所的公告",
-        "关于召开 2025 年度业绩说明会的公告",
-        "2025 年年度报告",
-        "2025 年第三季度报告",
-    )
+    KEY = ("投资建设高性能覆铜板项目", "签订项目投资意向协议", "2025年度业绩快报",
+           "2025年年度业绩预增", "2026年半年度业绩预增", "2025年前三季度业绩预增")
+    NOISE = ("临时股东会决议", "法律意见书", "股票交易异常波动", "股票交易风险提示",
+             "年度权益分派实施", "半年度报告摘要")
 
-    def test_实质类全部通过(self):
-        from ir_agent.sources.announce import is_substantive
-        for s in self.SUBSTANTIVE:
-            assert is_substantive(s), s
+    def test_真实候选里的关键公告全部进第一档(self):
+        from ir_agent.sources.announce import type_tier
+        anns = _real_anns()
+        for key in self.KEY:
+            hit = [a for a in anns if key in a.title]
+            assert hit, f"夹具里没有 {key}"
+            assert type_tier(hit[0].type_codes) == 1, (key, hit[0].type_codes)
 
-    def test_程序类全部拒绝(self):
-        from ir_agent.sources.announce import is_substantive
-        for s in self.PROCEDURAL:
-            assert not is_substantive(s), s
+    def test_真实候选里的程序性公告被排除(self):
+        from ir_agent.sources.announce import type_tier
+        anns = _real_anns()
+        for key in self.NOISE:
+            hit = [a for a in anns if key in a.title]
+            assert hit, f"夹具里没有 {key}"
+            assert type_tier(hit[0].type_codes) == 0, (key, hit[0].type_codes)
 
-    def test_定期报告被排除(self):
-        """**年报/季报走 `r.sections`，不走公告语料库。**
+    def test_股东会与股东大会是同一类型(self):
+        """**这条就是不按标题认字的理由。** 2024 年新《公司法》把「股东大会」
+        改名「股东会」，标题词表一夜失效；分类代码不动。"""
+        from ir_agent.sources.announce import type_tier
+        cross = _real_anns("cross")
+        titles = [a.title for a in cross]
+        assert any("股东大会" in t for t in titles)
+        assert any("股东会" in t and "股东大会" not in t for t in titles)
+        assert all(type_tier(a.type_codes) == 0 for a in cross)
 
-        它们动辄数百页；黑名单放过去的代价不是「多一篇无用文档」，是
-        下载一个几十 MB 的 PDF 并全文抽取。
-        """
-        from ir_agent.sources.announce import is_substantive
-        for s in ("2025 年年度报告", "2025 年半年度报告",
-                  "2025 年第一季度报告", "2025 年年度报告（更正后）"):
-            assert not is_substantive(s), s
+    def test_判档只看代码不看标题(self):
+        """标题里写什么都不影响 —— 反过来也要成立。"""
+        from ir_agent.sources.announce import type_tier
+        assert type_tier("01010503||010113||011705") == 1   # 对外投资
+        assert type_tier("01010503||010113||011905") == 0   # 股东（大）会决议
+        # 板块码与报告类码（0101 开头）不参与判档
+        assert type_tier("01010503||010113") == 2
 
-    def test_认不出来的标题放过去(self):
-        """**这里用黑名单，不用白名单。**
+    def test_无类型码与未知代码默认保留(self):
+        """**默认分支要选最弱的那个断言。** 判不了就保留、进第二档 —— 丢掉
+        一篇是无声的，多下载一篇只是慢一点。"""
+        from ir_agent.sources.announce import is_known_type, type_tier
+        assert type_tier("") == 2
+        assert type_tier("01010503||010113||019999") == 2
+        assert not is_known_type("01010503||010113||019999")
+        assert is_known_type("01010503||010113||011705")
 
-        本项目有一条相反方向的教训：`analyst._ask` 的过滤器曾是黑名单，
-        每放宽一次就撞上下一类，最后改成 `is_fabrication` 白名单。那条
-        教训在**拒绝模型输出**的方向上成立 —— 漏放一条伪造是实质损害。
+    def test_一篇公告带多个类型码时第一档优先(self):
+        """真实样本：`01010503||010113||011303||012325`。任一码是第一档就算
+        第一档；**全部**码都在排除表里才排除。"""
+        from ir_agent.sources.announce import type_tier
+        assert type_tier("01010503||010113||011705||011905") == 1
+        assert type_tier("01010503||010113||011303||012325") == 0
+        assert type_tier("01010503||010113||011905||012399") == 2
 
-        这里方向相反：我们要的是**高召回**。误判成实质类 = 多下一篇无用
-        PDF（便宜）；误判成程序类 = 丢掉一个可直接引为依据的 COMPANY 级
-        来源（贵，而且无声）。所以认不出来的一律放过去。
-        """
-        from ir_agent.sources.announce import is_substantive
-        assert is_substantive("关于公司经营情况的说明")
+
+class TestRealGather:
+    """真实候选过一遍 `gather`：入库多少、哪些、第一档是否齐全。"""
+
+    def _run(self, monkeypatch, cap=None):
+        import ir_agent.sources.announce as A
+        from ir_agent.sources.external import Corpus
+
+        anns = _real_anns()
+        monkeypatch.setattr(A, "_search", lambda *a, **k: anns)
+        monkeypatch.setattr(A, "_download",
+                            lambda url, cache_dir=None: b"x")
+        monkeypatch.setattr(A, "pdf_text", lambda data: "正文。")
+        if cap is not None:
+            monkeypatch.setattr(A, "MAX_INGEST", cap)
+        cp = Corpus(as_of=date(2026, 10, 13))
+        return A.gather(code="600183", company="生益科技",
+                        as_of=date(2026, 10, 13), corpus=cp), cp
+
+    def test_生益科技入库51篇第一档8篇(self, monkeypatch):
+        res, cp = self._run(monkeypatch)
+        assert res.candidates == 136
+        assert res.rejected == 85
+        assert len(cp.docs) == 51
+        assert sum(1 for d in cp.docs if d.rank == 1) == 8
+        titles = " ".join(d.title for d in cp.docs)
+        for key in TestTypeTier.KEY:
+            assert key in titles, f"关键公告没入库：{key}"
+        for key in TestTypeTier.NOISE:
+            assert key not in titles, f"程序性公告入库了：{key}"
+
+    def test_进提示词的八篇就是第一档(self, monkeypatch):
+        """**这是上一版真正坏掉的地方。** 上一版按时间取最近 8 篇，于是定性
+        三节读到的是股东会决议和律师意见书。"""
+        _, cp = self._run(monkeypatch)
+        got = cp.prompt_docs()
+        assert len(got) == 8 and all(d.rank == 1 for d in got)
+        joined = " ".join(d.title for d in got)
+        assert "投资建设高性能覆铜板项目" in joined and "业绩快报" in joined
+
+    def test_上限截断只截第二档的尾巴并且说出来(self, monkeypatch):
+        """安全上限是防一年几百条公告的公司把下载拖到十几分钟。**按档排序后
+        截断**：第一档无论多旧都先进；截了多少要能说出来。"""
+        res, cp = self._run(monkeypatch, cap=10)
+        assert len(cp.docs) == 10
+        assert sum(1 for d in cp.docs if d.rank == 1) == 8, "第一档被截掉了"
+        assert res.truncated == 51 - 10
+        oldest_t1 = min((d for d in cp.docs if d.rank == 1),
+                        key=lambda d: d.published)
+        assert "前三季度业绩预增" in oldest_t1.title, "最旧的第一档也该在"
 
 
 class TestGatherNoModel:
@@ -899,37 +984,6 @@ class TestPromptDocs:
                 text="正文"))
         got = [d.title for d in cp.prompt_docs(company_limit=3)]
         assert got == ["公告7", "公告8", "公告9"], got
-
-
-def test_入库条数放宽到MAX_INGEST而且留的是最近的(monkeypatch):
-    """**这条才是放宽条数的真证据。**
-
-    计划里那条「收益」测试（tests/test_gaps.py 的 `test_放宽条数带来的召回`）
-    直接拿手搭的两个语料库调 `_match_announce` —— 它证明的是「文档在库里就
-    搜得到」，而那在改动之前就成立（`_match_announce` 从来没有条数上限，
-    上限在入库处）。**它测不出流程会不会把 20 篇放进库。** 实跑时它一次就
-    绿，正是因为如此。
-
-    这里直接驱动 `gather`：给 30 条实质类候选，断言入库 `MAX_INGEST` 篇，
-    且留下的是披露日最近的那 20 条。
-    """
-    from ir_agent.sources.announce import MAX_INGEST
-
-    anns = [_ann(i, f"关于第{i}号产线投产的公告", date(2026, 1, 1) + timedelta(days=i))
-            for i in range(30)]
-    pages = {a.url: f"正文{i}" for i, a in enumerate(anns)}
-    _patch(monkeypatch, anns, pages)
-    cp = Corpus(as_of=AS_OF)
-    res = gather(code="600183", company="生益科技", as_of=AS_OF, corpus=cp)
-
-    assert res.candidates == 30
-    assert res.rejected == 0, "这 30 条都是实质类"
-    assert res.picked == MAX_INGEST == 20
-    assert len(cp.docs) == MAX_INGEST
-    # 留下的是最近的 20 条：第 10~29 号（第 0~9 号是最早的十条）
-    kept = sorted(d.title for d in cp.docs)
-    assert "关于第29号产线投产的公告" in kept
-    assert "关于第9号产线投产的公告" not in kept, "该被挤掉的是最早的那几条"
 
 
 def test_旧上限8篇已经不再是入库上限():

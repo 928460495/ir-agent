@@ -175,6 +175,10 @@ class Document:
     # 那时已经没有「当时是怎么拿到这个日期的」这个上下文了。能重算的
     # 不该存，而这个恰恰重算不出来。
     date_source: str = ""
+    # 公司公告的档位（`announce.type_tier`）：1 = 对估值因子有实质信息，
+    # 2 = 其余。**只用于排序**（`Corpus.prompt_docs` 先给第一档），不影响
+    # 引用与核验。非公告文档一律 2。
+    rank: int = 2
 
     def cite(self) -> str:
         return (f"{self.publisher}《{self.title}》"
@@ -264,7 +268,7 @@ class Corpus:
     def prompt_docs(self, company_limit: int | None = None) -> list[Document]:
         """进提示词的文档。**只截断 COMPANY 级，其余分级照旧全给。**
 
-        入库的公告放宽到 `announce.MAX_INGEST` 篇之后，三个定性模块若仍
+        入库的公告不再限 8 篇之后，三个定性模块若仍
         `for d in corpus.docs` 无差别全喂，提示词会是原先的 2.5 倍、而且是
         三个模块各一份。
 
@@ -285,8 +289,13 @@ class Corpus:
 
         if company_limit is None:
             company_limit = PROMPT_DOCS
+        # **先按档、再按新旧。** 上一版只按新旧取最近 8 篇，生益科技实跑时
+        # 定性三节读到的是股东会决议与律师意见书，而投资建设覆铜板项目、
+        # 年度业绩快报排在后面被截掉。档位来自交易所分类代码，见
+        # `announce.type_tier`。
         company = sorted((d for d in self.docs if d.tier is Tier.COMPANY),
-                         key=lambda d: d.published, reverse=True)[:company_limit]
+                         key=lambda d: (d.rank, -d.published.toordinal())
+                         )[:company_limit]
         keep = {id(d) for d in company}
         return [d for d in self.docs
                 if d.tier is not Tier.COMPANY or id(d) in keep]

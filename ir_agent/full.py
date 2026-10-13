@@ -455,7 +455,8 @@ def _restore_announce(r, out: Path) -> list[str]:
         return ["公司公告读回：" + "\n".join([head, *kids])]
     if res.candidates:
         return [f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
-                f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
+                f"按分类代码排除 {res.rejected} 条、入库 {res.picked} 条，"
+                f"取文失败 {res.fetch_failed} 篇）"]
     return ["公司公告：读回 0 篇且候选数为 0——分辨不出是第一阶段确实没有候选"
             f"公告，还是落盘文件（{announce.ANNOUNCE_JSON}）已损坏或为空"
             "（损坏的文件整份降级为零候选，与前者读回来一模一样）；"
@@ -519,7 +520,8 @@ def _load_announce(code: str, r, as_of: date, out: Path,
     if not res.docs:
         return skipped + [
             f"公司公告：一篇都没入库（候选 {res.candidates} 条，"
-            f"模型挑 {res.picked} 条，取文失败 {res.fetch_failed} 篇）"]
+            f"按分类代码排除 {res.rejected} 条、入库 {res.picked} 条，"
+                f"取文失败 {res.fetch_failed} 篇）"]
 
     notes: list[str] = []
     if res.fetch_failed:
@@ -534,6 +536,15 @@ def _load_announce(code: str, r, as_of: date, out: Path,
                       + "\n".join(f"  · {x}" for x in notes)]
 
 
+def _annual_cache_dir() -> Path:
+    """年报 PDF 的缓存目录。**`_load_sections` 与门① 清单共用这一处。**
+
+    文件名由 `annual_pdf._download` 取网址末段。两处若各写一遍目录，门①
+    清单列出的路径与实际缓存的路径会悄悄分开。
+    """
+    return Path("snapshots") / "pdf"
+
+
 def _load_sections(r):
     """年报叙述章节 —— 战略与产业链分析的证据基础。"""
     from ir_agent.sources.annual_sections import extract
@@ -542,7 +553,7 @@ def _load_sections(r):
     if not r.annual_url:
         return None, "年报叙述章节（未找到年报公告）"
     try:
-        data = _download(r.annual_url, Path("snapshots") / "pdf")
+        data = _download(r.annual_url, _annual_cache_dir())
         return extract(data, code=r.code), ""
     except Exception as e:                                  # noqa: BLE001
         return None, f"年报叙述章节（{e.__class__.__name__}: {e}）"
@@ -1775,8 +1786,12 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
     # 局部变量，从未挂到 r。写成 `getattr(r, "peers", ())` 会恒取到空元组，
     # 门① 的同业样本名单就永远是空的，而 spec 要的正是让人看见「牧原 11 家
     # vs 生益 46 家」这个代表性差异。用 `_build_evidence` 已经在用的那条路。
-    rows = collect_rows(r.ledger, corpus=getattr(r, "corpus", None),
-                        pdf_dir=out / "pdf", peers=_peer_names(code))
+    annual_url = getattr(r, "annual_url", "") or ""
+    rows = collect_rows(
+        r.ledger, corpus=getattr(r, "corpus", None), pdf_dir=out / "pdf",
+        peers=_peer_names(code),
+        annual=(annual_url, (_annual_cache_dir() / annual_url.rsplit("/", 1)[-1])
+                if annual_url else None))
     (out / SOURCES_MD).write_text(render(rows, _snapshot_gaps(r)),
                                   encoding="utf-8")
     (out / SOURCES_JSON).write_text(

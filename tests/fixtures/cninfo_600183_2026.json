@@ -1,0 +1,1250 @@
+{
+ "_说明": "巨潮 hisAnnouncement/query 的原始响应字段，取自 2026-10-13 生益科技 --analyse 试跑的快照（12 个月窗口，as_of 2026-10-13）。cross 是跨公司对照：同一个 announcementType 代码，标题分别用「股东会」与「股东大会」。",
+ "as_of": "2026-10-13",
+ "shengyi": [
+  {
+   "announcementId": "1225599516",
+   "announcementTitle": "生益科技关于持股5%以上股东权益变动触及1%刻度的提示性公告",
+   "announcementTime": 1791561600000,
+   "announcementType": "01010503||010113||011501",
+   "adjunctUrl": "finalpage/2026-10-10/1225599516.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225578856",
+   "announcementTitle": "生益科技董事减持股份结果公告",
+   "announcementTime": 1790179200000,
+   "announcementType": "01010503||010113||011501",
+   "adjunctUrl": "finalpage/2026-09-24/1225578856.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225505932",
+   "announcementTitle": "生益科技关于湖南绿晟环保股份有限公司及其下属公司互相提供担保的进展公告",
+   "announcementTime": 1787673600000,
+   "announcementType": "01010503||010113||011711",
+   "adjunctUrl": "finalpage/2026-08-26/1225505932.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225475827",
+   "announcementTitle": "生益科技2026年半年度报告摘要",
+   "announcementTime": 1786723200000,
+   "announcementType": "01010503||010113||010303",
+   "adjunctUrl": "finalpage/2026-08-15/1225475827.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225475803",
+   "announcementTitle": "生益科技关于召开2026年半年度业绩说明会的公告",
+   "announcementTime": 1786723200000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-08-15/1225475803.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225475789",
+   "announcementTitle": "生益科技关于2026年半年度日常关联交易情况及增加2026年度日常关联交易预计额度的公告",
+   "announcementTime": 1786723200000,
+   "announcementType": "01010503||010113||011719",
+   "adjunctUrl": "finalpage/2026-08-15/1225475789.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225475783",
+   "announcementTitle": "生益科技2026年半年度报告",
+   "announcementTime": 1786723200000,
+   "announcementType": "01010503||010113||010303",
+   "adjunctUrl": "finalpage/2026-08-15/1225475783.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225475714",
+   "announcementTitle": "生益科技第十一届董事会第二十次会议决议公告",
+   "announcementTime": 1786723200000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-08-15/1225475714.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225463839",
+   "announcementTitle": "生益科技股票交易风险提示公告",
+   "announcementTime": 1786118400000,
+   "announcementType": "01010503||010113||012109",
+   "adjunctUrl": "finalpage/2026-08-08/1225463839.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225462224",
+   "announcementTitle": "生益科技股票交易异常波动公告",
+   "announcementTime": 1786032000000,
+   "announcementType": "01010503||010113||012103",
+   "adjunctUrl": "finalpage/2026-08-07/1225462224.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225462223",
+   "announcementTitle": "生益科技关于湖南绿晟环保股份有限公司及其下属公司互相提供担保的进展公告",
+   "announcementTime": 1786032000000,
+   "announcementType": "01010503||010113||011711",
+   "adjunctUrl": "finalpage/2026-08-07/1225462223.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225441495",
+   "announcementTitle": "北京市康达（广州）律师事务所关于生益科技2026年第一次临时股东会的法律意见书",
+   "announcementTime": 1784908800000,
+   "announcementType": "01010901||010113||011999||012903",
+   "adjunctUrl": "finalpage/2026-07-25/1225441495.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225441493",
+   "announcementTitle": "生益科技2026年第一次临时股东会决议公告",
+   "announcementTime": 1784908800000,
+   "announcementType": "01010503||010113||011905",
+   "adjunctUrl": "finalpage/2026-07-25/1225441493.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225428540",
+   "announcementTitle": "生益科技关于2024年度限制性股票激励计划第二个解除限售期解除限售暨上市的公告",
+   "announcementTime": 1784217600000,
+   "announcementType": "01010503||010113||011303||012325",
+   "adjunctUrl": "finalpage/2026-07-17/1225428540.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225428528",
+   "announcementTitle": "北京市康达（广州）律师事务所关于生益科技2024年度限制性股票激励计划第二个解除限售期解除限售条件成就的法律意见书",
+   "announcementTime": 1784217600000,
+   "announcementType": "01010503||01010901||010113||012325||012903",
+   "adjunctUrl": "finalpage/2026-07-17/1225428528.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225424289",
+   "announcementTitle": "生益科技关于拟处置持有的江苏联瑞新材料股份有限公司可转换公司债券的公告",
+   "announcementTime": 1784044800000,
+   "announcementType": "01010503||010113||010999",
+   "adjunctUrl": "finalpage/2026-07-15/1225424289.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225424287",
+   "announcementTitle": "生益科技第十一届董事会第十八次会议决议公告",
+   "announcementTime": 1784044800000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-07-15/1225424287.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225422436",
+   "announcementTitle": "生益科技2026年半年度业绩预增公告",
+   "announcementTime": 1783958400000,
+   "announcementType": "01010503||010113||012111",
+   "adjunctUrl": "finalpage/2026-07-14/1225422436.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225417109",
+   "announcementTitle": "生益科技股权激励限制性股票回购注销实施公告",
+   "announcementTime": 1783612800000,
+   "announcementType": "01010503||010113||011513||012325",
+   "adjunctUrl": "finalpage/2026-07-10/1225417109.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225417102",
+   "announcementTitle": "北京市康达（广州）律师事务所关于生益科技回购注销2024年度限制性股票激励计划部分已获授但尚未解除限售的限制性股票的法律意见书",
+   "announcementTime": 1783612800000,
+   "announcementType": "01010503||01010901||010113||012325||012903",
+   "adjunctUrl": "finalpage/2026-07-10/1225417102.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225415494",
+   "announcementTitle": "生益科技第十一届董事会第十七次会议决议公告",
+   "announcementTime": 1783526400000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-07-09/1225415494.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225415493",
+   "announcementTitle": "生益科技2026年第一次临时股东会会议资料",
+   "announcementTime": 1783526400000,
+   "announcementType": "01010503||010113||011906",
+   "adjunctUrl": "finalpage/2026-07-09/1225415493.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225415492",
+   "announcementTitle": "生益科技关于召开2026年第一次临时股东会的通知",
+   "announcementTime": 1783526400000,
+   "announcementType": "01010503||010113||011901",
+   "adjunctUrl": "finalpage/2026-07-09/1225415492.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225364510",
+   "announcementTitle": "生益科技关于增加2026年度日常关联交易预计额度的公告",
+   "announcementTime": 1781193600000,
+   "announcementType": "01010503||010113||011719",
+   "adjunctUrl": "finalpage/2026-06-12/1225364510.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225364505",
+   "announcementTitle": "生益科技第十一届董事会第十六次会议决议公告",
+   "announcementTime": 1781193600000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-06-12/1225364505.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225339844",
+   "announcementTitle": "生益科技董事减持股份计划公告",
+   "announcementTime": 1780070400000,
+   "announcementType": "01010503||010113||011501",
+   "adjunctUrl": "finalpage/2026-05-30/1225339844.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225335459",
+   "announcementTitle": "生益科技2025年年度权益分派实施公告",
+   "announcementTime": 1779984000000,
+   "announcementType": "01010503||010113||011301",
+   "adjunctUrl": "finalpage/2026-05-29/1225335459.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225331800",
+   "announcementTitle": "生益科技股票交易异常波动公告",
+   "announcementTime": 1779811200000,
+   "announcementType": "01010503||010113||012103",
+   "adjunctUrl": "finalpage/2026-05-27/1225331800.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225321920",
+   "announcementTitle": "生益科技关于董事辞职的公告",
+   "announcementTime": 1779379200000,
+   "announcementType": "01010503||010113||012303",
+   "adjunctUrl": "finalpage/2026-05-22/1225321920.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225317659",
+   "announcementTitle": "生益科技关于回购注销部分限制性股票减资暨通知债权人的公告",
+   "announcementTime": 1779206400000,
+   "announcementType": "01010503||010113||011513",
+   "adjunctUrl": "finalpage/2026-05-20/1225317659.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225317646",
+   "announcementTitle": "生益科技2025年年度股东会决议公告",
+   "announcementTime": 1779206400000,
+   "announcementType": "01010503||010113||011905",
+   "adjunctUrl": "finalpage/2026-05-20/1225317646.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225317643",
+   "announcementTitle": "北京市康达（广州）律师事务所关于广东生益科技股份有限公司2025年年度股东会的法律意见书",
+   "announcementTime": 1779206400000,
+   "announcementType": "01010901||010113||011999||012903",
+   "adjunctUrl": "finalpage/2026-05-20/1225317643.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225285240",
+   "announcementTitle": "生益科技2025年年度股东会会议资料",
+   "announcementTime": 1778256000000,
+   "announcementType": "01010503||010113||011906",
+   "adjunctUrl": "finalpage/2026-05-09/1225285240.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225230175",
+   "announcementTitle": "生益科技2026年第一季度报告",
+   "announcementTime": 1777392000000,
+   "announcementType": "01010503||010113||010305",
+   "adjunctUrl": "finalpage/2026-04-29/1225230175.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225230115",
+   "announcementTitle": "生益科技第十一届董事会第十五次会议决议公告",
+   "announcementTime": 1777392000000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-04-29/1225230115.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195412",
+   "announcementTitle": "生益科技关于2026年度“提质增效重回报”行动方案的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195412.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195411",
+   "announcementTitle": "生益科技董事、高级管理人员薪酬管理制度（2026年4月修订）",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2026-04-25/1225195411.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195410",
+   "announcementTitle": "生益科技关于董事、高级管理人员2025年度薪酬情况暨2026年度薪酬方案的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195410.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195409",
+   "announcementTitle": "生益科技2025年年度报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||010301",
+   "adjunctUrl": "finalpage/2026-04-25/1225195409.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195408",
+   "announcementTitle": "北京市康达（广州）律师事务所关于生益科技回购注销2024年度限制性股票激励计划部分已获授但尚未解除限售的限制性股票暨第二个解除限售期解除限售条件成就的法律意见书",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||01010901||010113||012325||012903",
+   "adjunctUrl": "finalpage/2026-04-25/1225195408.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195407",
+   "announcementTitle": "生益科技2025年度环境、社会和公司治理报告摘要",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012330",
+   "adjunctUrl": "finalpage/2026-04-25/1225195407.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195406",
+   "announcementTitle": "生益科技关于变更注册资本并修订《公司章程》的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012301",
+   "adjunctUrl": "finalpage/2026-04-25/1225195406.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195404",
+   "announcementTitle": "生益科技关于回购注销2024年度限制性股票激励计划部分已获授但尚未解除限售的限制性股票的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011513||012325",
+   "adjunctUrl": "finalpage/2026-04-25/1225195404.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195402",
+   "announcementTitle": "生益科技2025年度独立董事述职报告（赵彤）",
+   "announcementTime": 1777046400000,
+   "announcementType": "01011107||010113||013105",
+   "adjunctUrl": "finalpage/2026-04-25/1225195402.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195401",
+   "announcementTitle": "生益科技公司章程（2026年4月修订）",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||013101",
+   "adjunctUrl": "finalpage/2026-04-25/1225195401.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195399",
+   "announcementTitle": "生益科技董事会关于独立董事独立性自查情况的专项报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195399.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195396",
+   "announcementTitle": "生益科技2025年度环境、社会和公司治理报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012330",
+   "adjunctUrl": "finalpage/2026-04-25/1225195396.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195394",
+   "announcementTitle": "生益科技关于湖南绿晟环保股份有限公司及其下属公司互相提供担保的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011711",
+   "adjunctUrl": "finalpage/2026-04-25/1225195394.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195392",
+   "announcementTitle": "生益科技2025年度独立董事述职报告（景乃权）",
+   "announcementTime": 1777046400000,
+   "announcementType": "01011107||010113||013105",
+   "adjunctUrl": "finalpage/2026-04-25/1225195392.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195390",
+   "announcementTitle": "生益科技关于使用自有资金进行委托理财的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011705",
+   "adjunctUrl": "finalpage/2026-04-25/1225195390.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195388",
+   "announcementTitle": "生益科技关于2024年度限制性股票激励计划第二个解除限售期解除限售条件成就的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011303||012325",
+   "adjunctUrl": "finalpage/2026-04-25/1225195388.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195386",
+   "announcementTitle": "生益科技第十一届董事会第十四次会议决议公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-04-25/1225195386.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195384",
+   "announcementTitle": "生益科技关于2025年度日常关联交易情况及预计2026年度日常关联交易的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011719",
+   "adjunctUrl": "finalpage/2026-04-25/1225195384.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195382",
+   "announcementTitle": "生益科技2025年度独立董事述职报告（蒋基路）",
+   "announcementTime": 1777046400000,
+   "announcementType": "01011107||010113||013105",
+   "adjunctUrl": "finalpage/2026-04-25/1225195382.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195380",
+   "announcementTitle": "生益科技关于召开2025年年度股东会的通知",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011901",
+   "adjunctUrl": "finalpage/2026-04-25/1225195380.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195378",
+   "announcementTitle": "生益科技关于投资建设高性能覆铜板项目的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011705",
+   "adjunctUrl": "finalpage/2026-04-25/1225195378.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195376",
+   "announcementTitle": "生益科技2025年度内部控制评价报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195376.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195374",
+   "announcementTitle": "生益科技对华兴会计师事务所（特殊普通合伙）履职情况评估报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195374.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195373",
+   "announcementTitle": "生益科技关于续聘会计师事务所的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012301",
+   "adjunctUrl": "finalpage/2026-04-25/1225195373.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195371",
+   "announcementTitle": "生益科技关于会计政策变更的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012305",
+   "adjunctUrl": "finalpage/2026-04-25/1225195371.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195368",
+   "announcementTitle": "生益科技2025年度审计报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010903||010113||012913",
+   "adjunctUrl": "finalpage/2026-04-25/1225195368.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195364",
+   "announcementTitle": "生益科技关于2025年年度暨2026年第一季度业绩说明会的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195364.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195362",
+   "announcementTitle": "生益科技2025年年度报告摘要",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||010301",
+   "adjunctUrl": "finalpage/2026-04-25/1225195362.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195360",
+   "announcementTitle": "生益科技关于2025年度“提质增效重回报”行动方案的年度评估报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195360.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195358",
+   "announcementTitle": "生益科技关于为下属控股公司提供担保的公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011711",
+   "adjunctUrl": "finalpage/2026-04-25/1225195358.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195357",
+   "announcementTitle": "生益科技2025年度内部控制审计报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010903||010113||012913",
+   "adjunctUrl": "finalpage/2026-04-25/1225195357.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195356",
+   "announcementTitle": "生益科技2025年度独立董事述职报告（杜家驹）",
+   "announcementTime": 1777046400000,
+   "announcementType": "01011107||010113||013105",
+   "adjunctUrl": "finalpage/2026-04-25/1225195356.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195354",
+   "announcementTitle": "生益科技2025年年度利润分配方案公告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||011301",
+   "adjunctUrl": "finalpage/2026-04-25/1225195354.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195352",
+   "announcementTitle": "生益科技2025年度审计委员会履职报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010501||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195352.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195350",
+   "announcementTitle": "生益科技董事会审计委员会对华兴会计师事务所（特殊普通合伙）履行监督职责情况报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2026-04-25/1225195350.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225195348",
+   "announcementTitle": "关于生益科技非经营性资金占用及其他关联资金往来情况汇总表的专项审计报告",
+   "announcementTime": 1777046400000,
+   "announcementType": "01010503||01010903||010113||012399||0129||012913",
+   "adjunctUrl": "finalpage/2026-04-25/1225195348.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225053586",
+   "announcementTitle": "生益科技关于持股5%以上股东非公开发行可交换公司债券发行完成的公告",
+   "announcementTime": 1774886400000,
+   "announcementType": "01010503||010113||013999",
+   "adjunctUrl": "finalpage/2026-03-31/1225053586.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225008806",
+   "announcementTitle": "生益科技关于持股5%以上股东拟非公开发行可交换公司债券办理持有股份担保及信托登记的公告",
+   "announcementTime": 1773417600000,
+   "announcementType": "01010503||010113||011711||013999",
+   "adjunctUrl": "finalpage/2026-03-14/1225008806.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225005434",
+   "announcementTitle": "生益科技第十一届董事会第十三次会议决议公告",
+   "announcementTime": 1773244800000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-03-12/1225005434.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225005432",
+   "announcementTitle": "生益科技关于授权湖南绿晟环保股份有限公司开展期货套期保值业务的公告",
+   "announcementTime": 1773244800000,
+   "announcementType": "01010503||010113||011799||012399",
+   "adjunctUrl": "finalpage/2026-03-12/1225005432.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1225005421",
+   "announcementTitle": "湖南绿晟环保股份有限公司关于开展境内期货套期保值业务的可行性报告",
+   "announcementTime": 1773244800000,
+   "announcementType": "01010501||010113||012399",
+   "adjunctUrl": "finalpage/2026-03-12/1225005421.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224987198",
+   "announcementTitle": "生益科技2025年度业绩快报公告",
+   "announcementTime": 1772208000000,
+   "announcementType": "01010503||010113||012111",
+   "adjunctUrl": "finalpage/2026-02-28/1224987198.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224985479",
+   "announcementTitle": "生益科技持股5%以上股东及董事减持股份结果公告",
+   "announcementTime": 1772121600000,
+   "announcementType": "01010503||010113||011501",
+   "adjunctUrl": "finalpage/2026-02-27/1224985479.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224962944",
+   "announcementTitle": "生益科技关于非公开发行可交换公司债券的进展公告",
+   "announcementTime": 1770048000000,
+   "announcementType": "01010503||010113||013999",
+   "adjunctUrl": "finalpage/2026-02-03/1224962944.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224956186",
+   "announcementTitle": "生益科技2025年年度业绩预增公告",
+   "announcementTime": 1769702400000,
+   "announcementType": "01010503||010113||012111",
+   "adjunctUrl": "finalpage/2026-01-30/1224956186.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224920631",
+   "announcementTitle": "生益科技关于关联公司伟华电子有限公司拟参与公司可交换公司债券发行暨关联交易的公告",
+   "announcementTime": 1767628800000,
+   "announcementType": "01010503||010113||011719||013999",
+   "adjunctUrl": "finalpage/2026-01-06/1224920631.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224920629",
+   "announcementTitle": "生益科技第十一届董事会第十二次会议决议公告",
+   "announcementTime": 1767628800000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-01-06/1224920629.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224920628",
+   "announcementTitle": "生益科技关于业绩补偿款支付的进展公告",
+   "announcementTime": 1767628800000,
+   "announcementType": "01010501||010113||012399",
+   "adjunctUrl": "finalpage/2026-01-06/1224920628.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224917465",
+   "announcementTitle": "生益科技第十一届董事会第十一次会议决议公告",
+   "announcementTime": 1767542400000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2026-01-05/1224917465.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224917463",
+   "announcementTitle": "生益科技关于与东莞松山湖高新技术产业开发区管理委员会签订项目投资意向协议的公告",
+   "announcementTime": 1767542400000,
+   "announcementType": "01010503||010113||011705",
+   "adjunctUrl": "finalpage/2026-01-05/1224917463.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224898081",
+   "announcementTitle": "生益科技高级管理人员减持股份结果公告",
+   "announcementTime": 1766678400000,
+   "announcementType": "01010503||010113||011501||01230350",
+   "adjunctUrl": "finalpage/2025-12-26/1224898081.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224862087",
+   "announcementTitle": "生益科技关于持股5%以上股东权益变动触及1%刻度的提示性公告",
+   "announcementTime": 1765296000000,
+   "announcementType": "01010503||010113||011501",
+   "adjunctUrl": "finalpage/2025-12-10/1224862087.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224811528",
+   "announcementTitle": "生益科技简式权益变动报告书",
+   "announcementTime": 1763395200000,
+   "announcementType": "01011101||010113||011501",
+   "adjunctUrl": "finalpage/2025-11-18/1224811528.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224811527",
+   "announcementTitle": "生益科技关于股东权益变动的提示性公告",
+   "announcementTime": 1763395200000,
+   "announcementType": "01010503||010113||011501",
+   "adjunctUrl": "finalpage/2025-11-18/1224811527.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224804591",
+   "announcementTitle": "生益科技关于选举职工董事的公告",
+   "announcementTime": 1763049600000,
+   "announcementType": "01010503||010113||012303",
+   "adjunctUrl": "finalpage/2025-11-14/1224804591.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224804590",
+   "announcementTitle": "北京市康达（广州）律师事务所关于生益科技2025年第三次临时股东大会的法律意见书",
+   "announcementTime": 1763049600000,
+   "announcementType": "01010901||010113||011999||012903",
+   "adjunctUrl": "finalpage/2025-11-14/1224804590.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224804589",
+   "announcementTitle": "生益科技2025年第三次临时股东大会决议公告",
+   "announcementTime": 1763049600000,
+   "announcementType": "01010503||010113||011905",
+   "adjunctUrl": "finalpage/2025-11-14/1224804589.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224784708",
+   "announcementTitle": "生益科技持股5%以上股东、董事及高级管理人员减持股份计划公告",
+   "announcementTime": 1762185600000,
+   "announcementType": "01010503||010113||011501||01230350",
+   "adjunctUrl": "finalpage/2025-11-04/1224784708.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754837",
+   "announcementTitle": "生益科技董事会秘书工作制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754837.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754836",
+   "announcementTitle": "生益科技董事会议事规则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754836.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754835",
+   "announcementTitle": "生益科技股东会议事规则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013103||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754835.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754834",
+   "announcementTitle": "生益科技信息披露事务管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754834.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754833",
+   "announcementTitle": "生益科技募集资金管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754833.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754832",
+   "announcementTitle": "生益科技董事、高级管理人员薪酬管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754832.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754831",
+   "announcementTitle": "生益科技独立董事津贴管理办法（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754831.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754830",
+   "announcementTitle": "生益科技独立董事工作制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754830.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754829",
+   "announcementTitle": "生益科技董事会薪酬与考核委员会议事规则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754829.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754828",
+   "announcementTitle": "生益科技董事会提名委员会议事规则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754828.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754827",
+   "announcementTitle": "生益科技董事会审计委员会议事规则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754827.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754826",
+   "announcementTitle": "生益科技董事会战略委员会工作细则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754826.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754825",
+   "announcementTitle": "生益科技第十一届董事会第十次会议决议公告",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||01239901",
+   "adjunctUrl": "finalpage/2025-10-29/1224754825.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754874",
+   "announcementTitle": "生益科技2025年第三次临时股东大会会议资料",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||011906",
+   "adjunctUrl": "finalpage/2025-10-29/1224754874.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754873",
+   "announcementTitle": "生益科技关于召开2025年第三次临时股东大会的通知",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||011901",
+   "adjunctUrl": "finalpage/2025-10-29/1224754873.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754872",
+   "announcementTitle": "生益科技关于召开2025年第三季度业绩说明会的公告",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||012399",
+   "adjunctUrl": "finalpage/2025-10-29/1224754872.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754863",
+   "announcementTitle": "生益科技2025年第三季度报告",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010501||01010503||010113||010307",
+   "adjunctUrl": "finalpage/2025-10-29/1224754863.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754862",
+   "announcementTitle": "生益科技公司章程（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013101",
+   "adjunctUrl": "finalpage/2025-10-29/1224754862.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754861",
+   "announcementTitle": "生益科技关于取消监事会并修订《公司章程》及修订、制定部分公司治理制度的公告",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||012301",
+   "adjunctUrl": "finalpage/2025-10-29/1224754861.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754860",
+   "announcementTitle": "北京市康达（广州）律师事务所关于生益科技回购注销2024年度限制性股票激励计划部分已获授但尚未解除限售的限制性股票的法律意见书",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||01010901||010113||012325||012903",
+   "adjunctUrl": "finalpage/2025-10-29/1224754860.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754859",
+   "announcementTitle": "生益科技股权激励限制性股票回购注销实施公告",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||011513||012325",
+   "adjunctUrl": "finalpage/2025-10-29/1224754859.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754858",
+   "announcementTitle": "生益科技第十一届监事会第九次会议决议公告",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010505||010113||01239910",
+   "adjunctUrl": "finalpage/2025-10-29/1224754858.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754857",
+   "announcementTitle": "生益科技审计委员会年报工作制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754857.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754856",
+   "announcementTitle": "生益科技内部审计制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754856.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754855",
+   "announcementTitle": "生益科技对外投资管理制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754855.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754854",
+   "announcementTitle": "生益科技董事、高级管理人员离职管理制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754854.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754853",
+   "announcementTitle": "生益科技总经理工作细则",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754853.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754852",
+   "announcementTitle": "生益科技信息披露暂缓与豁免业务管理制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754852.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754851",
+   "announcementTitle": "生益科技关联交易管理制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754851.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754850",
+   "announcementTitle": "生益科技对外担保管理制度",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754850.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754849",
+   "announcementTitle": "湖南绿晟环保股份有限公司境内期货套期保值管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754849.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754848",
+   "announcementTitle": "生益科技外部信息使用人管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754848.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754847",
+   "announcementTitle": "生益科技年报信息披露重大差错责任追究制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754847.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754846",
+   "announcementTitle": "生益科技独立董事年报工作制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754846.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754845",
+   "announcementTitle": "生益科技银行间债券市场债务融资工具信息披露事务管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754845.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754844",
+   "announcementTitle": "生益科技信用类债券募集资金管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754844.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754843",
+   "announcementTitle": "生益科技社会责任制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754843.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754842",
+   "announcementTitle": "生益科技委托理财管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754842.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754841",
+   "announcementTitle": "生益科技投资者关系管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754841.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754840",
+   "announcementTitle": "生益科技内幕信息知情人备案管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754840.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754839",
+   "announcementTitle": "生益科技董事和高级管理人员所持本公司股份及其变动管理细则（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013105||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754839.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224754838",
+   "announcementTitle": "生益科技分红管理制度（2025年10月修订）",
+   "announcementTime": 1761667200000,
+   "announcementType": "01010503||010113||013199",
+   "adjunctUrl": "finalpage/2025-10-29/1224754838.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  },
+  {
+   "announcementId": "1224727399",
+   "announcementTitle": "生益科技2025年前三季度业绩预增公告",
+   "announcementTime": 1761235200000,
+   "announcementType": "01010503||010113||012111",
+   "adjunctUrl": "finalpage/2025-10-24/1224727399.PDF",
+   "secCode": "600183",
+   "secName": "生益科技"
+  }
+ ],
+ "cross": [
+  {
+   "announcementId": "1225366264",
+   "announcementTitle": "贵州茅台2025年度股东会决议公告",
+   "announcementTime": 1781193600000,
+   "announcementType": "01010503||010113||011905",
+   "adjunctUrl": "finalpage/2026-06-12/1225366264.PDF",
+   "secCode": "600519",
+   "secName": "贵州茅台"
+  },
+  {
+   "announcementId": "1224911038",
+   "announcementTitle": "江苏长电科技股份有限公司2025年第二次临时股东大会决议公告",
+   "announcementTime": 1767110400000,
+   "announcementType": "01010503||010113||011905",
+   "adjunctUrl": "finalpage/2025-12-31/1224911038.PDF",
+   "secCode": "600584",
+   "secName": "长电科技"
+  }
+ ]
+}

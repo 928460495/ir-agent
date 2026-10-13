@@ -141,13 +141,72 @@ class TestCollectRows:
         assert fact.origin == "eastmoney#stmt"
         assert "revenue" in fact.label and "2025FY" in fact.label
 
-    def test_年报PDF按缓存目录列出(self, tmp_path):
+    def test_年报PDF由年报地址定位而不是扫缓存目录(self, tmp_path):
+        """**`out/pdf/` 里存的是公告，不是年报。** 年报由 `_load_sections`
+        缓存到 `snapshots/pdf/`。上一版扫 `pdf_dir` 的 `*.pdf` 当年报：生益
+        科技实跑时文件名是大写 `.PDF`，glob 区分大小写、一个都没匹配上，
+        「年报 PDF」一节整个消失；而就算匹配上了，那 20 个也是公告的 PDF，
+        会被错标成 20 份年报。"""
         from ir_agent.sources.manifest import collect_rows
 
-        (tmp_path / "600183_2025.pdf").write_text("x", encoding="utf-8")
-        rows = collect_rows(self._ledger(), pdf_dir=tmp_path)
-        pdf = next(r for r in rows if r.kind == "年报 PDF")
-        assert pdf.local.endswith("600183_2025.pdf")
+        ann_dir = tmp_path / "pdf"
+        ann_dir.mkdir()
+        (ann_dir / "1225599516.PDF").write_text("公告", encoding="utf-8")
+        annual = tmp_path / "1223101543.PDF"
+        annual.write_text("年报", encoding="utf-8")
+        url = "http://static.cninfo.com.cn/finalpage/2026-04-25/1223101543.PDF"
+        rows = collect_rows(self._ledger(), pdf_dir=ann_dir,
+                            annual=(url, annual))
+        ann_rows = [r for r in rows if r.kind == "年报 PDF"]
+        assert len(ann_rows) == 1, [r.label for r in ann_rows]
+        assert ann_rows[0].origin == url and ann_rows[0].local == str(annual)
+        assert "1225599516" not in " ".join(r.local for r in ann_rows), \
+            "公告的 PDF 被当成了年报"
+
+    def test_找不到年报时也要列一行说出来(self):
+        """**缺什么必须显式列出来。** 不出这一行，读清单的人分不清「年报
+        核过了」和「根本没有年报」。"""
+        from ir_agent.sources.manifest import collect_rows
+
+        rows = collect_rows(self._ledger(), annual=("", None))
+        r = next(x for x in rows if x.kind == "年报 PDF")
+        assert "未找到" in r.label and r.local == ""
+
+    def test_年报未缓存时本地栏留空而不是写一个不存在的路径(self, tmp_path):
+        """写一个不存在的路径，`missing_files` 会把它报成「清单引用了从未
+        保存的文件」—— 那不对，年报只是没缓存。留空并在备注里说。"""
+        from ir_agent.sources.manifest import collect_rows, missing_files
+
+        rows = collect_rows(self._ledger(),
+                            annual=("http://x/a.PDF", tmp_path / "nope.PDF"))
+        r = next(x for x in rows if x.kind == "年报 PDF")
+        assert r.local == "" and "未在本地缓存" in r.note
+        assert missing_files(rows) == []
+
+    def test_公告的本地文件按网址末段到缓存目录里找(self, tmp_path):
+        """`Document` 没有本地路径字段。上一版写 `getattr(d, "path", "")` ——
+        恒得空串，生益科技实跑时 20 篇公告的「本地文件」一栏全是 `—`，而 PDF
+        明明缓存着。`announce.gather` 用 `_download(url, cache_dir)` 缓存，
+        文件名就是网址末段（大写 `.PDF`）。"""
+        from datetime import date
+
+        from ir_agent.sources.external import Corpus, Document, Tier
+        from ir_agent.sources.manifest import collect_rows
+
+        d = tmp_path / "pdf"
+        d.mkdir()
+        (d / "1225599516.PDF").write_text("x", encoding="utf-8")
+        cp = Corpus(as_of=date(2026, 10, 13))
+        for i, name in enumerate(("1225599516.PDF", "9999999999.PDF")):
+            cp.docs.append(Document(
+                doc_id=f"a{i}", url=f"http://static.cninfo.com.cn/f/{name}",
+                title=f"公告{i}", publisher="生益科技", tier=Tier.COMPANY,
+                published=date(2026, 10, 1), retrieved=date(2026, 10, 13),
+                text="正文"))
+        rows = [r for r in collect_rows(self._ledger(), corpus=cp, pdf_dir=d)
+                if r.kind == "公司公告"]
+        assert rows[0].local == str(d / "1225599516.PDF")
+        assert rows[1].local == "", "没缓存的不能编一个路径"
 
     def test_同业样本量小的要标出代表性弱(self):
         """牧原 11 家 vs 生益 46 家 —— 行业中位数、CR5、分位数都建立在它上面。"""

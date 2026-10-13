@@ -326,3 +326,11 @@ def test_停在门一门二时摘要说清停在哪():
                             as_of=date(2026, 10, 12), stage=stage,
                             cost_usd=Decimal(0))
         assert word in o.summary(), stage
+
+
+def test_财经媒体级来源的警告不被标成未生成():
+    """生益科技 2026-10-13 试跑时，这条警告在门① 的终端输出里印成了
+    「– 未生成：依据引用财经媒体级来源 2 处……」。"""
+    from ir_agent.research import _mark
+    s = "依据引用财经媒体级来源 2 处，核验通过但分级规则是「仅作线索，不得作为依据。」"
+    assert _mark(s) == "  ⚠ "

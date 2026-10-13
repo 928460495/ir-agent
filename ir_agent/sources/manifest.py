@@ -75,11 +75,17 @@ def render(rows: list[SourceRow], gaps: list[tuple[str, int]]) -> str:
     return "\n".join(lines)
 
 
-def collect_rows(ledger, corpus=None, pdf_dir=None,
-                 peers: tuple = ()) -> list[SourceRow]:
-    """从账本、语料库、PDF 缓存、同业名单汇总清单行。
+def collect_rows(ledger, corpus=None, pdf_dir=None, peers: tuple = (),
+                 annual: tuple | None = None) -> list[SourceRow]:
+    """从账本、语料库、公告缓存、年报、同业名单汇总清单行。
 
     取不到的部分留空而不是编 —— 清单的价值在于它说的每一条都能点开。
+
+    `pdf_dir` 是**公告**的 PDF 缓存（`announce.gather` 写入），用来给每篇
+    公告找本地文件；**它不是年报目录**。`annual` 是 `(年报网址, 本地缓存
+    路径)`：年报由 `_load_sections` 缓存到别处。`annual=None` 表示调用方
+    不提供年报信息（不出这一节）；`("", None)` 表示找过、没有年报公告 ——
+    会列一行说出来。
     """
     rows: list[SourceRow] = []
     seen: set[str] = set()
@@ -105,18 +111,40 @@ def collect_rows(ledger, corpus=None, pdf_dir=None,
         # （值是小写的 `'company'`）—— 写成 `str(d.tier) == "COMPANY"` 恒为
         # False，于是门① 清单里「公司公告」那一节永远是空的、所有公告都被
         # 归进「外部文档」。无异常、无告警，只有读清单的人看到一个空小节。
+        is_ann = getattr(d, "tier", None) is Tier.COMPANY
+        url = getattr(d, "url", "") or ""
+        # **`Document` 没有本地路径字段。** 上一版写 `getattr(d, "path", "")`
+        # —— 恒得空串，生益科技实跑时 20 篇公告的「本地文件」全是 `—`，
+        # 而 PDF 明明缓存着。`announce.gather` 用 `_download(url, cache_dir)`
+        # 缓存，文件名就是网址末段。没缓存的留空，不编路径。
+        local = ""
+        if is_ann and pdf_dir and (name := url.rsplit("/", 1)[-1]):
+            if (p := Path(pdf_dir) / name).exists():
+                local = str(p)
         rows.append(SourceRow(
-            kind=("公司公告" if getattr(d, "tier", None) is Tier.COMPANY
-                  else "外部文档"),
+            kind="公司公告" if is_ann else "外部文档",
             label=(getattr(d, "title", "") or "")[:40],
-            origin=getattr(d, "url", ""),
-            local=str(getattr(d, "path", "") or ""),
+            origin=url,
+            local=local,
             retrieved=str(getattr(d, "published", "") or ""),
             note=str(getattr(d, "publisher", "") or "")))
-    if pdf_dir and Path(pdf_dir).is_dir():
-        for p in sorted(Path(pdf_dir).glob("*.pdf")):
-            rows.append(SourceRow(kind="年报 PDF", label=p.stem, origin="巨潮",
-                                  local=str(p), retrieved="", note=""))
+    # **年报由年报地址定位，不扫缓存目录。** 上一版扫 `pdf_dir` 的 `*.pdf`
+    # 当年报：那个目录里是公告；而文件名是大写 `.PDF`、glob 区分大小写，
+    # 生益科技实跑时一个都没匹配上，这一节整个消失。
+    if annual is not None:
+        url, path = annual
+        if not url:
+            rows.append(SourceRow(
+                kind="年报 PDF", label="未找到年报公告", origin="—", local="",
+                retrieved="", note="战略与产业链分析缺年报叙述章节"))
+        else:
+            cached = path is not None and Path(path).exists()
+            rows.append(SourceRow(
+                kind="年报 PDF", label=url.rsplit("/", 1)[-1] or "年报",
+                origin=url, local=str(path) if cached else "", retrieved="",
+                # 未缓存时**不写路径**：写一个不存在的路径，`missing_files`
+                # 会把它报成「清单引用了从未保存的文件」—— 那不对。
+                note="" if cached else "未在本地缓存"))
     if peers:
         rows.append(SourceRow(
             kind="同业样本", label=f"{len(peers)} 家", origin="东财行业分类",

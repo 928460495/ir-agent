@@ -224,9 +224,12 @@ class TestSeamAnnounceToManifest:
         res = _gather_into(monkeypatch, cp, n=12)
         assert res.picked == 12 and len(cp.docs) == 12
 
-        (tmp_path / "600183_2025.pdf").write_text("x", encoding="utf-8")
-        rows = collect_rows(_led(), corpus=cp, pdf_dir=tmp_path,
-                            peers=("生益科技", "南亚新材"))
+        annual = tmp_path / "1223101543.PDF"
+        annual.write_text("x", encoding="utf-8")
+        rows = collect_rows(_led(), corpus=cp, pdf_dir=tmp_path / "pdf",
+                            peers=("生益科技", "南亚新材"),
+                            annual=("http://static.cninfo.com.cn/a/1223101543.PDF",
+                                    annual))
         anns = [r for r in rows if r.kind == "公司公告"]
         assert len(anns) == 12, [r.kind for r in rows]
         assert all(r.origin.startswith("http://static.cninfo.com.cn")
@@ -243,9 +246,11 @@ class TestSeamAnnounceToManifest:
 
         cp = Corpus(as_of=AS_OF)
         _gather_into(monkeypatch, cp, n=5)
-        (tmp_path / "600183_2025.pdf").write_text("x", encoding="utf-8")
-        assert missing_files(collect_rows(_led(), corpus=cp,
-                                          pdf_dir=tmp_path)) == []
+        annual = tmp_path / "1223101543.PDF"
+        annual.write_text("x", encoding="utf-8")
+        assert missing_files(collect_rows(
+            _led(), corpus=cp, pdf_dir=tmp_path / "pdf",
+            annual=("http://x/1223101543.PDF", annual))) == []
 
 
 class TestSeamIngestVsPrompt:
