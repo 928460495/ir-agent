@@ -3817,3 +3817,2171 @@ grep -o '^- Create: `[^`]*`' docs/superpowers/plans/2026-10-12-phase1-restructur
 - 不把平衡三元组直接当判断项（会绕过 `assume` 既有的三档拉开/依据可核验/锚定覆盖全套校验）
 - 不改第二阶段任何环节
 - 不修 `em_macro` / `eastmoney_report` 缺快照这个结构性缺口（只在门①说明）
+
+---
+
+# 第二次调用试跑后的修订（Task 14–21）
+
+> 对应 spec「修订（2026-10-13 第二次调用试跑后）：因子采集为什么一条都没采到」
+> （`e85cafd`）。Task 1–13 已完成；这一批在 main 上接着做（用户已同意）。
+
+**Goal:** 让第二次调用的因子采集真正产出东西，并让门② 上的标注不再说错话。
+
+**Architecture:** ①④⑤ 改 `methodology.py` 的提示词与 DSL 解析、`gaps.collect`
+的账本一级；② 新建 `sources/conclusions.py`（模型综合结论 + 引用文章 + 代码
+机械比对），`gaps.collect` 的④分支改用它，`factors.json` 升到 schema 2；门③
+在 `assume.Row` 上加一个派生标记；③ 与门② 的待核清单在 `full.py` 里改为按实际
+查到的列。
+
+**Tech Stack:** Python 3.11、pytest；不新增依赖。
+
+## Global Constraints（本批）
+
+- **第二阶段一行不改**：`run_valuation` / `_write_full_report` 不动；`audit.py`
+  不改；`external.norm` 不改（spec ②「不做」）。
+- **标注不阻断**。唯一例外是时点守卫：晚于 as_of 的文章剔除，引的文章全被剔除的
+  结论丢弃。
+- **不绕过反爬**。打不开就标「代码无法打开该文章正文」，不得说成「结论未能核实」。
+- 判断项环节对带 ⚠ 的结论：**可以作依据，但该行带标记**（决定 A）。门② 一次签名
+  覆盖全部结论，人直接改/删 `factors.json`（决定 B）。
+- 真实样本：`tests/fixtures/factor_web_experiment_600183.json`（实验② 原样输出
+  `raw` + 代码抓回的原页正文 `pages`；捷配那页是反爬挑战页）。
+- 测试计数一律先 `--collect-only`；带环境变量的命令用 `bash -c`（zsh 不切分 `$VAR`）。
+- 写文件先看目标：`Create:` 的文件必须不存在（见上文自查 2a）。
+
+## 文件结构（本批）
+
+| 文件 | 职责 | 任务 |
+|---|---|---|
+| `ir_agent/methodology.py` | 检索词前缀兜底；格式行占位写法；`覆盖:`/`未覆盖:` 声明与 `coverage()`；`[[key]]` 声明提示与 drivers.md 标注 | 14, 15, 16 |
+| `ir_agent/gaps.py` | `ledger_refs()` + 账本声明一级；④分支改用 conclusions；`factors.json` schema 2（含 `source_excerpt`）；`summary` 渲染结论 | 16, 18 |
+| `ir_agent/sources/conclusions.py`（新） | 结论/文章解析、抓文章、数字出处、`flags()` | 17 |
+| `ir_agent/sources/web.py` | 抽出 `require_web()` 供两处共用 | 17 |
+| `ir_agent/assume.py` | `Row.basis_flag` 派生标记与呈现 | 19 |
+| `ir_agent/full.py` | 覆盖/账本 key 标注接线；`_snapshot_gaps` 按实际查；`_missing_snapshot_notes`；`_write_review` 两节 | 15, 16, 20 |
+
+---
+
+### Task 14: 检索词字面前缀（①）
+
+**Files:**
+- Modify: `ir_agent/methodology.py`（`parse` 里取 `term` 处；`PROMPT` 两行格式行）
+- Test: `tests/test_methodology.py`
+
+**Interfaces:**
+- Produces: `methodology._strip_term_label(term: str) -> str`
+
+- [ ] **Step 1: 写失败测试**（追加到 `tests/test_methodology.py` 末尾）
+
+```python
+# ══ 第二次调用试跑后的修订 ①：检索词字面前缀 ═════════════════════
+#
+# 生益科技 2026-10-13 drivers.md 原样两行。模型把格式行
+# `因子名:单位:数据线索:检索词` 里的占位词当成前缀照抄，6 个检索词全成了
+# 「检索词Prismark」——命中次数全 0，gaps 的年报、公告两级全落空。
+
+_SY_DSL = (
+    "分解: 营收 | 乘 | 行业产值(覆铜板/PCB下游Prismark口径)同比增速:变化率:"
+    "industry.revenue、industry.revenue_yoy（账本已有key）:检索词Prismark | "
+    "公司市占率同比变化率:变化率:company.market_share、company.market_share_delta"
+    "（账本已有key，0.87pp/8.02%基期折算）:检索词市场占有率\n"
+    "分解: 毛利率 | 加 | 提价/调价传导效应:pp:2026Q2毛利率环比跳升4.53pp，多空辩论A"
+    "价格条目提及\"持续提价\"，需采集调价函披露:检索词调价函 | 核心原材料(铜箔/玻纤布)"
+    "成本效应:pp:新浪财经《不公开涨价的覆铜板厂》提及原材料成本压力，需采集铜价数据:"
+    "检索词铜价 | 高端产品结构升级效应:pp:东莞证券/太平洋研报\"高端高速产品放量\"，"
+    "需采集高端产品收入占比:检索词高端产品占比 | 产能稼动率(规模效应):pp:capex、"
+    "fixed_asset等账本key及在建工程投资公告，需采集稼动率数据:检索词稼动率\n")
+
+
+class TestSearchTermLabel:
+    def test_真实样本里的字面前缀被剥掉(self):
+        from ir_agent.methodology import parse
+        m = parse(_SY_DSL)
+        assert [f.search_term for d in m.decompositions for f in d.factors] == [
+            "Prismark", "市场占有率", "调价函", "铜价", "高端产品占比", "稼动率"]
+
+    def test_全角冒号与等号分隔的前缀也剥掉(self):
+        from ir_agent.methodology import _strip_term_label
+        assert _strip_term_label("检索词：出货量") == "出货量"
+        assert _strip_term_label("检索词=出货量") == "出货量"
+        assert _strip_term_label("出货量") == "出货量"
+        assert _strip_term_label("检索词") == ""
+
+    def test_剥掉后往返不再带前缀(self):
+        from ir_agent.methodology import from_markdown, parse, to_markdown
+        back = from_markdown(to_markdown(parse(_SY_DSL)))
+        assert back.decompositions[0].factors[0].search_term == "Prismark"
+
+    def test_格式行用占位写法而不是裸词(self):
+        """根因在提示词：`因子名:单位:数据线索:检索词` 读起来像「字段名:值」。"""
+        from ir_agent import methodology
+        assert "因子名:单位:数据线索:检索词" not in methodology.PROMPT
+        assert "<因子名>:<单位>:<数据线索>:<检索词>" in methodology.PROMPT
+```
+
+- [ ] **Step 2: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_methodology.py -k "TestSearchTermLabel" -q --collect-only | tail -1   # 应为 4 tests
+python -m pytest tests/test_methodology.py -k "TestSearchTermLabel" -q
+```
+Expected: 4 failed（`ImportError: _strip_term_label` / 检索词带前缀 / PROMPT 仍是裸词）。
+
+- [ ] **Step 3: 实现**
+
+`methodology.py`，在 `_OPS = {...}` 下方加：
+
+```python
+# 模型把格式行里的占位词「检索词」当成字面前缀照抄（生益科技 2026-10-13：
+# 6 个因子全写成「检索词Prismark」「检索词铜价」，命中次数全 0，年报与公告
+# 两级全部落空、全掉到联网）。根因在提示词的格式行，已改为 `<检索词>`；
+# 这里只做兜底。`:` 已经被 DSL 切掉了，剩下的分隔可能是全角冒号或等号。
+_TERM_LABEL = re.compile(r"^检索词\s*[:：=]?\s*")
+
+
+def _strip_term_label(term: str) -> str:
+    return _TERM_LABEL.sub("", term).strip()
+```
+
+`parse()` 里把
+
+```python
+            term = bits[3] if len(bits) > 3 else ""
+```
+
+改为
+
+```python
+            term = _strip_term_label(bits[3]) if len(bits) > 3 else ""
+```
+
+`PROMPT` 里把
+
+```
+`分解: 营收 | 乘 | 因子名:单位:数据线索:检索词 | 因子名:单位:数据线索:检索词 | …`
+`分解: 毛利率 | 加 | 因子名:单位:数据线索:检索词 | …`
+```
+
+改为
+
+```
+`分解: 营收 | 乘 | <因子名>:<单位>:<数据线索>:<检索词> | <因子名>:<单位>:<数据线索>:<检索词> | …`
+`分解: 毛利率 | 加 | <因子名>:<单位>:<数据线索>:<检索词> | …`
+
+尖括号连同里面的字一起换成你的内容。示例（某封测公司，仅示意格式）：
+
+`分解: 营收 | 乘 | 有效产能同比增速:变化率:年报经营情况讨论:有效产能 | 平均单价变化率:变化率:研报价格跟踪:平均单价`
+```
+
+- [ ] **Step 4: 跑，确认通过；本文件全量不回归**
+
+```bash
+python -m pytest tests/test_methodology.py -q
+```
+Expected: 全部 passed。
+
+- [ ] **Step 5: 变异验证**——把 `parse` 里的 `_strip_term_label(bits[3])` 临时改回 `bits[3]`，
+`TestSearchTermLabel` 应有 2 条变红；还原。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add ir_agent/methodology.py tests/test_methodology.py
+git commit -m "methodology: 检索词不再被写成「检索词Prismark」—— 格式行改占位写法，解析兜底剥前缀"
+```
+
+---
+
+### Task 15: 主题覆盖以模型声明为主（④）
+
+**Files:**
+- Modify: `ir_agent/methodology.py`（`Methodology`、`parse`、`_to_dsl`、`PROMPT` 覆盖要求一段、新增 `Cover`/`coverage`、`to_markdown`）
+- Modify: `ir_agent/full.py`（`_research_methodology` 两段标注）
+- Test: `tests/test_methodology.py`、`tests/test_full_context.py`
+
+**Interfaces:**
+- Consumes: `methodology.theme_coverage(decomps, themes) -> list[tuple[str, str]]`（保留，作词面兜底）
+- Produces:
+  - `Methodology.coverage_decl: list[tuple[str, str, str]]` —— `(覆盖|未覆盖, 主题, 因子名或理由)`
+  - `@dataclass(frozen=True) class Cover: theme: str; mark: str; detail: str` —— mark ∈ {"✓","✗","？"}
+  - `methodology.coverage(m: Methodology, themes: list[str]) -> tuple[list[Cover], list[str]]`
+  - `to_markdown(m, coverage=(), hits=None, coverage_notes=(), key_refs=None)`（`key_refs` 由 Task 16 用，本任务先加参数、不渲染）
+
+- [ ] **Step 1: 写失败测试**（追加到 `tests/test_methodology.py`）
+
+```python
+# ══ 第二次调用试跑后的修订 ④：主题覆盖以模型声明为主 ═══════════════
+
+_DECL = (_DSL
+         + "覆盖: 需求 | 服务器用高频覆铜板出货量（含通信）\n"
+         + "未覆盖: 政策 | 补贴口径无公开数据\n"
+         + "覆盖: 份额 | 不存在的因子\n"
+         + "覆盖: 估值 | 平均单价\n")
+
+
+class TestCoverageDeclared:
+    """词面匹配报过假阴性：生益科技「行业产值同比增速」承载需求、「公司市占率
+    同比变化率」承载份额，标签里没有那两个字，被标「未进入分解式」。"""
+
+    def test_三档_声明覆盖_声明未覆盖_未交代退回词面(self):
+        from ir_agent.methodology import coverage, parse
+        cov, notes = coverage(parse(_DECL), ["需求", "价格", "份额", "政策"])
+        got = {c.theme: (c.mark, c.detail) for c in cov}
+        assert got["需求"] == ("✓", _REV_LABEL)
+        assert got["政策"] == ("✗", "补贴口径无公开数据")
+        assert got["价格"] == ("？", "平均单价"), "未交代的退回词面匹配"
+        assert got["份额"][0] == "？", "声明的因子名不存在，不能算覆盖"
+        assert any("不存在的因子" in x for x in notes)
+        assert any("清单外的主题「估值」" in x for x in notes)
+
+    def test_自相矛盾被标出(self):
+        from ir_agent.methodology import coverage, parse
+        m = parse(_DSL + "覆盖: 需求 | 平均单价\n未覆盖: 需求 | 无数据\n")
+        cov, notes = coverage(m, ["需求"])
+        assert cov[0].mark == "✓"
+        assert any("自相矛盾" in x for x in notes)
+
+    def test_未覆盖行不被当成覆盖行(self):
+        from ir_agent.methodology import parse
+        assert parse(_DSL + "未覆盖: 政策 | x\n").coverage_decl == [
+            ("未覆盖", "政策", "x")]
+
+    def test_声明随drivers_md往返不丢(self):
+        """人改过 drivers.md 再重跑，声明不能丢——此前 `未覆盖:` 行解析时
+        直接被丢，drivers.md 里也没有，读回即丢。"""
+        from ir_agent.methodology import from_markdown, parse, to_markdown
+        m = parse(_DECL)
+        assert from_markdown(to_markdown(m)).coverage_decl == m.coverage_decl
+
+    def test_没有主题时什么都不做(self):
+        from ir_agent.methodology import coverage, parse
+        assert coverage(parse(_DECL), []) == ([], [])
+
+    def test_提示词要求两种声明行(self):
+        from ir_agent import methodology
+        assert "`覆盖: <主题> | <" in methodology.PROMPT
+        assert "`未覆盖: <主题> | <" in methodology.PROMPT
+```
+
+同文件 `TestMarkdownAnnotations` 里两处旧写法改为 `Cover`：
+
+```python
+    def test_两段标注进drivers_md顶部(self):
+        from ir_agent.methodology import Cover, to_markdown
+        out = to_markdown(_meth(),
+                          coverage=[Cover("需求", "✓", _REV_LABEL),
+                                    Cover("份额", "？", "")],
+                          hits={_REV_LABEL: [(_REV_LABEL, 1), ("铜箔", 3)]})
+        assert "主题覆盖" in out and "份额" in out
+        assert "？ 模型未交代" in out
+        assert "命中次数" in out and "铜箔:3" in out
+```
+
+```python
+        back = from_markdown(to_markdown(
+            m, coverage=[Cover("需求", "✓", _REV_LABEL)],
+            hits={_REV_LABEL: [("铜箔", 3)]}))
+```
+（`test_标注不参与往返解析` 里那一处；顶部 import 加 `Cover`。）
+
+`tests/test_full_context.py` 的 `test_预研没收到辩论结论时不做覆盖标注` 末尾两行改为：
+
+```python
+        assert "辩论主题没有声明由哪个因子承载" in err2, err2
+        md2 = (tmp_path / "drivers.md").read_text(encoding="utf-8")
+        assert "主题覆盖" in md2 and "？ 模型未交代" in md2
+```
+
+- [ ] **Step 2: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_methodology.py -k "TestCoverageDeclared or TestMarkdownAnnotations" -q --collect-only | tail -1   # 9 tests
+python -m pytest tests/test_methodology.py -k "TestCoverageDeclared or TestMarkdownAnnotations" -q
+```
+Expected: 失败（`ImportError: coverage / Cover`）。
+
+- [ ] **Step 3: 实现 `methodology.py`**
+
+`_PITFALL = keyed("陷阱")` 下加：
+
+```python
+# `keyed("覆盖")` 不会误中「未覆盖:」行：行首前缀只吃列表符号与加粗，吃不掉「未」。
+_COVER = keyed("覆盖")
+_UNCOVER = keyed("未覆盖")
+```
+
+`Methodology` 加字段：
+
+```python
+    # 辩论① 主题的覆盖声明：(「覆盖」|「未覆盖」, 主题, 因子名或理由)。
+    # **写进 drivers.md 的原始定义块**，人改过再重跑不丢（spec 2026-10-13 ④）。
+    coverage_decl: list[tuple[str, str, str]] = field(default_factory=list)
+```
+
+`parse()` 末尾 `m.pitfalls = ...` 之后、`return m` 之前：
+
+```python
+    for kind, rx in (("覆盖", _COVER), ("未覆盖", _UNCOVER)):
+        for h in rx.finditer(text):
+            th, _, rest = h.group(1).partition("|")
+            m.coverage_decl.append((kind, th.strip(), rest.strip()))
+```
+
+`_to_dsl()` 里 `for p in m.pitfalls:` 之前：
+
+```python
+    for kind, th, rest in m.coverage_decl:
+        lines.append(f"{kind}: {th} | {rest}")
+```
+
+`theme_coverage` 之后新增：
+
+```python
+@dataclass(frozen=True)
+class Cover:
+    """一个辩论主题的覆盖情况。
+
+    mark：✓ 模型声明由某因子承载（代码核对过因子名真实存在）/ ✗ 模型声明
+    未覆盖 / ？ 模型没交代（detail 是词面匹配到的因子名，可能为空）。
+    """
+    theme: str
+    mark: str
+    detail: str
+
+
+def coverage(m: Methodology, themes: list[str]) -> tuple[list[Cover], list[str]]:
+    """辩论① 主题覆盖：**模型的声明为主，词面匹配兜底**。返回 (逐主题, 问题)。
+
+    词面匹配（`theme_coverage`）报过假阴性：生益科技「行业产值同比增速」承载
+    需求、「公司市占率同比变化率」承载份额，标签里没有那两个字。「这个因子承载
+    哪个主题」是语义判断，该由给出分解式的模型声明；代码只核对声明里的因子名
+    真实存在。
+
+    全部是标注：清单外主题、因子名不存在、自相矛盾只列进问题，不驳回。
+    `themes` 为空（辩论① 没有结论）时什么都不做 —— 不能凭空要求覆盖。
+    """
+    if not themes:
+        return [], []
+    labels = {f.label for d in m.decompositions for f in d.factors}
+    cov: dict[str, str] = {}
+    unc: dict[str, str] = {}
+    notes: list[str] = []
+    for kind, th, rest in m.coverage_decl:
+        if th not in themes:
+            notes.append(f"声明了清单外的主题「{th}」（{kind}: {rest}）")
+        elif kind == "未覆盖":
+            unc.setdefault(th, rest)
+        elif rest in labels:
+            cov.setdefault(th, rest)
+        else:
+            notes.append(f"「{th}」声明由「{rest}」承载，但分解式里没有这个因子")
+    word = dict(theme_coverage(m.decompositions, themes))
+    out: list[Cover] = []
+    for th in themes:
+        if th in cov and th in unc:
+            notes.append(f"「{th}」既声明了覆盖又声明了未覆盖（自相矛盾），按覆盖显示")
+        if th in cov:
+            out.append(Cover(th, "✓", cov[th]))
+        elif th in unc:
+            out.append(Cover(th, "✗", unc[th]))
+        else:
+            out.append(Cover(th, "？", word.get(th, "")))
+    return out, notes
+```
+
+`to_markdown` 签名改为 `def to_markdown(m: Methodology, coverage=(), hits=None, coverage_notes=(), key_refs=None) -> str:`，
+把 `if coverage:` 整块替换为：
+
+```python
+    if coverage:
+        lines += ["## 辩论① 主题覆盖（标注，未阻断）", ""]
+        for c in coverage:
+            if c.mark == "✓":
+                lines.append(f"- {c.theme}：✓ 模型声明由「{c.detail}」承载")
+            elif c.mark == "✗":
+                lines.append(f"- {c.theme}：✗ 模型声明未覆盖 —— "
+                             f"{c.detail or '（没写理由）'}")
+            else:
+                lines.append(f"- {c.theme}：？ 模型未交代 —— 仅词面匹配："
+                             + (f"「{c.detail}」" if c.detail else "无"))
+        lines += [f"- ⚠ {x}" for x in coverage_notes]
+        open_ = [c.theme for c in coverage if c.mark != "✓"]
+        if open_:
+            lines += ["", f"⚠ {len(open_)} 个辩论主题没有声明由哪个因子承载"
+                          f"（{'、'.join(open_)}）—— 请在门② 复核：这几点"
+                          "多空有分歧，而判断项可能无从反映它们。"]
+        lines.append("")
+```
+
+`PROMPT` 里「覆盖要求」一段，把
+
+```
+无从给出三档取值、判断项也无从反映这个分歧。确实无法因子化的，用一行说明：
+
+`未覆盖: <主题> | <为什么不能因子化>`
+
+代码会逐个核对并把结果标注在产物顶部。**不会因此驳回你**，但人会在审核时
+看到哪些主题没进分解式。
+```
+
+改为
+
+```
+无从给出三档取值、判断项也无从反映这个分歧。对每个主题写一行声明：
+
+`覆盖: <主题> | <承载它的因子名，与分解式里写的一字不差>`
+`未覆盖: <主题> | <为什么不能因子化>`
+
+代码会核对你声明的因子名是否真在分解式里，并把结果标注在产物顶部。
+**不会因此驳回你**，但人会在审核时看到。
+```
+
+- [ ] **Step 4: 实现 `full.py` 接线**
+
+`_research_methodology` 里
+
+```python
+    cov = methodology.theme_coverage(m.decompositions, themes)
+```
+
+改为
+
+```python
+    cov, cov_notes = methodology.coverage(m, themes)
+```
+
+`to_markdown(m, coverage=cov, hits=hits)` 改为 `to_markdown(m, coverage=cov, hits=hits, coverage_notes=cov_notes)`，
+`note` 那段改为：
+
+```python
+    note = ""
+    if (open_ := [c.theme for c in cov if c.mark != "✓"]):
+        note = (f"方法论预研：{len(open_)} 个辩论主题没有声明由哪个因子承载"
+                f"（{'、'.join(open_)}）—— 已标注，未阻断，需在门② 复核")
+```
+
+（`research._PREFIX` 已有「方法论预研：」⚠ 前缀，不用改。）
+
+- [ ] **Step 5: 跑，确认通过**
+
+```bash
+python -m pytest tests/test_methodology.py tests/test_full_context.py -k "Coverage or MarkdownAnnotations or 覆盖标注" -q
+python -m pytest tests/test_methodology.py tests/test_full_context.py tests/test_research.py -q
+```
+Expected: 全部 passed。
+
+- [ ] **Step 6: 变异验证**——把 `coverage()` 里 `elif rest in labels:` 改成 `else:`（不核对因子名），
+`test_三档…` 应变红；还原。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add ir_agent/methodology.py ir_agent/full.py tests/test_methodology.py tests/test_full_context.py
+git commit -m "methodology: 主题覆盖以模型声明为主、词面兜底；声明写进原始定义块，往返不丢"
+```
+
+---
+
+### Task 16: 数据线索里显式声明的账本 key 接到 `gaps.collect`（⑤）
+
+> **对 spec ⑤ 的收紧（写计划时发现）**：spec 写的是「切出形如 `a.b` 的词与账本
+> 精确匹配」。生益科技第 60 行线索原文是「capex、fixed_asset等账本key……需采集
+> 稼动率数据」—— **提到某个 key 不等于这个因子的数据就是它**，按出现即绑定会把
+> 「产能稼动率」错绑到 capex 上并跳过采集。改为**只认显式声明 `[[key]]`**（本项目
+> 引用账本的惯用写法），提示词讲明「只是相关的不要写成 `[[ ]]`」。Task 21 同步修 spec。
+
+**Files:**
+- Modify: `ir_agent/gaps.py`（新增 `_KEY_DECL`、`ledger_refs`；`collect` 在 DISCLOSED 判断之后加一级）
+- Modify: `ir_agent/methodology.py`（`PROMPT` 数据线索一条；`to_markdown` 渲染 `key_refs`）
+- Modify: `ir_agent/full.py`（`_research_methodology` 算 `key_refs`）
+- Test: `tests/test_gaps.py`、`tests/test_methodology.py`
+
+**Interfaces:**
+- Produces: `gaps.ledger_refs(hint: str, ledger: FactLedger, as_of: date) -> tuple[list[str], list[str]]`
+  —— (`["key@期间", …]` 账本里有的, `["key", …]` 没有或晚于 as_of 的)
+- 账本声明命中的因子：`FactorData(status=DISCLOSED, note="账本 [[key@期间]]（模型在数据线索中声明，口径是否与因子一致待人工确认）")`
+
+- [ ] **Step 1: 写失败测试**（追加到 `tests/test_gaps.py`）
+
+```python
+# ══ 第二次调用试跑后的修订 ⑤：数据线索里声明的账本 key ══════════════
+
+def test_显式声明的账本key_标已披露且不联网():
+    from ir_agent.gaps import DISCLOSED
+    f = Factor(key="f_x", label="行业产值同比增速", unit="变化率",
+               source_hint="[[industry.revenue_yoy]]（同业聚合口径）")
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[f])
+    data = collect(_ExplodingClient(), [d], _led("industry.revenue_yoy"),
+                   Corpus(as_of=AS_OF), "电子", AS_OF)
+    assert data["f_x"].status == DISCLOSED
+    assert "[[industry.revenue_yoy@2025FY]]" in data["f_x"].note
+    assert "口径" in data["f_x"].note, "口径是否一致要交给人"
+
+
+def test_只是提到key不算声明():
+    """生益科技 2026-10-13 第 60 行原文：提到 capex 不等于稼动率就是 capex。"""
+    from ir_agent.gaps import ledger_refs
+    hint = "capex、fixed_asset等账本key及在建工程投资公告，需采集稼动率数据"
+    assert ledger_refs(hint, _led("capex", "fixed_asset"), AS_OF) == ([], [])
+
+
+def test_声明的key前缀不误中():
+    from ir_agent.gaps import ledger_refs
+    assert ledger_refs("[[industry.revenue]]", _led("industry.revenue_yoy"),
+                       AS_OF) == ([], ["industry.revenue"])
+
+
+def test_研究时点之后才披露的不算():
+    from ir_agent.gaps import ledger_refs
+    led = FactLedger()
+    led.put(Fact(key="industry.revenue_yoy", value=D("0.1"), unit="ratio",
+                 period="2026FY", as_of=date(2026, 12, 1), source_id="t",
+                 method=Method.COMPUTED))
+    assert ledger_refs("[[industry.revenue_yoy]]", led, AS_OF) == (
+        [], ["industry.revenue_yoy"])
+```
+
+追加到 `tests/test_methodology.py`：
+
+```python
+class TestLedgerKeyDecl:
+    def test_提示词讲明只有同一个量才写成双括号(self):
+        from ir_agent import methodology
+        assert "[[industry.revenue_yoy]]" in methodology.PROMPT
+        assert "只是相关" in methodology.PROMPT
+
+    def test_drivers_md标出声明的key(self):
+        from ir_agent.methodology import to_markdown
+        out = to_markdown(_meth(), key_refs={
+            _REV_LABEL: (["industry.revenue_yoy@2025FY"], ["foo.bar"])})
+        assert "✓ [[industry.revenue_yoy@2025FY]]" in out
+        assert "✗ foo.bar" in out
+        assert "口径" in out
+```
+
+- [ ] **Step 2: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_gaps.py tests/test_methodology.py -k "账本key or key前缀 or 研究时点之后才披露 or 只是提到key or LedgerKeyDecl" -q --collect-only | tail -1   # 6 tests
+python -m pytest tests/test_gaps.py tests/test_methodology.py -k "账本key or key前缀 or 研究时点之后才披露 or 只是提到key or LedgerKeyDecl" -q
+```
+Expected: 6 failed。
+
+- [ ] **Step 3: 实现 `gaps.py`**
+
+`_latest` 函数之后加：
+
+```python
+# 数据线索里的账本 key 声明：**只认显式的 `[[key]]`**，不认线索里顺带提到的
+# 英文词。生益科技 2026-10-13 的线索写着「capex、fixed_asset等账本key……需采集
+# 稼动率数据」—— 提到 capex 不等于「稼动率就是 capex」，按出现就绑定会把因子
+# 错绑到一个不相干的量上、并跳过采集。spec (c) 要的「优先分解成已有数据能支撑
+# 的因子、直接决定 gaps.collect 的命中率」由这一级兑现。
+_KEY_DECL = re.compile(r"\[\[([A-Za-z_][\w.]*)(?:@[^\]]*)?\]\]")
+
+
+def ledger_refs(hint: str, ledger: FactLedger, as_of: date
+                ) -> tuple[list[str], list[str]]:
+    """数据线索里 `[[key]]` 声明的账本 key。返回 (有的 `key@期间`, 没有的 key)。
+
+    时点守卫与 `identify` 同一条：as_of 之后才披露的视为没有。按整词比对，
+    `industry.revenue` 不会误中 `industry.revenue_yoy`。
+    """
+    have: list[str] = []
+    miss: list[str] = []
+    for k in dict.fromkeys(_KEY_DECL.findall(hint or "")):
+        per = _latest(ledger, k)
+        try:
+            ledger.get(k, per, as_of=as_of)
+            have.append(f"{k}@{per}")
+        except (KeyError, LookAheadError):
+            miss.append(k)
+    return have, miss
+```
+
+`collect()` 里
+
+```python
+            if f.key not in gaps:
+                out[f.key] = FactorData(factor=f, status=DISCLOSED)
+                continue
+```
+
+之后加：
+
+```python
+            have, _ = ledger_refs(f.source_hint, ledger, as_of)
+            if have:
+                out[f.key] = FactorData(
+                    factor=f, status=DISCLOSED,
+                    note="账本 " + "、".join(f"[[{x}]]" for x in have)
+                         + "（模型在数据线索中声明，口径是否与因子一致待人工确认）")
+                continue
+```
+
+- [ ] **Step 4: 实现 `methodology.py`**
+
+`PROMPT` 里把
+
+```
+- 数据线索写明你**指望它来自哪里**：已有的账本 key（见上面「账本里已有的
+  key」那一节，若有）/ 年报某一节 / 语料库某一篇 / 需要新采集。优先分解成
+  已有数据能支撑的因子 —— 采集不到的因子会落「无数据」，那一档的三个取值
+  就只能凭判断填。
+```
+
+改为
+
+```
+- 数据线索写明你**指望它来自哪里**：年报某一节 / 语料库某一篇 / 需要新采集。
+  **若这个因子的数据就是账本里已有的某个 key**（见上面「账本里已有的 key」
+  那一节，若有），在数据线索里写成 `[[key]]`，例如 `[[industry.revenue_yoy]]`
+  —— 代码会直接取账本数据、不再去搜。**只是相关、不是同一个量的，不要写成
+  `[[ ]]`**，照常用文字描述。优先分解成已有数据能支撑的因子 —— 采集不到的
+  因子会落「无数据」，那一档的三个取值就只能凭判断填。
+```
+
+`to_markdown` 里 `if hits:` 块之后加：
+
+```python
+    if key_refs:
+        lines += ["## 数据线索里声明的账本 key（标注，未阻断）", ""]
+        for label, (have, miss) in key_refs.items():
+            parts = ([f"✓ [[{x}]]" for x in have]
+                     + [f"✗ {k}（账本里没有，或晚于研究时点才披露）" for k in miss])
+            lines.append(f"- {label}：" + "　".join(parts))
+        lines += ["", "声明了的因子直接取账本数据、不再联网采集。**口径是否与"
+                      "因子名一致（例如因子写的是某机构口径、账本是同业聚合口径）"
+                      "由人判断。**", ""]
+```
+
+- [ ] **Step 5: 实现 `full.py` 接线**
+
+`_research_methodology` 里 `hits = methodology.term_hits(...)` 之后加：
+
+```python
+    refs: dict = {}
+    led, as_of = getattr(r, "ledger", None), getattr(r, "as_of", None)
+    if led is not None and as_of is not None:
+        from ir_agent import gaps
+        for d in m.decompositions:
+            for f in d.factors:
+                have, miss = gaps.ledger_refs(f.source_hint, led, as_of)
+                if have or miss:
+                    refs[f.label] = (have, miss)
+```
+
+`to_markdown(...)` 调用加 `key_refs=refs`。
+
+- [ ] **Step 6: 跑，确认通过；两文件全量不回归**
+
+```bash
+python -m pytest tests/test_gaps.py tests/test_methodology.py tests/test_full_context.py -q
+```
+
+- [ ] **Step 7: 变异验证**——把 `_KEY_DECL` 换成 `re.compile(r"([A-Za-z_][\w.]*)")`（按出现即绑定），
+`test_只是提到key不算声明` 应变红；还原。
+
+- [ ] **Step 8: 提交**
+
+```bash
+git add ir_agent/gaps.py ir_agent/methodology.py ir_agent/full.py tests/test_gaps.py tests/test_methodology.py
+git commit -m "gaps: 数据线索里显式声明的 [[账本key]] 直接标已披露、不再联网；只提到不算声明"
+```
+
+---
+
+### Task 17: `sources/conclusions.py` —— 模型综合结论 + 引用文章 + 代码机械比对（② 上）
+
+**Files:**
+- Create: `ir_agent/sources/conclusions.py`
+- Modify: `ir_agent/sources/web.py`（抽出 `require_web()`）
+- Test: `tests/test_conclusions.py`（Create）
+
+**Interfaces:**
+- Consumes: `openweb.fetch(url) -> Fetched(final_url, text, meta_published, host_check_degraded)`、
+  `openweb.tier_of_url(url) -> Tier`、`web.parse_date(raw) -> date | None`、`web.by_tier(items)`、
+  `web.WebUnavailable`
+- Produces（Task 18/19/20 依赖这些名字）:
+  - `Article(no, url, publisher, published, final_url="", tier=Tier.MEDIA, opened=False, text="", why_not="", degraded=False)`，属性 `link`
+  - `NumberMark(number: str, found_in: tuple[str, ...])`
+  - `Conclusion(factor_key, claim, articles, dropped=[], marks=[])`，属性 `url`/`publisher`/`tier`（与 `web.Finding` 同名，供 `assume._match_finding`、`gaps.summary` 鸭子类型读），方法 `missing_numbers()`、`unopened()`、`flags() -> str`
+  - `Searched(items: list[Conclusion], dropped: list[str])`
+  - `parse(text, as_of) -> Searched`、`number_marks(claim, articles) -> list[NumberMark]`、
+    `open_articles(items) -> None`、`search(client, factor_label, factor_key, industry, as_of) -> Searched`
+  - `web.require_web() -> None`
+
+- [ ] **Step 1: 写失败测试** `tests/test_conclusions.py`（先确认不存在：`ls tests/test_conclusions.py` 应报 No such file）
+
+```python
+"""因子联网结论（spec 2026-10-13 ②）。
+
+样本是实验② 的真实输出与代码抓回的原页正文：
+`tests/fixtures/factor_web_experiment_600183.json`。
+"""
+from __future__ import annotations
+
+import json
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from ir_agent.sources import conclusions as C
+from ir_agent.sources.conclusions import (Article, Conclusion, number_marks,
+                                          open_articles, parse)
+from ir_agent.sources.external import Tier
+from ir_agent.sources.openweb import Fetched, FetchFailed, tier_of_url
+
+AS_OF = date(2026, 10, 13)
+FX = json.loads((Path(__file__).parent / "fixtures"
+                 / "factor_web_experiment_600183.json").read_text(encoding="utf-8"))
+SINA = "https://finance.sina.com.cn/wm/2026-06-17/doc-inicthnr3825185.shtml"
+JIEPEI = "https://www.jiepei.com/design/7573.html"
+
+
+def _opened(no: str, text: str) -> Article:
+    return Article(no=no, url=f"https://x/{no}", publisher="某媒体",
+                   published=date(2026, 6, 17), final_url=f"https://x/{no}",
+                   opened=True, text=text)
+
+
+class TestParse:
+    def test_一条结论引多篇文章(self):
+        got = parse("文章: 1 | https://a.cn/1 | 甲 | 2026-07-01\n"
+                    "文章: 2 | https://b.cn/2 | 乙 | 2026-08-01\n"
+                    "结论: k | 稼动率约78% | 依据 1,2\n", AS_OF)
+        assert [a.no for a in got.items[0].articles] == ["1", "2"]
+        assert got.items[0].claim == "稼动率约78%"
+
+    def test_晚于as_of的文章剔除_部分剔除的结论保留并注明(self):
+        got = parse("文章: 1 | https://a.cn/1 | 甲 | 2026-07-01\n"
+                    "文章: 2 | https://b.cn/2 | 乙 | 2026-11-01\n"
+                    "结论: k | x | 依据 1,2\n", AS_OF)
+        c = got.items[0]
+        assert [a.no for a in c.articles] == ["1"]
+        assert any("晚于" in x for x in c.dropped)
+
+    def test_引的文章全部被剔除的结论丢弃(self):
+        got = parse("文章: 2 | https://b.cn/2 | 乙 | 2026-11-01\n"
+                    "结论: k | x | 依据 2\n", AS_OF)
+        assert got.items == []
+        assert any("晚于" in x for x in got.dropped)
+
+    def test_没有网址或日期的文章作废(self):
+        got = parse("文章: 1 | 无网址 | 甲 | 2026-07-01\n"
+                    "文章: 2 | https://b.cn/2 | 乙 | 2026年7月\n"
+                    "结论: k | x | 依据 1,2\n", AS_OF)
+        assert got.items == []
+        assert any("没有网址" in x for x in got.dropped)
+        assert any("发布日期" in x for x in got.dropped)
+
+    def test_没写依据的结论作废(self):
+        got = parse("文章: 1 | https://a.cn/1 | 甲 | 2026-07-01\n"
+                    "结论: k | x\n", AS_OF)
+        assert got.items == [] and any("没写依据" in x for x in got.dropped)
+
+    def test_结论里自带竖线不会挤掉整条(self):
+        got = parse("文章: 1 | https://a.cn/1 | 甲 | 2026-07-01\n"
+                    "结论: k | 铜箔占比约40% | 玻纤布25% | 依据 1\n", AS_OF)
+        assert got.items[0].claim == "铜箔占比约40%|玻纤布25%"
+
+
+class TestNumberMarks:
+    def test_真实样本_只有原页没有的7628被标出(self):
+        """实验② 第 1 条：模型加了「7628型规格」，7628 在那一页上没有。"""
+        claim = ("电子布(玻纤布)7628型规格已完成2026年内第5轮提价，均价达到"
+                 "7.4元/米，较2025年第三季度低点涨幅达100%")
+        c = Conclusion(factor_key="k", claim=claim,
+                       articles=[_opened("1", FX["pages"][SINA])])
+        c.marks = number_marks(c.claim, c.articles)
+        assert c.missing_numbers() == ["7628"]
+
+    def test_中文数字回退(self):
+        a = [_opened("1", "已完成年内第五轮提价")]
+        assert number_marks("第5轮", a)[0].found_in == ("1",)
+
+    def test_中文数字不误中更大的数(self):
+        assert number_marks("5家", [_opened("1", "共五十家")])[0].found_in == ()
+
+    def test_数字边界_2025里的5不算(self):
+        assert number_marks("5%", [_opened("1", "2025年")])[0].found_in == ()
+
+    def test_全角数字与千分位(self):
+        a = [_opened("1", "涨幅１００％，营收1,234亿元")]
+        got = {m.number: m.found_in for m in number_marks("100%、1234亿元", a)}
+        assert got == {"100": ("1",), "1234": ("1",)}
+
+    def test_打不开的文章不参与比对(self):
+        a = Article(no="1", url="u", publisher="p", published=AS_OF,
+                    opened=False, text="78%")
+        assert number_marks("78%", [a])[0].found_in == ()
+
+
+class TestOpenArticles:
+    def test_反爬挑战页标为打不开而不是结论未核实(self, monkeypatch):
+        monkeypatch.setattr(C, "fetch", lambda url, **k: Fetched(
+            final_url=JIEPEI, text=FX["pages"][JIEPEI], meta_published=None))
+        c = Conclusion(factor_key="k", claim="上调10%", articles=[Article(
+            no="1", url=JIEPEI, publisher="捷配", published=date(2026, 3, 10))])
+        open_articles([c])
+        a = c.articles[0]
+        assert not a.opened and "没有中文" in a.why_not
+        assert "代码无法打开" in c.flags()
+        assert "未能核实" not in c.flags()
+
+    def test_抓取失败记原因_分级按最终域名(self, monkeypatch):
+        def fake(url, **k):
+            if "bad" in url:
+                raise FetchFailed("404")
+            return Fetched(final_url="https://www.stats.gov.cn/x",
+                           text="平均稼动率约78%", meta_published=None)
+        monkeypatch.setattr(C, "fetch", fake)
+        ok = Article(no="1", url="https://short.link/a", publisher="自称券商",
+                     published=date(2026, 7, 1))
+        bad = Article(no="2", url="https://bad.cn/b", publisher="乙",
+                      published=date(2026, 7, 1))
+        c = Conclusion(factor_key="k", claim="稼动率约78%", articles=[ok, bad])
+        open_articles([c])
+        assert ok.opened and ok.tier is tier_of_url("https://www.stats.gov.cn/x")
+        assert not bad.opened and "抓取失败" in bad.why_not
+        assert c.url == "https://www.stats.gov.cn/x", "主出处取第一篇打开了的"
+        assert c.missing_numbers() == []
+
+    def test_同一篇文章被两条结论引用只抓一次(self, monkeypatch):
+        calls = []
+
+        def fake(url, **k):
+            calls.append(url)
+            return Fetched(final_url=url, text="稼动率78%", meta_published=None)
+        monkeypatch.setattr(C, "fetch", fake)
+        got = parse("文章: 1 | https://a.cn/1 | 甲 | 2026-07-01\n"
+                    "结论: k | 稼动率78% | 依据 1\n结论: k | 约78% | 依据 1\n", AS_OF)
+        open_articles(got.items)
+        assert calls == ["https://a.cn/1"]
+
+
+class TestFlags:
+    def test_数字找不到出处的措辞(self):
+        c = Conclusion(factor_key="k", claim="7628规格涨价20%",
+                       articles=[_opened("1", "涨价20%")])
+        c.marks = number_marks(c.claim, c.articles)
+        assert c.flags() == "依据含 1 个在引用文章里找不到出处的数字（7628）"
+
+    def test_都有出处且都打开时没有标记(self):
+        c = Conclusion(factor_key="k", claim="涨价20%",
+                       articles=[_opened("1", "涨价20%")])
+        c.marks = number_marks(c.claim, c.articles)
+        assert c.flags() == ""
+
+
+class TestSearch:
+    def test_联网被禁用时抛WebUnavailable(self, monkeypatch):
+        from ir_agent.sources import web
+        monkeypatch.setattr(web, "WEB_CAPABLE", False)
+        with pytest.raises(web.WebUnavailable):
+            C.search(lambda p: "", "稼动率", "k", "封测", AS_OF)
+
+    def test_提示词带因子与时点_结果已打开并标好数字(self, monkeypatch):
+        monkeypatch.setattr(C, "fetch", lambda url, **k: Fetched(
+            final_url=url, text="平均稼动率约78%", meta_published=None))
+        seen = []
+
+        def client(p):
+            seen.append(p)
+            return ("文章: 1 | https://a.cn/1 | 甲 | 2026-07-01\n"
+                    "结论: k | 稼动率约78%，提升3个百分点 | 依据 1\n")
+        got = C.search(client, "稼动率", "k", "封测", AS_OF)
+        assert "稼动率" in seen[0] and "2026-10-13" in seen[0]
+        assert "WebFetch" in seen[0], "要求打开文章再下结论"
+        assert got.items[0].missing_numbers() == ["3"]
+```
+
+- [ ] **Step 2: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_conclusions.py -q --collect-only 2>&1 | tail -2
+```
+Expected: collection error（`ModuleNotFoundError: ir_agent.sources.conclusions`）。
+
+- [ ] **Step 3: `web.py` 抽出 `require_web()`**
+
+在 `def search(` 之前加：
+
+```python
+def require_web() -> None:
+    """联网采集的总开关。`search` 与 `conclusions.search` 共用一份措辞。"""
+    if not WEB_CAPABLE:
+        # 措辞不能写死「claude -p 不能联网」——本文件顶部已经交代过，
+        # 之前的探测测的是默认调用不开工具，不是 claude -p 真的没有联网
+        # 能力。这里判定不可用，唯一的原因是 WEB_CAPABLE 这个开关被设成
+        # 了 False。真正该查的是谁、为什么关了它，而不是重新怀疑一遍
+        # 已经验证过的联网能力，那会把排查者引向错误方向。
+        raise WebUnavailable(
+            "开放网络采集当前被禁用（WEB_CAPABLE=False）—— 请检查是谁、"
+            "为什么关闭了这个开关；claude -p 本身的联网能力已经验证过，"
+            "不必重新怀疑（见 docs/superpowers/notes/"
+            "2026-09-12-web-capability.md）")
+```
+
+`search()` 里整个 `if not WEB_CAPABLE: …raise…` 块替换为一行 `require_web()`。
+（`WEB_CAPABLE` 在调用时读模块全局，`monkeypatch.setattr(web, "WEB_CAPABLE", False)` 照常生效。）
+
+- [ ] **Step 4: 写 `ir_agent/sources/conclusions.py`**
+
+```python
+"""因子联网结论 —— 模型综合判断 + 引用文章清单 + 代码机械比对 + 人工复核。
+
+**为什么不再要求逐字原文**（用户决定，2026-10-13）。此前提示词让模型写「一句
+话陈述」（允许改写），核实却要求这句话逐字出现在原页（`openweb.verify_finding`）
+—— 生益科技第二次调用 15 条全部核实失败、被丢弃。单因子实验（样本见
+`tests/fixtures/factor_web_experiment_600183.json`）逐条对照原页：4 条是改写或
+跨段拼接，1 条抓回的是反爬挑战页。模型的一句话本来就可能是跨多篇文章取材后
+的分析判断，要求逐字是错位的。
+
+**代码不判对错，只做四件机械的事**，结果全部是标注、交给门② 的人：
+1. 文章打不打得开（抓不到、或抓回的文本里一个中文字都没有）；
+2. 时点（晚于 as_of 的文章剔除；结论引的文章全被剔除就丢弃）—— 唯一会丢东西的一件；
+3. 结论里的每个数字在它引用的文章里有没有出处；
+4. 按代码实际抓到的最终域名分级，不按模型自报的机构名。
+
+**只核数字、不核措辞**：改写的危害集中在数字上 —— 实验第 1 条的数字大多在
+原页，却混进了一个原页没有的「7628型规格」。若把规则放宽成「数字对得上就算
+通过」它会被放过；这里把它标出来请人看，而不是替人判。
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import date
+
+from ir_agent.lineparse import keyed
+from ir_agent.sources import web
+from ir_agent.sources.external import Tier
+from ir_agent.sources.openweb import fetch, tier_of_url
+
+_ART = keyed("文章")
+_CON = keyed("结论")
+_URL = re.compile(r"https?://\S+")
+_CITE = re.compile(r"\d+")
+_NUM = re.compile(r"\d+(?:\.\d+)?")
+_CJK = re.compile(r"[一-鿿]")
+_CN = "零一二三四五六七八九"
+_CN_ALL = "零一二三四五六七八九十百千万亿两"
+
+PROMPT = """为一份 A 股研究报告采集一个因子的数据。
+
+行业：{industry}
+要找的因子：**{factor}**
+
+上网搜索，并**用 WebFetch 打开**相关文章，就这个因子给出结论（水平、同比
+变化、行业均值皆可）。结论可以综合多篇文章、可以用你自己的话概括 —— 但每条
+结论都要列出它采纳了哪几篇文章的观点，人会逐篇复核。
+
+先列文章，每篇一行：
+
+`文章: <编号> | <网址> | <发布机构> | <发布日期 YYYY-MM-DD>`
+
+再列结论，每条一行：
+
+`结论: {key} | <一句话结论> | 依据 <编号>,<编号>`
+
+**硬性要求**
+- 文章**必须给出网址与发布日期（YYYY-MM-DD）**，缺任何一样那篇文章作废；
+  只引用了作废文章的结论也作废。晚于 {as_of} 的文章会被剔除：拿未来的资料
+  分析过去，与账本的时点守卫是同一件事。
+- 结论里的数字**尽量沿用原文的写法与单位**。代码会拿每个数字去你列的文章里
+  找出处，找不到的会被标出来请人重点核对。
+- 数据要具体（「稼动率约 78%」而非「稼动率偏低」）。
+- 找不到就一行都不要输出，**不要用推测填充**。
+
+只输出上述格式的行。
+"""
+
+
+@dataclass
+class Article:
+    no: str
+    url: str
+    publisher: str
+    published: date
+    final_url: str = ""
+    tier: Tier = Tier.MEDIA
+    opened: bool = False
+    text: str = ""
+    why_not: str = ""
+    degraded: bool = False          # 抓取时主机安全校验降级（见 openweb.Fetched）
+
+    @property
+    def link(self) -> str:
+        return self.final_url or self.url
+
+
+@dataclass(frozen=True)
+class NumberMark:
+    number: str
+    found_in: tuple[str, ...]       # 在哪几篇文章里找到；空 = 引用的文章里都没有
+
+
+@dataclass
+class Conclusion:
+    factor_key: str
+    claim: str
+    articles: list[Article]
+    dropped: list[str] = field(default_factory=list)
+    marks: list[NumberMark] = field(default_factory=list)
+
+    # ── 与 `web.Finding` 同名的三个只读属性 ──────────────────────
+    # `assume._match_finding`（读 claim/url）与 `gaps.summary`（读
+    # publisher/url）按这几个名字读 `FactorData.findings` 的元素。
+    def _primary(self) -> Article:
+        opened = [a for a in self.articles if a.opened]
+        return (opened or self.articles)[0]
+
+    @property
+    def url(self) -> str:
+        return self._primary().link
+
+    @property
+    def publisher(self) -> str:
+        return self._primary().publisher
+
+    @property
+    def tier(self) -> Tier:
+        opened = [a for a in self.articles if a.opened]
+        return web.by_tier(opened)[0].tier if opened else Tier.MEDIA
+
+    def missing_numbers(self) -> list[str]:
+        return [m.number for m in self.marks if not m.found_in]
+
+    def unopened(self) -> list[str]:
+        return [a.no for a in self.articles if not a.opened]
+
+    def flags(self) -> str:
+        """门② 排序与门③ 标记共用的一句话。空串 = 没有要重点看的。"""
+        out: list[str] = []
+        if (miss := self.missing_numbers()):
+            out.append(f"依据含 {len(miss)} 个在引用文章里找不到出处的数字"
+                       f"（{'、'.join(miss)}）")
+        if (shut := self.unopened()):
+            out.append(f"依据引用的文章 {'、'.join(shut)} 代码无法打开")
+        return "；".join(out)
+
+
+@dataclass
+class Searched:
+    items: list[Conclusion]
+    dropped: list[str]
+
+
+def parse(text: str, as_of: date) -> Searched:
+    """解析 `文章:` / `结论:` 行。时点守卫在这里做完。"""
+    arts: dict[str, Article] = {}
+    late: dict[str, str] = {}
+    dropped: list[str] = []
+    for h in _ART.finditer(text):
+        p = [x.strip() for x in h.group(1).split("|")]
+        if len(p) < 4:
+            dropped.append(f"文章行字段不足，作废：{h.group(1)[:60]}")
+            continue
+        no, u, when = p[0], _URL.search(p[1]), web.parse_date(p[-1])
+        if not u:
+            dropped.append(f"文章 {no} 没有网址，作废")
+            continue
+        if when is None:
+            dropped.append(f"文章 {no} 没有可解析的发布日期（YYYY-MM-DD），作废")
+            continue
+        if when > as_of:
+            late[no] = f"文章 {no} 发布于 {when}，晚于 {as_of}，已剔除"
+            continue
+        arts[no] = Article(no=no, url=u.group(0),
+                           publisher="|".join(p[2:-1]).strip(), published=when)
+    items: list[Conclusion] = []
+    for h in _CON.finditer(text):
+        p = [x.strip() for x in h.group(1).split("|")]
+        if len(p) < 3 or "依据" not in p[-1]:
+            dropped.append(f"结论没写依据哪几篇文章，作废：{h.group(1)[:60]}")
+            continue
+        claim = "|".join(p[1:-1]).strip()
+        cites = list(dict.fromkeys(_CITE.findall(p[-1])))
+        use = [arts[n] for n in cites if n in arts]
+        gone = [late.get(n, f"文章 {n} 未列出或已作废")
+                for n in cites if n not in arts]
+        if not use:
+            dropped.append(f"结论「{claim[:30]}」引用的文章全部不可用"
+                           f"（{'；'.join(gone) or '没有编号'}），作废")
+            continue
+        items.append(Conclusion(factor_key=p[0], claim=claim, articles=use,
+                                dropped=gone))
+    return Searched(items=items, dropped=dropped)
+
+
+def _cn_forms(n: int) -> list[str]:
+    """1–99 的中文写法（实验里「第五轮」↔「第5轮」）。"""
+    if not 1 <= n <= 99:
+        return []
+    t, u = divmod(n, 10)
+    if t == 0:
+        return [_CN[u]]
+    return [("十" if t == 1 else _CN[t] + "十") + (_CN[u] if u else "")]
+
+
+def _page_form(text: str) -> str:
+    """只在数字比对这一步做的归一：全角→半角、去千分位逗号。
+    **不改共用的 `external.norm`**（spec ②「不做」）。"""
+    t = unicodedata.normalize("NFKC", text or "")
+    return re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", t)
+
+
+def _has_number(page: str, n: str) -> bool:
+    if re.search(rf"(?<![\d.]){re.escape(n)}(?!\d|\.\d)", page):
+        return True
+    if "." not in n:
+        for c in _cn_forms(int(n)):
+            if re.search(rf"(?<![{_CN_ALL}]){c}(?![{_CN_ALL}])", page):
+                return True
+    return False
+
+
+def number_marks(claim: str, articles: list[Article]) -> list[NumberMark]:
+    """结论里每个数字，在它引用的（打开了的）文章里有没有出处。"""
+    nums = list(dict.fromkeys(_NUM.findall(unicodedata.normalize("NFKC", claim))))
+    pages = [(a.no, _page_form(a.text)) for a in articles if a.opened]
+    return [NumberMark(n, tuple(no for no, pg in pages if _has_number(pg, n)))
+            for n in nums]
+
+
+def open_articles(items: list[Conclusion]) -> None:
+    """逐篇抓回正文（同一篇只抓一次），再给每条结论标数字出处。
+
+    抓回的文本里一个中文字都没有（反爬挑战页、外文页面）记为打不开 ——
+    **措辞是「无从比对」，不是「结论未能核实」**：实验里捷配返回的是阿里云 WAF
+    的 JS 挑战页，旧代码把它当正文、报成「转述未能核实」，那是说错话。
+    **不绕过反爬**，人可以在浏览器里看。
+    """
+    done: set[int] = set()
+    for c in items:
+        for a in c.articles:
+            if id(a) in done:
+                continue
+            done.add(id(a))
+            try:
+                got = fetch(a.url)
+            except Exception as e:                          # noqa: BLE001
+                a.why_not = f"抓取失败：{str(e)[:80]}"
+                continue
+            a.final_url = got.final_url
+            a.degraded = got.host_check_degraded
+            a.tier = tier_of_url(got.final_url)
+            if not _CJK.search(got.text or ""):
+                a.why_not = "抓回的文本里没有中文（反爬校验页或外文页面），无从比对"
+                continue
+            a.opened, a.text = True, got.text
+        c.marks = number_marks(c.claim, c.articles)
+
+
+def search(client, factor_label: str, factor_key: str, industry: str,
+           as_of: date) -> Searched:
+    """按因子联网，返回已打开文章、已标好数字出处的结论。
+
+    **调用方必须传入已开启 WebSearch/WebFetch 的 client**（同 `web.search`）。
+    """
+    web.require_web()
+    raw = client(PROMPT.format(industry=industry, factor=factor_label,
+                               key=factor_key, as_of=as_of.isoformat()))
+    got = parse(raw, as_of)
+    open_articles(got.items)
+    return got
+```
+
+- [ ] **Step 5: 跑，确认通过；web 相关不回归**
+
+```bash
+python -m pytest tests/test_conclusions.py -q --collect-only | tail -1   # 19 tests
+python -m pytest tests/test_conclusions.py tests/test_web_source.py tests/test_openweb.py -q
+```
+
+- [ ] **Step 6: 变异验证**（逐个改、逐个还原）
+  - `_has_number` 第一条正则去掉两侧断言（改成 `re.escape(n)`）→ `test_数字边界_2025里的5不算` 变红；
+  - `open_articles` 里删掉 `_CJK` 那段判断 → `test_反爬挑战页…` 变红；
+  - `parse` 里删掉 `if when > as_of:` 分支 → 两条时点测试变红。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add ir_agent/sources/conclusions.py ir_agent/sources/web.py tests/test_conclusions.py
+git commit -m "conclusions: 因子联网改为模型综合结论 + 引用文章 + 数字出处标注，不再要求逐字原文"
+```
+
+---
+
+### Task 18: `gaps.collect` ④分支改用 conclusions；`factors.json` schema 2（② 中）
+
+**Files:**
+- Modify: `ir_agent/gaps.py`（imports；`FactorData.findings` 注释；④分支；`to_json`/`from_json`；`summary` 的 EXTERNAL 渲染）
+- Test: `tests/test_gaps.py`（删 16 条旧测试，加 `TestExternalConclusions`）、`tests/test_full_context.py`（`factors.json` 往返那条改用 `Conclusion`）
+
+**Interfaces:**
+- Consumes: Task 17 全部名字
+- Produces:
+  - `gaps.SCHEMA = 2`
+  - `to_json(data) -> {"schema": 2, "factors": {key: {...,"source_excerpt", "host_check_degraded", "conclusions": [...]}}}`
+  - `from_json(raw, decomps)`：没有 `schema: 2` 抛 `ValueError`（`full._read_factors` 已接住并说「读不回」）；读回时**按（可能被人改过的）结论文字重算数字标注**；EXTERNAL 且结论被人删光 → 落 MISSING 并说明
+  - EXTERNAL 因子的 `FactorData.findings: list[Conclusion]`；`status` 仍为 `"外部来源"`（见 Task 21 spec 修订）
+
+- [ ] **Step 1: 删掉旧④分支的 16 条测试**（它们测的是逐字核实 / `supports_value` / `by_tier` 语义，或用「发现:」格式驱动④；仍成立的契约由下面新测试类接管）
+
+从 `tests/test_gaps.py` 删除这些函数（按名字找，整段删到下一个 `def`/`class`）：
+
+```
+test_采集到官方来源标为外部来源            → 接管：test_文章按最终域名分级
+test_核验不通过的媒体来源仍算无数据但说明原因  （语义已废）
+test_采集到的进语料库供核验                → 接管：test_打开的文章全文进语料库
+test_年报研报都未命中才落到外部网络          → 接管：test_年报研报都未命中才联网
+test_外部来源状态不填source_url            → 接管：test_外部来源状态不填source_url_结论版
+test_核验不通过的发现不算合格来源            （语义已废）
+test_核验通过的发现入库用抓回的全文          → 接管：test_打开的文章全文进语料库
+test_仅媒体支撑的因子在清单上被标注          （语义已废）
+test_部分核实的因子清单上写明另有几条已降级    （语义已废）
+test_一条抓取失败不牵连同因子其余已核实的发现  → 接管：test_一篇打不开不牵连同结论的其余文章
+test_verify_finding抛出非FetchFailed异常不逃出collect → 接管：test_抓取抛任意异常不逃出collect
+test_主机安全校验降级会写进因子的note         → 接管：test_主机安全校验降级写进结构化字段与note
+test_未降级时note不提主机安全校验            → 接管：同上（反向断言）
+test_外部来源按代码观测到的tier排序不看模型自报 （语义已废：分级在 Article 上）
+test_未核实的发现不进无数据分支的findings     （语义已废）
+test_端到端_verify_finding核验不过时因子仍落无数据 （语义已废）
+```
+
+**不要删**（正则误匹配到的、与④无关）：`test_否定语境之外的真实命中不受连坐`、
+`test_ANNOUNCE_标签文案`。删前删后各跑一次 `--collect-only`，差值必须正好是 16。
+
+**原地改写**（契约仍成立——③跳过媒体级语料——但它用旧格式驱动④；写计划时在副本上
+跑出来的）：`test_MEDIA语料不产生研报测算命中` 整个函数替换为
+
+```python
+def test_MEDIA语料不产生研报测算命中(monkeypatch):
+    """语料库里只有一篇 MEDIA 文档、文本命中核心词时，③不能把它判成
+    「研报测算」——那等于一篇网络博客单独支撑了因子取值，是本轮修复
+    要堵的洞。落空后应正常退到④，④有结论则算「外部来源」。"""
+    import ir_agent.sources.conclusions as CC
+    from ir_agent.sources.openweb import Fetched
+    monkeypatch.setattr(CC, "fetch", lambda url, **k: Fetched(
+        final_url=url, text="平均稼动率约78%", meta_published=None))
+    corpus = Corpus(as_of=AS_OF)
+    corpus.add(_doc("我们测算行业稼动率将于下半年回升。", tier=Tier.MEDIA))
+    ok = ("文章: 1 | https://semi.org/x | SEMI | 2026-07-01\n"
+          "结论: utilization | 平均稼动率约78% | 依据 1\n")
+    data = collect(_Client(ok, ""), [_rev()], _led("capacity", "asp"),
+                   corpus, "封测", AS_OF)
+    fd = data["utilization"]
+    assert fd.status != "研报测算"
+    assert fd.status == "外部来源"
+```
+
+- [ ] **Step 2: 写失败测试**（追加到 `tests/test_gaps.py`）
+
+```python
+# ══ 第二次调用试跑后的修订 ②：④改为模型综合结论 + 引用文章 ═══════════
+
+from ir_agent.sources import conclusions as _CC
+from ir_agent.sources.openweb import Fetched, FetchFailed
+
+_REPLY = ("文章: 1 | https://www.stats.gov.cn/a | 国家统计局 | 2026-07-01\n"
+          "文章: 2 | https://news.example.com/b | 某媒体 | 2026-08-01\n"
+          "结论: capacity | 名义产能约120万吨，同比提升3个百分点 | 依据 1,2\n")
+
+
+def _pages(pages: dict, degraded=False):
+    def f(url, **k):
+        if url not in pages:
+            raise FetchFailed("404")
+        return Fetched(final_url=url, text=pages[url], meta_published=None,
+                       host_check_degraded=degraded)
+    return f
+
+
+def _one(client, corpus=None):
+    d = Decomposition(target="revenue_growth", op=Op.MULTIPLY,
+                      factors=[Factor(key="capacity", label="名义产能",
+                                      unit="变化率", source_hint="")])
+    return collect(client, [d], FactLedger(), corpus or Corpus(as_of=AS_OF),
+                   "电子/元件", AS_OF, sections=None, annual_url="")
+
+
+class TestExternalConclusions:
+    PAGES = {"https://www.stats.gov.cn/a": "名义产能约120万吨。",
+             "https://news.example.com/b": "同比提升3个百分点。"}
+
+    def test_年报研报都未命中才联网(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        cl = _Client(_REPLY)
+        fd = _one(cl)["capacity"]
+        assert fd.status == "外部来源"
+        assert "名义产能" in cl.prompts[0]
+
+    def test_打开的文章全文进语料库(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        cp = Corpus(as_of=AS_OF)
+        _one(_Client(_REPLY), cp)
+        texts = {d.text for d in cp.docs}
+        assert texts == set(self.PAGES.values()), "入库的是代码抓回的全文"
+        assert all(d.date_source == "model" for d in cp.docs)
+
+    def test_文章按最终域名分级(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        c = _one(_Client(_REPLY))["capacity"].findings[0]
+        assert c.articles[0].tier is Tier.OFFICIAL
+        assert c.tier is Tier.OFFICIAL
+
+    def test_外部来源状态不填source_url_结论版(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        assert _one(_Client(_REPLY))["capacity"].source_url == ""
+
+    def test_一篇打不开不牵连同结论的其余文章(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(
+            {"https://www.stats.gov.cn/a": "名义产能约120万吨。"}))
+        fd = _one(_Client(_REPLY))["capacity"]
+        c = fd.findings[0]
+        assert fd.status == "外部来源"
+        assert c.articles[0].opened and not c.articles[1].opened
+        assert "代码无法打开" in c.flags()
+        assert "其中 1 条带 ⚠" in fd.note
+
+    def test_抓取抛任意异常不逃出collect(self, monkeypatch):
+        def boom(url, **k):
+            raise RuntimeError("连接被重置")
+        monkeypatch.setattr(_CC, "fetch", boom)
+        fd = _one(_Client(_REPLY))["capacity"]
+        assert fd.status == "外部来源"
+        assert all("抓取失败" in a.why_not for a in fd.findings[0].articles)
+
+    def test_数字找不到出处时note计数(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(
+            {"https://www.stats.gov.cn/a": "名义产能约120万吨。",
+             "https://news.example.com/b": "同比有所提升。"}))
+        fd = _one(_Client(_REPLY))["capacity"]
+        assert fd.findings[0].missing_numbers() == ["3"]
+        assert "其中 1 条带 ⚠" in fd.note and "待人工复核" in fd.note
+
+    def test_引的文章都晚于as_of时落无数据并说明(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        late = ("文章: 1 | https://www.stats.gov.cn/a | 国家统计局 | 2026-12-01\n"
+                "结论: capacity | x | 依据 1\n")
+        fd = _one(_Client(late))["capacity"]
+        assert fd.status == "无数据" and "晚于" in fd.note
+
+    def test_主机安全校验降级写进结构化字段与note(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES, degraded=True))
+        fd = _one(_Client(_REPLY))["capacity"]
+        assert fd.host_check_degraded and "主机安全校验降级" in fd.note
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES, degraded=False))
+        fd2 = _one(_Client(_REPLY))["capacity"]
+        assert not fd2.host_check_degraded and "主机安全校验" not in fd2.note
+
+
+class TestFactorsJsonV2:
+    def _data(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(TestExternalConclusions.PAGES))
+        d = Decomposition(target="revenue_growth", op=Op.MULTIPLY,
+                          factors=[Factor(key="capacity", label="名义产能",
+                                          unit="变化率", source_hint="")])
+        return d, collect(_Client(_REPLY), [d], FactLedger(), Corpus(as_of=AS_OF),
+                          "电子/元件", AS_OF)
+
+    def test_往返保留结论与文章正文(self, monkeypatch):
+        from ir_agent.gaps import from_json, to_json
+        d, data = self._data(monkeypatch)
+        raw = to_json(data)
+        assert raw["schema"] == 2
+        back, notes = from_json(raw, [d])
+        c = back["capacity"].findings[0]
+        assert c.claim == data["capacity"].findings[0].claim
+        assert c.articles[0].text == "名义产能约120万吨。"
+        assert c.articles[0].tier is Tier.OFFICIAL and notes == []
+
+    def test_人改了结论后数字标注按改后文字重算(self, monkeypatch):
+        """决定 B：人在门② 直接改 factors.json；标注不能停在改之前。"""
+        from ir_agent.gaps import from_json, to_json
+        d, data = self._data(monkeypatch)
+        raw = to_json(data)
+        raw["factors"]["capacity"]["conclusions"][0]["claim"] = "产能约999万吨"
+        back, _ = from_json(raw, [d])
+        assert back["capacity"].findings[0].missing_numbers() == ["999"]
+
+    def test_人删光结论后落无数据并说明(self, monkeypatch):
+        from ir_agent.gaps import from_json, to_json
+        d, data = self._data(monkeypatch)
+        raw = to_json(data)
+        raw["factors"]["capacity"]["conclusions"] = []
+        back, _ = from_json(raw, [d])
+        assert back["capacity"].status == "无数据"
+        assert "门②" in back["capacity"].note
+
+    def test_年报摘录跨调用存活(self):
+        """此前 to_json 不存 source_excerpt，第三次调用里模型逐字引用年报
+        摘录会被 `_match_excerpt` 判「匹配不到」。"""
+        from ir_agent.gaps import ANNUAL, from_json, to_json
+        f = Factor(key="capacity", label="名义产能", unit="变化率")
+        d = Decomposition(target="revenue_growth", op=Op.MULTIPLY, factors=[f])
+        data = {"capacity": FactorData(factor=f, status=ANNUAL, note="n",
+                                       source_url="http://a", source_excerpt="产能提升")}
+        back, _ = from_json(to_json(data), [d])
+        assert back["capacity"].source_excerpt == "产能提升"
+
+    def test_旧格式抛ValueError(self):
+        from ir_agent.gaps import from_json
+        with pytest.raises(ValueError, match="schema"):
+            from_json({"capacity": {"status": "无数据"}}, [])
+```
+
+`tests/test_full_context.py` 里 `factors.json` 往返那条（`finding = Finding(...)` 处）改为：
+
+```python
+    from ir_agent.sources.conclusions import Article, Conclusion
+    f0 = meth.decompositions[0].factors[0]
+    art = Article(no="1", url="https://example.cn/a", publisher="某协会",
+                  published=date(2026, 9, 1), final_url="https://example.cn/a",
+                  tier=Tier.OFFICIAL, opened=True,
+                  text="2026年出货量同比增长15%。")
+    finding = Conclusion(factor_key=f0.key, claim="2026年出货量同比增长15%",
+                         articles=[art])
+```
+
+（其余断言 `findings[0].claim`、`findings[0].tier is Tier.OFFICIAL` 不变——`Conclusion.tier`
+取打开了的文章里分级最高的。）
+
+同文件 `test_本分支新增的清单生产者逐个断言渲染标记` 里 `_read_factors` 场景的 `_fd`
+改为 schema 2（写计划时在副本上跑出来的；不改的话两个场景都退化成「读不回」）：
+
+```python
+    def _fd(keys):
+        return _json.dumps({"schema": 2, "factors": {
+            k: {"status": "无数据", "conclusions": []} for k in keys}})
+```
+
+- [ ] **Step 3: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_gaps.py -k "TestExternalConclusions or TestFactorsJsonV2" -q --collect-only | tail -1   # 14 tests
+python -m pytest tests/test_gaps.py -k "TestExternalConclusions or TestFactorsJsonV2" -q
+```
+
+- [ ] **Step 4: 实现 `gaps.py`**
+
+imports 两行
+
+```python
+from ir_agent.sources.openweb import TEXT_LIMIT, verify_finding
+from ir_agent.sources.web import (Finding, WebUnavailable, by_tier, search,
+                                  supports_value)
+```
+
+改为
+
+```python
+from ir_agent.sources import conclusions
+from ir_agent.sources.conclusions import Article, Conclusion, number_marks
+from ir_agent.sources.openweb import TEXT_LIMIT
+from ir_agent.sources.web import Finding, WebUnavailable
+```
+
+（`Finding` 留着：`FactorData.findings` 的类型注释与 `tests/test_assume.py` 仍用它构造；
+`verify_finding`/`supports_value`/`by_tier` 本文件不再用，函数本身不删——见 Task 21。）
+
+`FactorData` 里 `findings: list[Finding] = ...` 改为
+
+```python
+    # EXTERNAL：`conclusions.Conclusion` 列表（模型综合结论 + 引用文章，2026-10-13
+    # 起）。`assume._match_finding` / `summary` 按 claim/url/publisher 读，与旧的
+    # `web.Finding` 同名，两种都能放。
+    findings: list = field(default_factory=list)
+```
+
+`collect()` 的④分支：从 `try:` / `found = search(client, f.label, f.key, industry, as_of)`
+起、到本函数 `return out` 之前（含原来的 `verified = [...]`、`if ok:`/`else:` 两大段）
+**整段替换**为：
+
+```python
+            try:
+                got = conclusions.search(client, f.label, f.key, industry, as_of)
+            except WebUnavailable as e:
+                # 能力边界不是故障，整轮研究不该因此停摆。措辞里显式写
+                # 「不能联网」而不是只转述异常原文。
+                out[f.key] = FactorData(
+                    factor=f, status=MISSING,
+                    note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
+                continue
+
+            # ── ④：模型综合结论 + 引用文章（spec 2026-10-13 ②）─────
+            # 结论可以综合、可以改写；代码只做了机械比对，结果全是标注。
+            # 有结论就落 EXTERNAL（决定 A：带 ⚠ 的也能作依据，门③ 那一行
+            # 带标记），交给门② 的人复核（决定 B）。
+            if not got.items:
+                why = "；".join(got.dropped) or "没搜到可用的结论"
+                out[f.key] = FactorData(factor=f, status=MISSING,
+                                        note=f"{why} —— 取值为估计")
+                continue
+            arts: list[Article] = []
+            for c in got.items:
+                for a in c.articles:
+                    if all(a is not x for x in arts):
+                        arts.append(a)
+            for a in arts:
+                if a.opened:
+                    # **入库的是代码抓回的全文，不是模型的结论。** 辩论② 与
+                    # 撰写简报引的是文章原文 ——「不得引用本系统的分析结论」
+                    # 那条规矩照样成立。
+                    corpus.add_if_visible(Document(
+                        doc_id=f"web_{f.key}_{len(corpus.docs)}",
+                        url=a.final_url, title=f"{f.label}：文章{a.no}",
+                        publisher=a.publisher, tier=a.tier,
+                        published=a.published, retrieved=as_of,
+                        text=a.text, prompt_limit=TEXT_LIMIT,
+                        date_source="model"))
+            flagged = sum(1 for c in got.items if c.flags())
+            note = (f"{len(got.items)} 条模型综合结论，待人工复核"
+                    + (f"（其中 {flagged} 条带 ⚠）" if flagged else ""))
+            if got.dropped:
+                note += "；" + "；".join(got.dropped)
+            degraded = any(a.degraded for a in arts)
+            if degraded:
+                n = sum(1 for a in arts if a.degraded)
+                note += (f"；其中 {n} 篇文章抓取时主机安全校验降级（本机 DNS "
+                         "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮"
+                         "依赖代理侧")
+            out[f.key] = FactorData(factor=f, status=EXTERNAL,
+                                    findings=got.items, note=note,
+                                    host_check_degraded=degraded)
+```
+
+`to_json` / `from_json` 整段替换为：
+
+```python
+SCHEMA = 2
+
+
+def _article_json(a: Article) -> dict:
+    return {"no": a.no, "url": a.url, "publisher": a.publisher,
+            "published": a.published.isoformat(), "final_url": a.final_url,
+            "tier": a.tier.value, "opened": a.opened, "why_not": a.why_not,
+            "degraded": a.degraded, "text": a.text}
+
+
+def to_json(data: dict[str, FactorData]) -> dict:
+    """因子采集结果落盘（`factors.json`），schema 2。键是 `Factor.key`。
+
+    **为什么要落盘。** 采集发生在第二次调用（`run_brief`），用它的判断项在第三
+    次调用（`run_assume`），中间隔一个人工门、是两个进程。
+
+    **schema 2（2026-10-13）**：EXTERNAL 存模型综合结论 + 引用文章（含代码
+    抓回的正文 —— 第三次调用要拿它重算数字标注）；数字标注本身**不存**，读回
+    时按（人可能改过的）结论文字重算，存了就会在人改完之后停在改之前。另补存
+    `source_excerpt`：此前不存，第三次调用里模型逐字引用年报摘录会匹配不到。
+    """
+    def _fd(fd: FactorData) -> dict:
+        return {"status": fd.status, "note": fd.note,
+                "source_url": fd.source_url,
+                "source_retrieved": (fd.source_retrieved.isoformat()
+                                     if fd.source_retrieved else None),
+                "source_excerpt": fd.source_excerpt,
+                "host_check_degraded": fd.host_check_degraded,
+                "conclusions": [{"claim": c.claim, "dropped": list(c.dropped),
+                                 "articles": [_article_json(a) for a in c.articles]}
+                                for c in fd.findings
+                                if isinstance(c, Conclusion)]}
+    return {"schema": SCHEMA, "factors": {k: _fd(fd) for k, fd in data.items()}}
+
+
+def from_json(raw: dict, decomps: list[Decomposition]
+              ) -> tuple[dict[str, FactorData], list[str]]:
+    """读回 `factors.json`，按因子键与**当前**分解式对上。返回 (数据, 说明)。
+
+    人可以在两次调用之间改 `drivers.md`（I2）与 `factors.json`（决定 B）——
+    分解式里没有的因子丢弃并说出来；没采集过的按「未采集」处理；结论被人删光
+    的 EXTERNAL 落「无数据」。旧格式（没有 schema 2）抛 ValueError，由
+    `full._read_factors` 接住、说「读不回，重跑 --brief」。
+    """
+    if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+        raise ValueError(f"factors.json 是旧格式（没有 \"schema\": {SCHEMA}）"
+                         "—— 重跑 --brief 生成新格式")
+    factors = {f.key: f for d in decomps for f in d.factors}
+    out: dict[str, FactorData] = {}
+    notes: list[str] = []
+    for key, x in (raw.get("factors") or {}).items():
+        f = factors.get(key)
+        if f is None:
+            notes.append(f"因子采集结果里有「{key}」，但当前分解式没有这个因子"
+                         "（drivers.md 在两次调用之间被改过？）—— 已丢弃")
+            continue
+        concl = []
+        for y in x.get("conclusions") or []:
+            arts = [Article(no=str(z["no"]), url=z["url"],
+                            publisher=z.get("publisher", ""),
+                            published=date.fromisoformat(z["published"]),
+                            final_url=z.get("final_url", ""),
+                            tier=Tier(z.get("tier", Tier.MEDIA.value)),
+                            opened=bool(z.get("opened")), text=z.get("text", ""),
+                            why_not=z.get("why_not", ""),
+                            degraded=bool(z.get("degraded")))
+                    for z in y.get("articles") or []]
+            c = Conclusion(factor_key=key, claim=y["claim"], articles=arts,
+                           dropped=list(y.get("dropped") or []))
+            c.marks = number_marks(c.claim, c.articles)
+            concl.append(c)
+        status, note = x.get("status", MISSING), x.get("note", "")
+        if status == EXTERNAL and not concl:
+            status, note = MISSING, "门② 删除了全部联网结论 —— 取值为估计"
+        sr = x.get("source_retrieved")
+        out[key] = FactorData(
+            factor=f, status=status, note=note, findings=concl,
+            source_url=x.get("source_url", ""),
+            source_retrieved=date.fromisoformat(sr) if sr else None,
+            source_excerpt=x.get("source_excerpt", ""),
+            host_check_degraded=bool(x.get("host_check_degraded")))
+    for key, f in factors.items():
+        if key not in out:
+```
+
+（`for key, f in factors.items(): if key not in out:` 之后的原有几行保持不变。）
+
+`summary()` 里 EXTERNAL 分支
+
+```python
+            src = "；".join(f"{x.publisher}（{x.url}）" for x in fd.findings[:2])
+```
+
+改为
+
+```python
+            src = "；".join(
+                (f"「{x.claim}」（文章 "
+                 + "、".join(f"{a.no}:{a.publisher}" for a in x.articles)
+                 + ("，⚠" if x.flags() else "") + "）")
+                if isinstance(x, Conclusion) else f"{x.publisher}（{x.url}）"
+                for x in fd.findings[:3]).replace("|", "｜")
+```
+
+- [ ] **Step 5: 跑，确认通过；全量不回归**
+
+```bash
+python -m pytest tests/test_gaps.py tests/test_full_context.py tests/test_assume.py -q
+python -m pytest -q -m "not live" -W error
+```
+Expected: 全部 passed。`tests/test_assume.py` 里用 `web.Finding` 构造 `findings` 的几条照常通过（鸭子类型）。
+
+- [ ] **Step 6: 变异验证**
+  - `from_json` 里删掉 `c.marks = number_marks(...)` → `test_人改了结论后数字标注按改后文字重算` 变红；
+  - `to_json` 里删掉 `"source_excerpt"` 一项 → `test_年报摘录跨调用存活` 变红。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add ir_agent/gaps.py tests/test_gaps.py tests/test_full_context.py
+git commit -m "gaps: ④改用模型综合结论 + 引用文章；factors.json 升 schema 2，补存年报摘录、读回重算数字标注"
+```
+
+---
+
+### Task 19: 门③ —— 依据引了带 ⚠ 的结论，那一行带标记（决定 A）
+
+**Files:**
+- Modify: `ir_agent/assume.py`（`Row.basis_flag`；`_conclusion_flags`；`_parse_factors` 赋值；`describe` 呈现）
+- Test: `tests/test_assume.py`
+
+**Interfaces:**
+- Consumes: `Conclusion.flags() -> str`（Task 17）、`_match_finding(fd, quote)`（现有）
+- Produces: `Row.basis_flag: str`（派生，不进 `to_json`；第二阶段没有 `factor_data`，恒为空）
+
+- [ ] **Step 1: 写失败测试**（追加到 `tests/test_assume.py`）
+
+```python
+# ══ 第二次调用试跑后的修订 ②：门③ 标记（决定 A）════════════════════
+
+def _flagged_fd(d):
+    from ir_agent.sources.conclusions import Article, Conclusion, number_marks
+    art = Article(no="1", url="https://x.cn/a", publisher="某媒体",
+                  published=date(2026, 7, 1), final_url="https://x.cn/a",
+                  opened=True, text="平均稼动率约78%。")
+    c = Conclusion(factor_key="utilization",
+                   claim="平均稼动率约78%，7628规格满产", articles=[art])
+    c.marks = number_marks(c.claim, c.articles)
+    return {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.EXTERNAL, findings=[c])}
+
+
+def test_依据引了带警示的结论_可以用但该行带标记():
+    d = _one_factor_decomp()
+    raw = ("假设: 稼动率 | 第1年 | 2% | 4% | 6% | "
+           "「平均稼动率约78%，7628规格满产」，参照采集到的行业数据")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=_flagged_fd(d), as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body="", as_of=AS_OF, decomps=[d])
+    r = a.rows[0]
+    assert r.bases and r.bases[0].kind.value == "external", "可以作依据"
+    assert "找不到出处的数字（7628）" in r.basis_flag
+    assert "⚠ 依据含 1 个在引用文章里找不到出处的数字" in a.describe()
+
+
+def test_同上的行沿用同一份标记():
+    d = _one_factor_decomp()
+    raw = ("假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「平均稼动率约78%，7628规格满产」\n"
+           "假设: 稼动率 | 第2年 | 2% | 4% | 6% | 同上")
+    a = assume.parse(raw, 2, decomps=[d], factor_data=_flagged_fd(d), as_of=AS_OF)
+    assert a.rows[1].basis_flag == a.rows[0].basis_flag != ""
+
+
+def test_没有factor_data时不标记():
+    """第二阶段从 assumptions.json 读回、没有 factor_data —— 行为不变。"""
+    d = _one_factor_decomp()
+    raw = "假设: 稼动率 | 第1年 | 2% | 4% | 6% | [[revenue@2025FY]]"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=None, as_of=AS_OF)
+    assert a.rows[0].basis_flag == ""
+```
+
+- [ ] **Step 2: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_assume.py -k "带警示 or 同上的行沿用 or 没有factor_data时不标记" -q
+```
+Expected: 3 failed（`Row` 没有 `basis_flag`）。
+
+- [ ] **Step 3: 实现**
+
+`Row` 在 `basis_unverified` 之后加：
+
+```python
+    # 门③ 标记（用户决定 A，2026-10-13）：依据引的是因子联网结论、而那条结论
+    # 有数字在引用文章里找不到出处 / 引用的文章代码打不开。**可以作依据，但
+    # 这一行必须带着标记** —— 与 `basis_unverified` 同一处理：派生结果，不进
+    # to_json；第二阶段没有 factor_data，算出来恒为空，行为不变。
+    basis_flag: str = ""
+```
+
+`_match_finding` 之后加：
+
+```python
+def _conclusion_flags(bases: list[Basis], fd: FactorData | None) -> str:
+    """依据若引的是因子联网结论，带出那条结论的 ⚠（`Conclusion.flags()`）。
+
+    按 Basis 反查而不是在 `_factor_basis` 里顺手记：「同上」的行复用上一行的
+    Basis 列表，按 Basis 查自然得到同一份标记。"""
+    if fd is None:
+        return ""
+    out: list[str] = []
+    for b in bases:
+        if b.kind is not BasisKind.EXTERNAL:
+            continue
+        flags = getattr(_match_finding(fd, b.quote), "flags", None)
+        if flags is not None and (s := flags()) and s not in out:
+            out.append(s)
+    return "；".join(out)
+```
+
+`_parse_factors` 里 `out.rows.append(Row(...))` 的参数末尾加
+`basis_flag=_conclusion_flags(bases, factor_data.get(f.key))`。
+
+`describe()` 里
+
+```python
+                    if r.bases:
+                        body = "；".join(b.describe() for b in r.bases)
+                        if r.basis_unverified:
+```
+
+之前一行加：
+
+```python
+                    if r.basis_flag:
+                        parts.append("⚠ " + r.basis_flag)
+```
+
+- [ ] **Step 4: 跑，确认通过；本文件与全量不回归**
+
+```bash
+python -m pytest tests/test_assume.py -q
+python -m pytest -q -m "not live" -W error
+```
+
+- [ ] **Step 5: 变异验证**——把 `_parse_factors` 里 `basis_flag=...` 删掉，3 条里前 2 条变红；还原。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add ir_agent/assume.py tests/test_assume.py
+git commit -m "assume: 依据引了带 ⚠ 的联网结论时可用，但门③ 那一行带标记"
+```
+
+---
+
+### Task 20: 门② 待核清单两节 + 门① 快照缺口按实际查（③ 与 ② 下）
+
+**Files:**
+- Modify: `ir_agent/full.py`（`_source_name`、`_snapshot_gaps` 重写、`_missing_snapshot_notes`、`_review_factor_lines`、`_write_review` 签名与两节、`run_brief` 调用点）
+- Test: `tests/test_full_context.py`
+
+**Interfaces:**
+- Consumes: `audit.AuditResult.footnotes / missing_snapshots`（只读）、`citation.Footnote(marker, key, period, source_id, as_of, method, display)`、`Conclusion`/`Article`（Task 17）
+- Produces:
+  - `full._source_name(sid: str) -> str`
+  - `full._snapshot_gaps(r) -> list[tuple[str, int]]`（签名不变，判据改为实际 `store.load`）
+  - `full._missing_snapshot_notes(res) -> list[Footnote]`
+  - `full._write_review(out, sa, sb, missing=(), factor_data=None) -> None`
+
+- [ ] **Step 1: 写失败测试**（追加到 `tests/test_full_context.py`）
+
+```python
+# ══ 第二次调用试跑后的修订 ③：快照缺口按实际查到的 ═════════════════
+
+class _Store:
+    def __init__(self, have): self.have = set(have)
+    def load(self, sid):
+        if sid not in self.have:
+            raise KeyError(sid)
+        return object()
+
+
+def test_门一快照缺口按实际查_不按写死名单():
+    """生益科技第二次调用审计报了 em_rates，写死的名单里没有它。"""
+    from ir_agent import full
+
+    led = FactLedger()
+    for key, sid, m in (("rf", "em_rates", Method.REPORTED),
+                        ("rev", "eastmoney_20261013010101_abcdef123456", Method.REPORTED),
+                        ("g", "calc", Method.COMPUTED)):
+        led.put(Fact(key=key, value=Decimal("1"), unit="ratio", period="2025FY",
+                     as_of=date(2026, 4, 1), source_id=sid, method=m))
+
+    class _R:
+        ledger = led
+        store = _Store({"eastmoney_20261013010101_abcdef123456"})
+    assert full._snapshot_gaps(_R()) == [("em_rates", 1)]
+
+
+def test_来源名剥掉快照库的时间戳与摘要():
+    from ir_agent import full
+    assert full._source_name("eastmoney_20261013010101_abcdef123456") == "eastmoney"
+    assert full._source_name("em_macro") == "em_macro"
+
+
+def test_门二逐条列出简报里缺快照的引用_按来源分组():
+    from ir_agent import full
+    from ir_agent.citation import Footnote
+
+    def fn(key, sid, method="reported", display="2.0%"):
+        return Footnote(marker=1, key=key, period="2026-08", source_id=sid,
+                        as_of=date(2026, 9, 1), method=method, display=display)
+
+    class _A:
+        footnotes = [fn("macro.cpi", "em_macro"), fn("macro.cpi", "em_macro"),
+                     fn("rf", "em_rates", display="1.8%"), fn("rev", "eastmoney_x")]
+        missing_snapshots = ["em_macro", "em_macro", "em_rates"]
+    got = full._missing_snapshot_notes(_A())
+    assert [(n.key, n.source_id) for n in got] == [
+        ("macro.cpi", "em_macro"), ("rf", "em_rates")], "去重、只留缺的"
+
+
+def test_待核清单_快照一节逐条_因子结论一节警示在前(tmp_path):
+    from ir_agent import full, gaps
+    from ir_agent.citation import Footnote
+    from ir_agent.drivers import Factor
+    from ir_agent.sources.conclusions import Article, Conclusion, number_marks
+
+    def concl(claim, text):
+        a = Article(no="1", url="https://x.cn/a", publisher="某媒体",
+                    published=date(2026, 7, 1), final_url="https://x.cn/a",
+                    opened=True, text=text)
+        c = Conclusion(factor_key="k", claim=claim, articles=[a])
+        c.marks = number_marks(c.claim, c.articles)
+        return c
+
+    f = Factor(key="k", label="稼动率", unit="变化率")
+    fd = {"k": gaps.FactorData(factor=f, status=gaps.EXTERNAL, findings=[
+        concl("稼动率约78%", "稼动率约78%"),
+        concl("7628规格满产", "满产")])}
+    miss = [Footnote(marker=1, key="rf", period="2026-08", source_id="em_rates",
+                     as_of=date(2026, 9, 1), method="reported", display="1.8%")]
+    full._write_review(tmp_path, None, None, miss, fd)
+    md = (tmp_path / "review.md").read_text(encoding="utf-8")
+    assert "### em_rates（1 条）" in md and "`rf@2026-08`" in md
+    assert "因子联网结论（模型综合，待人工复核）：2 条" in md
+    assert md.index("7628规格满产") < md.index("稼动率约78%"), "带 ⚠ 的排最前"
+    assert "7628 ⚠ 找不到" in md
+    assert "factors.json" in md, "要告诉人有异议直接改哪个文件"
+```
+
+同文件 `test_本分支新增的清单生产者逐个断言渲染标记` 末尾的 `not_asserted` 字典加一项
+（它穷举 `full` 里所有返回 `list[str]` 的函数；`_review_factor_lines` 返回的是 review.md
+的行、不进终端清单——**登记并写明理由，不要改返回类型绕开这条守卫**）：
+
+```python
+        "_review_factor_lines": ("不是终端清单的生产者：返回 review.md 的 markdown "
+                                 "行，不进 skipped；渲染断言在 test_待核清单_快照"
+                                 "一节逐条_因子结论一节警示在前"),
+```
+
+- [ ] **Step 2: 跑，确认失败**
+
+```bash
+python -m pytest tests/test_full_context.py -k "快照缺口按实际查 or 来源名剥掉 or 门二逐条 or 待核清单_快照一节" -q
+```
+Expected: 4 failed。
+
+- [ ] **Step 3: 实现 `full.py`**
+
+`_snapshot_gaps` 整个函数替换为：
+
+```python
+def _source_name(sid: str) -> str:
+    """source_id → 来源名。快照库给的 id 形如 `{source}_{%Y%m%d%H%M%S}_{12位摘要}`
+    （`SnapshotStore.save`）；不存快照的来源直接用来源名（em_macro）。"""
+    return re.sub(r"_\d{14}_[0-9a-f]{12}$", "", sid.split("#")[0])
+
+
+def _snapshot_gaps(r) -> list[tuple[str, int]]:
+    """门①：账本里缺原始接口快照的事实，按来源汇总条数。
+
+    **按实际查到的，不按写死的名单。** 此前按 `manifest.KNOWN_GAPS` 的两个
+    来源名数前缀；生益科技第二次调用的审计报了 em_rates —— 名单里没有它，门①
+    的清单于是漏了一个来源。判据与 `audit.py` 同一条：非 COMPUTED 的事实逐个
+    `store.load(source_id)`，同一 source_id 只查一次。`KNOWN_GAPS` 降为「为什么
+    缺」的说明表（`manifest.render` 里查不到说明的用默认措辞）。
+
+    **`_facts` 的值是 `list[Fact]`，不是单条 Fact**（`ledger.py`）——按 bucket
+    再展开，Task 6 实跑时在同形的 `manifest.collect_rows` 上踩到过。
+    """
+    from collections import Counter
+
+    from ir_agent.ledger import Method
+
+    store, led = getattr(r, "store", None), getattr(r, "ledger", None)
+    if store is None or led is None:
+        return []
+    have: dict[str, bool] = {}
+    c: Counter = Counter()
+    for bucket in led._facts.values():                      # noqa: SLF001
+        for f in bucket:
+            if f.method is Method.COMPUTED:
+                continue
+            if f.source_id not in have:
+                try:
+                    store.load(f.source_id)
+                    have[f.source_id] = True
+                except KeyError:
+                    have[f.source_id] = False
+            if not have[f.source_id]:
+                c[_source_name(f.source_id)] += 1
+    return sorted(c.items())
+
+
+def _missing_snapshot_notes(res) -> list:
+    """门②：简报里缺原始接口快照的那些引用，逐条（同一 key@期间@来源只列一次）。
+
+    快照有没有只取决于 source_id（`audit.py` 逐条 `store.load(n.source_id)`、
+    跳过 COMPUTED），所以拿审计给出的缺失集合回头筛脚注就是精确的 —— 不改
+    `audit.py`，第二阶段不受影响。
+    """
+    from ir_agent.ledger import Method
+
+    miss = set(getattr(res, "missing_snapshots", None) or ())
+    out, seen = [], set()
+    for n in getattr(res, "footnotes", None) or ():
+        ident = (n.key, n.period, n.source_id)
+        if (n.method != Method.COMPUTED.value and n.source_id in miss
+                and ident not in seen):
+            seen.add(ident)
+            out.append(n)
+    return out
+```
+
+`_write_review` 整个函数替换为：
+
+```python
+def _review_factor_lines(factor_data) -> list[str]:
+    """门②：因子联网结论（模型综合，待人工复核）。带 ⚠ 的排最前。
+
+    用户决定 B：门② 一次签名覆盖全部结论，有异议直接改或删 `factors.json`
+    里对应条目后再签 —— 所以这里要把文件名说出来。
+    """
+    from ir_agent.sources.conclusions import Conclusion
+
+    rows = [(fd.factor.label, c) for fd in (factor_data or {}).values()
+            for c in fd.findings if isinstance(c, Conclusion)]
+    if not rows:
+        return []
+    rows.sort(key=lambda x: not x[1].flags())               # 稳定排序：⚠ 在前
+    lines = [f"## 因子联网结论（模型综合，待人工复核）：{len(rows)} 条", "",
+             "结论可以综合多篇文章、可以改写；代码只核对了文章打不打得开、结论里"
+             "的数字在引用文章里有没有出处。**有异议的，直接改或删 `factors.json`"
+             " 里对应条目后再签门②。**", ""]
+    for label, c in rows:
+        flags = c.flags()
+        lines.append(f"- {'⚠ ' if flags else ''}**{label}**：{c.claim}")
+        if flags:
+            lines.append(f"  - ⚠ {flags}")
+        for a in c.articles:
+            st = "" if a.opened else f"（{a.why_not}）"
+            lines.append(f"  - 文章{a.no}：[{a.publisher or a.link}]({a.link})"
+                         f"　{a.tier.value}　{a.published}{st}")
+        if c.marks:
+            lines.append("  - 数字出处：" + "　".join(
+                f"{m.number} " + ("✓ 文章" + "、".join(m.found_in)
+                                  if m.found_in else "⚠ 找不到")
+                for m in c.marks))
+        if c.dropped:
+            lines.append(f"  - 已剔除：{'；'.join(c.dropped)}")
+    lines.append("")
+    return lines
+
+
+def _write_review(out: Path, sa, sb, missing=(), factor_data=None) -> None:
+    """门② 的待核清单：把所有「代码没把握」的东西聚到一处。"""
+    from ir_agent.sources.manifest import KNOWN_GAPS
+
+    lines = ["# 待核清单（门②：请在批准简报结论前过一遍）", ""]
+    for name, s in (("多空辩论①", sa), ("多空辩论②", sb)):
+        if s is not None and s.unverified:
+            lines += [f"## {name}：{len(s.unverified)} 条证据代码核验不过", ""]
+            lines += [f"- [{e.side}] {e.subject}：{e.unverified}"
+                      for e in s.unverified] + [""]
+    lines += _review_factor_lines(factor_data)
+    if missing:
+        groups: dict[str, list] = {}
+        for n in missing:
+            groups.setdefault(_source_name(n.source_id), []).append(n)
+        lines += [f"## 简报引用缺原始接口快照：{len(missing)} 条"
+                  "（数字在，但反查不到当时的接口响应）", ""]
+        for name, ns in groups.items():
+            why = KNOWN_GAPS.get(name, "未保留原始接口响应")
+            lines += [f"### {name}（{len(ns)} 条）—— {why}", ""]
+            lines += [f"- {n.display or '—'}　`{n.key}@{n.period}`"
+                      for n in ns] + [""]
+    if len(lines) == 2:
+        lines.append("本轮没有需要人工复核的标注项。")
+    (out / REVIEW_MD).write_text("\n".join(lines), encoding="utf-8")
+```
+
+`run_brief` 里 `_write_review(out, sa, sb, _snapshot_gaps(r))` 改为
+
+```python
+        _write_review(out, sa, sb, _missing_snapshot_notes(r.audit), factor_data)
+```
+
+- [ ] **Step 4: 跑，确认通过；全量不回归**
+
+```bash
+python -m pytest tests/test_full_context.py tests/test_sources_manifest.py -q
+python -m pytest -q -m "not live" -W error
+```
+
+- [ ] **Step 5: 变异验证**——`_snapshot_gaps` 里删掉 `if f.method is Method.COMPUTED: continue`，
+`test_门一快照缺口按实际查…` 应变红（calc 被计入）；还原。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add ir_agent/full.py tests/test_full_context.py
+git commit -m "full: 门① 快照缺口按实际 store.load 查；门② 待核清单逐条列缺快照引用、列出联网结论（⚠ 在前）"
+```
+
+---
+
+### Task 21: spec 同步、全量、试跑
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-10-12-phase1-restructure-design.md`
+- Modify: 本计划（勾选与实跑记录）
+
+- [ ] **Step 1: spec 同步修订**（在「第二次调用试跑后」一节末尾、`### 不做` 之前加一小节）
+
+```markdown
+### 写实现计划时的四处收紧（2026-10-13）
+
+- **⑤ 只认显式声明 `[[key]]`**，不按「线索里出现形如 `a.b` 的词」绑定。生益科技
+  第 60 行线索原文「capex、fixed_asset等账本key……需采集稼动率数据」：提到 capex
+  不等于稼动率就是 capex，按出现即绑定会错绑并跳过采集。提示词讲明「只是相关的
+  不要写成 `[[ ]]`」。
+- **② EXTERNAL 状态值仍为「外部来源」**，「待人工复核」写在 note 里 —— 状态值
+  在判断项提示词等多处按字面出现，换值牵连面大而无实际收益。
+- **② 第三次调用不把文章放回语料库**：`--assume` 里没有任何环节读语料库，文章
+  正文随 `factors.json` 走、供重算数字标注即可。
+- **② `factors.json` 补存 `source_excerpt`**：此前漏存，第三次调用里模型逐字引用
+  年报摘录会匹配不到（与本节无关的既有缺口，顺带修）。
+- `web.Finding` / `parse_findings` / `openweb.verify_finding` / `web.supports_value`
+  / `by_tier` 本批**不删**：仍有测试守着、`test_assume.py` 用 `Finding` 构造数据，
+  删除连带四个测试文件，另起清理任务。
+```
+
+同时把正文 ⑤ 里「从因子的数据线索里切出形如 `a.b`……精确匹配」一句改为「从数据线索里
+取出显式声明的 `[[key]]`，与账本精确匹配（见下文收紧）」；② 里「状态为「外部资料（待人工
+复核）」」改为「状态为「外部来源」，note 写明「模型综合结论，待人工复核」」；「`--assume`
+从 `factors.json` 把文章重新放进语料库，并」改为「`--assume` 从 `factors.json` 读回文章正文，」。
+
+- [ ] **Step 2: 全量**
+
+```bash
+python -m pytest -q -m "not live" -W error --collect-only | tail -1
+python -m pytest -q -m "not live" -W error
+```
+Expected: 全部 passed；总数 = 2228 − 16 + 本批新增（Task 14:4、15:6、16:6、17:19、18:14、19:3、20:4 = 56）= **2268**
+（`--collect-only` 的数，含 8 条 skipped）。写计划时已在仓库副本上把 Task 17+18 套上跑过全量：2245 = 2228 − 16 + 19 + 14，对得上。
+数不对就停下查，不要往下走。
+
+- [ ] **Step 3: 提交 spec**
+
+```bash
+git add docs/superpowers/specs/2026-10-12-phase1-restructure-design.md docs/superpowers/plans/2026-10-12-phase1-restructure.md
+git commit -m "spec/plan: 第二次调用修订的四处收紧；Task 14–21 完成记录"
+```
+
+- [ ] **Step 4: 试跑前和用户确认两件事（不要自行决定）**
+  1. 门① 清单要不要按新的 `_snapshot_gaps` 重新生成后重签（旧清单漏了 em_rates）；
+  2. 重跑会花多少（预计约 $9）。
+
+- [ ] **Step 5: 试跑 `--brief`**（用户确认后）
+
+`drivers.md` 是旧提示词产物（检索词带前缀、没有覆盖声明、没有 `[[key]]`）——**读回路径
+会沿用它**，必须先归档再删，让预研按新提示词重做；`factors.json`、`stance_b.*` 依赖它，一并
+归档：
+
+```bash
+mkdir -p out/600183-p2-brief2
+mv out/600183-p2/{drivers.md,factors.json,stance_b.json,stance_b.md,brief.md,review.md} out/600183-p2-brief2/
+python -m ir_agent 600183 --year 2025 --brief out/600183-p2 --verified-by xhl --refresh-stance 2>&1 | tee out/600183-p2/run_brief.log
+```
+
+核对（每条都要看产物原文，不只看退出码）：
+- `drivers.md`：检索词不带「检索词」前缀；命中次数不再全 0；主题覆盖有 ✓/✗ 声明；
+  若模型写了 `[[key]]`，「数据线索里声明的账本 key」一节有 ✓；
+- `factors.json`：`"schema": 2`；联网因子有结论与文章；
+- `review.md`：快照一节含 em_rates 且逐条；联网结论一节 ⚠ 在前；
+- 终端产物清单与 `review.md` 说的是同一组数。
+
+---
+
+## 自查（Task 14–21）
+
+**1. Spec 覆盖**
+
+| spec「第二次调用试跑后」要求 | 对应 Task |
+|---|---|
+| ① 格式行占位写法 + 解析兜底剥前缀 | 14 |
+| ② 结论 + 引用文章格式；文章打不打得开（不绕反爬）；时点守卫；数字出处；按最终域名分级 | 17 |
+| ② 文章全文进语料库；factors.json schema 2；读回重算数字标注；④分支接线 | 18 |
+| ② 门② review.md 一节、⚠ 在前、写明改 factors.json（决定 B） | 20 |
+| ② 门③ 带 ⚠ 的可用但该行带标记（决定 A） | 19 |
+| ③ 门② 逐条列缺快照引用；门① 按实际 store.load | 20 |
+| ④ 覆盖/未覆盖声明、三档、写进原始定义块往返不丢 | 15 |
+| ⑤ 账本 key 接到 gaps.collect（收紧为显式 `[[key]]`） | 16（spec 同步在 21） |
+| 不改 `external.norm` / `audit.py` / 第二阶段 | 全批（Global Constraints） |
+
+**2. 写计划时在仓库副本上整批试套过**：把 Task 14–20 的每个代码块按计划原文套进
+仓库副本，跑 `-m "not live" -W error` 全量：2260 passed、8 skipped，合计 2268，与 Task 21
+预计一致。试套抓出三处计划缺陷，已改进上文：`test_MEDIA语料不产生研报测算命中` 原归为
+「不要删」，实际它用旧格式驱动④，改为原地改写；清单渲染守卫里 `_read_factors` 的
+`factors.json` 场景仍是旧格式；`_review_factor_lines` 需在穷举守卫里登记。
+
+**3. 类型一致性**：`Conclusion.url/publisher/tier` 与 `web.Finding` 同名（`assume._match_finding`、
+`gaps.summary` 鸭子类型读）；`FactorData.findings` 注释为 `list`；`Row.basis_flag: str` 与
+`basis_unverified` 同为派生、不进 `to_json`；`_write_review(out, sa, sb, missing=(), factor_data=None)`
+唯一调用点在 `run_brief`。
