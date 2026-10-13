@@ -61,6 +61,9 @@ class Factor:
     # 走到底。对价是提示词里把后果说清，以及 `gaps.collect` 在 note 里
     # 标出「靠模型给的检索词命中」（见 `gaps._via_note`）。
     search_term: str = ""
+    # 公式里指代这个因子的短名（`formula`，2026-10-14）。旧的乘/加分解式没有
+    # 它，读回时由 `formula.short_from_label` 从完整名生成。
+    short: str = ""
 
     def __post_init__(self) -> None:
         # **只查长度，这是唯一的闸门。** 1 字检索词（「率」「价」）在任何
