@@ -206,11 +206,17 @@ def _slug(label: str) -> str:
 PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。
 
 标的行业：{industry}　标的代码：{code}
+{context}
+下面（若有）给出了这家公司本轮已经采集到的材料。请回答：**就多空双方
+争执的这几个点，这家公司的营收和毛利率该怎么分解，才能把争议落到可测的
+因子上？**
 
-**先上网搜索**这个行业的研究与估值方法论 —— 卖方怎么看这个行业、营收和
-毛利率分别由什么驱动、有哪些公认的陷阱。搜完再回答，不要凭印象。
+**先用上面已入库的卖方研报**；只在它们不足以支撑方法论判断时才上网补。
+（这不改变卖方资料的可引用范围：你读研报读的是**方法论**，产出的是分解式
+的**框架**，不是任何一个因子的取值。）材料为空时就只凭行业分类回答，
+那是允许的降级路径。
 
-然后给出两条**算术闭合**的分解式：
+给出两条**算术闭合**的分解式：
 
 `分解: 营收 | 乘 | 因子名:单位:数据线索:检索词 | 因子名:单位:数据线索:检索词 | …`
 `分解: 毛利率 | 加 | 因子名:单位:数据线索:检索词 | …`
@@ -238,19 +244,38 @@ PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。
 **宁可给一个搜不到的精确词（因子落「无数据」，诚实），也不要给一个到处都能
 搜到的泛词。**
 
-实测参考：在生益科技 8 篇公告（8.9 万字）里，「覆铜板」出现 98 次、「产能」
-31 次、「服务器」18 次——这三个都是**不该给**的例子；「原材料成本」2 次、
-「铜箔」6 次是**可以给**的例子。
+**不必猜命中次数。** 代码会把你给的每个因子的候选词（整串标签 → 去括号
+→ 剥后缀 → 你给的检索词，共四级）在本轮语料里的实际命中次数算出来、印在
+产物顶部。宁可给一个搜不到的精确词（因子落「无数据」，诚实），也不要给
+一个到处都能搜到的泛词。
 - **营收乘法链里不要放「占比/比重/结构」类因子**：高端产品占比从 20% 到
   22.4% 是 +12% 的相对变化，但营收不会因此多长 12%。结构升级对营收的影响
   并进「平均单价/ASP」，对毛利率的影响放进加法链。市占率可以乘（营收 =
   行业规模 × 市占率）。
 - 每条 2–5 个因子。一个不叫分解；超过五个人核实不过来。
-- 数据线索要具体到「去哪找」（年报哪一节 / 哪类研报 / 哪个行业数据源）。
+- 数据线索写明你**指望它来自哪里**：已有的账本 key（见上面「账本里已有的
+  key」那一节，若有）/ 年报某一节 / 语料库某一篇 / 需要新采集。优先分解成
+  已有数据能支撑的因子 —— 采集不到的因子会落「无数据」，那一档的三个取值
+  就只能凭判断填。
 
-再给出这个行业估值的已知陷阱，每条一行：
+**覆盖要求**
+
+上面「多空平衡点」那一节（若有）列出了双方争执的主题。**每个主题都应有一个
+因子承载它** —— 某个主题多空分歧最大、而分解式里没有对应因子，下一轮辩论就
+无从给出三档取值、判断项也无从反映这个分歧。确实无法因子化的，用一行说明：
+
+`未覆盖: <主题> | <为什么不能因子化>`
+
+代码会逐个核对并把结果标注在产物顶部。**不会因此驳回你**，但人会在审核时
+看到哪些主题没进分解式。
+
+最后，针对**你刚给出的这组因子**，指出它们自身的误用方式，每条一行：
 
 `陷阱: <一句话>`
+
+例如：哪个因子容易被双重计数、哪两个因子实际上不独立、哪个单位换算容易错。
+这正是下游结构审查要对的账。**不要写行业通用风险** —— 那些已经在上面的
+定性结论与多空辩论里。
 
 只输出上述格式的行，不要其它说明。
 """
@@ -262,7 +287,10 @@ def _tail(raw: str, n: int = 400) -> str:
 
 
 def research(client, industry: str, code: str,
-             max_attempts: int = 3) -> Methodology:
+             max_attempts: int = 3, *,
+             facts: str = "", corpus_note: str = "",
+             qualitative: str = "", stance_note: str = "",
+             available_keys: tuple[str, ...] = ()) -> Methodology:
     """让模型联网研究行业方法论，产出可计算的分解式。
 
     **前提：`client` 是否真的联网，取决于调用方。** 本函数的提示词
@@ -275,7 +303,23 @@ def research(client, industry: str, code: str,
     这样已开启联网工具的 client，否则这里的「先搜索」要求形同虚设。
     这条前提容易被后来人忽略，因此单独写在这里。
     """
-    prompt = PROMPT.format(industry=industry, code=code)
+    # **新输入全部可选，不传就退回行业级预研。** 那条路是
+    # `_research_methodology` 的既有降级出口（预研失败 → 两标量模式），
+    # 不能因为新增输入而失效 —— 见 `test_不传新输入时仍退回行业级预研`。
+    blocks = []
+    if facts:
+        blocks.append(f"【可用事实】\n{facts}")
+    if corpus_note:
+        blocks.append(f"【已入库资料】\n{corpus_note}")
+    if qualitative:
+        blocks.append(f"【定性结论】\n{qualitative}")
+    if stance_note:
+        blocks.append(f"【多空平衡点】\n{stance_note}")
+    if available_keys:
+        blocks.append("【账本里已有的 key】\n" + "、".join(available_keys))
+    prompt = PROMPT.format(industry=industry, code=code,
+                           context=("\n" + "\n\n".join(blocks) + "\n"
+                                    if blocks else ""))
     last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
         raw = client(prompt)
@@ -320,11 +364,109 @@ def _to_dsl(m: Methodology) -> str:
     return "\n".join(lines)
 
 
-def to_markdown(m: Methodology) -> str:
+def theme_coverage(decomps: list, themes: list[str]) -> list[tuple[str, str]]:
+    """辩论① 的每个主题，有没有被某个因子覆盖。**标注用，不阻断。**
+
+    判据只能是词面：主题词出现在因子标签、数据线索或检索词里就算覆盖。
+    「份额这件事有没有被这个分解式真的覆盖」是语义判断，代码判不了 ——
+    所以这个函数的产出是一行标注，交给门② 的人读，不是闸门。实测教训
+    就在手边：隐含份额检查想用算术判断一件该由语义判断的事，10 份存档上
+    10/10 惰性。
+
+    **要读 `source_hint`，不是 `hint`。** `Factor` 的字段叫 `source_hint`
+    （`drivers.py:48`）；写成 `getattr(f, "hint", "")` 会静默取到空串，
+    数据线索于是永不参与覆盖判断 —— 而「成本」这类主题常常只出现在数据
+    线索里（「年报营业成本构成」），不在任何因子标签里。
+
+    `themes` 为空（辩论① 失败且人工补写为空）时返回空列表 —— 不能凭空
+    要求覆盖。
+    """
+    out: list[tuple[str, str]] = []
+    for th in themes:
+        hit = ""
+        if th:
+            for d in decomps:
+                for f in d.factors:
+                    blob = (f"{f.label}{getattr(f, 'source_hint', '')}"
+                            f"{getattr(f, 'search_term', '')}")
+                    if th in blob:
+                        hit = f.label
+                        break
+                if hit:
+                    break
+        out.append((th, hit))
+    return out
+
+
+def term_hits(decomps: list, *, sections=None, corpus=None
+              ) -> dict[str, list[tuple[str, int]]]:
+    """每个因子的四级候选词，在年报分节 + 语料库里各命中几次。
+
+    **顺序必须与 `gaps._core_candidates` 一致** —— L1 整串标签 → L2 去括号
+    → L3 剥后缀 → L4 模型给的检索词。检索词在最底端：L1–L3 全部落空才轮到
+    它。只给检索词的次数，等于在优化用得最少的那根杠杆。
+
+    **不设阈值、不反馈给模型**：次数原样印进 `drivers.md`，门② 的人看得见
+    就能判断。原本想按实测取「> 10 次判为泛词嫌疑」，但那组实测只有五个
+    样本（生益科技 8 篇公告 8.9 万字里覆铜板 98 / 产能 31 / 服务器 18 是
+    反例，原材料成本 2 / 铜箔 6 是正例），而公告篇数与字数每家公司都不同
+    —— 一个绝对次数的阈值换个行业就不对。
+
+    计数用朴素的 `str.count`，不走 `gaps._valid_hit` 的否定语境过滤：这是
+    标注而不是判定，多数几次不会误伤谁，而引入过滤会让印出来的数字与
+    「实际能不能命中」之间多一层解释。
+    """
+    from ir_agent.gaps import _core_candidates
+
+    blobs: list[str] = []
+    if isinstance(sections, str):
+        blobs.append(sections)
+    elif sections is not None:
+        from ir_agent.strategy import annual_text
+        blobs.append(annual_text(sections))
+    for d in (getattr(corpus, "docs", None) or []):
+        blobs.append(getattr(d, "text", "") or "")
+    hay = "\n".join(x for x in blobs if x)
+
+    out: dict[str, list[tuple[str, int]]] = {}
+    for d in decomps:
+        for f in d.factors:
+            cands = _core_candidates(f.label, getattr(f, "search_term", "") or "")
+            out[f.label] = [(c, hay.count(c)) for c in cands]
+    return out
+
+
+def to_markdown(m: Methodology, coverage=(), hits=None) -> str:
+    """分解式落盘为 drivers.md。
+
+    `coverage` / `hits` 是**标注**，不参与 `from_markdown` 的往返解析 ——
+    后者只读 text 围栏块与 `# 驱动因子分解（…）` 标题行。人改分解式时不必
+    维护这两段，下次重跑由代码重算。
+    """
     lines = [f"# 驱动因子分解（{m.industry}）", "",
              "本次研究采用的分解式。**它决定了后面去采集什么数据、"
              "以及批准清单上能检查到什么** —— 清单上若没有某个因子，"
              "说明这个因素没被纳入。", ""]
+    if coverage:
+        miss = [th for th, who in coverage if not who]
+        lines += ["## 辩论① 主题覆盖（标注，未阻断）", ""]
+        lines += [f"- {th}：{('✓ ' + who) if who else '✗ 未进入分解式'}"
+                  for th, who in coverage]
+        if miss:
+            lines += ["", f"⚠ {len(miss)} 个辩论主题未进入分解式"
+                          f"（{'、'.join(miss)}）—— 请在门② 复核：这几点"
+                          f"多空有分歧，而判断项将无从反映它们。"]
+        lines.append("")
+    if hits:
+        lines += ["## 因子候选词在本轮语料里的命中次数（标注，未阻断）", "",
+                  "探测顺序：整串标签 → 去括号 → 剥后缀 → **模型给的检索词**"
+                  "（最后一级）。`gaps` 按这个顺序逐级试，命中即停。"
+                  "次数原样印出，不设阈值 —— 公告篇数与字数每家公司都不同，"
+                  "一个绝对次数的判语换个行业就不对。", ""]
+        for label, pairs in hits.items():
+            shown = "　".join(f"{c}:{n}" for c, n in pairs)
+            lines.append(f"- {label}　{shown}")
+        lines.append("")
     for d in m.decompositions:
         lines.append(f"## {d.describe()}")
         lines.append("")

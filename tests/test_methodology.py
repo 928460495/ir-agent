@@ -379,3 +379,203 @@ def test_落盘与读回用不同的文件名():
     下一轮把失败稿当成人工修改读回去。"""
     from ir_agent import full
     assert full.DRIVERS_FAILED_RAW != full.DRIVERS_MD
+
+
+# ══ 预研框架重写（Task 9）══════════════════════════════════════
+#
+# 计划里这四个夹具的 DSL 都不合法：`parse` 要求**两条分解式都给**
+# （缺一半会让读者以为两项都分解了）、且每条 2–5 个因子（MIN_FACTORS = 2，
+# 「一个因子不叫分解」）。实跑时逐个修正。
+
+_DSL = (
+    "分解: 营收 | 乘 "
+    "| 服务器用高频覆铜板出货量（含通信）:变化率:年报经营情况:铜箔 "
+    "| 平均单价:变化率:年报分产品价格:平均单价\n"
+    "分解: 毛利率 | 加 "
+    "| 铜箔采购价:pp:年报营业成本构成:铜箔 "
+    "| 稼动率摊薄:pp:年报产能利用:稼动率\n")
+
+_REV_LABEL = "服务器用高频覆铜板出货量（含通信）"
+
+
+def _meth():
+    from ir_agent.methodology import parse
+    m = parse(_DSL)
+    m.industry = "电子/元件/覆铜板"
+    return m
+
+
+class TestThemeCoverage:
+    """**覆盖约束：标注，不阻断。**
+
+    分解式要能承载辩论① 列出的主题 —— 多空在「份额」上分歧最大、分解式里
+    却没有份额因子，辩论② 就无从给出三元组、判断项也无从反映分歧，整条链
+    在这里断掉而产物上看不出来。
+
+    但这是**语义判断**：代码只能查「某个词有没有出现在因子标签或数据线索
+    里」，而「份额这件事有没有被这个分解式覆盖」要靠读。实测教训就在手边
+    —— 隐含份额检查想用算术判断一件该由语义判断的事，10 份存档上 10/10
+    惰性。所以标注、不阻断。
+    """
+
+    def test_覆盖到的主题给出覆盖它的因子(self):
+        from ir_agent.methodology import theme_coverage
+        got = dict(theme_coverage(_meth().decompositions, ["价格", "成本"]))
+        assert "平均单价" in got["价格"], got
+        assert "铜箔" in got["成本"], got
+
+    def test_没覆盖的主题给空串而不是抛异常(self):
+        from ir_agent.methodology import theme_coverage
+        got = dict(theme_coverage(_meth().decompositions, ["份额", "政策"]))
+        assert got["份额"] == "" and got["政策"] == ""
+
+    def test_主题顺序原样保留(self):
+        """标注是给人看的，顺序要和辩论① 列出的主题一致。"""
+        from ir_agent.methodology import theme_coverage
+        themes = ["需求", "价格", "成本", "份额", "政策"]
+        assert [x[0] for x in
+                theme_coverage(_meth().decompositions, themes)] == themes
+
+    def test_没有主题时返回空列表(self):
+        """辩论① 失败并由人工补写为空时，不能凭空要求覆盖。"""
+        from ir_agent.methodology import theme_coverage
+        assert theme_coverage(_meth().decompositions, []) == []
+
+    def test_数据线索也算覆盖(self):
+        """**判据要读 `source_hint`，不是只读 label。**
+
+        计划写的是 `getattr(f, 'hint', '')` —— `Factor` 的字段叫
+        `source_hint`（`drivers.py:48`），那样写会静默取到空串，数据线索
+        于是永不参与覆盖判断。这里「成本」只出现在 `source_hint`
+        （年报营业成本构成）里，不在任何 label 里。
+        """
+        from ir_agent.methodology import theme_coverage
+        assert dict(theme_coverage(_meth().decompositions, ["成本"]))["成本"]
+
+
+class TestTermHits:
+    """**检索词从「靠告诫」改为「靠数据」。**
+
+    现有提示词花了一整段劝模型不要给泛词，还得举实测数字 —— 因为那时候
+    语料库不存在，模型只能凭猜。现在语料库已在手，命中次数算得出来。
+    """
+
+    def test_四级候选词各自给出命中次数(self):
+        from ir_agent.methodology import term_hits
+        text = ("铜箔价格波动。铜箔采购。"
+                "服务器用高频覆铜板出货量（含通信）稳定。")
+        pairs = dict(term_hits(_meth().decompositions, sections=text)[_REV_LABEL])
+        assert pairs["铜箔"] == 2
+        assert pairs[_REV_LABEL] == 1
+
+    def test_检索词排在第四级而不是第一级(self):
+        """**这一条是整节里最要紧的。**
+
+        `gaps._core_candidates` 的阶梯是 L1 整串标签 → L2 去括号 →
+        L3 剥后缀 → L4 模型给的检索词。检索词在**最底端**：L1–L3 全部落空
+        才轮到它。只反馈检索词的命中次数，等于在优化用得最少的那根杠杆。
+
+        重写提示词时极易破坏这个顺序（会想当然地把检索词放前面），所以
+        这里直接钉住它。
+        """
+        from ir_agent.gaps import _core_candidates
+        from ir_agent.methodology import term_hits
+
+        cands = _core_candidates(_REV_LABEL, "铜箔")
+        assert cands[0] == _REV_LABEL, "第一级必须是整串标签"
+        assert cands[-1] == "铜箔", "模型给的检索词必须在最后一级"
+
+        order = [c for c, _ in
+                 term_hits(_meth().decompositions, sections="x")[_REV_LABEL]]
+        assert order == cands, "标注里的顺序要与实际探测顺序一致"
+
+    def test_没有语料时次数全零而不是报错(self):
+        from ir_agent.methodology import term_hits
+        got = term_hits(_meth().decompositions, sections=None, corpus=None)
+        assert got and all(n == 0 for pairs in got.values() for _, n in pairs)
+
+    def test_语料库里的公告也计入(self):
+        from datetime import date
+
+        from ir_agent.sources.external import Corpus, Document, Tier
+        from ir_agent.methodology import term_hits
+
+        cp = Corpus(as_of=date(2026, 10, 12))
+        cp.docs.append(Document(
+            doc_id="a1", url="http://x/1", title="公告", publisher="某公司",
+            tier=Tier.COMPANY, published=date(2026, 1, 1),
+            retrieved=date(2026, 10, 12), text="本期铜箔采购价下降。铜箔供给宽松。"))
+        pairs = dict(term_hits(_meth().decompositions, corpus=cp)[_REV_LABEL])
+        assert pairs["铜箔"] == 2
+
+
+class TestMarkdownAnnotations:
+    def test_两段标注进drivers_md顶部(self):
+        from ir_agent.methodology import to_markdown
+        out = to_markdown(_meth(), coverage=[("需求", _REV_LABEL), ("份额", "")],
+                          hits={_REV_LABEL: [(_REV_LABEL, 1), ("铜箔", 3)]})
+        assert "主题覆盖" in out and "份额" in out
+        assert "未进入分解式" in out
+        assert "命中次数" in out and "铜箔:3" in out
+
+    def test_不传标注时与改之前一样(self):
+        """老的调用点一个都不该因此变红。"""
+        from ir_agent.methodology import to_markdown
+        out = to_markdown(_meth())
+        assert "主题覆盖" not in out and "命中次数" not in out
+        assert "# 驱动因子分解（电子/元件/覆铜板）" in out
+
+    def test_标注不参与往返解析(self):
+        """**人改分解式时不必维护这两段标注。**
+
+        `from_markdown` 只读 text 围栏块与标题行；标注是普通 markdown，
+        下次重跑由代码重算。这条测试防的是「标注里写了个看起来像 DSL 的
+        东西，被 from_markdown 当真」。
+        """
+        from ir_agent.methodology import from_markdown, to_markdown
+        m = _meth()
+        back = from_markdown(to_markdown(
+            m, coverage=[("需求", _REV_LABEL)],
+            hits={_REV_LABEL: [("铜箔", 3)]}))
+        assert len(back.decompositions) == len(m.decompositions)
+        assert [f.label for f in back.decompositions[0].factors] == \
+               [f.label for f in m.decompositions[0].factors]
+
+
+class TestResearchInputs:
+    def _client(self):
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return _DSL
+        c.seen = seen
+        return c
+
+    def test_不传新输入时仍退回行业级预研(self):
+        """**两标量降级路径要走它。** 预研失败、或拿不到语料库时，
+        `research()` 必须还能只凭行业分类跑 —— 那条路是
+        `_research_methodology` 的既有降级出口，不能因为新增输入而失效。
+        """
+        from ir_agent.methodology import research
+
+        c = self._client()
+        m = research(c, "电子/元件/覆铜板", "600183")
+        assert m.decompositions and len(m.decompositions) == 2
+        assert "覆铜板" in c.seen[0]
+        for absent in ("【可用事实】", "【多空平衡点】", "【定性结论】",
+                       "【账本里已有的 key】"):
+            assert absent not in c.seen[0], f"没传的输入不该出现：{absent}"
+
+    def test_传了新输入就进提示词(self):
+        from ir_agent.methodology import research
+
+        c = self._client()
+        research(c, "电子/元件/覆铜板", "600183",
+                 facts="revenue@2025FY = 203 亿",
+                 stance_note="需求：多方看 AI 服务器放量，空方看消费电子疲软",
+                 available_keys=("revenue.yoy", "industry.revenue_yoy"))
+        p = c.seen[0]
+        assert "203 亿" in p and "AI 服务器" in p
+        assert "industry.revenue_yoy" in p
+        assert "【多空平衡点】" in p

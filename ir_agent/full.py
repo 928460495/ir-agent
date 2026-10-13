@@ -1132,6 +1132,9 @@ STATE = "state.json"
 # brief.md 的某一段：它要在数据采集之前就能被人看到、改坏了可以直接
 # 改这个文件覆盖重跑，不必等简报写完。
 DRIVERS_MD = "drivers.md"
+# 多空辩论① 的五个驱动主题。预研的覆盖标注逐个核对它们 —— 同一份清单
+# 两处用（辩论① 的 subjects、覆盖标注的 themes），不各写一遍。
+STANCE_THEMES = ("需求", "价格", "成本", "份额", "政策")
 
 
 def _analyse_facts(code: str, r, as_of: date, snapshot_dir):
@@ -1202,8 +1205,90 @@ def _analyse_qualitative(code: str, r, as_of: date, model,
     return qual_client
 
 
-def _research_methodology(code: str, r, out: Path, client):
-    """方法论预研 —— 先问「这个行业靠什么赚钱」，再按答案去采集数据。
+def _methodology_failed(out: Path, e) -> tuple[None, str]:
+    """预研给不出闭合的分解式 —— 退回不分解模式，整轮继续。
+
+    从 `_research_methodology` 的 `except methodology.MethodologyFailed`
+    分支整段搬出。**下面那段关于存活者偏差的注释逐字带走，一个字都没删** ——
+    它记着牧原股份那次实跑事故的根因。
+    """
+    # **被驳回的分解式必须落盘。** 不落盘的后果不是"排查麻烦"，是**存活者
+    # 偏差**: 事后拿历史产物做离线复盘时，只能看到通过了闸门的样本。实测
+    # （牧原股份 002714）: 「公司出栏量占全国比重」被拒 3 次、drivers.md
+    # 根本没生成，于是用 10 份存档做消融时，两个词法修复在 56 个存活因子
+    # 上的效果是 0 个改变 —— 真正的拦截与漏报全在看不见的那一半。
+    dumped = _dump_refused(out, getattr(e, "raw", ""), DRIVERS_FAILED_RAW)
+    tail = f"（最后一稿已落盘：{dumped}）" if dumped else ""
+    return None, (f"方法论预研（{str(e)[:160]}）{tail}—— "
+                  "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+
+
+def _methodology_api_failed(e) -> tuple[None, str]:
+    """模型接口失败（额度用尽/超时/CLI 报错）—— 不是这个行业分解不了。
+
+    从 `except ClaudeCliError` 分支整段搬出，注释同样逐字带走。
+    """
+    # **与 5db4ca5 修过的是同一个洞，只是换了个调用点。** 实测
+    # （600584 --analyse，确定性层已跑完 2930 条事实、三表与跨源勾稽
+    # 全部通过）第一个联网调用就撞上「You've hit your session limit」，
+    # 而这里当时只捕 MethodologyFailed，于是 ClaudeCliError 一路冒到
+    # __main__，整轮退出码 1、产物一个都没写出来。run_analysis 里其他
+    # 每一个联网环节都已经把这类错误记进 skipped 后继续，唯独预研这一
+    # 处漏了。**能力边界不是故障，整轮研究不该因此停摆。**
+    #
+    # 降级理由要说清这是**接口失败**而不是「这个行业分解不了」：
+    # 两者都退回不分解模式，但前者重跑就能拿回因子分解，后者重跑
+    # 多少次都一样。降级到两标量是这条产品线最不该悄悄发生的事，
+    # 起码要让人一眼看出这次降级是可恢复的。
+    return None, (f"方法论预研（{e.__class__.__name__}: {str(e)[:160]}）"
+                  "—— 模型接口失败（额度用尽/超时/CLI 报错），不是这个"
+                  # 预研已挪进第二次调用，该重跑的是 --brief 而不是
+                  # --analyse。**过时的指引是会主动误导人的那种错。**
+                  "行业分解不了：本轮退回不分解模式，判断项按营收增速/"
+                  "毛利率两项填写；接口恢复后重跑 --brief 即可拿回"
+                  "因子分解")
+
+
+def _ledger_keys(r) -> tuple[str, ...]:
+    """账本里已有的 key（去重、排序）。让预研优先分解成有数据的因子。
+
+    **拿不到就返回空元组，不抛。** 与紧邻的 `_facts_digest` 一条理由：
+    这两个值都是预研提示词的**可选**输入，缺了只是退回行业级预研 ——
+    而 `_research_methodology` 整体的设计就是「降级但继续」（预研失败不
+    中断整轮研究）。为一个可选输入炸掉整轮，与那条设计相反。
+    """
+    led = getattr(r, "ledger", None)
+    keys = {k for k, _ in getattr(led, "_facts", {})}        # noqa: SLF001
+    return tuple(sorted(keys))
+
+
+def _facts_digest(r) -> str:
+    """喂给预研的事实摘要。**复用撰写方那份清单，不另造一份口径。**
+
+    另造一份的后果是预研看到的事实与简报能引用的事实不是同一批 —— 预研
+    据以设计分解式的某个数字，撰写时引用不了。
+    """
+    try:
+        cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
+                                      extra_periods=_catalog_periods(r))
+        return cat.render_for_prompt()
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _research_methodology(code: str, r, out: Path, client, *,
+                          md: dict | None = None, stance_note: str = ""):
+    """方法论预研 —— **就多空争执的这几点，这家公司该怎么分解**。
+
+    **它现在排在辩论① 之后，手里有全部证据与多空结论。** 旧位置排在所有
+    采集之前，所以只能问一个行业级的通用问题（「这个行业靠什么赚钱」），
+    产出是「这个行业怎么运转」而不是「这家公司此刻的争议在哪」。
+
+    `md` 是定性分析的结果（`state.json` 的 `md`），`stance_note` 是辩论①
+    的平衡结论。**`stance_note` 是「辩论① 排在预研之前」唯一的兑现处** ——
+    不传它，辩论① 的结论就到不了预研，流程图上它在那儿而数据流上它不在。
+
+    两者都可选：不传就退回行业级预研，那是两标量降级路径要走的出口。
 
     **不另设人工确认门。** 门的价值会被数量稀释: 现有那道判断项的门之所以
     有效，是因为它一次只要求人看一件事；再加一道，人看两次的注意力未必比
@@ -1238,37 +1323,38 @@ def _research_methodology(code: str, r, out: Path, client):
         return None, "方法论预研（取不到申万行业分类）"
 
     try:
-        m = methodology.research(client, industry, code)
+        m = methodology.research(
+            client, industry, code,
+            facts=_facts_digest(r),
+            corpus_note=(md or {}).get("外部资料", ""),
+            qualitative="\n\n".join(
+                f"【{k}】\n{v}" for k, v in (md or {}).items()
+                if k in ("宏观定性", "战略", "产业链") and v),
+            stance_note=stance_note,
+            available_keys=_ledger_keys(r))
     except methodology.MethodologyFailed as e:
-        # **被驳回的分解式必须落盘。** 不落盘的后果不是"排查麻烦"，是**存活者
-        # 偏差**: 事后拿历史产物做离线复盘时，只能看到通过了闸门的样本。实测
-        # （牧原股份 002714）: 「公司出栏量占全国比重」被拒 3 次、drivers.md
-        # 根本没生成，于是用 10 份存档做消融时，两个词法修复在 56 个存活因子
-        # 上的效果是 0 个改变 —— 真正的拦截与漏报全在看不见的那一半。
-        dumped = _dump_refused(out, getattr(e, "raw", ""), DRIVERS_FAILED_RAW)
-        tail = f"（最后一稿已落盘：{dumped}）" if dumped else ""
-        return None, (f"方法论预研（{str(e)[:160]}）{tail}—— "
-                      "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
+        return _methodology_failed(out, e)
     except ClaudeCliError as e:
-        # **与 5db4ca5 修过的是同一个洞，只是换了个调用点。** 实测
-        # （600584 --analyse，确定性层已跑完 2930 条事实、三表与跨源勾稽
-        # 全部通过）第一个联网调用就撞上「You've hit your session limit」，
-        # 而这里当时只捕 MethodologyFailed，于是 ClaudeCliError 一路冒到
-        # __main__，整轮退出码 1、产物一个都没写出来。run_analysis 里其他
-        # 每一个联网环节都已经把这类错误记进 skipped 后继续，唯独预研这一
-        # 处漏了。**能力边界不是故障，整轮研究不该因此停摆。**
-        #
-        # 降级理由要说清这是**接口失败**而不是「这个行业分解不了」：
-        # 两者都退回不分解模式，但前者重跑就能拿回因子分解，后者重跑
-        # 多少次都一样。降级到两标量是这条产品线最不该悄悄发生的事，
-        # 起码要让人一眼看出这次降级是可恢复的。
-        return None, (f"方法论预研（{e.__class__.__name__}: {str(e)[:160]}）"
-                      "—— 模型接口失败（额度用尽/超时/CLI 报错），不是这个"
-                      "行业分解不了：本轮退回不分解模式，判断项按营收增速/"
-                      "毛利率两项填写；接口恢复后重跑 --analyse 即可拿回"
-                      "因子分解")
-    path.write_text(methodology.to_markdown(m), encoding="utf-8")
-    return m, ""
+        return _methodology_api_failed(e)
+
+    # ── 两段标注（都不阻断）─────────────────────────────────────
+    # **没有辩论① 的结论就不做覆盖标注。** spec 对 `theme_coverage` 写的是
+    # 「`themes` 为空时返回空列表 —— 不能凭空要求覆盖」，那条逻辑在调用方
+    # 同样成立：没传 `stance_note`（辩论① 失败、或这是降级路径）时，模型
+    # 压根没看到过主题清单，拿五个主题去核对它、再在产物上标「4 个未覆盖」
+    # 就是凭空问责。
+    themes = list(STANCE_THEMES) if stance_note.strip() else []
+    cov = methodology.theme_coverage(m.decompositions, themes)
+    hits = methodology.term_hits(m.decompositions,
+                                 sections=getattr(r, "sections", None),
+                                 corpus=getattr(r, "corpus", None))
+    path.write_text(methodology.to_markdown(m, coverage=cov, hits=hits),
+                    encoding="utf-8")
+    note = ""
+    if (miss := [th for th, who in cov if not who]):
+        note = (f"方法论预研：{len(miss)} 个辩论主题未进入分解式"
+                f"（{'、'.join(miss)}）—— 已标注，未阻断，需在门② 复核")
+    return m, note
 
 
 def _catalog_periods(r) -> tuple[str, ...]:

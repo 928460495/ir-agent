@@ -3137,3 +3137,95 @@ def test_假设辩论的成立挑战进终端清单():
 
     note = _assumption_caveat_note(_A())
     assert "假设辩论有 2 项" in note and "未因此改动" in note
+
+
+def test_预研没收到辩论结论时不做覆盖标注(tmp_path):
+    """**不能凭空要求覆盖。**
+
+    spec 对 `theme_coverage` 写的是「themes 为空时返回空列表」，那条逻辑在
+    调用方同样成立：没传 `stance_note`（辩论① 失败、或两标量降级路径）时，
+    模型压根没看到过主题清单 —— 拿五个主题去核对它、再在产物上标「4 个
+    未覆盖」是凭空问责。
+    """
+    from ir_agent import full
+
+    lines = ("分解: 营收 | 乘 | 出货量:变化率:年报:出货量 "
+             "| 单价:变化率:年报:单价\n"
+             "分解: 毛利率 | 加 | 铜箔采购价:pp:年报:铜箔 "
+             "| 稼动率:pp:年报:稼动率\n")
+
+    class _R:
+        period, as_of = "2025FY", date(2026, 9, 30)
+        ledger = sections = corpus = None
+
+    def _fake_path(code):
+        return "电子/元件/覆铜板"
+
+    orig, full._industry_path = full._industry_path, _fake_path
+    try:
+        m, err = full._research_methodology("600183", _R(), tmp_path,
+                                            lambda p: lines)
+        assert m is not None and err == "", err
+        md = (tmp_path / "drivers.md").read_text(encoding="utf-8")
+        assert "主题覆盖" not in md, "没有辩论结论却印了覆盖标注"
+        assert "命中次数" in md, "命中次数标注与辩论无关，应照旧印出"
+
+        # 传了辩论结论就该核对
+        (tmp_path / "drivers.md").unlink()
+        m2, err2 = full._research_methodology(
+            "600183", _R(), tmp_path, lambda p: lines,
+            stance_note="需求：多方看 AI 放量；份额：空方看份额在丢")
+        assert "辩论主题未进入分解式" in err2, err2
+        md2 = (tmp_path / "drivers.md").read_text(encoding="utf-8")
+        assert "主题覆盖" in md2 and "✗ 未进入分解式" in md2
+    finally:
+        full._industry_path = orig
+
+
+def test_辩论结论与定性结论真的进了预研的提示词(tmp_path):
+    """**这是「辩论① 排在预研之前」唯一的兑现处。**
+
+    `_research_methodology` 的文档字符串写着这句话，而上一条测试
+    （`test_预研没收到辩论结论时不做覆盖标注`）验的是**参数**：它读
+    `stance_note` 这个形参来决定要不要做覆盖标注，而不管那个值有没有真的
+    传给 `methodology.research`。
+
+    实测证据：把 `stance_note=stance_note` 改成 `stance_note=""`（即辩论①
+    的结论根本到不了模型），全量 2178 条**一条都不红**。顺序调整的全部
+    目的就在这一行上，而它当时没有任何测试。
+    """
+    from ir_agent import full
+
+    lines = ("分解: 营收 | 乘 | 出货量:变化率:年报:出货量 "
+             "| 单价:变化率:年报:单价\n"
+             "分解: 毛利率 | 加 | 铜箔采购价:pp:年报:铜箔 "
+             "| 稼动率:pp:年报:稼动率\n")
+    seen: list[str] = []
+
+    def _client(prompt):
+        seen.append(prompt)
+        return lines
+
+    class _R:
+        period, as_of = "2025FY", date(2026, 9, 30)
+        ledger = sections = corpus = None
+
+    orig, full._industry_path = full._industry_path, lambda c: "电子/元件/覆铜板"
+    try:
+        full._research_methodology(
+            "600183", _R(), tmp_path, _client,
+            md={"外部资料": "共 12 篇（卖方 7 / 官方 3 / 媒体 2）",
+                "战略": "护城河在高频高速板的客户认证周期",
+                "产业链": "上游铜箔集中度高，议价能力弱",
+                "宏观定性": "货币政策中性偏松"},
+            stance_note="需求：多方看 AI 服务器放量，空方看消费电子疲软")
+    finally:
+        full._industry_path = orig
+
+    assert len(seen) == 1
+    p = seen[0]
+    assert "AI 服务器" in p, "辩论① 的平衡结论没进提示词 —— 顺序调整白做了"
+    assert "【多空平衡点】" in p
+    assert "护城河" in p and "铜箔集中度" in p, "定性结论没进提示词"
+    assert "【定性结论】" in p and "【已入库资料】" in p
+    assert "共 12 篇" in p, "语料库构成没进提示词"
