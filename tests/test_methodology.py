@@ -579,3 +579,48 @@ class TestResearchInputs:
         assert "203 亿" in p and "AI 服务器" in p
         assert "industry.revenue_yoy" in p
         assert "【多空平衡点】" in p
+
+
+# ══ 第二次调用试跑后的修订 ①：检索词字面前缀 ═════════════════════
+#
+# 生益科技 2026-10-13 drivers.md 原样两行。模型把格式行
+# `因子名:单位:数据线索:检索词` 里的占位词当成前缀照抄，6 个检索词全成了
+# 「检索词Prismark」——命中次数全 0，gaps 的年报、公告两级全落空。
+
+_SY_DSL = (
+    "分解: 营收 | 乘 | 行业产值(覆铜板/PCB下游Prismark口径)同比增速:变化率:"
+    "industry.revenue、industry.revenue_yoy（账本已有key）:检索词Prismark | "
+    "公司市占率同比变化率:变化率:company.market_share、company.market_share_delta"
+    "（账本已有key，0.87pp/8.02%基期折算）:检索词市场占有率\n"
+    "分解: 毛利率 | 加 | 提价/调价传导效应:pp:2026Q2毛利率环比跳升4.53pp，多空辩论A"
+    "价格条目提及\"持续提价\"，需采集调价函披露:检索词调价函 | 核心原材料(铜箔/玻纤布)"
+    "成本效应:pp:新浪财经《不公开涨价的覆铜板厂》提及原材料成本压力，需采集铜价数据:"
+    "检索词铜价 | 高端产品结构升级效应:pp:东莞证券/太平洋研报\"高端高速产品放量\"，"
+    "需采集高端产品收入占比:检索词高端产品占比 | 产能稼动率(规模效应):pp:capex、"
+    "fixed_asset等账本key及在建工程投资公告，需采集稼动率数据:检索词稼动率\n")
+
+
+class TestSearchTermLabel:
+    def test_真实样本里的字面前缀被剥掉(self):
+        from ir_agent.methodology import parse
+        m = parse(_SY_DSL)
+        assert [f.search_term for d in m.decompositions for f in d.factors] == [
+            "Prismark", "市场占有率", "调价函", "铜价", "高端产品占比", "稼动率"]
+
+    def test_全角冒号与等号分隔的前缀也剥掉(self):
+        from ir_agent.methodology import _strip_term_label
+        assert _strip_term_label("检索词：出货量") == "出货量"
+        assert _strip_term_label("检索词=出货量") == "出货量"
+        assert _strip_term_label("出货量") == "出货量"
+        assert _strip_term_label("检索词") == ""
+
+    def test_剥掉后往返不再带前缀(self):
+        from ir_agent.methodology import from_markdown, parse, to_markdown
+        back = from_markdown(to_markdown(parse(_SY_DSL)))
+        assert back.decompositions[0].factors[0].search_term == "Prismark"
+
+    def test_格式行用占位写法而不是裸词(self):
+        """根因在提示词：`因子名:单位:数据线索:检索词` 读起来像「字段名:值」。"""
+        from ir_agent import methodology
+        assert "因子名:单位:数据线索:检索词" not in methodology.PROMPT
+        assert "<因子名>:<单位>:<数据线索>:<检索词>" in methodology.PROMPT
