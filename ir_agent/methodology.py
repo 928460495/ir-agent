@@ -20,8 +20,13 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from ir_agent.drivers import (TARGET_LABEL, Decomposition,
-                              DecompositionInvalid, Factor, Op, check_closure)
+from ir_agent.drivers import (MAX_FACTORS, MIN_FACTORS, TARGET_LABEL,
+                              Decomposition, DecompositionInvalid, Factor, Op,
+                              check_closure)
+from ir_agent.formula import (MODES, RESERVED, TARGETS as _FORMULA_TARGETS,
+                              Constant, FormulaInvalid, FormulaModel,
+                              from_decomps, parse_constant, parse_formula,
+                              valid_name)
 from ir_agent.lineparse import keyed, pick
 
 _DECOMP = keyed("分解")
@@ -29,6 +34,11 @@ _PITFALL = keyed("陷阱")
 # `keyed("覆盖")` 不会误中「未覆盖:」行：行首前缀只吃列表符号与加粗，吃不掉「未」。
 _COVER = keyed("覆盖")
 _UNCOVER = keyed("未覆盖")
+# 公式化写法（2026-10-14）。出现 `公式:` 行即按新写法解析，否则按旧的 `分解:`。
+_MODE = keyed("模式")
+_FACTOR = keyed("因子")
+_CONST = keyed("常量")
+_FORMULA = keyed("公式")
 
 _TARGETS = {"营收": "revenue", "毛利率": "gross_margin"}
 _OPS = {"乘": Op.MULTIPLY, "加": Op.ADD_PP}
@@ -71,6 +81,14 @@ class Methodology:
     # 辩论① 主题的覆盖声明：(「覆盖」|「未覆盖」, 主题, 因子名或理由)。
     # **写进 drivers.md 的原始定义块**，人改过再重跑不丢（spec 2026-10-13 ④）。
     coverage_decl: list[tuple[str, str, str]] = field(default_factory=list)
+    # 公式化后的分解式（`formula.FormulaModel`）。**下游一律读它。** 新写法直接
+    # 解析得到；旧的 `分解:` 写法解析后由 `formula.from_decomps` 翻译（`legacy`），
+    # 此时 `decompositions` 仍保留原样，旧文件的往返与旧闸门不变。
+    model: FormulaModel | None = None
+
+    def factors(self) -> list[Factor]:
+        """全部因子（去重、按声明顺序）。水平模式下同一个因子可被两条公式共用。"""
+        return list(self.model.factors) if self.model else _flat(self.decompositions)
 
     def of(self, target: str) -> Decomposition | None:
         return next((d for d in self.decompositions if d.target == target),
@@ -78,6 +96,118 @@ class Methodology:
 
 
 def parse(text: str) -> Methodology:
+    """解析分解式。出现 `公式:` 行按公式化写法，否则按旧的 `分解:` 写法。"""
+    m = _parse_formulas(text) if _FORMULA.search(text) else _parse_legacy(text)
+    m.pitfalls = [h.group(1).strip() for h in _PITFALL.finditer(text)]
+    for kind, rx in (("覆盖", _COVER), ("未覆盖", _UNCOVER)):
+        for h in rx.finditer(text):
+            th, _, rest = h.group(1).partition("|")
+            m.coverage_decl.append((kind, th.strip(), rest.strip()))
+    return m
+
+
+def _fields(raw: str) -> list[str]:
+    return [p.strip() for p in raw.split("|")]
+
+
+def _parse_formulas(text: str) -> Methodology:
+    """公式化写法。**代码只查能不能算**（spec 2026-10-14 一）：模式合法、名字
+    已声明且合法、公式在白名单内、两条都有；另保留因子个数（每条公式 2–5 个、
+    声明了就要用到）与 key 不撞车，待子项目二由裁决者接管。旧写法的运算匹配、
+    单位白名单、占比类、营收量级四道字面闸门在这里**不跑** —— 它们建立在
+    「乘法链/加法链」概念上，公式化后无意义。
+    """
+    modes = [h.group(1).strip() for h in _MODE.finditer(text)]
+    if len(modes) != 1:
+        raise MethodologyFailed(
+            f"要有且只有一行「模式: 变化」或「模式: 水平」，得到 {len(modes)} 行")
+    mode = pick(modes[0], list(MODES)) or modes[0]
+    factors: list[Factor] = []
+    keys: dict[str, str] = {}
+    for h in _FACTOR.finditer(text):
+        parts = _fields(h.group(1))
+        if len(parts) < 3 or not all(parts[:3]):
+            raise MethodologyFailed(
+                "因子一行应为「短名 | 完整名 | 单位 | 数据线索 | 检索词」，"
+                f"得到 {h.group(1)!r}")
+        short, label, unit = parts[0], parts[1], parts[2]
+        _check_name(short, "因子短名")
+        key = _slug(label)
+        if key in keys:
+            raise MethodologyFailed(
+                f"因子「{keys[key]}」与「{label}」slug 后都是 {key!r} —— 下游按"
+                "这个 key 对采集结果与工作簿行，撞车的那个会被错认。换一个更有"
+                "区分度的完整名。")
+        keys[key] = label
+        try:
+            factors.append(Factor(
+                key=key, label=label, unit=unit,
+                source_hint=parts[3] if len(parts) > 3 else "",
+                search_term=(_strip_term_label(parts[4])
+                             if len(parts) > 4 else ""),
+                short=short))
+        except DecompositionInvalid as e:
+            raise MethodologyFailed(str(e)) from e
+    consts: list[Constant] = []
+    for h in _CONST.finditer(text):
+        parts = _fields(h.group(1))
+        if len(parts) < 3 or not all(parts[:3]):
+            raise MethodologyFailed(
+                "常量一行应为「名字 | 数值 | 出处」，出处不能空 —— 常量是公式里"
+                f"不逐年判断的数，得说清它从哪来。得到 {h.group(1)!r}")
+        _check_name(parts[0], "常量名")
+        try:
+            consts.append(Constant(parts[0], parse_constant(parts[1]), parts[2]))
+        except FormulaInvalid as e:
+            raise MethodologyFailed(str(e)) from e
+    declared = {f.short for f in factors} | {c.name for c in consts}
+    formulas: dict = {}
+    for h in _FORMULA.finditer(text):
+        lhs, sep, rhs = h.group(1).replace("＝", "=").partition("=")
+        tgt = _FORMULA_TARGETS.get(lhs.strip())
+        if not sep or tgt is None:
+            raise MethodologyFailed(
+                f"公式一行应为「营收 = …」或「毛利率 = …」，得到 {h.group(1)!r}")
+        if tgt in formulas:
+            raise MethodologyFailed(
+                f"「{lhs.strip()}」的公式出现了不止一条 —— 只能给一条")
+        try:
+            formulas[tgt] = parse_formula(rhs, tgt, declared)
+        except FormulaInvalid as e:
+            raise MethodologyFailed(str(e)) from e
+    model = FormulaModel(mode=mode, factors=factors, constants=consts,
+                         formulas=formulas)
+    try:
+        model.validate()
+    except FormulaInvalid as e:
+        raise MethodologyFailed(str(e)) from e
+    for tgt in formulas:
+        n = len(model.factors_of(tgt))
+        if not MIN_FACTORS <= n <= MAX_FACTORS:
+            raise MethodologyFailed(
+                f"「{TARGET_LABEL[tgt]}」的公式引用了 {n} 个因子 —— 每条 "
+                f"{MIN_FACTORS}–{MAX_FACTORS} 个：一个不叫分解，超过五个人"
+                "核实不过来。")
+    used = {f.short for t in formulas for f in model.factors_of(t)}
+    unused = [f.label for f in factors if f.short not in used]
+    if unused:
+        raise MethodologyFailed(
+            f"声明了却没有任何公式用到的因子：{'、'.join(unused)} —— 删掉，或写进"
+            "公式。不进公式的因子不影响营收与毛利率，却要逐年填值、联网采集。")
+    return Methodology(model=model)
+
+
+def _check_name(name: str, what: str) -> None:
+    """在读到声明行时就查名字 —— 否则先报出来的会是「公式引用了未声明的名字」，
+    把模型引向错误的修改方向。"""
+    if not valid_name(name):
+        raise MethodologyFailed(
+            f"{what}「{name}」不合法 —— 不能含运算符、括号、空格，不能以数字开头，"
+            f"不能是 {'、'.join(sorted(RESERVED))}")
+
+
+def _parse_legacy(text: str) -> Methodology:
+    """旧的 `分解: 目标 | 乘/加 | 因子:单位:线索:检索词 …` 写法。旧闸门照旧。"""
     m = Methodology()
     for hit in _DECOMP.finditer(text):
         parts = [p.strip() for p in hit.group(1).split("|")]
@@ -178,11 +308,7 @@ def parse(text: str) -> Methodology:
                     "上「（收入端）/（成本端）」这类后缀）。")
             seen_keys[f.key] = (tgt_label, f.label)
 
-    m.pitfalls = [h.group(1).strip() for h in _PITFALL.finditer(text)]
-    for kind, rx in (("覆盖", _COVER), ("未覆盖", _UNCOVER)):
-        for h in rx.finditer(text):
-            th, _, rest = h.group(1).partition("|")
-            m.coverage_decl.append((kind, th.strip(), rest.strip()))
+    m.model = from_decomps(m.decompositions)
     return m
 
 
@@ -236,22 +362,50 @@ PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。
 的**框架**，不是任何一个因子的取值。）材料为空时就只凭行业分类回答，
 那是允许的降级路径。
 
-给出两条**算术闭合**的分解式：
+先选**模式**（整份分解式只用一种）：
 
-`分解: 营收 | 乘 | <因子名>:<单位>:<数据线索>:<检索词> | <因子名>:<单位>:<数据线索>:<检索词> | …`
-`分解: 毛利率 | 加 | <因子名>:<单位>:<数据线索>:<检索词> | …`
+- **变化**：每个因子逐年填「变化」（增速、pp 变动……），公式描述「本年的变化 →
+  本年目标」。营收、毛利率的第 0 年取账本实际值。适合拿得到变化率、拿不到绝对
+  量的行业。
+- **水平**：每个因子逐年填「水平」（出货量、单价、单位成本……），公式直接写目标
+  的水平，代码用相邻两年算增速。第 0 年的营收、毛利率由各因子基期值代入公式算出
+  （不用报表营收，分子分母同口径）。适合量价数据拿得到的行业。
+
+再写因子、常量与两条公式：
+
+`模式: <变化|水平>`
+`因子: <短名> | <完整名> | <单位> | <数据线索> | <检索词>`
+`常量: <名字> | <数值> | <出处>`
+`公式: 营收 = <右边>`
+`公式: 毛利率 = <右边>`
 
 尖括号连同里面的字一起换成你的内容。示例（某封测公司，仅示意格式）：
 
-`分解: 营收 | 乘 | 有效产能同比增速:变化率:年报经营情况讨论:有效产能 | 平均单价变化率:变化率:研报价格跟踪:平均单价`
+`模式: 变化`
+`因子: 产能增速 | 有效产能同比增速 | 变化率 | 年报经营情况讨论 | 有效产能`
+`因子: 单价增速 | 平均单价同比变化率 | 变化率 | 研报价格跟踪 | 平均单价`
+`因子: 降价侵蚀 | 降价对毛利率的累计影响 | pp | 研报价格跟踪 | 降价`
+`因子: 折旧摊薄 | 稼动率提升对毛利率的累计摊薄 | pp | 年报成本构成 | 折旧`
+`公式: 营收 = 上期(营收) × (1 + 产能增速) × (1 + 单价增速)`
+`公式: 毛利率 = 基期(毛利率) + (降价侵蚀 + 折旧摊薄) / 100`
 
-**闭合的硬性要求**
-- 营收只能用「乘」，每个因子单位一律 `变化率`；毛利率只能用「加」，
-  单位一律 `pp`。
-- **pp 不能进乘法链**：稼动率 85%→82% 是 −3pp，但乘法因子的变化率是
-  82/85−1 = −3.5%，两者不等。
-- 每个因子必须写得出单位。**写不出单位的项就写不进来** ——
-  「客户结构优化」听着专业但不能乘，这类一律不要。
+**公式怎么写**（代码只管能不能算；算得对不对，由审核者与人工门看）
+- 只能用加减乘除、括号、数字、因子短名、常量名，以及 `上期(名字)`（上一年的
+  值）、`基期(名字)`（第 0 年的值）。名字可以是因子短名，也可以是 营收、毛利率
+  —— 但营收、毛利率只能写在 上期(…)/基期(…) 里。不提供 max、min、条件判断。
+- 短名不能含运算符、括号、空格，不能以数字开头。
+- 每条公式引用 2–5 个因子（一个不叫分解；超过五个人核实不过来）；声明了的因子
+  都要进公式。
+- 毛利率按小数计（26.5% 是 0.265），pp 进公式要 /100。营收的单位是亿元（只在你
+  用到绝对金额时才要紧）。
+- **换算写进公式，不要让代码猜**：变化模式下稼动率变了 −3pp，要换成营收的变化率
+  就写 `稼动率变动 / 100 / 上期稼动率`，`上期稼动率` 用 `常量:` 声明数值与出处。
+- **「累计」还是「逐年」在公式里看得见**：`基期(毛利率) + X / 100` 表示 X 是相对
+  基期累计的 pp；`上期(毛利率) + X / 100` 表示 X 是逐年再变的 pp。选一种，在
+  陷阱里写清楚。
+- **分母在公司内部的占比**（如高端产品收入占比）变动，不等于营收的变动 —— 它对
+  营收的影响经由均价体现；市占率（分母在公司之外）可以乘：营收 = 行业规模 ×
+  市占率。
 
 **检索词**
 
@@ -272,11 +426,6 @@ PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。
 → 剥后缀 → 你给的检索词，共四级）在本轮语料里的实际命中次数算出来、印在
 产物顶部。宁可给一个搜不到的精确词（因子落「无数据」，诚实），也不要给
 一个到处都能搜到的泛词。
-- **营收乘法链里不要放「占比/比重/结构」类因子**：高端产品占比从 20% 到
-  22.4% 是 +12% 的相对变化，但营收不会因此多长 12%。结构升级对营收的影响
-  并进「平均单价/ASP」，对毛利率的影响放进加法链。市占率可以乘（营收 =
-  行业规模 × 市占率）。
-- 每条 2–5 个因子。一个不叫分解；超过五个人核实不过来。
 - 数据线索写明你**指望它来自哪里**：年报某一节 / 语料库某一篇 / 需要新采集。
   **若这个因子的数据就是账本里已有的某个 key**（见上面「账本里已有的 key」
   那一节，若有），在数据线索里写成 `[[key]]`，例如 `[[industry.revenue_yoy]]`
@@ -290,7 +439,7 @@ PROMPT = """你正在为一份 A 股公司研究报告做**方法论预研**。
 因子承载它** —— 某个主题多空分歧最大、而分解式里没有对应因子，下一轮辩论就
 无从给出三档取值、判断项也无从反映这个分歧。对每个主题写一行声明：
 
-`覆盖: <主题> | <承载它的因子名，与分解式里写的一字不差>`
+`覆盖: <主题> | <承载它的因子短名或完整名，与上面写的一字不差>`
 `未覆盖: <主题> | <为什么不能因子化>`
 
 代码会核对你声明的因子名是否真在分解式里，并把结果标注在产物顶部。
@@ -379,7 +528,15 @@ def _to_dsl(m: Methodology) -> str:
     """把 Methodology 变回预研阶段那种 `分解: ... | ...` 的 DSL 文本——
     与 `parse()` 互为逆操作，`from_markdown` 靠它把落盘文件读回来。"""
     lines = []
-    for d in m.decompositions:
+    if m.model is not None and not m.model.legacy:
+        mm = m.model
+        lines.append(f"模式: {mm.mode}")
+        lines += [f"因子: {f.short} | {f.label} | {f.unit} | {f.source_hint} "
+                  f"| {f.search_term}" for f in mm.factors]
+        lines += [f"常量: {c.name} | {c.value} | {c.source}" for c in mm.constants]
+        lines += [f"公式: {mm.describe(t)}" for t in ("revenue", "gross_margin")
+                  if t in mm.formulas]
+    for d in (m.decompositions if (m.model is None or m.model.legacy) else []):
         parts = [_TARGET_CN.get(d.target, d.target), _OP_CN.get(d.op, d.op.value)]
         # 四段写全。**少写检索词这一段，人工编辑 drivers.md 后重跑就会把它
         # 吃掉**——而「编辑这段文字再重跑即可覆盖」是写在文件末尾的承诺。
@@ -391,6 +548,25 @@ def _to_dsl(m: Methodology) -> str:
     for p in m.pitfalls:
         lines.append(f"陷阱: {p}")
     return "\n".join(lines)
+
+
+def _flat(xs) -> list[Factor]:
+    """分解式列表 / `FormulaModel` / 因子列表 → 因子列表（按 key 去重、保序）。
+
+    旧调用方传 `m.decompositions`（每条带 `.factors`），新调用方传 `m.model`；
+    两者在这里归一，下游函数不必各写一套。"""
+    if xs is None:
+        return []
+    if isinstance(xs, FormulaModel):
+        xs = xs.factors
+    out: list[Factor] = []
+    seen: set[str] = set()
+    for x in xs:
+        for f in (getattr(x, "factors", None) or [x]):
+            if f.key not in seen:
+                seen.add(f.key)
+                out.append(f)
+    return out
 
 
 def theme_coverage(decomps: list, themes: list[str]) -> list[tuple[str, str]]:
@@ -411,17 +587,15 @@ def theme_coverage(decomps: list, themes: list[str]) -> list[tuple[str, str]]:
     要求覆盖。
     """
     out: list[tuple[str, str]] = []
+    factors = _flat(decomps)
     for th in themes:
         hit = ""
         if th:
-            for d in decomps:
-                for f in d.factors:
-                    blob = (f"{f.label}{getattr(f, 'source_hint', '')}"
-                            f"{getattr(f, 'search_term', '')}")
-                    if th in blob:
-                        hit = f.label
-                        break
-                if hit:
+            for f in factors:
+                blob = (f"{f.label}{getattr(f, 'source_hint', '')}"
+                        f"{getattr(f, 'search_term', '')}")
+                if th in blob:
+                    hit = f.label
                     break
         out.append((th, hit))
     return out
@@ -452,7 +626,10 @@ def coverage(m: Methodology, themes: list[str]) -> tuple[list[Cover], list[str]]
     """
     if not themes:
         return [], []
-    labels = {f.label for d in m.decompositions for f in d.factors}
+    factors = m.factors()
+    labels = {f.label for f in factors}
+    # 声明里写短名也认（公式化后模型更可能写短名），显示时换成完整名。
+    by_short = {f.short: f.label for f in factors if getattr(f, "short", "")}
     cov: dict[str, str] = {}
     unc: dict[str, str] = {}
     notes: list[str] = []
@@ -461,11 +638,11 @@ def coverage(m: Methodology, themes: list[str]) -> tuple[list[Cover], list[str]]
             notes.append(f"声明了清单外的主题「{th}」（{kind}: {rest}）")
         elif kind == "未覆盖":
             unc.setdefault(th, rest)
-        elif rest in labels:
-            cov.setdefault(th, rest)
+        elif rest in labels or rest in by_short:
+            cov.setdefault(th, by_short.get(rest, rest))
         else:
             notes.append(f"「{th}」声明由「{rest}」承载，但分解式里没有这个因子")
-    word = dict(theme_coverage(m.decompositions, themes))
+    word = dict(theme_coverage(factors, themes))
     out: list[Cover] = []
     for th in themes:
         if th in cov and th in unc:
@@ -510,10 +687,9 @@ def term_hits(decomps: list, *, sections=None, corpus=None
     hay = "\n".join(x for x in blobs if x)
 
     out: dict[str, list[tuple[str, int]]] = {}
-    for d in decomps:
-        for f in d.factors:
-            cands = _core_candidates(f.label, getattr(f, "search_term", "") or "")
-            out[f.label] = [(c, hay.count(c)) for c in cands]
+    for f in _flat(decomps):
+        cands = _core_candidates(f.label, getattr(f, "search_term", "") or "")
+        out[f.label] = [(c, hay.count(c)) for c in cands]
     return out
 
 
@@ -566,7 +742,9 @@ def to_markdown(m: Methodology, coverage=(), hits=None,
         lines += ["", "声明了的因子直接取账本数据、不再联网采集。**口径是否与"
                       "因子名一致（例如因子写的是某机构口径、账本是同业聚合口径）"
                       "由人判断。**", ""]
-    for d in m.decompositions:
+    if m.model is not None and not m.model.legacy:
+        lines += _formula_markdown(m.model)
+    for d in (m.decompositions if (m.model is None or m.model.legacy) else []):
         lines.append(f"## {d.describe()}")
         lines.append("")
         # 检索词要在人读表里露出来：它决定代码实际去搜什么词，而一个泛词
@@ -588,12 +766,38 @@ def to_markdown(m: Methodology, coverage=(), hits=None,
               "", _RAW_HEADING, "",
               "重跑第一阶段时会先读这里的代码块，而不是重新联网预研——"
               "**编辑下面这段文字再重跑即可覆盖**，语法与预研阶段完全一致："
-              "`分解: 目标 | 运算 | 因子名:单位:数据线索:检索词 | …`、"
-              "`陷阱: 一句话`。删掉这段代码块或改坏语法，重跑时会**明确"
+              "`模式:`、`因子: 短名 | 完整名 | 单位 | 数据线索 | 检索词`、"
+              "`常量: 名字 | 数值 | 出处`、`公式: 营收 = …`、"
+              "`陷阱: 一句话`（旧的 `分解: 目标 | 运算 | …` 写法也认）。删掉这段代码块或改坏语法，重跑时会**明确"
               "报错**而不是被静默忽略——不然你会以为自己的修改生效了，"
               "实际却被悄悄丢弃、重新联网跑出一份新的分解式。", "",
               "```text", _to_dsl(m), "```", ""]
     return "\n".join(lines)
+
+
+def _formula_markdown(mm: FormulaModel) -> list[str]:
+    """公式化分解式的人读部分：模式、因子表、常量表、两条公式。"""
+    lines = [f"## 模式：{mm.mode}", "",
+             ("每个因子逐年填**变化**（增速、pp 变动…），第 0 年营收与毛利率取账本。"
+              if mm.mode == "变化" else
+              "每个因子逐年填**水平**（量、价、成本…），第 0 年营收与毛利率由基期"
+              "因子值代入公式算出 —— 不用报表营收，分子分母同口径。"), ""]
+    lines += ["## 公式", ""]
+    lines += [f"- {mm.describe(t)}" for t in ("revenue", "gross_margin")
+              if t in mm.formulas]
+    lines.append("")
+    # 检索词要在人读表里露出来：它决定代码实际去搜什么词。
+    lines += ["## 因子", "",
+              "| 短名 | 因子 | 单位 | 数据线索 | 检索词 |",
+              "| --- | --- | --- | --- | --- |"]
+    lines += [f"| {f.short} | {f.label} | {f.unit} | {f.source_hint or '—'} "
+              f"| {f.search_term or '—'} |" for f in mm.factors]
+    lines.append("")
+    if mm.constants:
+        lines += ["## 常量", "", "| 名字 | 数值 | 出处 |", "| --- | --- | --- |"]
+        lines += [f"| {c.name} | {c.value} | {c.source} |" for c in mm.constants]
+        lines.append("")
+    return lines
 
 
 _CODE_BLOCK = re.compile(r"```(?:text)?\n(.*?)```", re.DOTALL)

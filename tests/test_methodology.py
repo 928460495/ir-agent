@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from ir_agent.drivers import Op
@@ -105,7 +107,8 @@ def test_提示词要求先搜索再回答():
     research(c, industry="集成电路封测", code="600584")
     p = c.prompts[0]
     assert "集成电路封测" in p and "搜索" in p
-    assert "闭合" in p and "写不出单位" in p
+    # 公式化后（2026-10-14）不再要求「乘/加闭合」，改为讲清模式与 上期/基期。
+    assert "模式" in p and "上期(名字)" in p and "基期(名字)" in p
 
 
 def test_落盘的markdown给人看得懂():
@@ -622,10 +625,12 @@ class TestSearchTermLabel:
         assert back.decompositions[0].factors[0].search_term == "Prismark"
 
     def test_格式行用占位写法而不是裸词(self):
-        """根因在提示词：`因子名:单位:数据线索:检索词` 读起来像「字段名:值」。"""
+        """根因在提示词：`因子名:单位:数据线索:检索词` 读起来像「字段名:值」。
+        公式化后（2026-10-14）格式行换成 `因子:` 行，仍用尖括号占位。"""
         from ir_agent import methodology
         assert "因子名:单位:数据线索:检索词" not in methodology.PROMPT
-        assert "<因子名>:<单位>:<数据线索>:<检索词>" in methodology.PROMPT
+        assert "`因子: <短名> | <完整名> | <单位> | <数据线索> | <检索词>`" \
+            in methodology.PROMPT
 
 
 # ══ 第二次调用试跑后的修订 ④：主题覆盖以模型声明为主 ═══════════════
@@ -694,3 +699,104 @@ class TestLedgerKeyDecl:
         assert "✓ [[industry.revenue_yoy@2025FY]]" in out
         assert "✗ foo.bar" in out
         assert "口径" in out
+
+
+
+# ══ 分解式公式化（2026-10-14 子项目一）══════════════════════════════
+
+_NEW = """模式: 变化
+因子: 份额增速 | 本司市占率（占全行业规模，非公司内部占比）同比增速 | 变化率 | [[company.market_share_delta@2025FY]] | 市场份额
+因子: 行业增速 | 行业（覆铜板）全球市场规模同比增速 | 变化率 | Prismark | Prismark
+因子: 提价 | 产品提价传导对毛利率的净贡献 | pp | 调价函 | 调价
+因子: 原料 | 核心原材料价格上涨对毛利率的侵蚀 | pp | 年报风险因素 | 原材料价格
+常量: 上期稼动率 | 78% | 年报经营情况讨论「产能利用率约78%」
+公式: 营收 = 上期(营收) × (1 + 行业增速) × (1 + 份额增速)
+公式: 毛利率 = 基期(毛利率) + (提价 + 原料) / 100
+覆盖: 份额 | 份额增速
+陷阱: 提价与原料是同一次毛利率变动的两面
+"""
+
+_LEVEL = """模式: 水平
+因子: 量 | 覆铜板出货量 | 万平方米 | 年报产销量 | 产销量
+因子: 价 | 覆铜板平均单价 | 元/平方米 | 研报价格跟踪 | 平均单价
+因子: 本 | 覆铜板单位成本 | 元/平方米 | 年报成本构成 | 单位成本
+公式: 营收 = 量 × 价
+公式: 毛利率 = (价 − 本) ÷ 价
+"""
+
+
+class TestFormulaDSL:
+    def test_生益那条被字面闸门误拦的因子在新写法下能过(self):
+        """2026-10-14 第二次调用：「非公司内部占比」里的「占比」被
+        `_is_mix_factor` 拦了三次。新写法不跑字面闸门，交给裁决者。"""
+        from ir_agent.methodology import parse
+        m = parse(_NEW)
+        assert m.model.mode == "变化" and not m.model.legacy
+        assert [f.short for f in m.factors()] == ["份额增速", "行业增速", "提价", "原料"]
+        assert m.model.const("上期稼动率").value == Decimal("0.78")
+        assert m.factors()[0].search_term == "市场份额"
+        assert m.coverage_decl == [("覆盖", "份额", "份额增速")]
+        assert m.pitfalls and m.decompositions == []
+
+    def test_水平模式同一因子被两条公式共用(self):
+        from ir_agent.methodology import parse
+        m = parse(_LEVEL)
+        assert m.model.mode == "水平"
+        assert [f.short for f in m.model.factors_of("gross_margin")] == ["价", "本"]
+        assert [f.short for f in m.factors()] == ["量", "价", "本"]
+
+    def test_往返不丢(self):
+        from ir_agent.methodology import from_markdown, parse, to_markdown
+        m = parse(_NEW)
+        md = to_markdown(m)
+        assert "## 模式：变化" in md and "上期(营收)" in md and "上期稼动率" in md
+        back = from_markdown(md)
+        assert [(f.short, f.label, f.unit, f.source_hint, f.search_term)
+                for f in back.factors()] == \
+            [(f.short, f.label, f.unit, f.source_hint, f.search_term)
+             for f in m.factors()]
+        assert back.model.describe("gross_margin") == m.model.describe("gross_margin")
+        assert back.model.constants == m.model.constants
+        assert back.coverage_decl == m.coverage_decl and back.pitfalls == m.pitfalls
+
+    def test_旧写法仍然认_并翻译成公式(self):
+        from ir_agent.methodology import parse
+        m = parse(_DSL)
+        assert m.decompositions and m.model.legacy
+        assert m.model.describe("gross_margin").startswith("毛利率 = 基期(毛利率)+(")
+
+    @pytest.mark.parametrize("text,frag", [
+        (_NEW.replace("模式: 变化\n", ""), "模式"),
+        (_NEW.replace("模式: 变化", "模式: 混合"), "模式只能是"),
+        (_NEW.replace("公式: 毛利率 = 基期(毛利率) + (提价 + 原料) / 100\n", ""),
+         "缺少 毛利率"),
+        (_NEW.replace("(提价 + 原料)", "(提价 + 原料 + 没声明)"), "未声明的名字「没声明」"),
+        (_NEW.replace("(提价 + 原料) / 100", "提价 / 100"), "引用了 1 个因子"),
+        (_NEW.replace("常量: 上期稼动率 | 78% | 年报经营情况讨论「产能利用率约78%」",
+                      "常量: 上期稼动率 | 78% |"), "出处不能空"),
+        (_NEW.replace("因子: 原料 |", "因子: 原 料 |"), "不合法"),
+        (_NEW + "公式: 营收 = 上期(营收)\n", "不止一条"),
+        (_NEW.replace("公式: 营收", "公式: 净利"), "营收 = …"),
+    ])
+    def test_算不了的写法被驳回(self, text, frag):
+        from ir_agent.methodology import MethodologyFailed, parse
+        with pytest.raises(MethodologyFailed, match=frag):
+            parse(text)
+
+    def test_声明了却没用到的因子被驳回(self):
+        from ir_agent.methodology import MethodologyFailed, parse
+        with pytest.raises(MethodologyFailed, match="没有任何公式用到"):
+            parse(_NEW.replace("陷阱:", "因子: 闲置 | 闲置因子 | pp | x | 闲置因子\n陷阱:"))
+
+    def test_覆盖声明写短名也认_显示完整名(self):
+        from ir_agent.methodology import coverage, parse
+        cov, notes = coverage(parse(_NEW), ["份额"])
+        assert cov[0].mark == "✓" and "非公司内部占比" in cov[0].detail
+        assert notes == []
+
+    def test_命中次数与词面覆盖接受新写法(self):
+        from ir_agent.methodology import parse, term_hits, theme_coverage
+        m = parse(_NEW)
+        hits = term_hits(m.model, sections="Prismark 数据显示。调价函。")
+        assert dict(hits["行业（覆铜板）全球市场规模同比增速"])["Prismark"] == 1
+        assert dict(theme_coverage(m.model, ["成本"]))["成本"] == ""
