@@ -3742,3 +3742,185 @@ def test_三个签名各落在自己那道门的产物上(tmp_path, monkeypatch)
     assert "资料来源经 甲 核验" in head and "简报结论经 乙 审阅" in head, head
     st = _j.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert st["verified_by"] == "甲" and st["reviewed_by"] == "乙"
+
+
+# ══ 全链路（Task 13）════════════════════════════════════════════
+
+_E2E_DSL = (
+    "分解: 营收 | 乘 | 高端覆铜板出货量:变化率:年报经营情况:出货量 "
+    "| 平均单价:变化率:年报分产品价格:平均单价\n"
+    "分解: 毛利率 | 加 | 铜箔采购价:pp:年报营业成本构成:铜箔 "
+    "| 稼动率摊薄:pp:年报产能利用:稼动率\n"
+    "陷阱: 出货量与稼动率不独立，同时上调会双重计数\n")
+
+
+def _e2e(monkeypatch, full, tmp_path):
+    """**只在最外层打桩**：模型调用与网络。编排层的每一个函数都真跑 ——
+    `_stance_round`、`_research_methodology`（含两段标注）、`_collect_factors`、
+    `_review_stage`、`_sign_sources` / `_sign_header`、`_save_state`。
+
+    这是 Task 1–8 那组接缝测试做不到的事：当时编排层还不存在。
+    """
+    import ir_agent.gaps as G
+    import ir_agent.methodology as Me
+    import ir_agent.stance as St
+
+    calls = {"run_stance": 0, "research": 0}
+    _offline(monkeypatch, full)
+
+    def run_stance(client, *, round_, subjects, **k):
+        calls["run_stance"] += 1
+        line = (f"平衡｜{subjects[0]}｜0.02｜0.08｜0.15｜双方都接受的中间值"
+                if round_ == "B" else f"平衡｜{subjects[0]}｜—｜—｜—｜量增价稳")
+        return St.StanceResult(
+            round_=round_,
+            evidence=St.parse_evidence(
+                f"多方｜{subjects[0]}｜放量｜「{subjects[0]}」\n"
+                f"空方｜{subjects[0]}｜疲软｜「{subjects[0]}」"),
+            balances=St.parse_balance(line))
+
+    def research(client, industry, code, *a, **k):
+        calls["research"] += 1
+        calls["research.stance_note"] = k.get("stance_note", "")
+        m = Me.parse(_E2E_DSL)
+        m.industry = industry
+        return m
+
+    def propose(code, r, body, md, as_of, out, client, arts, **k):
+        calls["balances"] = k.get("balances")
+        (out / "assumptions.json").write_text('{"rows": [], "approved_by": ""}',
+                                              encoding="utf-8")
+        (out / "assumptions.md").write_text("# DCF 判断项\n", encoding="utf-8")
+        arts[full.ASSUMPTIONS_ART] = str(out / "assumptions.md")
+        return ""
+
+    monkeypatch.setattr(St, "run_stance", run_stance)
+    monkeypatch.setattr(Me, "research", research)
+    monkeypatch.setattr(G, "collect", lambda *a, **k: {})
+    monkeypatch.setattr(full, "_build_evidence", lambda r, code: None)
+    monkeypatch.setattr(full, "write_body",
+                        lambda *a, **k: ("## 一、结论\n覆铜板景气回升。", 1))
+    monkeypatch.setattr(full, "_propose_assumptions", propose)
+    return calls
+
+
+def test_四次调用的产物集合与停止点(tmp_path, monkeypatch):
+    """**端到端。** 断言每次调用产出哪些文件、停在哪道门、签名落在哪 ——
+    而不是断言源码里有哪些字符串。"""
+    import json as _j
+
+    from ir_agent import full
+
+    calls = _e2e(monkeypatch, full, tmp_path)
+    d = date(2026, 10, 12)
+
+    # ── ① --analyse ───────────────────────────────────────────
+    o1 = full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    assert o1.stage is full.Stage.AWAITING_SOURCES
+    for f in ("sources.md", "sources.json", "state.json"):
+        assert (tmp_path / f).exists(), f
+    assert calls["run_stance"] == 0 and calls["research"] == 0, \
+        "第一次调用不该辩论、不该预研"
+
+    # ── ② --brief ─────────────────────────────────────────────
+    o2 = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert o2.stage is full.Stage.AWAITING_BRIEF_REVIEW, o2.skipped
+    for f in ("stance_a.json", "stance_a.md", "drivers.md", "stance_b.json",
+              "stance_b.md", "brief.md", "review.md"):
+        assert (tmp_path / f).exists(), f
+    assert calls["run_stance"] == 2, "两轮辩论各一次"
+    # 辩论① 的结论真的到了预研（整条链上，不只是一段）
+    assert "量增价稳" in calls["research.stance_note"]
+    drivers = (tmp_path / "drivers.md").read_text(encoding="utf-8")
+    assert "主题覆盖" in drivers and "命中次数" in drivers, "两段标注没进 drivers.md"
+    # 辩论② 的主题是预研给出的因子标签
+    sb = _j.loads((tmp_path / "stance_b.json").read_text(encoding="utf-8"))
+    assert sb["balances"][0]["subject"] == "高端覆铜板出货量"
+    assert (tmp_path / "brief.md").read_text(
+        encoding="utf-8").startswith("> 资料来源经 甲 核验")
+
+    # ── ③ --assume ────────────────────────────────────────────
+    o3 = full.run_assume("600183", _PhaseR(), d, tmp_path, "乙")
+    assert o3.stage is full.Stage.AWAITING_ASSUME_REVIEW, o3.skipped
+    assert [b.subject for b in calls["balances"]] == ["高端覆铜板出货量"], \
+        "辩论② 的三元组没到判断项"
+    # 顺利路径上这句**区分不了**「只读」与「会联网的预研」：drivers.md 已在，
+    # `_research_methodology` 开头的 `_read_drivers` 会读回、不联网，两者行为
+    # 相同。变异验证时把 run_assume 换成 `_research_methodology`，本测试照样
+    # 绿。能区分的场景见 `test_预研失败时第三次调用不补做预研`。
+    assert calls["research"] == 1
+    head = (tmp_path / "assumptions.md").read_text(encoding="utf-8").split("\n")[0]
+    assert "资料来源经 甲 核验" in head and "简报结论经 乙 审阅" in head
+    st = _j.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert st["verified_by"] == "甲" and st["reviewed_by"] == "乙"
+    assert _j.loads((tmp_path / "sources.json").read_text(
+        encoding="utf-8"))["verified_by"] == "甲"
+
+
+def test_门二打回来重跑时沿用已有的辩论产物(tmp_path, monkeypatch):
+    """spec ③：stance_a/b.json 存在就读回，与 drivers.md 同一规矩。门② 打回来
+    重跑一次 --brief，若每次都重抽，就是 6 次模型调用全做一遍；而人手改过的
+    三元组会被悄悄冲掉。"""
+    import json as _j
+
+    from ir_agent import full
+
+    calls = _e2e(monkeypatch, full, tmp_path)
+    d = date(2026, 10, 12)
+    full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert calls["run_stance"] == 2
+
+    # 人手改了辩论② 的平衡值（仍在区间内）
+    f = tmp_path / "stance_b.json"
+    sb = _j.loads(f.read_text(encoding="utf-8"))
+    sb["balances"][0]["mid"] = "0.10"
+    f.write_text(_j.dumps(sb, ensure_ascii=False), encoding="utf-8")
+
+    o = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert calls["run_stance"] == 2, "重跑时又重抽了辩论"
+    assert any("沿用已有产物" in s for s in o.skipped)
+    assert _j.loads(f.read_text(encoding="utf-8"))["balances"][0]["mid"] == "0.10", \
+        "人的修改被冲掉了"
+    assert "0.10" in (tmp_path / "stance_b.md").read_text(encoding="utf-8"), \
+        ".md 没按人改过的 .json 重写 —— 两个文件说的不是同一件事"
+
+    o2 = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲",
+                        refresh_stance=True)
+    assert calls["run_stance"] == 4, "--refresh-stance 没有重抽"
+    assert o2.stage is full.Stage.AWAITING_BRIEF_REVIEW
+
+
+def test_预研失败时第三次调用不补做预研(tmp_path, monkeypatch):
+    """**drivers.md 缺失时，第三次调用只读、不联网补做预研。**
+
+    第二次调用里预研失败（退回两标量），drivers.md 没写出来。若第三次调用
+    走的是会联网的 `_research_methodology`，它会在这里悄悄预研出一个新
+    分解式 —— 人在门② 审过的简报（两标量）与接下来要填的判断项（新分解式）
+    依据的是两套东西，而产物上看不出来。
+
+    顺利路径（drivers.md 已在）区分不了这两种写法，所以单独一个场景。
+    """
+    import ir_agent.methodology as Me
+
+    from ir_agent import full
+
+    calls = _e2e(monkeypatch, full, tmp_path)
+
+    def fail(*a, **k):
+        calls["research"] += 1
+        raise Me.MethodologyFailed("测试：给不出闭合的分解式")
+
+    monkeypatch.setattr(Me, "research", fail)
+    d = date(2026, 10, 12)
+    full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    o2 = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert not (tmp_path / "drivers.md").exists()
+    assert calls["research"] == 1
+    assert o2.stage is full.Stage.AWAITING_BRIEF_REVIEW, "预研失败不该中断简报"
+
+    o3 = full.run_assume("600183", _PhaseR(), d, tmp_path, "乙")
+    assert calls["research"] == 1, "第三次调用在 drivers.md 缺失时补做了预研"
+    assert o3.stage is full.Stage.AWAITING_ASSUME_REVIEW
+    # 辩论② 退回了两标量，判断项拿到的平衡点主题也是两标量的
+    assert calls["balances"][0].subject == "营收增速"

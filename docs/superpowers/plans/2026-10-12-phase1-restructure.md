@@ -3741,6 +3741,25 @@ class _FakeMeth:
 测试里走通、在实跑里永不触发，而测试变成「证明了一件不成立的事」。那条分支
 已按本计划改为读 `_snapshot_gaps(r)`；替身也就不该有这个名字。
 
+> **实跑出入：**
+>
+> 1. 端到端测试**只在最外层打桩**（`stance.run_stance` / `methodology.research` /
+>    `gaps.collect` / `write_body` / `_propose_assumptions`），编排层的每个函数
+>    都真跑。计划原稿的四个替身类（`_FakeR` 等）不需要了，复用 Task 10 的
+>    `_offline` / `_PhaseR`。
+> 2. **变异验证暴露了端到端测试的一个盲区。** 把 `run_assume` 换成会联网的
+>    `_research_methodology`，顺利路径上测试照样绿 —— drivers.md 已在，
+>    `_research_methodology` 开头的 `_read_drivers` 读回、不联网，两种写法在
+>    这个场景里行为相同。原断言「第三次调用重新联网预研了」在它所处的场景里
+>    区分不了它声称要区分的两件事。补 `test_预研失败时第三次调用不补做预研`
+>    （drivers.md 缺失），变异后红。
+> 3. 另补 `test_门二打回来重跑时沿用已有的辩论产物`：人手改的三元组不被冲掉、
+>    `.md` 按改过的 `.json` 重写、`--refresh-stance` 才重抽。
+> 4. **README 的「端到端」一节比两阶段那版还旧**：写的是 `--full` / `--review` /
+>    `--assumptions` / `--reviewer`，四个参数在解析器里都已不存在。改为四次调用
+>    的真实命令与每次的产物；两个旧小节保留设计理由、标明参数已移除。README 里
+>    的每条命令都拿真实解析器验过。
+
 - [ ] **Step 2: 更新 README 的流程段**
 
 把 README 里描述两阶段的那一段改为四次调用，并把四条命令按顺序列出（含签名参数）。
