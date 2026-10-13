@@ -447,17 +447,8 @@ PROMPT = """为一份 A 股研究报告采集一个具体的数据点。
 """
 
 
-def search(client, factor_label: str, factor_key: str, industry: str,
-           as_of: date) -> list[Finding]:
-    """按因子上网搜索证据。
-
-    **调用方必须传入已显式开启 WebSearch/WebFetch 工具的 client**——
-    例如 `make_client(tools=["WebSearch", "WebFetch"])`。默认（不带
-    `tools` 参数）构造出的 client 不联网，会让模型如实回答「不能联网」，
-    而不是本函数抛出的 WebUnavailable；这不是本函数能拦的错误，因为
-    client 是否联网由调用方在构造时决定，本函数只负责在 WEB_CAPABLE
-    为 False（这条链路整体判定不可联网）时提前拒绝。
-    """
+def require_web() -> None:
+    """联网采集的总开关。`search` 与 `conclusions.search` 共用一份措辞。"""
     if not WEB_CAPABLE:
         # 措辞不能写死「claude -p 不能联网」——本文件顶部已经交代过，
         # 之前的探测测的是默认调用不开工具，不是 claude -p 真的没有联网
@@ -469,6 +460,20 @@ def search(client, factor_label: str, factor_key: str, industry: str,
             "为什么关闭了这个开关；claude -p 本身的联网能力已经验证过，"
             "不必重新怀疑（见 docs/superpowers/notes/"
             "2026-09-12-web-capability.md）")
+
+
+def search(client, factor_label: str, factor_key: str, industry: str,
+           as_of: date) -> list[Finding]:
+    """按因子上网搜索证据。
+
+    **调用方必须传入已显式开启 WebSearch/WebFetch 工具的 client**——
+    例如 `make_client(tools=["WebSearch", "WebFetch"])`。默认（不带
+    `tools` 参数）构造出的 client 不联网，会让模型如实回答「不能联网」，
+    而不是本函数抛出的 WebUnavailable；这不是本函数能拦的错误，因为
+    client 是否联网由调用方在构造时决定，本函数只负责在 WEB_CAPABLE
+    为 False（这条链路整体判定不可联网）时提前拒绝。
+    """
+    require_web()
     raw = client(PROMPT.format(industry=industry, factor=factor_label,
                                key=factor_key, as_of=as_of.isoformat()))
     got = parse_findings(raw)
