@@ -2552,3 +2552,45 @@ class TestDeviation:
             if r.driver == "growth":
                 r.bear, r.bull = D("0.10"), D("0.26")
         assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+
+
+# ══ 第二次调用试跑后的修订 ②：门③ 标记（决定 A）════════════════════
+
+def _flagged_fd(d):
+    from ir_agent.sources.conclusions import Article, Conclusion, number_marks
+    art = Article(no="1", url="https://x.cn/a", publisher="某媒体",
+                  published=date(2026, 7, 1), final_url="https://x.cn/a",
+                  opened=True, text="平均稼动率约78%。")
+    c = Conclusion(factor_key="utilization",
+                   claim="平均稼动率约78%，7628规格满产", articles=[art])
+    c.marks = number_marks(c.claim, c.articles)
+    return {"utilization": gaps.FactorData(
+        factor=d.factors[0], status=gaps.EXTERNAL, findings=[c])}
+
+
+def test_依据引了带警示的结论_可以用但该行带标记():
+    d = _one_factor_decomp()
+    raw = ("假设: 稼动率 | 第1年 | 2% | 4% | 6% | "
+           "「平均稼动率约78%，7628规格满产」，参照采集到的行业数据")
+    a = assume.parse(raw, 1, decomps=[d], factor_data=_flagged_fd(d), as_of=AS_OF)
+    assume.check(a, 1, ledger=FactLedger(), body="", as_of=AS_OF, decomps=[d])
+    r = a.rows[0]
+    assert r.bases and r.bases[0].kind.value == "external", "可以作依据"
+    assert "找不到出处的数字（7628）" in r.basis_flag
+    assert "⚠ 依据含 1 个在引用文章里找不到出处的数字" in a.describe()
+
+
+def test_同上的行沿用同一份标记():
+    d = _one_factor_decomp()
+    raw = ("假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「平均稼动率约78%，7628规格满产」\n"
+           "假设: 稼动率 | 第2年 | 2% | 4% | 6% | 同上")
+    a = assume.parse(raw, 2, decomps=[d], factor_data=_flagged_fd(d), as_of=AS_OF)
+    assert a.rows[1].basis_flag == a.rows[0].basis_flag != ""
+
+
+def test_没有factor_data时不标记():
+    """第二阶段从 assumptions.json 读回、没有 factor_data —— 行为不变。"""
+    d = _one_factor_decomp()
+    raw = "假设: 稼动率 | 第1年 | 2% | 4% | 6% | [[revenue@2025FY]]"
+    a = assume.parse(raw, 1, decomps=[d], factor_data=None, as_of=AS_OF)
+    assert a.rows[0].basis_flag == ""

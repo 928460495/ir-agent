@@ -147,6 +147,11 @@ class Row:
     # 结果，不是模型输出或人的决定，跨阶段没有持久化的必要，第二阶段
     # `run_valuation` 重跑 check() 会重新算出同样的标记。
     basis_unverified: str = ""
+    # 门③ 标记（用户决定 A，2026-10-13）：依据引的是因子联网结论、而那条结论
+    # 有数字在引用文章里找不到出处 / 引用的文章代码打不开。**可以作依据，但
+    # 这一行必须带着标记** —— 与 `basis_unverified` 同一处理：派生结果，不进
+    # to_json；第二阶段没有 factor_data，算出来恒为空，行为不变。
+    basis_flag: str = ""
 
 
 def _decomp_to_dict(d: Decomposition) -> dict:
@@ -388,6 +393,8 @@ class AssumptionSet:
                     parts: list[str] = []
                     if est or not r.bases:
                         parts.append("⚠ 估计（无数据支撑）")
+                    if r.basis_flag:
+                        parts.append("⚠ " + r.basis_flag)
                     if r.bases:
                         body = "；".join(b.describe() for b in r.bases)
                         if r.basis_unverified:
@@ -700,7 +707,8 @@ def _parse_factors(text: str, years: int,
         out.rows.append(Row(
             driver=target_of[f.key], year=year,
             bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
-            bases=bases, note=_note(parts[5]), factor_key=f.key))
+            bases=bases, note=_note(parts[5]), factor_key=f.key,
+            basis_flag=_conclusion_flags(bases, factor_data.get(f.key))))
     return out
 
 
@@ -853,6 +861,23 @@ def _match_finding(fd: FactorData | None, quote: str):
         if qn in _norm(finding.claim):
             return finding
     return None
+
+
+def _conclusion_flags(bases: list[Basis], fd: FactorData | None) -> str:
+    """依据若引的是因子联网结论，带出那条结论的 ⚠（`Conclusion.flags()`）。
+
+    按 Basis 反查而不是在 `_factor_basis` 里顺手记：「同上」的行复用上一行的
+    Basis 列表，按 Basis 查自然得到同一份标记。"""
+    if fd is None:
+        return ""
+    out: list[str] = []
+    for b in bases:
+        if b.kind is not BasisKind.EXTERNAL:
+            continue
+        flags = getattr(_match_finding(fd, b.quote), "flags", None)
+        if flags is not None and (s := flags()) and s not in out:
+            out.append(s)
+    return "；".join(out)
 
 
 def _match_excerpt(fd: FactorData | None, quote: str) -> bool:
