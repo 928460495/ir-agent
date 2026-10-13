@@ -3472,6 +3472,14 @@ git add ir_agent/__main__.py tests/test_full_context.py
 git commit -m "cli: 新增 --brief / --assume / --refresh-stance，签名校验提到取数之前"
 ```
 
+> **实跑出入：计划给的两条测试是空心的。** 它们用一个会抛 `AssertionError` 的
+> 桩顶替 `run`，期望「校验排在取数之后」时它会炸。但 `main()` 把 `run()` 包在
+> `except Exception` 里、接住后返回 2 —— 而 2 正是「正确拒绝」的退出码。变异
+> 验证时把校验挪回取数之后、或把 `--assume --accept-manual` 静默放过，**两条都
+> 照样绿**。两种情形产生同一个可观测结果，测试恒真。改为 `_spy_run` 记录调用、
+> 断言 `run` 没被调用；重做变异后各自变红。另外 `--analyse` 的帮助文本还写着
+> 「分析+简报+辩论+回写+AI 填 DCF 判断项」，一并改了。
+>
 > 注：本 Task 排在 Task 10 之后，所以提交完成时 `--brief` / `--assume` 立刻可实跑。
 > 最初的排法是反的（CLI 先、实现后），理由写的是「参数协议先定，实现跟上」——
 > 那个理由只在多人并行实现、需要先对齐接口时成立；单线执行没有这个收益，

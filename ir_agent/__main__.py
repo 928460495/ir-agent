@@ -32,20 +32,68 @@ def build_parser() -> argparse.ArgumentParser:
                    help="生成可交互 HTML 看板")
     p.add_argument("--xlsx", metavar="PATH", default=None,
                    help="导出 Excel 工作簿到指定路径")
+    # 第一阶段拆成三次调用、三道人工门（spec 2026-10-12）。每家公司
+    # 4 次命令、3 个签名：--analyse → --brief → --assume → --value。
     p.add_argument("--analyse", metavar="DIR", default=None,
-                   help="第一阶段：分析+简报+辩论+回写+AI 填 DCF 判断项，"
-                        "产物写入该目录（不建模、不出完整研报）")
+                   help="第一阶段之一：定量采集 → 语料库入库 → 定性分析 → "
+                        "门① 资料来源清单（sources.md）")
+    p.add_argument("--brief", metavar="DIR", default=None,
+                   help="第一阶段之二：多空辩论① → 方法论预研 → 因子采集 → "
+                        "多空辩论② → 撰写简报（需 --verified-by）")
+    p.add_argument("--assume", metavar="DIR", default=None,
+                   help="第一阶段之三：AI 填 DCF 判断项 + 四道检查"
+                        "（需 --reviewed-by）")
     p.add_argument("--value", metavar="DIR", default=None,
                    help="第二阶段：读回已核实的判断项 → 三表 DCF 建模 → 完整研报")
+    p.add_argument("--verified-by", default=None,
+                   help="资料来源核验人署名（--brief 必需）")
+    p.add_argument("--reviewed-by", default=None,
+                   help="简报结论审阅人署名（--assume 必需）")
     p.add_argument("--approved-by", default=None,
                    help="判断项核实人署名（--value 必需）")
+    p.add_argument("--accept-manual", action="store_true",
+                   help="读回人工补写的 stance_*.json，跳过该环节的模型调用"
+                        "（只对 --brief 有意义）")
+    p.add_argument("--refresh-stance", action="store_true",
+                   help="重抽多空辩论，覆盖已有的 stance_a/b.json"
+                        "（默认沿用已有产物，与 drivers.md 同一规矩）")
     p.add_argument("--strict", action="store_true",
                    help="本期两源分歧、跨源勾稽不一致、或存在抓取故障时判为失败")
     return p
 
 
+def _check_args(a) -> str:
+    """参数自洽性检查。**必须排在取数之前。**
+
+    此前 `--approved-by` 的校验排在 `run()` 之后，于是忘了署名的人要等整轮
+    取数（几千条事实、三表勾稽、每家同业各一次接口）跑完，才被告知「你没
+    署名」。参数错误是在读任何数据之前就能判定的；顺带这也让签名那条单元
+    测试不必连网。
+
+    `--assume --accept-manual` **报错而不是静默忽略**：两轮辩论都在 `--brief`
+    里，`--assume` 没有可读回的 stance_*.json。静默忽略一个用户显式给出的
+    开关，会让人以为自己的补写生效了。
+    """
+    for flag, sig, why in (
+            ("brief", "verified_by", "资料来源要有人核验过才谈得上可用"),
+            ("assume", "reviewed_by", "简报结论要有人审阅过才谈得上可据以建模"),
+            ("value", "approved_by", "假设要有人负责才谈得上「已核实」")):
+        if getattr(a, flag) and not getattr(a, sig):
+            return (f"--{flag} 需同时给出 --{sig.replace('_', '-')} <署名> "
+                    f"—— {why}。")
+    if a.assume and a.accept_manual:
+        return ("--accept-manual 只对 --brief 有意义 —— 两轮多空辩论都在那一次"
+                "调用里，--assume 没有可读回的 stance_*.json。")
+    if a.refresh_stance and not a.brief:
+        return "--refresh-stance 只对 --brief 有意义。"
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
+    if (err := _check_args(a)):
+        print(err, file=sys.stderr)
+        return 2
 
     as_of = date.fromisoformat(a.as_of) if a.as_of else date.today()
 
@@ -64,11 +112,28 @@ def main(argv: list[str] | None = None) -> int:
                out_dir=a.analyse, year=a.year)
         return 0
 
+    # 签名校验已在 `_check_args` 里做过（取数之前），各分支不再重复。
+    # 函数层（run_brief / run_assume / run_valuation）各自还有一道 SystemExit，
+    # 给直接调 API、不经 CLI 的人。
+    if a.brief:
+        from ir_agent.full import report, run_brief
+        print(r.summary())
+        report(run_brief(a.code, r, as_of, a.brief, a.verified_by,
+                         model=a.model, snapshot_dir=a.snapshots,
+                         accept_manual=a.accept_manual,
+                         refresh_stance=a.refresh_stance),
+               out_dir=a.brief, year=a.year)
+        return 0
+
+    if a.assume:
+        from ir_agent.full import report, run_assume
+        print(r.summary())
+        report(run_assume(a.code, r, as_of, a.assume, a.reviewed_by,
+                          model=a.model, snapshot_dir=a.snapshots),
+               out_dir=a.assume, year=a.year)
+        return 0
+
     if a.value:
-        if not a.approved_by:
-            print("--value 需同时给出 --approved-by <署名> —— "
-                  "假设要有人负责才谈得上「已核实」。", file=sys.stderr)
-            return 2
         from ir_agent.full import report, run_valuation
         print(r.summary())
         report(run_valuation(a.code, r, as_of, a.value, a.approved_by,

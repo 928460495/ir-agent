@@ -3571,3 +3571,91 @@ def test_第一阶段之三把平衡点交给判断项且不联网重新预研(t
     assert o.stage is full.Stage.AWAITING_ASSUME_REVIEW
     assert _j.loads((tmp_path / "state.json").read_text(
         encoding="utf-8"))["reviewed_by"] == "xhl"
+
+
+def test_四个阶段的命令行参数都在():
+    """`build_parser` 单独成函数，正是为了让测试拿真实解析器校验「指引里
+    的命令能不能跑」。此前靠比对字符串来守，于是删掉 --review 之后测试照样
+    通过，而打给用户的命令已经跑不动了。"""
+    from ir_agent.__main__ import build_parser
+
+    p = build_parser()
+    for argv, attr in (
+        (["600183", "--year", "2025", "--analyse", "out/x"], "analyse"),
+        (["600183", "--year", "2025", "--brief", "out/x",
+          "--verified-by", "xhl"], "brief"),
+        (["600183", "--year", "2025", "--assume", "out/x",
+          "--reviewed-by", "xhl"], "assume"),
+        (["600183", "--year", "2025", "--value", "out/x",
+          "--approved-by", "xhl"], "value"),
+    ):
+        a = p.parse_args(argv)
+        assert getattr(a, attr) == "out/x"
+
+
+def _spy_run(monkeypatch):
+    """顶替 `__main__.run`，**记录**它有没有被调用。
+
+    **不要靠它抛异常来判断。** `main()` 把 `run()` 包在 `except Exception`
+    里、接住后返回 2 —— 而 2 正是「参数校验正确拒绝」的退出码。第一版这两条
+    测试用一个会抛 `AssertionError` 的桩，变异验证时把校验挪回取数之后、
+    或把 `--assume --accept-manual` 静默放过，**两条都照样绿**：桩抛的错被
+    `main()` 接住，退出码同样是 2。两种情形产生同一个可观测结果，测试恒真。
+    """
+    import ir_agent.__main__ as M
+
+    called: list = []
+
+    def spy(*a, **k):
+        called.append(a)
+        raise AssertionError("不该走到取数这一步")
+
+    monkeypatch.setattr(M, "run", spy)
+    return M, called
+
+
+def test_签名缺失即拒绝运行并且不先去取数(monkeypatch):
+    """与 --approved-by 同一处理：**要有人负责才谈得上「已核验」。**
+
+    **这条测试不连网，而这正是它要守的事。** 校验若排在 `run()` 之后，忘了
+    署名的人要等整轮取数跑完才被告知。断言落在「`run` 没被调用」上，而不是
+    只看退出码 —— 见 `_spy_run`。
+    """
+    M, called = _spy_run(monkeypatch)
+    for argv in (["600183", "--year", "2025", "--brief", "out/x"],
+                 ["600183", "--year", "2025", "--assume", "out/x"],
+                 ["600183", "--year", "2025", "--value", "out/x"]):
+        assert M.main(argv) == 2, f"缺签名却没有拒绝：{argv}"
+    assert called == [], "校验排在取数之后了：缺签名时仍然先去取了数"
+
+
+def test_assume配accept_manual直接报错(monkeypatch, capsys):
+    """**静默忽略一个用户显式给出的开关是最坏的形状** —— 人会以为自己的
+    补写生效了。两轮辩论都在 --brief 里，--assume 无物可读。
+
+    断言要落在「`run` 没被调用」与报错文本上：只看退出码分不清「正确拒绝」
+    和「放过之后在取数那一步炸了」。
+    """
+    M, called = _spy_run(monkeypatch)
+    assert M.main(["600183", "--year", "2025", "--assume", "out/x",
+                   "--reviewed-by", "xhl", "--accept-manual"]) == 2
+    assert called == [], "--assume --accept-manual 被放过了，走到了取数"
+    assert "--accept-manual 只对 --brief 有意义" in capsys.readouterr().err
+
+
+def test_refresh_stance是开关而且只对brief有意义():
+    from ir_agent.__main__ import build_parser
+
+    a = build_parser().parse_args(
+        ["600183", "--year", "2025", "--brief", "out/x",
+         "--verified-by", "xhl", "--refresh-stance"])
+    assert a.refresh_stance is True
+
+
+def test_accept_manual是开关而不是取值():
+    from ir_agent.__main__ import build_parser
+
+    a = build_parser().parse_args(
+        ["600183", "--year", "2025", "--brief", "out/x",
+         "--verified-by", "xhl", "--accept-manual"])
+    assert a.accept_manual is True
