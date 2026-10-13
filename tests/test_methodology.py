@@ -679,3 +679,18 @@ class TestCoverageDeclared:
         from ir_agent import methodology
         assert "`覆盖: <主题> | <" in methodology.PROMPT
         assert "`未覆盖: <主题> | <" in methodology.PROMPT
+
+
+class TestLedgerKeyDecl:
+    def test_提示词讲明只有同一个量才写成双括号(self):
+        from ir_agent import methodology
+        assert "[[industry.revenue_yoy]]" in methodology.PROMPT
+        assert "只是相关" in methodology.PROMPT
+
+    def test_drivers_md标出声明的key(self):
+        from ir_agent.methodology import to_markdown
+        out = to_markdown(_meth(), key_refs={
+            _REV_LABEL: (["industry.revenue_yoy@2025FY"], ["foo.bar"])})
+        assert "✓ [[industry.revenue_yoy@2025FY]]" in out
+        assert "✗ foo.bar" in out
+        assert "口径" in out

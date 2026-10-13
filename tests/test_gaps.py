@@ -1316,3 +1316,40 @@ def test_放宽条数带来的召回就是本次改动的全部收益():
 
     assert _match_announce(_cp(8), "铜箔采购价", search_term="铜箔") is None
     assert _match_announce(_cp(20), "铜箔采购价", search_term="铜箔") is not None
+
+
+# ══ 第二次调用试跑后的修订 ⑤：数据线索里声明的账本 key ══════════════
+
+def test_显式声明的账本key_标已披露且不联网():
+    from ir_agent.gaps import DISCLOSED
+    f = Factor(key="f_x", label="行业产值同比增速", unit="变化率",
+               source_hint="[[industry.revenue_yoy]]（同业聚合口径）")
+    d = Decomposition(target="revenue", op=Op.MULTIPLY, factors=[f])
+    data = collect(_ExplodingClient(), [d], _led("industry.revenue_yoy"),
+                   Corpus(as_of=AS_OF), "电子", AS_OF)
+    assert data["f_x"].status == DISCLOSED
+    assert "[[industry.revenue_yoy@2025FY]]" in data["f_x"].note
+    assert "口径" in data["f_x"].note, "口径是否一致要交给人"
+
+
+def test_只是提到key不算声明():
+    """生益科技 2026-10-13 第 60 行原文：提到 capex 不等于稼动率就是 capex。"""
+    from ir_agent.gaps import ledger_refs
+    hint = "capex、fixed_asset等账本key及在建工程投资公告，需采集稼动率数据"
+    assert ledger_refs(hint, _led("capex", "fixed_asset"), AS_OF) == ([], [])
+
+
+def test_声明的key前缀不误中():
+    from ir_agent.gaps import ledger_refs
+    assert ledger_refs("[[industry.revenue]]", _led("industry.revenue_yoy"),
+                       AS_OF) == ([], ["industry.revenue"])
+
+
+def test_研究时点之后才披露的不算():
+    from ir_agent.gaps import ledger_refs
+    led = FactLedger()
+    led.put(Fact(key="industry.revenue_yoy", value=D("0.1"), unit="ratio",
+                 period="2026FY", as_of=date(2026, 12, 1), source_id="t",
+                 method=Method.COMPUTED))
+    assert ledger_refs("[[industry.revenue_yoy]]", led, AS_OF) == (
+        [], ["industry.revenue_yoy"])

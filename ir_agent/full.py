@@ -1517,8 +1517,18 @@ def _research_methodology(code: str, r, out: Path, client, *,
     hits = methodology.term_hits(m.decompositions,
                                  sections=getattr(r, "sections", None),
                                  corpus=getattr(r, "corpus", None))
+    refs: dict = {}
+    led, as_of = getattr(r, "ledger", None), getattr(r, "as_of", None)
+    if led is not None and as_of is not None:
+        from ir_agent import gaps
+        for d in m.decompositions:
+            for f in d.factors:
+                have, miss = gaps.ledger_refs(f.source_hint, led, as_of)
+                if have or miss:
+                    refs[f.label] = (have, miss)
     path.write_text(methodology.to_markdown(m, coverage=cov, hits=hits,
-                                                coverage_notes=cov_notes),
+                                                coverage_notes=cov_notes,
+                                                key_refs=refs),
                     encoding="utf-8")
     note = ""
     if (open_ := [c.theme for c in cov if c.mark != "✓"]):

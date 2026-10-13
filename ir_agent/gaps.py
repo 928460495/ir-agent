@@ -220,6 +220,33 @@ def _latest(ledger: FactLedger, key: str) -> str:
     return pers[-1] if pers else ""
 
 
+# 数据线索里的账本 key 声明：**只认显式的 `[[key]]`**，不认线索里顺带提到的
+# 英文词。生益科技 2026-10-13 的线索写着「capex、fixed_asset等账本key……需采集
+# 稼动率数据」—— 提到 capex 不等于「稼动率就是 capex」，按出现就绑定会把因子
+# 错绑到一个不相干的量上、并跳过采集。spec (c) 要的「优先分解成已有数据能支撑
+# 的因子、直接决定 gaps.collect 的命中率」由这一级兑现。
+_KEY_DECL = re.compile(r"\[\[([A-Za-z_][\w.]*)(?:@[^\]]*)?\]\]")
+
+
+def ledger_refs(hint: str, ledger: FactLedger, as_of: date
+                ) -> tuple[list[str], list[str]]:
+    """数据线索里 `[[key]]` 声明的账本 key。返回 (有的 `key@期间`, 没有的 key)。
+
+    时点守卫与 `identify` 同一条：as_of 之后才披露的视为没有。按整词比对，
+    `industry.revenue` 不会误中 `industry.revenue_yoy`。
+    """
+    have: list[str] = []
+    miss: list[str] = []
+    for k in dict.fromkeys(_KEY_DECL.findall(hint or "")):
+        per = _latest(ledger, k)
+        try:
+            ledger.get(k, per, as_of=as_of)
+            have.append(f"{k}@{per}")
+        except (KeyError, LookAheadError):
+            miss.append(k)
+    return have, miss
+
+
 def _valid_hit(text: str, core: str) -> str | None:
     """在 text 里找 core 一处**不落在否定语境里**的出现，摘出前后原文
     片段；找不到（含"所有出现都在否定语境里"）返回 None。
@@ -389,6 +416,13 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                 continue
             if f.key not in gaps:
                 out[f.key] = FactorData(factor=f, status=DISCLOSED)
+                continue
+            have, _ = ledger_refs(f.source_hint, ledger, as_of)
+            if have:
+                out[f.key] = FactorData(
+                    factor=f, status=DISCLOSED,
+                    note="账本 " + "、".join(f"[[{x}]]" for x in have)
+                         + "（模型在数据线索中声明，口径是否与因子一致待人工确认）")
                 continue
 
             hit = _match_annual(sections, f.label, f.search_term)
