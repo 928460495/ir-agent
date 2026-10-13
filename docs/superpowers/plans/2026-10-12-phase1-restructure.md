@@ -3212,6 +3212,51 @@ python -m pytest -q -m "not live" -W error
 ```
 Expected: 原先引用 `run_analysis` 的测试会失败，逐个改为对应的新函数；`test_预研排在数据采集之前` 整条删除（已被 Step 1 的新测试替换）。
 
+> **实跑与本 Task 计划的出入（Step 1–6）：**
+>
+> 1. **计划的 `run_brief` 有一个会静默生效的回退。** 它只开了一个
+>    `make_client(model=model)`、不带联网工具，拿它跑预研和因子采集。而
+>    `run_analysis` 里专门写着：「不开的话不会报错，只会安静地什么都搜不到」。
+>    改为两个 client：`research_client`（带 WebSearch/WebFetch）给预研与因子
+>    采集；`client`（不带）给辩论与撰写 —— 后两者只能用已入库的材料，联网
+>    会让引文出处跑到语料库之外、核验不过。新增测试钉住，变异验证过。
+> 2. **计划 Step 1 的测试照抄会崩在六处**（桩的返回形状与调用方的解包不符、
+>    假 client 没有 `total_cost_usd`、`_peer_names` 真去联网……）。换成共用的
+>    离线夹具 `_offline` / `_stub_brief`。
+> 3. **补三条计划没有的测试**：预研与因子采集拿到的是带联网工具的 client；
+>    `run_brief → _research_methodology` 这一段真的透传了辩论① 结论（Task 9
+>    只验了下一段 `_research_methodology → research()`，两段缺一段结论都到不了
+>    模型）；辩论① 失败时停下而不是跳过。四个变异各打红一条。
+> 4. **`_write_and_debate` 删除。** 它只被 `run_analysis` 调用，spec 也写明
+>    第一阶段的成稿辩论删除。但调它的四条测试守的是「辩论/回写失败时正文
+>    留不留得住」—— 那是 `_debate_and_revise` 的行为，第二阶段还在用 —— 所以
+>    改为直接测它，不删。茅台那条（被驳回的稿子必须落盘）改验 `run_brief` 的
+>    撰写失败路径。
+> 5. **`DEBATE_BRIEF` 删除**（死常量）。「两阶段辩论记录不撞名」那条测试泛化为
+>    「第二阶段的辩论记录不与第一阶段任何产物撞名」。
+> 6. **CLI 的 `--analyse` 在本 Task 就改调 `run_analyse`**，计划没提。删掉
+>    `run_analysis` 而 CLI 要到 Task 11 才改，中间这段 `--analyse` 实跑会
+>    ImportError —— 正是评审时反对过的破损窗口。
+> 7. `run_assume` 里的 client 叫 `assume_client`：两条既有测试
+>    （判断项开了超时重试、创建早于开销累加）靠这个名字区分「判断项不借用
+>    别的 client」。
+> 8. 14 条盯 `run_analysis` 源码的结构测试逐条判断不变量现在住在哪：6 条改指
+>    `run_analyse`、2 条 `run_brief`、2 条 `run_assume`、1 条（预研失败不中断）
+>    从「源码里有 MethodologyFailed 字样」改为行为断言，1 条随 spec 删除
+>    （`test_预研排在数据采集之前`）。Step 0a 时另有 3 条改指 `_collect_factors`，
+>    并补了一条守卫：那个函数真的被流水线调用。
+> 9. 抽出 `_write_dashboard`，两次调用共用（spec ④）。`_stance_round` 读回已有
+>    产物时，人手改坏的 JSON（`ValueError`/`KeyError`）记进 skipped 并停下，
+>    不崩。
+>
+> **Step 7 的检查方法本身要换。** 计划写的是 `git diff main | grep -c`：我们就在
+> main 上，`git diff main` 只看未提交的部分；而且 grep 会把文档字符串里**提到**
+> 这几个函数名的行也算进去。实跑改为：取重构开始前（`8f52537`）与现在的
+> `full.py`，用 AST 把 `run_valuation` / `_write_full_report` /
+> `_debate_and_revise` / `report` / `_analyse_facts` 的源码段逐字节比对 —— 五个
+> 全部相同。`_propose_assumptions` 有改动，difflib 确认只有两处（加 `balances`
+> 形参、透传给 `assume.decide`），属第一阶段，符合预期。
+
 - [ ] **Step 7: 机械确认第二阶段没被碰到**
 
 ```bash

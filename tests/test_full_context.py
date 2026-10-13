@@ -202,9 +202,6 @@ def test_回写失败不丢弃正文():
     assert body == "撰写好的正文", "回写失败仍会连正文一起丢掉"
     assert "未修订稿" in note
 
-    run = inspect.getsource(full.run_analysis)
-    assert "err and body is None" in run, "有正文时不应报「研究简报」缺失"
-
 
 def test_回写阶段断流同样不丢弃正文():
     """与辩论那处同一个缺陷的第二处: 回写调用断流不该让撰写与辩论两步的
@@ -221,18 +218,6 @@ def test_回写阶段断流同样不丢弃正文():
 
 # ── Task 10: 方法论预研 → 定向采集 → 按因子填判断项 ─────────────
 
-def test_预研排在数据采集之前():
-    """**这是整个改造的要点。** 先问「这个行业靠什么赚钱」，再按答案去
-    采集数据 —— 顺序反了就退化成「先收集再解释」。"""
-    import inspect
-
-    from ir_agent import full
-    src = inspect.getsource(full.run_analysis)
-    assert "methodology.research(" in src or "_research_methodology(" in src
-    assert src.index("methodology") < src.index("_analyse_facts("), \
-        "方法论预研必须在数据采集之前"
-
-
 def test_分解式立刻落盘且说明可覆盖():
     """不另设人工门，改用「立刻落盘 + 可中断 + 可覆盖」换早期干预 ——
     门加多了人会开始机械点同意。"""
@@ -240,18 +225,39 @@ def test_分解式立刻落盘且说明可覆盖():
 
     from ir_agent import full
     assert full.DRIVERS_MD == "drivers.md"
-    src = inspect.getsource(full.run_analysis)
+    src = inspect.getsource(full.run_brief)
     assert "DRIVERS_MD" in src
 
 
-def test_预研失败退回不分解而非中断():
-    """降级但继续 —— 损失的是精度，不是担保。"""
-    import inspect
+def test_预研失败退回不分解而非中断(tmp_path, monkeypatch):
+    """预研失败（`_research_methodology` 返回 `(None, 原因)`）**不中断第二次
+    调用**：辩论② 退回用 `DRIVERS` 的两个标量做 subjects，撰写照常进行，
+    原因记进 skipped。
 
+    此前这条断言的是「`run_analysis` 的源码里有 MethodologyFailed 和『退回』
+    两个字」—— 字符串在不在说明不了流程会不会继续。改为行为断言。
+    """
     from ir_agent import full
-    src = inspect.getsource(full.run_analysis)
-    assert "MethodologyFailed" in src
-    assert "退回" in src or "不分解" in src
+
+    seq = _offline(monkeypatch, full)
+    got = _stub_brief(monkeypatch, full, seq)
+    subjects: list = []
+
+    def stance_round(client, out, fname, round_, subj, *a, **k):
+        seq.append(f"辩论{round_}")
+        subjects.append(list(subj))
+        return _Bal()
+
+    monkeypatch.setattr(full, "_stance_round", stance_round)
+    monkeypatch.setattr(full, "_research_methodology",
+                        lambda *a, **k: (seq.append("预研"),
+                                         (None, "方法论预研（测试：失败）"))[1])
+    o = full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
+    assert "因子采集" not in seq, "没有分解式就不该去按因子采集"
+    assert seq.count("撰写") == 1, "预研失败不该中断撰写"
+    assert subjects[1] == ["营收增速", "毛利率"], "辩论② 没退回两标量"
+    assert any("方法论预研（测试：失败）" in s for s in o.skipped)
 
 
 def test_采集结果进批准清单():
@@ -269,7 +275,7 @@ def test_预研与采集使用已开工具的client():
     import inspect
 
     from ir_agent import full
-    src = inspect.getsource(full.run_analysis)
+    src = inspect.getsource(full.run_brief)
     assert "WebSearch" in src and "WebFetch" in src
 
 
@@ -461,8 +467,14 @@ def test_辩论阶段断流同样不丢弃正文():
 
 def _run_debate_stage(boom: Exception | None = None,
                       revision_boom: Exception | None = None):
-    """跑一遍 `_write_and_debate`。撰写总是成功；`boom` 让辩论抛错，
-    `revision_boom` 让辩论成功而回写抛错。
+    """跑一遍 `_debate_and_revise`。`boom` 让辩论抛错，`revision_boom` 让
+    辩论成功而回写抛错。
+
+    **此前跑的是 `_write_and_debate`**（第一阶段的撰写+辩论）。Task 10 删掉了
+    第一阶段的成稿辩论，`_write_and_debate` 随之删除 —— 但这四条测试守的是
+    「辩论或回写失败时正文留不留得住」，那是 `_debate_and_revise` 的行为，
+    而第二阶段（`_write_full_report`）还在用它。所以改为直接测它，不删。
+    返回值补一个 cost 位，凑回调用方解包的五元组。
 
     撰写与辩论都打掉成假的: 这条测试要钉的是**失败时正文留不留得住**，
     与模型实际写了什么无关。客户端在函数内部用 make_client 造，不经参数
@@ -508,7 +520,9 @@ def _run_debate_stage(boom: Exception | None = None,
          mock.patch.object(full, "run_debate", _debate), \
          mock.patch.object(full, "revise_from_verdicts",
                            mock.Mock(side_effect=revision_boom)):
-        return full._write_and_debate(_R(), "600183", None)
+        body, upheld, debate_md, note = full._debate_and_revise(
+            _Cat(), "撰写好的正文", _client, "2025FY")
+        return body, upheld, debate_md, _client.total_cost_usd, note
 
 
 def test_第二阶段必须重建派生事实():
@@ -1387,7 +1401,9 @@ def test_第二阶段未跑完时仍教人接着跑第二阶段(tmp_path):
 def test_两个阶段都把自己是哪一阶段带进结果():
     import inspect
     from ir_agent import full
-    assert 'phase="analyse"' in inspect.getsource(full.run_analysis)
+    assert 'phase="analyse"' in inspect.getsource(full.run_analyse)
+    assert 'phase="brief"' in inspect.getsource(full.run_brief)
+    assert 'phase="assume"' in inspect.getsource(full.run_assume)
     assert 'phase="value"' in inspect.getsource(full.run_valuation)
     assert "phase=outcome.phase" in inspect.getsource(full.report)
 
@@ -1469,7 +1485,9 @@ def test_一致预期的占位符都进了可引用清单():
 def test_两处建清单都用同一个期间来源():
     import inspect
     from ir_agent import full
-    for fn in (full._write_and_debate, full._write_full_report):
+    # 第一阶段建清单的地方此前在 `_write_and_debate`，Task 10 拆函数后在
+    # `run_brief`（撰写简报那一步）。
+    for fn in (full.run_brief, full._write_full_report):
         src = inspect.getsource(fn)
         assert "_catalog_periods(r)" in src, fn.__name__
         assert "_macro_periods(r) + ((spot" not in src, fn.__name__
@@ -1548,11 +1566,11 @@ def test_第一阶段采集排在定性三节之前():
     """战略/产业链/宏观定性要引用开放网络文档的原文，采集必须更早。"""
     from ir_agent import full
 
-    calls = _calls(full.run_analysis)
+    calls = _calls(full.run_analyse)
 
     def first(name: str) -> int:
         lines = [ln for n, ln in calls if n == name]
-        assert lines, f"run_analysis 里没有对 {name} 的真实调用"
+        assert lines, f"run_analyse 里没有对 {name} 的真实调用"
         return min(lines)
 
     assert first("_analyse_facts") < first("_load_openweb"), \
@@ -1617,7 +1635,7 @@ def test_因子采集的三条不变量所在的函数确实被流水线调用()
     """
     from ir_agent import full
 
-    pipeline = getattr(full, "run_brief", None) or full.run_analysis
+    pipeline = full.run_brief
     names = [n for n, _ in _calls(pipeline)]
     assert "_collect_factors" in names, (
         f"{pipeline.__name__} 没有调用 _collect_factors —— 因子采集的三条"
@@ -1673,7 +1691,7 @@ def test_采集用的是开了联网工具的client():
     """
     from ir_agent import full
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analyse)))
     call = next(n for n in ast.walk(tree)
                 if isinstance(n, ast.Call) and _call_name(n) == "_load_openweb")
     used: set[str] = set()
@@ -2006,14 +2024,14 @@ def test_公告采集排在定性三节之前():
     """
     from ir_agent import full
 
-    calls = _calls(full.run_analysis)
+    calls = _calls(full.run_analyse)
 
     def first(name: str) -> int:
         lines = [ln for n, ln in calls if n == name]
         assert lines, f"{name} 没有被调用"
         return min(lines)
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analysis)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analyse)))
     binding = None
     for node in ast.walk(tree):
         if not (isinstance(node, ast.AugAssign)
@@ -2063,7 +2081,7 @@ def test_公告采集之后重渲染外部资料清单():
     ——与子项目 A 终审 C1 是同一个失败模式。"""
     from ir_agent import full
 
-    calls = _calls(full.run_analysis)
+    calls = _calls(full.run_analyse)
     ann = [ln for name, ln in calls if name == "_load_announce"]
     ref = [ln for name, ln in calls if name == "_refresh_external_md"]
     qual = [ln for name, ln in calls if name == "_analyse_qualitative"]
@@ -2844,7 +2862,12 @@ class TestFullReportIsDebated:
         """两阶段产物同在一个目录里。同名就会把简报那轮的记录冲掉 ——
         而那是另一场辩论，不是同一场的新一稿。"""
         from ir_agent import full
-        assert full.DEBATE_REPORT != full.DEBATE_BRIEF
+        # 第一阶段的成稿辩论已删除（`debate.md` 不再产出），但旧目录里可能
+        # 还留着；第一阶段新增的产物也都与它同在一个目录里。
+        phase1 = {"debate.md", full.BRIEF, full.STANCE_A, full.STANCE_B,
+                  "stance_a.md", "stance_b.md", full.REVIEW_MD,
+                  full.SOURCES_MD, full.SOURCES_JSON, full.DRIVERS_MD}
+        assert full.DEBATE_REPORT not in phase1
 
 
 def _run_full_report_stage(boom: Exception | None = None):
@@ -2980,7 +3003,7 @@ def test_第一阶段没有估值事实时清单不变():
     assert not any(p == "2026-10-03" for p in full._catalog_periods(_R()))
 
 
-def test_撰写被驳回时最后一稿落盘(tmp_path):
+def test_撰写被驳回时最后一稿落盘(tmp_path, monkeypatch):
     """**贵州茅台第一阶段重跑抓到。** 撰写连续三次被判「正文没有引用任何
     事实占位符」，整轮中止，而三稿都没留下来 —— 撰写是整条链上最贵的一次
     调用，烧掉三次之后无从判断模型写了什么。
@@ -2991,43 +3014,27 @@ def test_撰写被驳回时最后一稿落盘(tmp_path):
 
     两阶段文件名必须分开: 同一个目录，同名会把另一阶段的证据冲掉。
     """
-    from unittest import mock
-
-    from ir_agent import analyst, full
+    # 此前驱动的是 `_write_and_debate`（第一阶段的撰写+辩论）。Task 10 删掉了
+    # 第一阶段的成稿辩论，撰写挪进 `run_brief` —— 被驳回的稿子落盘这件事
+    # 跟着搬家，这里改为驱动 `run_brief`。
+    from ir_agent import full
     from ir_agent.analyst import AnalystRefused
 
-    assert full.WRITE_FAILED_BRIEF != full.WRITE_FAILED_REPORT
-
-    def _client(prompt):                        # pragma: no cover
-        raise AssertionError("不该走到这里")
-    _client.total_cost_usd = 1.0
-    _client.calls = 0
-
-    class _Cat:
-        entries = ()
-        evidence = None
-
-    class _R:
-        period = "2025FY"
-        as_of = None
-        ledger = None
-
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
     boom = AnalystRefused("连续 3 次违反占位符契约", raw="## 一节\n没有数字的三稿。")
 
-    with mock.patch.object(full, "make_client", lambda **kw: _client), \
-         mock.patch.object(full.FactCatalog, "from_ledger",
-                           classmethod(lambda cls, *a, **kw: _Cat())), \
-         mock.patch.object(full, "_build_evidence", lambda r, code: None), \
-         mock.patch.object(full, "_catalog_periods", lambda r: ()), \
-         mock.patch.object(full, "write_body", mock.Mock(side_effect=boom)):
-        body, _, _, _, err = full._write_and_debate(_R(), "600519", None,
-                                                   tmp_path)
+    def refuse(*a, **k):
+        raise boom
 
-    assert body is None
+    monkeypatch.setattr(full, "write_body", refuse)
+    o = full.run_brief("600519", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
     dumped = tmp_path / full.WRITE_FAILED_BRIEF
     assert dumped.exists(), "被驳回的稿子没落盘"
     assert "没有数字的三稿" in dumped.read_text(encoding="utf-8")
-    assert str(dumped) in err, "产物清单里没指出稿子在哪"
+    assert any(str(dumped) in s for s in o.skipped), "产物清单里没指出稿子在哪"
+    assert o.stage is full.Stage.INCOMPLETE, "没有简报就不能停在门②"
 
 
 def test_没有稿子时不写空文件(tmp_path):
@@ -3052,7 +3059,7 @@ def test_判断项那一步开了超时重试并给了更长超时():
 
     from ir_agent import full
 
-    src = inspect.getsource(full.run_analysis)
+    src = inspect.getsource(full.run_assume)
     assert "retry_timeout=True" in src, "判断项没开超时重试"
     assert "timeout=ASSUME_TIMEOUT" in src, "判断项没给更长的超时"
     assert "out, assume_client, arts" in src, "判断项还在借用 qual_client"
@@ -3079,7 +3086,7 @@ def test_判断项客户端的创建早于开销累加():
 
     from ir_agent import full
 
-    src = inspect.getsource(full.run_analysis)
+    src = inspect.getsource(full.run_assume)
     assert src.index("assume_client = make_client") < \
         src.index("assume_client.total_cost_usd"), \
         "客户端的创建晚于它的开销被累加 —— 运行时必然 UnboundLocalError"
@@ -3305,3 +3312,262 @@ def test_后一次调用不清掉前一次算出来的_upheld(tmp_path):
     assert saved["upheld"] == 5, "没算过 upheld 的调用把它清掉了"
     assert saved["verified_by"] == "xhl"
     assert _restore_state(tmp_path) == ({"a": "1"}, {})
+
+
+# ══ 第一阶段拆三段（Task 10）══════════════════════════════════
+#
+# **用行为测试，不用源码字符串匹配。** 本会话有四次「结构式断言盯着源码
+# 字面量」而误报或漏报的记录：断言被一条注释满足、被另一处同名调用满足、
+# 被「调用存在但没有绑定」满足、被「字符串在但顺序反了」满足。
+#
+# 计划原稿的 Step 1 测试照抄会崩在六处（桩的返回形状与调用方的解包不符、
+# 假 client 没有 total_cost_usd、_peer_names 真去联网……），这里换成一个
+# 共用的离线夹具。
+
+
+class _PhaseClient:
+    """假 client。记下自己是带哪些工具造出来的 —— 联网工具那条测试要用。"""
+
+    def __init__(self, tools=None):
+        self.tools = tuple(tools or ())
+        self.total_cost_usd = 0.0
+
+    def __call__(self, prompt):                 # pragma: no cover
+        raise AssertionError("不该真的调模型")
+
+
+class _PhaseR:
+    """三段都能用的最小 r：真的空账本、真的空语料库。"""
+    period = "2025FY"
+    quotes = store = sections = audit = None
+    annual_url = ""
+
+    def __init__(self):
+        from ir_agent.sources.external import Corpus
+        self.as_of = date(2026, 9, 30)
+        self.ledger = FactLedger()
+        self.corpus = Corpus(as_of=self.as_of)
+        self.verdicts = []
+
+
+def _offline(monkeypatch, full, seq: list | None = None) -> list:
+    """把三段里所有联网、调模型、写看板的环节打掉，只留流程与落盘。
+
+    每个桩返回调用方要解包的那个形状（`_analyse_facts` 是三元组、两个
+    语料库入库是 skipped 列表、`_analyse_qualitative` 是 client）。
+    """
+    seq = seq if seq is not None else []
+
+    def rec(name, make):
+        def f(*a, **k):
+            seq.append(name)
+            return make()
+        return f
+
+    monkeypatch.setattr(full, "make_client",
+                        lambda **k: _PhaseClient(k.get("tools")))
+    monkeypatch.setattr(full, "_analyse_facts",
+                        rec("定量采集", lambda: ({}, {}, [])))
+    monkeypatch.setattr(full, "_load_openweb", rec("开放网络", list))
+    monkeypatch.setattr(full, "_load_announce", rec("公司公告", list))
+    monkeypatch.setattr(full, "_analyse_qualitative",
+                        rec("定性分析", _PhaseClient))
+    monkeypatch.setattr(full, "_peer_names", lambda code: ("生益科技", "南亚新材"))
+    monkeypatch.setattr(full, "_industry_path", lambda code: "电子/元件/覆铜板")
+    monkeypatch.setattr(full, "build_dashboard",
+                        lambda *a, **k: seq.append("看板"))
+    monkeypatch.setattr(full, "build_workbook",
+                        lambda *a, **k: seq.append("工作簿"))
+    return seq
+
+
+class _Bal:
+    """冒充 StanceResult。"""
+
+    def __init__(self, note="辩论结论", balances=()):
+        self.note, self.balances, self.unverified = note, list(balances), ()
+
+    def summary(self):
+        return self.note
+
+    def to_json(self):
+        return {}
+
+
+def _stub_brief(monkeypatch, full, seq):
+    """把 run_brief 的五个模型环节打掉，只记录先后与收到的参数。"""
+    got: dict = {}
+
+    def stance_round(client, out, fname, round_, *a, **k):
+        seq.append(f"辩论{round_}")
+        got[f"辩论{round_}.client"] = client
+        return _Bal(note=f"辩论{round_}的平衡结论")
+
+    class _M:
+        decompositions, industry = [], "测试业"
+
+    def meth(code, r, out, client, **k):
+        seq.append("预研")
+        got["预研.client"], got["预研.kwargs"] = client, k
+        return _M(), ""
+
+    def collect(r, as_of, client, *a, **k):
+        seq.append("因子采集")
+        got["因子采集.client"] = client
+        return {}
+
+    monkeypatch.setattr(full, "_stance_round", stance_round)
+    monkeypatch.setattr(full, "_research_methodology", meth)
+    monkeypatch.setattr(full, "_collect_factors", collect)
+    monkeypatch.setattr(full, "_restore_state", lambda out: ({"战略": "x"}, {}))
+    monkeypatch.setattr(full, "_build_evidence", lambda r, code: None)
+    monkeypatch.setattr(full, "_catalog_periods", lambda r: ())
+    monkeypatch.setattr(full, "write_body",
+                        lambda *a, **k: (seq.append("撰写"), ("", None))[1])
+    return got
+
+
+def test_第一阶段之一只跑到定性分析并产出来源清单(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    seq = _offline(monkeypatch, full)
+    o = full.run_analyse("600183", _PhaseR(), date(2026, 10, 12), tmp_path)
+
+    assert seq[:4] == ["定量采集", "开放网络", "公司公告", "定性分析"], seq
+    assert "预研" not in seq and "撰写" not in seq
+    # 门① 的清单是本次调用的交付物 —— 断言文件真的在盘上，不 monkeypatch
+    # 一个「写清单」的函数来替代：那样断言的是「我们调了它」。
+    assert (tmp_path / "sources.md").exists()
+    assert (tmp_path / "sources.json").exists()
+    assert "## 同业样本" in (tmp_path / "sources.md").read_text(encoding="utf-8")
+    assert "看板" in seq and "工作簿" in seq, "④：第①次调用也要出看板与工作簿"
+    assert o.stage is full.Stage.AWAITING_SOURCES
+    assert o.phase == "analyse"
+
+
+def test_第一阶段之二的五个环节按新顺序跑(tmp_path, monkeypatch):
+    """**替换掉旧的 `test_预研排在数据采集之前`。** 旧不变量（预研在**所有**
+    采集之前）按 spec 已废除 —— 新顺序让分解式能基于全部证据与多空结论设计。
+    但预研仍须在**因子**采集之前，否则「按分解式定向采集」无从谈起；而两轮
+    辩论必须一前一后夹住它们。
+
+    **断言记录下来的调用顺序，不断言源码里字符串的先后。**
+    """
+    from ir_agent import full
+
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+    core = [x for x in seq if x in ("辩论A", "预研", "因子采集", "辩论B", "撰写")]
+    assert core == ["辩论A", "预研", "因子采集", "辩论B", "撰写"], seq
+
+
+def test_第一阶段之二的预研与因子采集用的是开了联网工具的client(tmp_path,
+                                                          monkeypatch):
+    """**计划原稿在这里有个会静默生效的回退。**
+
+    它只开了一个 `make_client(model=model)`、不带联网工具，拿它跑预研与
+    因子采集。而 `run_analysis` 里专门写着：「不开的话不会报错，只会安静地
+    什么都搜不到，比直接失败更容易被忽略」。预研要联网补方法论，`gaps.collect`
+    的④分支要联网找因子数据 —— 照原稿写，两者都会静默地什么都搜不到。
+
+    辩论与撰写**不该**开联网工具：它们只能用已入库的材料，联网会让引文
+    出处跑到语料库之外、核验不过。
+    """
+    from ir_agent import full
+
+    seq = _offline(monkeypatch, full)
+    got = _stub_brief(monkeypatch, full, seq)
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
+    web = {"WebSearch", "WebFetch"}
+    assert web <= set(got["预研.client"].tools), "预研拿到的 client 没开联网工具"
+    assert web <= set(got["因子采集.client"].tools), "因子采集拿到的 client 没开联网工具"
+    assert not got["辩论A.client"].tools, "辩论不该开联网工具"
+
+
+def test_第一阶段之二把辩论一的结论交给预研(tmp_path, monkeypatch):
+    """**「辩论① 排在预研之前」的兑现，run_brief 这一段。**
+
+    Task 9 的 `test_辩论结论与定性结论真的进了预研的提示词` 验的是
+    `_research_methodology → methodology.research` 那一段。这条验上一段：
+    `run_brief` 真的把辩论① 的平衡结论、以及定性结论，交给了
+    `_research_methodology`。两段缺一段，辩论① 的结论都到不了模型。
+    """
+    from ir_agent import full
+
+    seq = _offline(monkeypatch, full)
+    got = _stub_brief(monkeypatch, full, seq)
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
+    assert got["预研.kwargs"].get("stance_note") == "辩论A的平衡结论"
+    assert got["预研.kwargs"].get("md") == {"战略": "x"}, "定性结论没交给预研"
+
+
+def test_辩论一失败时停下而不是跳过(tmp_path, monkeypatch, capsys):
+    """**不存在「跳过」这条路。** 每份研报的多空输入要么来自模型、要么来自人。"""
+    from ir_agent import full
+
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
+
+    def fail(client, out, fname, round_, *a, **k):
+        seq.append(f"辩论{round_}")
+        return None
+
+    monkeypatch.setattr(full, "_stance_round", fail)
+    o = full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
+    assert o.stage is full.Stage.INCOMPLETE
+    assert "预研" not in seq and "撰写" not in seq, "辩论① 失败后不能往下走"
+    err = capsys.readouterr().err
+    assert "--accept-manual" in err and "--year 2025" in err
+
+
+def test_第一阶段之三缺简报或辩论二产物时拒绝运行(tmp_path, monkeypatch):
+    import pytest
+
+    from ir_agent import full
+
+    _offline(monkeypatch, full)
+    with pytest.raises(SystemExit, match="brief"):
+        full.run_assume("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+    (tmp_path / "brief.md").write_text("## 一节\n正文。", encoding="utf-8")
+    with pytest.raises(SystemExit, match="stance_b"):
+        full.run_assume("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
+
+def test_第一阶段之三把平衡点交给判断项且不联网重新预研(tmp_path, monkeypatch):
+    """两件事：辩论② 的三元组真的到了判断项；drivers.md 缺失时**只读、
+    不联网**（`_read_drivers` 而不是 `_research_methodology`）—— 否则人在
+    门② 审过的简报与接下来要填的判断项依据的是两个不同的分解式。"""
+    import json as _j
+
+    from ir_agent import full, stance
+
+    _offline(monkeypatch, full)
+    (tmp_path / "brief.md").write_text("## 一节\n正文。", encoding="utf-8")
+    sb = stance.StanceResult(
+        round_="B",
+        balances=stance.parse_balance("平衡｜营收增速｜0.05｜0.12｜0.20｜理由"))
+    (tmp_path / "stance_b.json").write_text(
+        _j.dumps(sb.to_json(), ensure_ascii=False), encoding="utf-8")
+
+    def no_predict(*a, **k):                    # pragma: no cover
+        raise AssertionError("run_assume 不该重新联网预研")
+
+    got: dict = {}
+
+    def propose(code, r, body, md, as_of, out, client, arts, **k):
+        got.update(k)
+        (out / "assumptions.json").write_text("{}", encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(full, "_research_methodology", no_predict)
+    monkeypatch.setattr(full, "_propose_assumptions", propose)
+    o = full.run_assume("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+
+    assert [b.mid for b in got["balances"]] == [sb.balances[0].mid]
+    assert o.stage is full.Stage.AWAITING_ASSUME_REVIEW
+    assert _j.loads((tmp_path / "state.json").read_text(
+        encoding="utf-8"))["reviewed_by"] == "xhl"

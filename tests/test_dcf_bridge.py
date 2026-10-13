@@ -229,7 +229,7 @@ def test_完整研报只在建模之后产出():
     import inspect
 
     from ir_agent import full
-    a = inspect.getsource(full.run_analysis)
+    a = inspect.getsource(full.run_brief)
     v = inspect.getsource(full.run_valuation)
     assert "BRIEF" in a and "REPORT" not in a.replace("REPORT = ", "")
     assert "REPORT" in v and "dcf.run(" in v

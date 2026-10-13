@@ -57,9 +57,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if a.analyse:
-        from ir_agent.full import report, run_analysis
+        from ir_agent.full import report, run_analyse
         print(r.summary())
-        report(run_analysis(a.code, r, as_of, a.analyse, model=a.model,
+        report(run_analyse(a.code, r, as_of, a.analyse, model=a.model,
                             snapshot_dir=a.snapshots),
                out_dir=a.analyse, year=a.year)
         return 0

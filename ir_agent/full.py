@@ -999,38 +999,6 @@ def _build_evidence(r, code: str):
                     corpus=r.corpus, peers=_peer_names(code))
 
 
-def _write_and_debate(r, code: str, model: str | None, out=None,
-                      macro_summary: str = "", industry_summary: str = "",
-                      comps_summary: str = "", strategy_summary: str = "",
-                      chain_summary: str = "", consensus_summary: str = "",
-                      valuation_summary: str = "", brief: bool = False):
-    """撰写 → 辩论 → 回写。返回 (正文, 成立挑战数, 辩论摘要, 开销, 失败说明)。"""
-    cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=r.as_of,
-                                  extra_periods=_catalog_periods(r))
-    cat.evidence = _build_evidence(r, code)
-    client = make_client(model=model)
-    try:
-        print(f"撰写正文（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
-        body, _ = write_body(cat, client, code=code, period=r.period,
-                             comps_summary=comps_summary or None,
-                             macro_summary=macro_summary or None,
-                             industry_summary=industry_summary or None,
-                             strategy_summary=strategy_summary or None,
-                             chain_summary=chain_summary or None,
-                             consensus_summary=consensus_summary or None,
-                             valuation_summary=valuation_summary or None,
-                             brief=brief)
-
-        body, upheld, debate_md, note = _debate_and_revise(
-            cat, body, client, r.period)
-        return body, upheld, debate_md, client.total_cost_usd, note
-    except (AnalystRefused, ClaudeCliError) as e:
-        dumped = _dump_refused(out, getattr(e, "raw", ""), WRITE_FAILED_BRIEF) if out else ""
-        tail = f"（最后一稿已落盘：{dumped}）" if dumped else ""
-        return None, 0, "", client.total_cost_usd, \
-            f"{e.__class__.__name__}: {e}{tail}"
-
-
 def _debate_and_revise(cat, body: str, client, period: str):
     """辩论 → 回写。返回 (正文, 成立挑战数, 辩论记录, 失败说明)。
 
@@ -1091,10 +1059,9 @@ def _debate_and_revise(cat, body: str, client, period: str):
 # 建模之前不该存在一份读起来像结论的完整研报。
 BRIEF = "brief.md"
 REPORT = "report.md"
-# 两阶段的辩论记录。**同名就会把上一阶段的记录冲掉** —— 两者是两场
-# 不同的辩论（一场评审简报、一场评审完整研报），不是同一场的两稿，
-# 而两阶段的产物同在一个目录里。
-DEBATE_BRIEF = "debate.md"
+# 第二阶段完整研报的辩论记录。第一阶段的成稿辩论已删除（spec「要改的
+# 既有不变量」第 2 条：简报改由门② 人工审阅），它原先的 `debate.md`
+# 随之不再产出 —— 但旧目录里可能还留着，所以这里仍不用那个名字。
 DEBATE_REPORT = "debate_report.md"
 # ASSUMPTIONS_MD 定义在 research.py 并从那里导入——`next_actions` 要按
 # 「判断项文件在不在」决定教人重跑哪一阶段，两处各写一遍同一个文件名
@@ -1187,10 +1154,9 @@ def _analyse_qualitative(code: str, r, as_of: date, model,
     """需要模型的定性层（宏观定性 / 战略 / 产业链）。**就地**写入调用方的
     md/pr/skipped，只返回本层用的 client —— 开销要累计到总开销里。
 
-    独立于 `_analyse_facts` 拆开（此前两者合在一个 `_analyse` 里）：
-    `run_analysis` 现在要在两者之间插入方法论预研之后、正式采集因子
-    数据之前的一段逻辑，拆开才能让「预研先于确定性层数据采集」这件事
-    在源码顺序上也看得出来（见 test_预研排在数据采集之前）。
+    独立于 `_analyse_facts` 拆开（此前两者合在一个 `_analyse` 里）：确定性层
+    两阶段都要重跑，定性层要调模型、只在第一阶段之一（`run_analyse`）跑一次，
+    结果落进 state.json 供后两次调用读回。
     """
     def take(name, fn):
         try:
@@ -1729,150 +1695,360 @@ def _audit_note(what: str, res) -> str:
     return f"审计未通过（{what}）：" + "；".join(parts)
 
 
-def run_analysis(code: str, r, as_of: date, out_dir: str | Path,
-                 model: str | None = None,
-                 snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
-    """第一阶段：分析 → 简报 → 辩论 → 回写 → AI 填 DCF 判断项 → 待人工核实。
+def _snapshot_gaps(r) -> list[tuple[str, int]]:
+    """统计本轮涉及的「缺原始接口快照」来源及条数。
 
-    **这一阶段不建模，也不出完整研报。** 建模之前就产出一份读起来像结论的
-    完整报告，读者会把未经核实的假设当成定论 —— 而那些假设恰恰是整份估值
-    里最该被人看一眼的东西。
+    这条告警此前每轮都在终端重复一遍。它属于**来源质量**，归门① 说一次。
+
+    **`_facts` 的值是 `list[Fact]`，不是单条 Fact**（`ledger.py:63`）。写成
+    `for (key, per), f in ….items()` 再读 `f.source_id`，拿的是 list 的属性
+    —— 恒得空串，于是这个函数永远返回空列表，门① 的「缺原始接口快照」那一节
+    一次也不会打印。而那一节正是这道门的首要动机：这条告警连续六轮只在终端
+    一闪而过。Task 6 实跑时在同形的 `manifest.collect_rows` 上踩到过同一处。
     """
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    arts: dict[str, str] = {}
-    skipped: list[str] = []
+    from collections import Counter
 
-    # ── 方法论预研：先问「这个行业靠什么赚钱」──────────────────
-    # **必须排在 _analyse_facts（确定性层的数据采集）之前** —— 顺序
-    # 反了就退化成「先收集再解释」，那正是此前的形状: 固定模板 + 填
-    # 数据，无论研究什么公司问的都是同一组通用指标。
-    #
-    # 预研、随后的因子定向采集、以及开放网络文档采集都要联网，client
-    # 必须提前显式开启 WebSearch/WebFetch 工具 —— 不开的话不会报错，
-    # 只会安静地什么都搜不到，比直接失败更容易被忽略，所以单独开一个
-    # client，不能用定性三节那个默认不开工具的 client。
-    research_client = make_client(model=model, tools=["WebSearch", "WebFetch"])
-    # 预研抛 MethodologyFailed（或取不到申万行业分类）时，_research_methodology
-    # 返回 (None, 原因) 而不向上抛异常——退回不分解模式，判断项仍按营收增速/
-    # 毛利率两项填写，整轮研究继续跑，只是损失了因子层面的精度。
-    meth, meth_err = _research_methodology(code, r, out, research_client)
-    if meth_err:
-        skipped.append(meth_err)
-    if meth is not None:
-        arts["驱动因子分解"] = str(out / DRIVERS_MD)
+    from ir_agent.sources.manifest import KNOWN_GAPS
 
-    md, pr, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
-    skipped += facts_skipped
+    c: Counter = Counter()
+    for bucket in getattr(getattr(r, "ledger", None), "_facts", {}).values():  # noqa: SLF001
+        for f in bucket:
+            sid = (getattr(f, "source_id", "") or "").split("#")[0]
+            for name in KNOWN_GAPS:
+                if sid.startswith(name):
+                    c[name] += 1
+    return sorted(c.items())
 
-    # ── 开放网络文档入语料库 ────────────────────────────────────
-    # 接在确定性层之后（研报已入库，去重要用）、定性三节之前（战略 /
-    # 产业链 / 宏观定性要引用其中的原文）。**不能并进 _analyse_facts** ——
-    # 理由见 _load_openweb 的 docstring。
-    skipped += _load_openweb(
-        code, r, as_of, out, research_client, industry=_industry_path(code))
-    # **清单要按语料库的实际内容重渲染。** `_load_external` 渲染的是研报
-    # 入库那一刻的语料库；上面这一步往同一个 Corpus 里又加了最多 10 篇
-    # 文档，且它们确实进了下面定性三节的提示词。不重渲染，md（进看板、
-    # 进 state.json、第二阶段读回）说的就是一个与事实不符的篇数与分级
-    # 构成 —— 见 `_external_md`。
-    _refresh_external_md(r, md)
 
-    # ── 公司公告入语料库 ────────────────────────────────────────
-    # 接在开放网络之后、定性三节之前。公告是公司权威披露且由确定性接口
-    # 取回，与 gaps 的 ②.5 一致地排在研报之前；这里的位置只需满足
-    # 「定性三节之前」。
-    #
-    # **不能用 `qual_client`。** 那个变量要等下面 `_analyse_qualitative`
-    # 返回才存在——它在那个函数内部创建、作为返回值交回本层，这里还
-    # 引用不到（brief 原稿假设它已经存在，实际不成立：`grep -n
-    # "qual_client = "` 命中的另一处在 `_analyse_qualitative` 内部，
-    # 是它自己的局部变量，不是 `run_analysis` 这一层的）。但公告采集
-    # 本身也不需要联网工具——模型只从代码取回的候选清单里挑下标，不
-    # 上网（同一条理由见 `_load_announce` 的 docstring）——所以不必像
-    # `_load_openweb` 那样借用已开工具的 `research_client`，单独开一个
-    # 默认不开工具的 client 即可，费用照样累计进下面的 `cost`。
-    skipped += _load_announce(code, r, as_of, out, md)
-    # 公告入的是同一个 Corpus，清单要按语料库的实际内容重渲染一遍
-    # ——不重渲染，md（进看板、进 state.json、第二阶段读回）说的就是
-    # 加公告之前的篇数与分级构成。与子项目 A 终审 C1 是同一个失败模式。
-    _refresh_external_md(r, md)
+def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
+    """看板与工作簿。**第①②两次调用各生成一次**（spec ④）。
 
-    qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
-
-    # ── 按分解式定向采集因子数据 ────────────────────────────────
-    # 接在确定性层之后（要用它产出的 r.sections/r.corpus 做②年报③研报
-    # 两级文本命中）、撰写正文之前（采集结果要能进 DCF 判断项的提示词）。
-    factor_data: dict = {}
-    if meth is not None:
-        factor_data = _collect_factors(r, as_of, research_client, md,
-                                       meth.decompositions, meth.industry,
-                                       skipped)
-
-    # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出
-    # 最长的一次调用（7~8 个因子 × 5 年 × 3 档，几十行结构化文本），瓶颈在
-    # 输出而不在提示词长度 —— 与撰写正文正相反。实测（生益科技
-    # 2026-10-06）: 它 900s 超时，而 brief 与 debate 都已成功落盘、5 项挑战
-    # 全部回写，整轮 $11.09 却因为进不了第二阶段而作废。
-    #
-    # 不借用 `qual_client`: 那个客户端服务宏观定性/战略/产业链三步，它们是
-    # 输入受限的调用，给它们开超时重试只会换来静默等待。
-    assume_client = make_client(model=model, timeout=ASSUME_TIMEOUT,
-                                retry_timeout=True)
-    # **创建必须早于下面的开销累加。** 实测踩到: 原先这段放在判断项那一节
-    # （第 1617 行附近），而累加在第 1604 行引用它 —— UnboundLocalError 把
-    # 整轮打崩，而 2030 条单元测试全绿: 它们断言的是「源码里有这个字符串」，
-    # 而字符串在不在说明不了先后。见 test_判断项客户端的创建早于开销累加。
-    body, upheld, debate_md, cost, err = _write_and_debate(
-        code=code, r=r, model=model, out=out, brief=True, **_prompt_bundle(pr))
-    cost += (assume_client.total_cost_usd + qual_client.total_cost_usd
-             + research_client.total_cost_usd)
-    if err and body is None:
-        print(f"\n撰写/辩论中止：{err}", file=sys.stderr)
-        skipped.append("研究简报")
-    elif err:
-        skipped.append(err)
-    if debate_md:
-        (out / DEBATE_BRIEF).write_text(debate_md, encoding="utf-8")
-        arts["辩论记录"] = str(out / DEBATE_BRIEF)
-    if body:
-        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
-        (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
-        arts["研究简报"] = str(out / BRIEF)
-        if (note := _audit_note("研究简报", r.audit)):
-            skipped.append(note)
-
-    # ── AI 填写 DCF 判断项 ────────────────────────────────
-    if body:
-        aerr = _propose_assumptions(
-            code, r, body, md, as_of, out, assume_client, arts,
-            decomps=(meth.decompositions if meth is not None else None),
-            factor_data=factor_data)
-        if aerr:
-            skipped.append(aerr)
-    else:
-        skipped.append("DCF 判断项（无简报正文，假设无从追溯到分析结论）")
-
+    它们不调模型、成本近零。门① 核来源的人需要一个交叉核对的入口；第②次
+    再生成一遍是为了把「因子数据」那一节补进看板。此前它们在 `run_analysis`
+    末尾生成 —— 拆函数时若没人接着做，它们会无声消失：没有任何测试断言
+    这两个文件，全量绿不代表它们还在。
+    """
     build_dashboard(r, path=out / "dashboard.html", context=md)
     arts["看板"] = str(out / "dashboard.html")
     build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
                    path=out / "model.xlsx", verdicts=r.verdicts)
     arts["工作簿"] = str(out / "model.xlsx")
 
-    _save_state(out, code, r, as_of, md, pr, upheld=upheld)
 
-    # 依据核验过、但来源分级是 MEDIA 的记录——警告，不拒绝，见
-    # `_media_tier_note`。放在写产物清单的最后一刻读：本阶段所有会调
-    # `basis.validate()` 的环节（定性三节、DCF 判断项）此时都已跑完，
-    # `r.corpus.media_cited` 已经是本阶段的完整计数。
-    skipped += _media_tier_note(r.corpus)
+def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
+                model: str | None = None,
+                snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
+    """第一阶段之一：定量采集 → 语料库入库 → 定性分析 → 门① 来源清单。
 
-    # **状态按实际产物定，不按预期路径。** 见 `_review_stage`。
-    stage, reason = _review_stage(arts)
+    **这一次调用不预研、不辩论、不撰写。** 它的交付物是 `sources.md`：人在
+    门① 逐条核验资料的出处与本地文件，签名之后才进入第②次调用。
+    """
+    from ir_agent.sources.manifest import collect_rows, missing_files, render
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    arts: dict[str, str] = {}
+    skipped: list[str] = []
+
+    md, pr, facts_skipped = _analyse_facts(code, r, as_of, snapshot_dir)
+    skipped += facts_skipped
+
+    # ── 语料库入库 ──────────────────────────────────────────────
+    # 开放网络要联网工具 —— 不开的话不会报错，只会安静地什么都搜不到，比
+    # 直接失败更容易被忽略。`industry` 走确定性查表（`_industry_path`）：
+    # 预研已挪到辩论① 之后，旧写法 `meth.industry` 在这里会恒为空。
+    research_client = make_client(model=model, tools=["WebSearch", "WebFetch"])
+    skipped += _load_openweb(code, r, as_of, out, research_client,
+                             industry=_industry_path(code))
+    # **清单要按语料库的实际内容重渲染。** 不重渲染，md（进看板、进
+    # state.json、后两次调用读回）说的就是加文档之前的篇数与分级构成。
+    _refresh_external_md(r, md)
+    # 公告入库**不需要 client**：挑选是确定性的标题分类（`announce.
+    # is_substantive`），因子定向挪到消费端由 `gaps._match_announce` 做。
+    skipped += _load_announce(code, r, as_of, out, md)
+    _refresh_external_md(r, md)
+
+    qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
+
+    # ── 门①：来源清单 ───────────────────────────────────────────
+    # `peers` 不在 `r` 上 —— `peer_set(code)` 的结果是 `_load_industry` 的
+    # 局部变量，从未挂到 r。写成 `getattr(r, "peers", ())` 会恒取到空元组，
+    # 门① 的同业样本名单就永远是空的，而 spec 要的正是让人看见「牧原 11 家
+    # vs 生益 46 家」这个代表性差异。用 `_build_evidence` 已经在用的那条路。
+    rows = collect_rows(r.ledger, corpus=getattr(r, "corpus", None),
+                        pdf_dir=out / "pdf", peers=_peer_names(code))
+    (out / SOURCES_MD).write_text(render(rows, _snapshot_gaps(r)),
+                                  encoding="utf-8")
+    (out / SOURCES_JSON).write_text(
+        json.dumps({"rows": [vars(x) for x in rows], "verified_by": ""},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    arts["资料来源清单"] = str(out / SOURCES_MD)
+    for bad in missing_files(rows):
+        skipped.append(f"来源清单：{bad}")
+
+    _write_dashboard(r, out, md, code, arts)
+    skipped += _media_tier_note(getattr(r, "corpus", None))
+    _save_state(out, code, r, as_of, md, pr)
     return ResearchOutcome(
-        code=code, period=r.period, as_of=as_of, stage=stage,
-        artifacts=arts, skipped=skipped, upheld=upheld,
-        cost_usd=Decimal(str(cost)), route_reason=reason, phase="analyse")
+        code=code, period=r.period, as_of=as_of, stage=Stage.AWAITING_SOURCES,
+        artifacts=arts, skipped=skipped,
+        cost_usd=Decimal(str(research_client.total_cost_usd
+                             + qual_client.total_cost_usd)),
+        phase="analyse")
+
+
+def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
+                  as_of, accept_manual, by, skipped, refresh=False):
+    """跑一轮多空辩论，或读回已有产物 / 人工补写。失败则落盘模板，返回 None。
+
+    **不存在「跳过」**：每份研报的多空输入要么来自模型、要么来自人。
+
+    **已有产物算数（spec ③）**：与 `drivers.md` 同一条规矩 —— 文件在就读回，
+    不再重抽。两条理由：门② 打回来重跑一次 `--brief`，重抽就是 6 次模型
+    调用全做一遍；而人若手改过 `stance_b.json` 的某个三元组，重抽会把那次
+    修改悄悄冲掉，正是 `drivers.md` 当初要堵的洞。要重抽给 `--refresh-stance`。
+    """
+    from ir_agent import stance
+
+    path = out / fname
+    low = round_.lower()
+    if path.exists() and not refresh:
+        try:
+            if accept_manual:
+                res = stance.load_manual(path, round_=round_, by=by)
+                skipped.append(f"多空辩论{round_}：由 {by} 人工补写")
+            else:
+                # 模型产出的已有稿。**区间校验照样走** —— 它守的是「平衡点
+                # 对两侧可问责」，与这份 JSON 是谁写的、什么时候写的无关；
+                # 文件可能被人手改过。
+                res = stance.StanceResult.from_json(
+                    json.loads(path.read_text(encoding="utf-8")))
+                if (probs := stance.check_interval(res.balances)):
+                    raise stance.StanceFailed("；".join(probs))
+                skipped.append(f"多空辩论{round_}：沿用已有产物"
+                               f"（要重抽加 --refresh-stance）")
+        except (stance.StanceFailed, ValueError, KeyError) as e:
+            skipped.append(f"多空辩论{round_} 已有产物不可用（{str(e)[:160]}）"
+                           f"—— 请修正 {path}，或加 --refresh-stance 重抽")
+            return None
+        # **`.md` 要按读回的内容重写，`.json` 不动。** 人手改过 JSON 之后，
+        # 旁边那份 `.md` 还是上一轮模型的摘要 —— 两个文件说的不是同一件事，
+        # 而人读的是 `.md`。`.json` 是人的输入，不该被 `to_json()` 往返一遍
+        # （会把人加的未知字段抹掉）。
+        (out / f"stance_{low}.md").write_text(res.summary(), encoding="utf-8")
+        return res
+
+    try:
+        res = stance.run_stance(client, round_=round_, subjects=subjects,
+                                context=ctx, catalog=cat, ledger=r.ledger,
+                                as_of=as_of, corpus=getattr(r, "corpus", None))
+    except stance.StanceFailed as e:
+        _dump_refused(out, getattr(e, "raw", ""), f"stance_{low}_failed_raw.md")
+        (out / f"stance_{low}.template.json").write_text(
+            json.dumps(stance.template_json(round_, subjects),
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+        skipped.append(f"多空辩论{round_} 未完成（{str(e)[:160]}）")
+        return None
+    path.write_text(json.dumps(res.to_json(), ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    (out / f"stance_{low}.md").write_text(res.summary(), encoding="utf-8")
+    return res
+
+
+def _write_review(out: Path, sa, sb, gaps_rows) -> None:
+    """门② 的待核清单：把所有「代码没把握」的东西聚到一处。"""
+    lines = ["# 待核清单（门②：请在批准简报结论前过一遍）", ""]
+    for name, s in (("多空辩论①", sa), ("多空辩论②", sb)):
+        if s is not None and s.unverified:
+            lines += [f"## {name}：{len(s.unverified)} 条证据代码核验不过", ""]
+            lines += [f"- [{e.side}] {e.subject}：{e.unverified}"
+                      for e in s.unverified] + [""]
+    # **不要写成 `getattr(audit_res, "unsnapshotted", None)`。** `audit()` 的
+    # 返回值没有这个属性（全仓库查无此名），`getattr` 带默认值会让这一节
+    # 永远不打印 —— 待核清单上写着它会列这件事，而它一次也不会列。
+    if gaps_rows:
+        lines += ["## 本轮账本事实缺原始接口快照（结构性限制，非本轮故障）", ""]
+        lines += [f"- {name}：{n} 条" for name, n in gaps_rows] + [""]
+    if len(lines) == 2:
+        lines.append("本轮没有需要人工复核的标注项。")
+    (out / REVIEW_MD).write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_brief(code: str, r, as_of: date, out_dir: str | Path,
+              verified_by: str, *, model: str | None = None,
+              snapshot_dir: str | Path = "snapshots",
+              accept_manual: bool = False,
+              refresh_stance: bool = False) -> ResearchOutcome:
+    """第一阶段之二：辩论① → 方法论预研 → 因子采集 → 辩论② → 撰写简报。
+
+    **五个模型环节逐个立刻落盘。** 实测里这五个各自都失败过；没有中间落盘点
+    的话，失败会丢掉已完成的部分。
+    """
+    # `assume` 必须在这里导入：`full.py` 顶部没有它（全仓库都在函数内导），
+    # 下面 `list(assume.DRIVERS)` 不导就是 NameError。
+    from ir_agent import assume
+
+    if not verified_by.strip():
+        raise SystemExit("必须署名核验人 —— 资料来源要有人核验过才谈得上可用。")
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    arts: dict[str, str] = {}
+    skipped: list[str] = []
+
+    # **两个 client，不能合成一个。** 预研要联网补方法论、`gaps.collect` 的
+    # ④分支要联网找因子数据 —— 不开联网工具不会报错，只会安静地什么都搜
+    # 不到。辩论与撰写**不该**开：它们只能用已入库的材料，联网会让引文出处
+    # 跑到语料库之外、核验不过。见
+    # `test_第一阶段之二的预研与因子采集用的是开了联网工具的client`。
+    client = make_client(model=model)
+    research_client = make_client(model=model, tools=["WebSearch", "WebFetch"])
+
+    md, pr = _restore_state(out)
+    _analyse_facts(code, r, as_of, snapshot_dir)      # 重建派生事实，不调模型
+    cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=as_of,
+                                  extra_periods=_catalog_periods(r))
+    cat.evidence = _build_evidence(r, code)
+    ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
+
+    def _cost() -> Decimal:
+        return Decimal(str(client.total_cost_usd
+                           + research_client.total_cost_usd))
+
+    # ── 多空辩论①：定方向 ───────────────────────────────────────
+    sa = _stance_round(client, out, STANCE_A, "A", list(STANCE_THEMES), ctx,
+                       cat, r, as_of, accept_manual, verified_by, skipped,
+                       refresh=refresh_stance)
+    if sa is None:
+        o = _stop_for_manual(code, r, as_of, out, arts, skipped, client,
+                             round_="A")
+        o.cost_usd = _cost()
+        return o
+    arts["多空辩论①"] = str(out / "stance_a.md")
+
+    # ── 方法论预研：现在能看到全部证据与多空结论 ────────────────
+    # `stance_note=sa.summary()` 是「辩论① 排在预研之前」唯一的兑现处 ——
+    # 不传它，辩论① 的结论就到不了预研，流程图上它在那儿而数据流上它不在。
+    meth, merr = _research_methodology(code, r, out, research_client,
+                                       md=md, stance_note=sa.summary())
+    if merr:
+        skipped.append(merr)
+    if meth is not None:
+        arts["驱动因子分解"] = str(out / DRIVERS_MD)
+
+    # ── 因子定向采集 ───────────────────────────────────────────
+    factor_data: dict = {}
+    if meth is not None:
+        factor_data = _collect_factors(r, as_of, research_client, md,
+                                       meth.decompositions, meth.industry,
+                                       skipped)
+
+    # ── 多空辩论②：定取值 ─────────────────────────────────────
+    subjects = ([f.label for d in meth.decompositions for f in d.factors]
+                if meth is not None else list(assume.DRIVERS))
+    sb = _stance_round(client, out, STANCE_B, "B", subjects,
+                       ctx + "\n\n【因子采集】\n" + _factor_ctx(factor_data),
+                       cat, r, as_of, accept_manual, verified_by, skipped,
+                       refresh=refresh_stance)
+    if sb is None:
+        o = _stop_for_manual(code, r, as_of, out, arts, skipped, client,
+                             round_="B")
+        o.cost_usd = _cost()
+        return o
+    arts["多空辩论②"] = str(out / "stance_b.md")
+
+    # ── 撰写简报：应用多空平衡点 ────────────────────────────────
+    print(f"撰写研究简报（{len(cat.entries)} 条可引用事实）…", file=sys.stderr)
+    body = None
+    try:
+        body, _ = write_body(cat, client, code=code, period=r.period, brief=True,
+                             context=f"**多空平衡点**\n\n{sb.summary()}",
+                             **{k: v or None
+                                for k, v in _prompt_bundle(pr).items()})
+    except (AnalystRefused, ClaudeCliError) as e:
+        dumped = _dump_refused(out, getattr(e, "raw", ""), WRITE_FAILED_BRIEF)
+        skipped.append(f"研究简报（{e.__class__.__name__}: {str(e)[:160]}）"
+                       + (f"（最后一稿已落盘：{dumped}）" if dumped else ""))
+    if body:
+        r.audit = audit(body, r.ledger, r.store, as_of=r.as_of)
+        (out / BRIEF).write_text(r.audit.with_sources(), encoding="utf-8")
+        arts["研究简报"] = str(out / BRIEF)
+        if (note := _audit_note("研究简报", r.audit)):
+            skipped.append(note)
+        _write_review(out, sa, sb, _snapshot_gaps(r))
+        arts["待核清单"] = str(out / REVIEW_MD)
+
+    _write_dashboard(r, out, md, code, arts)
+    skipped += _media_tier_note(getattr(r, "corpus", None))
+    _save_state(out, code, r, as_of, md, pr, verified_by=verified_by)
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of,
+        stage=Stage.AWAITING_BRIEF_REVIEW if body else Stage.INCOMPLETE,
+        artifacts=arts, skipped=skipped, cost_usd=_cost(), phase="brief")
+
+
+def run_assume(code: str, r, as_of: date, out_dir: str | Path,
+               reviewed_by: str, *, model: str | None = None,
+               snapshot_dir: str | Path = "snapshots") -> ResearchOutcome:
+    """第一阶段之三：AI 填 DCF 判断项 + 四道检查。
+
+    判断项的三档候选输入来自 `stance_b.json` 的平衡三元组；偏离该三元组的
+    行必须填 `deviation`（只查存在性）。
+
+    **没有 `accept_manual`。** 两轮辩论都在 `run_brief` 里，这一次调用没有
+    任何多空环节，那个开关在这儿无物可读。
+    """
+    from ir_agent import stance
+
+    out = Path(out_dir)
+    brief = out / BRIEF
+    sb_path = out / STANCE_B
+    for f in (brief, sb_path):
+        if not f.exists():
+            raise SystemExit(
+                f"找不到 {f} —— 请先运行第一阶段之二：\n"
+                f"  python -m ir_agent {code} --year {r.period[:4]} "
+                f"--brief {out} --verified-by <名字>")
+    if not reviewed_by.strip():
+        raise SystemExit("必须署名审阅人 —— 简报结论要有人审过才谈得上可据以建模。")
+
+    arts: dict[str, str] = {}
+    skipped: list[str] = []
+    body = brief.read_text(encoding="utf-8")
+    sb = stance.StanceResult.from_json(
+        json.loads(sb_path.read_text(encoding="utf-8")))
+    md, pr = _restore_state(out)
+    # **重建派生事实必须排在填判断项之前。** industry.* / comps.* / macro.*
+    # 只存在于内存账本；判断项的依据完全可以合法地引用它们，而本次调用是
+    # 一个新进程。与 `run_valuation` 里那条同源的实测教训（600584 端到端）：
+    # 不重建的话，校验时账本还没建好，合法的依据会被判为不存在。
+    _analyse_facts(code, r, as_of, snapshot_dir)
+
+    # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出最长
+    # 的一次调用，瓶颈在输出而不在提示词长度。实测（生益科技 2026-10-06）：
+    # 它 900s 超时，整轮 $11.09 作废。
+    assume_client = make_client(model=model, timeout=ASSUME_TIMEOUT,
+                                retry_timeout=True)
+
+    # **只读 drivers.md，不联网重新预研。** `_research_methodology` 在文件
+    # 缺失时会联网预研一个新分解式 —— 若这里那样做，人在门② 审过的简报与
+    # 接下来要填的判断项依据的是两个不同的分解式，而产物上看不出来。
+    meth, derr = _read_drivers(out)
+    if derr:
+        skipped.append(derr)
+    aerr = _propose_assumptions(
+        code, r, body, md, as_of, out, assume_client, arts,
+        decomps=(meth.decompositions if meth is not None else None),
+        factor_data=None, balances=sb.balances)
+    if aerr:
+        skipped.append(aerr)
+    _save_state(out, code, r, as_of, md, pr, reviewed_by=reviewed_by)
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of,
+        stage=(Stage.AWAITING_ASSUME_REVIEW
+               if (out / ASSUMPTIONS_JSON).exists() else Stage.INCOMPLETE),
+        artifacts=arts, skipped=skipped,
+        cost_usd=Decimal(str(assume_client.total_cost_usd)), phase="assume")
 
 
 def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
@@ -1917,7 +2093,7 @@ def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
 
 
 def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
-                         decomps=None, factor_data=None) -> str:
+                         decomps=None, factor_data=None, balances=None) -> str:
     """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。
 
     `decomps`/`factor_data` 给定时按因子分解填写（方法论预研 + 定向
@@ -1946,7 +2122,9 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                           decomps=decomps, factor_data=factor_data,
                           base_margin=base_margin,
                           # 锚定输入：清单上展示的毛利率路径与建模时同一套基期。
-                          anchor=assume.anchor_from_cal(cal))
+                          anchor=assume.anchor_from_cal(cal),
+                          # 辩论② 的平衡三元组：偏离它的行必须填 deviation。
+                          balances=balances)
     except assume.AssumeFailed as e:
         return f"DCF 判断项（{str(e)[:200]}）"
     except ClaudeCliError as e:

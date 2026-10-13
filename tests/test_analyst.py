@@ -428,7 +428,7 @@ class TestReportCarriesItsSources:
     def test_两个阶段写的都是带来源的版本(self):
         import inspect
         from ir_agent import full
-        for fn in (full.run_analysis, full.run_valuation):
+        for fn in (full.run_brief, full.run_valuation):
             assert "with_sources()" in inspect.getsource(fn), fn.__name__
 
 
