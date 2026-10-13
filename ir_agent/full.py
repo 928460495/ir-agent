@@ -1767,29 +1767,66 @@ def _audit_note(what: str, res) -> str:
     return f"审计未通过（{what}）：" + "；".join(parts)
 
 
+def _source_name(sid: str) -> str:
+    """source_id → 来源名。快照库给的 id 形如 `{source}_{%Y%m%d%H%M%S}_{12位摘要}`
+    （`SnapshotStore.save`）；不存快照的来源直接用来源名（em_macro）。"""
+    return re.sub(r"_\d{14}_[0-9a-f]{12}$", "", sid.split("#")[0])
+
+
 def _snapshot_gaps(r) -> list[tuple[str, int]]:
-    """统计本轮涉及的「缺原始接口快照」来源及条数。
+    """门①：账本里缺原始接口快照的事实，按来源汇总条数。
 
-    这条告警此前每轮都在终端重复一遍。它属于**来源质量**，归门① 说一次。
+    **按实际查到的，不按写死的名单。** 此前按 `manifest.KNOWN_GAPS` 的两个
+    来源名数前缀；生益科技第二次调用的审计报了 em_rates —— 名单里没有它，门①
+    的清单于是漏了一个来源。判据与 `audit.py` 同一条：非 COMPUTED 的事实逐个
+    `store.load(source_id)`，同一 source_id 只查一次。`KNOWN_GAPS` 降为「为什么
+    缺」的说明表（`manifest.render` 里查不到说明的用默认措辞）。
 
-    **`_facts` 的值是 `list[Fact]`，不是单条 Fact**（`ledger.py:63`）。写成
-    `for (key, per), f in ….items()` 再读 `f.source_id`，拿的是 list 的属性
-    —— 恒得空串，于是这个函数永远返回空列表，门① 的「缺原始接口快照」那一节
-    一次也不会打印。而那一节正是这道门的首要动机：这条告警连续六轮只在终端
-    一闪而过。Task 6 实跑时在同形的 `manifest.collect_rows` 上踩到过同一处。
+    **`_facts` 的值是 `list[Fact]`，不是单条 Fact**（`ledger.py`）——按 bucket
+    再展开，Task 6 实跑时在同形的 `manifest.collect_rows` 上踩到过。
     """
     from collections import Counter
 
-    from ir_agent.sources.manifest import KNOWN_GAPS
+    from ir_agent.ledger import Method
 
+    store, led = getattr(r, "store", None), getattr(r, "ledger", None)
+    if store is None or led is None:
+        return []
+    have: dict[str, bool] = {}
     c: Counter = Counter()
-    for bucket in getattr(getattr(r, "ledger", None), "_facts", {}).values():  # noqa: SLF001
+    for bucket in led._facts.values():                      # noqa: SLF001
         for f in bucket:
-            sid = (getattr(f, "source_id", "") or "").split("#")[0]
-            for name in KNOWN_GAPS:
-                if sid.startswith(name):
-                    c[name] += 1
+            if f.method is Method.COMPUTED:
+                continue
+            if f.source_id not in have:
+                try:
+                    store.load(f.source_id)
+                    have[f.source_id] = True
+                except KeyError:
+                    have[f.source_id] = False
+            if not have[f.source_id]:
+                c[_source_name(f.source_id)] += 1
     return sorted(c.items())
+
+
+def _missing_snapshot_notes(res) -> list:
+    """门②：简报里缺原始接口快照的那些引用，逐条（同一 key@期间@来源只列一次）。
+
+    快照有没有只取决于 source_id（`audit.py` 逐条 `store.load(n.source_id)`、
+    跳过 COMPUTED），所以拿审计给出的缺失集合回头筛脚注就是精确的 —— 不改
+    `audit.py`，第二阶段不受影响。
+    """
+    from ir_agent.ledger import Method
+
+    miss = set(getattr(res, "missing_snapshots", None) or ())
+    out, seen = [], set()
+    for n in getattr(res, "footnotes", None) or ():
+        ident = (n.key, n.period, n.source_id)
+        if (n.method != Method.COMPUTED.value and n.source_id in miss
+                and ident not in seen):
+            seen.add(ident)
+            out.append(n)
+    return out
 
 
 def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
@@ -1931,20 +1968,65 @@ def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
     return res
 
 
-def _write_review(out: Path, sa, sb, gaps_rows) -> None:
+def _review_factor_lines(factor_data) -> list[str]:
+    """门②：因子联网结论（模型综合，待人工复核）。带 ⚠ 的排最前。
+
+    用户决定 B：门② 一次签名覆盖全部结论，有异议直接改或删 `factors.json`
+    里对应条目后再签 —— 所以这里要把文件名说出来。
+    """
+    from ir_agent.sources.conclusions import Conclusion
+
+    rows = [(fd.factor.label, c) for fd in (factor_data or {}).values()
+            for c in fd.findings if isinstance(c, Conclusion)]
+    if not rows:
+        return []
+    rows.sort(key=lambda x: not x[1].flags())               # 稳定排序：⚠ 在前
+    lines = [f"## 因子联网结论（模型综合，待人工复核）：{len(rows)} 条", "",
+             "结论可以综合多篇文章、可以改写；代码只核对了文章打不打得开、结论里"
+             "的数字在引用文章里有没有出处。**有异议的，直接改或删 `factors.json`"
+             " 里对应条目后再签门②。**", ""]
+    for label, c in rows:
+        flags = c.flags()
+        lines.append(f"- {'⚠ ' if flags else ''}**{label}**：{c.claim}")
+        if flags:
+            lines.append(f"  - ⚠ {flags}")
+        for a in c.articles:
+            st = "" if a.opened else f"（{a.why_not}）"
+            lines.append(f"  - 文章{a.no}：[{a.publisher or a.link}]({a.link})"
+                         f"　{a.tier.value}　{a.published}{st}")
+        if c.marks:
+            lines.append("  - 数字出处：" + "　".join(
+                f"{m.number} " + ("✓ 文章" + "、".join(m.found_in)
+                                  if m.found_in else "⚠ 找不到")
+                for m in c.marks))
+        if c.dropped:
+            lines.append(f"  - 已剔除：{'；'.join(c.dropped)}")
+    lines.append("")
+    return lines
+
+
+def _write_review(out: Path, sa, sb, missing=(), factor_data=None) -> None:
     """门② 的待核清单：把所有「代码没把握」的东西聚到一处。"""
+    from ir_agent.sources.manifest import KNOWN_GAPS
+
     lines = ["# 待核清单（门②：请在批准简报结论前过一遍）", ""]
     for name, s in (("多空辩论①", sa), ("多空辩论②", sb)):
         if s is not None and s.unverified:
             lines += [f"## {name}：{len(s.unverified)} 条证据代码核验不过", ""]
             lines += [f"- [{e.side}] {e.subject}：{e.unverified}"
                       for e in s.unverified] + [""]
-    # **不要写成 `getattr(audit_res, "unsnapshotted", None)`。** `audit()` 的
-    # 返回值没有这个属性（全仓库查无此名），`getattr` 带默认值会让这一节
-    # 永远不打印 —— 待核清单上写着它会列这件事，而它一次也不会列。
-    if gaps_rows:
-        lines += ["## 本轮账本事实缺原始接口快照（结构性限制，非本轮故障）", ""]
-        lines += [f"- {name}：{n} 条" for name, n in gaps_rows] + [""]
+    lines += _review_factor_lines(factor_data)
+    if missing:
+        groups: dict[str, list] = {}
+        for n in missing:
+            groups.setdefault(_source_name(n.source_id), []).append(n)
+        lines += [f"## 简报引用缺原始接口快照：{len(missing)} 条"
+                  "（数字在，但反查不到当时的接口响应）", ""]
+        for name, ns in groups.items():
+            why = KNOWN_GAPS.get(name, "未保留原始接口响应")
+            lines += [f"### {name}（{len(ns)} 条）—— {why}", ""]
+            lines += [f"- {n.display or '—'}　`{n.key}@{n.period}`"
+                      for n in ns] + [""]
     if len(lines) == 2:
         lines.append("本轮没有需要人工复核的标注项。")
     (out / REVIEW_MD).write_text("\n".join(lines), encoding="utf-8")
@@ -2109,7 +2191,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
         arts["研究简报"] = str(out / BRIEF)
         if (note := _audit_note("研究简报", r.audit)):
             skipped.append(note)
-        _write_review(out, sa, sb, _snapshot_gaps(r))
+        _write_review(out, sa, sb, _missing_snapshot_notes(r.audit), factor_data)
         arts["待核清单"] = str(out / REVIEW_MD)
 
     _write_dashboard(r, out, md, code, arts)

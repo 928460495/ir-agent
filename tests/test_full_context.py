@@ -2851,6 +2851,9 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
                             "成未生成是对的"),
         "_load_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
         "_restore_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
+        "_review_factor_lines": ("不是终端清单的生产者：返回 review.md 的 markdown "
+                                 "行，不进 skipped；渲染断言在 test_待核清单_快照"
+                                 "一节逐条_因子结论一节警示在前"),
     }
     producers = {n for n, f in inspect.getmembers(full, inspect.isfunction)
                  if f.__module__ == full.__name__
@@ -4105,3 +4108,82 @@ def test_因子采集结果从第二次调用传到第三次的判断项(tmp_pat
     assert fd[f0.key].status == gaps.EXTERNAL
     assert fd[f0.key].findings[0].claim == "2026年出货量同比增长15%"
     assert fd[f0.key].findings[0].tier is Tier.OFFICIAL
+
+
+# ══ 第二次调用试跑后的修订 ③：快照缺口按实际查到的 ═════════════════
+
+class _Store:
+    def __init__(self, have): self.have = set(have)
+    def load(self, sid):
+        if sid not in self.have:
+            raise KeyError(sid)
+        return object()
+
+
+def test_门一快照缺口按实际查_不按写死名单():
+    """生益科技第二次调用审计报了 em_rates，写死的名单里没有它。"""
+    from ir_agent import full
+
+    led = FactLedger()
+    for key, sid, m in (("rf", "em_rates", Method.REPORTED),
+                        ("rev", "eastmoney_20261013010101_abcdef123456", Method.REPORTED),
+                        ("g", "calc", Method.COMPUTED)):
+        led.put(Fact(key=key, value=Decimal("1"), unit="ratio", period="2025FY",
+                     as_of=date(2026, 4, 1), source_id=sid, method=m))
+
+    class _R:
+        ledger = led
+        store = _Store({"eastmoney_20261013010101_abcdef123456"})
+    assert full._snapshot_gaps(_R()) == [("em_rates", 1)]
+
+
+def test_来源名剥掉快照库的时间戳与摘要():
+    from ir_agent import full
+    assert full._source_name("eastmoney_20261013010101_abcdef123456") == "eastmoney"
+    assert full._source_name("em_macro") == "em_macro"
+
+
+def test_门二逐条列出简报里缺快照的引用_按来源分组():
+    from ir_agent import full
+    from ir_agent.citation import Footnote
+
+    def fn(key, sid, method="reported", display="2.0%"):
+        return Footnote(marker=1, key=key, period="2026-08", source_id=sid,
+                        as_of=date(2026, 9, 1), method=method, display=display)
+
+    class _A:
+        footnotes = [fn("macro.cpi", "em_macro"), fn("macro.cpi", "em_macro"),
+                     fn("rf", "em_rates", display="1.8%"), fn("rev", "eastmoney_x")]
+        missing_snapshots = ["em_macro", "em_macro", "em_rates"]
+    got = full._missing_snapshot_notes(_A())
+    assert [(n.key, n.source_id) for n in got] == [
+        ("macro.cpi", "em_macro"), ("rf", "em_rates")], "去重、只留缺的"
+
+
+def test_待核清单_快照一节逐条_因子结论一节警示在前(tmp_path):
+    from ir_agent import full, gaps
+    from ir_agent.citation import Footnote
+    from ir_agent.drivers import Factor
+    from ir_agent.sources.conclusions import Article, Conclusion, number_marks
+
+    def concl(claim, text):
+        a = Article(no="1", url="https://x.cn/a", publisher="某媒体",
+                    published=date(2026, 7, 1), final_url="https://x.cn/a",
+                    opened=True, text=text)
+        c = Conclusion(factor_key="k", claim=claim, articles=[a])
+        c.marks = number_marks(c.claim, c.articles)
+        return c
+
+    f = Factor(key="k", label="稼动率", unit="变化率")
+    fd = {"k": gaps.FactorData(factor=f, status=gaps.EXTERNAL, findings=[
+        concl("稼动率约78%", "稼动率约78%"),
+        concl("7628规格满产", "满产")])}
+    miss = [Footnote(marker=1, key="rf", period="2026-08", source_id="em_rates",
+                     as_of=date(2026, 9, 1), method="reported", display="1.8%")]
+    full._write_review(tmp_path, None, None, miss, fd)
+    md = (tmp_path / "review.md").read_text(encoding="utf-8")
+    assert "### em_rates（1 条）" in md and "`rf@2026-08`" in md
+    assert "因子联网结论（模型综合，待人工复核）：2 条" in md
+    assert md.index("7628规格满产") < md.index("稼动率约78%"), "带 ⚠ 的排最前"
+    assert "7628 ⚠ 找不到" in md
+    assert "factors.json" in md, "要告诉人有异议直接改哪个文件"
