@@ -36,9 +36,10 @@ from datetime import date
 from ir_agent.drivers import Decomposition, Factor
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.sources.external import Document, Tier
-from ir_agent.sources.openweb import TEXT_LIMIT, verify_finding
-from ir_agent.sources.web import (Finding, WebUnavailable, by_tier, search,
-                                  supports_value)
+from ir_agent.sources import conclusions
+from ir_agent.sources.conclusions import Article, Conclusion, number_marks
+from ir_agent.sources.openweb import TEXT_LIMIT
+from ir_agent.sources.web import Finding, WebUnavailable
 
 DISCLOSED = "已披露"
 ANNUAL = "年报披露"     # ②年报叙述章节命中——文字依据，未必给出数值
@@ -156,7 +157,10 @@ def _negated(window: str) -> bool:
 class FactorData:
     factor: Factor
     status: str = MISSING
-    findings: list[Finding] = field(default_factory=list)
+    # EXTERNAL：`conclusions.Conclusion` 列表（模型综合结论 + 引用文章，2026-10-13
+    # 起）。`assume._match_finding` / `summary` 按 claim/url/publisher 读，与旧的
+    # `web.Finding` 同名，两种都能放。
+    findings: list = field(default_factory=list)
     note: str = ""
     # ANNUAL/ANNOUNCE/REPORT 命中时的真实出处——供 assume.py 在模型引用摘出的
     # 原文片段时，代码自动补上可核验的 URL/抓取日期（模型自己不接触
@@ -465,170 +469,139 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                 continue
 
             try:
-                found = search(client, f.label, f.key, industry, as_of)
+                got = conclusions.search(client, f.label, f.key, industry, as_of)
             except WebUnavailable as e:
                 # 能力边界不是故障，整轮研究不该因此停摆。措辞里显式写
-                # 「不能联网」而不是只转述异常原文 —— WebUnavailable 的
-                # 实际文案说的是"开放网络采集当前被禁用"，读者要能一眼
-                # 看出这是联网能力缺失，而不用去解读措辞。
+                # 「不能联网」而不是只转述异常原文。
                 out[f.key] = FactorData(
                     factor=f, status=MISSING,
                     note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
                 continue
 
-            # ── B2：每条发现都回原页核实 ────────────────────────────
-            # 核验不通过的**降级为线索**：不丢弃、不阻断，但不算进
-            # supports_value。这是门槛得以放宽到 MEDIA 的前提——
-            # 见 web.supports_value 的文档字符串。
-            #
-            # **排序在这里做，按 Verified.tier（代码观测到的最终域名），
-            # 不是 Finding.tier（模型自报的机构名）。** 一条发现的
-            # publisher 可以随便写「国家统计局」，但核验通过后落地的
-            # 是它实际请求到的域名——呈现顺序理应服从后者，否则
-            # by_tier 排出来的"证明力强的排前面"就是在用模型的自称
-            # 排序，恰是这次改动要停止相信的东西。`passed` 本身在这里
-            # 排好序，不是排一份派生列表：这样入库顺序、note 判断
-            # （下面 `all(...)`）与最终交给 supports_value/FactorData
-            # 的列表三者用的是同一份顺序，不会各说各话。
-            verified = [verify_finding(x) for x in found]
-            passed = by_tier([v for v in verified if v.ok])
-            unverified = [v for v in verified if not v.ok]
-            found = [v.finding for v in passed]
-
-            ok, why = supports_value(found)
-            if ok:
-                for v in passed:
-                    x = v.finding
+            # ── ④：模型综合结论 + 引用文章（spec 2026-10-13 ②）─────
+            # 结论可以综合、可以改写；代码只做了机械比对，结果全是标注。
+            # 有结论就落 EXTERNAL（决定 A：带 ⚠ 的也能作依据，门③ 那一行
+            # 带标记），交给门② 的人复核（决定 B）。
+            if not got.items:
+                why = "；".join(got.dropped) or "没搜到可用的结论"
+                out[f.key] = FactorData(factor=f, status=MISSING,
+                                        note=f"{why} —— 取值为估计")
+                continue
+            arts: list[Article] = []
+            for c in got.items:
+                for a in c.articles:
+                    if all(a is not x for x in arts):
+                        arts.append(a)
+            for a in arts:
+                if a.opened:
+                    # **入库的是代码抓回的全文，不是模型的结论。** 辩论② 与
+                    # 撰写简报引的是文章原文 ——「不得引用本系统的分析结论」
+                    # 那条规矩照样成立。
                     corpus.add_if_visible(Document(
                         doc_id=f"web_{f.key}_{len(corpus.docs)}",
-                        url=v.final_url, title=f"{f.label}：{x.claim[:30]}",
-                        publisher=x.publisher,
-                        # 核验通过后分级按**代码观测到的最终域名**重判，
-                        # 不用模型自报的机构名。
-                        tier=v.tier,
-                        # 不用 `x.published or as_of` 兜底——那等于把
-                        # "日期不明"洗成"时点上最合规"，把最不可信的
-                        # 证据换成时点守卫最宽松放行的取值。理由详见
-                        # `web.Finding.published` 字段上的注释，两处
-                        # 必须遵循同一条规矩，不能各改各的。
-                        published=x.published, retrieved=as_of,
-                        # **入库的是代码抓回的全文，不是模型转述的那句话。**
-                        # 此前这里是 text=x.claim——一句从没被抓取过的
-                        # 转述，和代码亲手抓回来的文档躺在同一个 Corpus
-                        # 里，Corpus.verify() 分不出来（子项目 A 终审
-                        # NEW-3 记的就是这条）。
-                        text=v.text, prompt_limit=TEXT_LIMIT))
-                note = ""
-                if all(v.tier is Tier.MEDIA for v in passed):
-                    # 放宽的是门槛，不是知情：仅靠媒体支撑时证据强度
-                    # 要让人在批准时看得见。
-                    note = "仅财经媒体支撑（已在原页逐字核实）"
-                # Fix C（复审）：note 里这句人话与下面的结构化字段算的是
-                # 同一个谓词，只算一次、两处一起赋值，不能各说各的。
-                degraded = any(v.host_check_degraded for v in passed)
-                if degraded:
-                    # 与 `Fetched.host_check_degraded`（openweb.py:770-
-                    # 775）同一份事实——降级不阻断抓取，但「内网地址
-                    # 拦截这一轮靠的是代理，不是本代码」是批准这条因子
-                    # 取值的人有权知道的事。**这里落地的只是因子级**：
-                    # 这句 note（经 `gaps.summary()` 渲染后人可见，见
-                    # Fix wave 2 Fix A）与下面 `FactorData.
-                    # host_check_degraded` 结构化字段。不是
-                    # `openweb.OpenWebResult.host_check_degraded` 那个
-                    # 计数器——④ 分支走的是 `verify_finding` 这第二个
-                    # fetch 调用点，从没往 `OpenWebResult` 记过账，所以
-                    # `_openweb_notes` 的「N 篇入库时…」那行至今不含这里
-                    # 发生的降级。**但这不再是欠计数**：Task 7 给④这条
-                    # 路径接了自己的清单行——`full._factor_host_check_
-                    # note`（按函数名找，行号会漂）读下面那个结构化字段，产出
-                    # 「N 个因子采集时主机安全校验降级」。`Fetched.
-                    # host_check_degraded`「必须一路传到产物清单」这条
-                    # 契约在④分支上由那一行兑现，不是由这句 note。
-                    n = sum(1 for v in passed if v.host_check_degraded)
-                    note += ("；" if note else "") + \
-                        (f"其中 {n} 条命中时主机安全校验降级（本机 DNS "
-                         "被代理劫持，IP 层校验无从进行）——内网地址拦截"
-                         "本轮依赖代理侧")
-                if unverified:
-                    note += ("；" if note else "") + \
-                        f"另有 {len(unverified)} 条模型转述未能在原页核实，" \
-                        "已降级为线索"
-                out[f.key] = FactorData(factor=f, status=EXTERNAL,
-                                        findings=found, note=note,
-                                        host_check_degraded=degraded)
-            else:
-                # `passed` 在这个分支里恒为空——`ok=False` 就是
-                # `supports_value(found)` 判了空，而 `found` 正是从
-                # `passed` 算出来的；下面 `not passed` 与 `findings=`
-                # 都在吃同一个事实，这里只说一次。
-                if unverified and not passed:
-                    # 「搜到了但核实不过」与「什么都没搜到」对读者的含义
-                    # 不同：前者是证据链起步了但站不住，后者是连线索都
-                    # 没有。
-                    note = (f"{len(unverified)} 条模型转述均未能在原页核实"
-                            f"（{unverified[0].reason[:60]}）—— 取值为估计")
-                else:
-                    note = f"{why} —— 取值为估计"
-                # 跟着 `passed` 的定义写，不写死 `[]`：`assume.
-                # _match_finding` 按 `claim` 逐字匹配、不看核验状态，
-                # 未核实的发现混进 `findings` 会被当成已核实的
-                # `Basis.external`。
-                out[f.key] = FactorData(
-                    factor=f, status=MISSING,
-                    findings=[v.finding for v in passed], note=note)
+                        url=a.final_url, title=f"{f.label}：文章{a.no}",
+                        publisher=a.publisher, tier=a.tier,
+                        published=a.published, retrieved=as_of,
+                        text=a.text, prompt_limit=TEXT_LIMIT,
+                        date_source="model"))
+            flagged = sum(1 for c in got.items if c.flags())
+            note = (f"{len(got.items)} 条模型综合结论，待人工复核"
+                    + (f"（其中 {flagged} 条带 ⚠）" if flagged else ""))
+            if got.dropped:
+                note += "；" + "；".join(got.dropped)
+            degraded = any(a.degraded for a in arts)
+            if degraded:
+                n = sum(1 for a in arts if a.degraded)
+                note += (f"；其中 {n} 篇文章抓取时主机安全校验降级（本机 DNS "
+                         "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮"
+                         "依赖代理侧")
+            out[f.key] = FactorData(factor=f, status=EXTERNAL,
+                                    findings=got.items, note=note,
+                                    host_check_degraded=degraded)
     return out
 
 
-def to_json(data: dict[str, FactorData]) -> dict:
-    """因子采集结果落盘（`factors.json`）。键是 `Factor.key`。
+SCHEMA = 2
 
-    **为什么要落盘。** 采集发生在第一阶段的第二次调用（`run_brief`），而用它
-    的判断项在第三次调用（`run_assume`），中间隔一个人工门、是两个进程。第一
-    版没落盘，第三次调用拿到的是 `factor_data=None` —— `assume._factor_basis`
-    于是把每个因子都当成「没采到」：逐字核实过的网络发现不能作依据，「无数据
-    （估计）」对所有因子开放。花钱做的定向采集对判断项完全不起作用。
+
+def _article_json(a: Article) -> dict:
+    return {"no": a.no, "url": a.url, "publisher": a.publisher,
+            "published": a.published.isoformat(), "final_url": a.final_url,
+            "tier": a.tier.value, "opened": a.opened, "why_not": a.why_not,
+            "degraded": a.degraded, "text": a.text}
+
+
+def to_json(data: dict[str, FactorData]) -> dict:
+    """因子采集结果落盘（`factors.json`），schema 2。键是 `Factor.key`。
+
+    **为什么要落盘。** 采集发生在第二次调用（`run_brief`），用它的判断项在第三
+    次调用（`run_assume`），中间隔一个人工门、是两个进程。
+
+    **schema 2（2026-10-13）**：EXTERNAL 存模型综合结论 + 引用文章（含代码
+    抓回的正文 —— 第三次调用要拿它重算数字标注）；数字标注本身**不存**，读回
+    时按（人可能改过的）结论文字重算，存了就会在人改完之后停在改之前。另补存
+    `source_excerpt`：此前不存，第三次调用里模型逐字引用年报摘录会匹配不到。
     """
     def _fd(fd: FactorData) -> dict:
         return {"status": fd.status, "note": fd.note,
                 "source_url": fd.source_url,
                 "source_retrieved": (fd.source_retrieved.isoformat()
                                      if fd.source_retrieved else None),
-                "findings": [{"claim": x.claim, "url": x.url,
-                              "publisher": x.publisher, "tier": x.tier.value,
-                              "published": x.published.isoformat()}
-                             for x in fd.findings]}
-    return {k: _fd(fd) for k, fd in data.items()}
+                "source_excerpt": fd.source_excerpt,
+                "host_check_degraded": fd.host_check_degraded,
+                "conclusions": [{"claim": c.claim, "dropped": list(c.dropped),
+                                 "articles": [_article_json(a) for a in c.articles]}
+                                for c in fd.findings
+                                if isinstance(c, Conclusion)]}
+    return {"schema": SCHEMA, "factors": {k: _fd(fd) for k, fd in data.items()}}
 
 
 def from_json(raw: dict, decomps: list[Decomposition]
               ) -> tuple[dict[str, FactorData], list[str]]:
     """读回 `factors.json`，按因子键与**当前**分解式对上。返回 (数据, 说明)。
 
-    人可以在两次调用之间改 `drivers.md`（I2 的承诺）。改过之后，采集结果里
-    可能有分解式已不存在的因子、分解式里也可能有从没采集过的因子 —— 两种
-    都**说出来**，不静默对齐：前者丢弃，后者按「未采集」处理。
+    人可以在两次调用之间改 `drivers.md`（I2）与 `factors.json`（决定 B）——
+    分解式里没有的因子丢弃并说出来；没采集过的按「未采集」处理；结论被人删光
+    的 EXTERNAL 落「无数据」。旧格式（没有 schema 2）抛 ValueError，由
+    `full._read_factors` 接住、说「读不回，重跑 --brief」。
     """
-    from ir_agent.sources.external import Tier
-
+    if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+        raise ValueError(f"factors.json 是旧格式（没有 \"schema\": {SCHEMA}）"
+                         "—— 重跑 --brief 生成新格式")
     factors = {f.key: f for d in decomps for f in d.factors}
     out: dict[str, FactorData] = {}
     notes: list[str] = []
-    for key, x in (raw or {}).items():
+    for key, x in (raw.get("factors") or {}).items():
         f = factors.get(key)
         if f is None:
             notes.append(f"因子采集结果里有「{key}」，但当前分解式没有这个因子"
                          "（drivers.md 在两次调用之间被改过？）—— 已丢弃")
             continue
+        concl = []
+        for y in x.get("conclusions") or []:
+            arts = [Article(no=str(z["no"]), url=z["url"],
+                            publisher=z.get("publisher", ""),
+                            published=date.fromisoformat(z["published"]),
+                            final_url=z.get("final_url", ""),
+                            tier=Tier(z.get("tier", Tier.MEDIA.value)),
+                            opened=bool(z.get("opened")), text=z.get("text", ""),
+                            why_not=z.get("why_not", ""),
+                            degraded=bool(z.get("degraded")))
+                    for z in y.get("articles") or []]
+            c = Conclusion(factor_key=key, claim=y["claim"], articles=arts,
+                           dropped=list(y.get("dropped") or []))
+            c.marks = number_marks(c.claim, c.articles)
+            concl.append(c)
+        status, note = x.get("status", MISSING), x.get("note", "")
+        if status == EXTERNAL and not concl:
+            status, note = MISSING, "门② 删除了全部联网结论 —— 取值为估计"
         sr = x.get("source_retrieved")
         out[key] = FactorData(
-            factor=f, status=x.get("status", MISSING), note=x.get("note", ""),
+            factor=f, status=status, note=note, findings=concl,
             source_url=x.get("source_url", ""),
             source_retrieved=date.fromisoformat(sr) if sr else None,
-            findings=[Finding(factor_key=key, claim=y["claim"], url=y["url"],
-                              publisher=y.get("publisher", ""),
-                              tier=Tier(y["tier"]),
-                              published=date.fromisoformat(y["published"]))
-                      for y in x.get("findings") or []])
+            source_excerpt=x.get("source_excerpt", ""),
+            host_check_degraded=bool(x.get("host_check_degraded")))
     for key, f in factors.items():
         if key not in out:
             notes.append(f"因子「{f.label}」没有采集结果 —— 按「未采集」处理")
@@ -642,7 +615,12 @@ def summary(data: dict[str, FactorData]) -> str:
     lines.append("| --- | --- | --- |")
     for fd in data.values():
         if fd.status == EXTERNAL:
-            src = "；".join(f"{x.publisher}（{x.url}）" for x in fd.findings[:2])
+            src = "；".join(
+                (f"「{x.claim}」（文章 "
+                 + "、".join(f"{a.no}:{a.publisher}" for a in x.articles)
+                 + ("，⚠" if x.flags() else "") + "）")
+                if isinstance(x, Conclusion) else f"{x.publisher}（{x.url}）"
+                for x in fd.findings[:3]).replace("|", "｜")
             # 复审 Fix A：`note` 在 EXTERNAL 分支上装的是代码观测到的
             # 事实（仅媒体支撑、主机安全校验是否降级、还有几条转述没
             # 核实住）——这些是 Task 6 明确要求人在批准清单上看得见的

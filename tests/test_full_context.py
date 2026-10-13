@@ -2794,7 +2794,8 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
         return full._read_factors(_rf, _meth)[1]
 
     def _fd(keys):
-        return _json.dumps({k: {"status": "无数据", "findings": []} for k in keys})
+        return _json.dumps({"schema": 2, "factors": {
+            k: {"status": "无数据", "conclusions": []} for k in keys}})
 
     add("_read_factors", "未落盘", read_factors(None), GAP, "未落盘")
     add("_read_factors", "读不回", read_factors("{坏的"), GAP, "读不回")
@@ -4057,10 +4058,14 @@ def test_因子采集结果从第二次调用传到第三次的判断项(tmp_pat
         "分解: 营收 | 乘 | 出货量:变化率:年报:出货量 | 单价:变化率:年报:单价\n"
         "分解: 毛利率 | 加 | 铜箔:pp:年报:铜箔 | 稼动率:pp:年报:稼动率\n")
     meth.industry = "测试业"
+    from ir_agent.sources.conclusions import Article, Conclusion
     f0 = meth.decompositions[0].factors[0]
-    finding = Finding(factor_key=f0.key, claim="2026年出货量同比增长15%",
-                      url="https://example.cn/a", publisher="某协会",
-                      tier=Tier.OFFICIAL, published=date(2026, 9, 1))
+    art = Article(no="1", url="https://example.cn/a", publisher="某协会",
+                  published=date(2026, 9, 1), final_url="https://example.cn/a",
+                  tier=Tier.OFFICIAL, opened=True,
+                  text="2026年出货量同比增长15%。")
+    finding = Conclusion(factor_key=f0.key, claim="2026年出货量同比增长15%",
+                         articles=[art])
 
     seq = _offline(monkeypatch, full)
     _stub_brief(monkeypatch, full, seq)

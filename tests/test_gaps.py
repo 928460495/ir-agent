@@ -103,64 +103,6 @@ def test_采集不到标为无数据():
     assert "估计" in data["utilization"].note
 
 
-def test_采集到官方来源标为外部来源(monkeypatch):
-    """Task 6 之后④会先核验再判断是否够格（见 web.supports_value 的
-    调用契约），因此这里要把 verify_finding 换成不发真实请求的假实现——
-    否则这条单元测试会真的去抓 https://semi.org/x。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text=x.claim,
-        final_url=x.url, tier=x.tier))
-    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
-          "| SEMI | 2026-07-01\n")
-    data = collect(_Client(ok, ""), [_rev()], _led("capacity"),
-                   Corpus(as_of=AS_OF), "封测", AS_OF)
-    assert data["utilization"].status == "外部来源"
-    assert data["utilization"].findings[0].tier is Tier.OFFICIAL
-
-
-def test_核验不通过的媒体来源仍算无数据但说明原因(monkeypatch):
-    """Task 6 放宽的是"已核实"的 MEDIA，不是 MEDIA 本身——核验不通过时
-    依旧不够格，且要说清是「找到了但没核实住」而不是「什么都没找到」。
-    此前这里断言的是"单一媒体"（旧门槛按来源等级），放宽后来源等级已经
-    不是门槛，这条测试改守新门槛：是否已核实。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=False, reason=f"{x.url}：未能在原页核实",
-        text="", final_url=x.url, tier=x.tier))
-    media = ("发现: utilization | 稼动率下滑 | https://a/b "
-             "| 某财经网 | 2026-07-01\n")
-    data = collect(_Client(media, ""), [_rev()], _led("capacity"),
-                   Corpus(as_of=AS_OF), "封测", AS_OF)
-    assert data["utilization"].status == "无数据"
-    # 只断言"核实"这两个字在 note 里会通过——代码模板里的「均未能在
-    # 原页核实」和桩自己的 reason「未能在原页核实」都含这两个字，一个
-    # 从没拼过这句模板的实现也能凑巧让这条断言过。改钉数量前缀 +
-    # 「均未能」，这是只有走了「unverified and not passed」这条分支
-    # 才会拼出来的具体措辞。
-    assert "1 条模型转述均未能在原页核实" in data["utilization"].note
-
-
-def test_采集到的进语料库供核验(monkeypatch):
-    """入库用的是核验时抓回的全文，不是模型转述的 claim——这里的假
-    verify_finding 特意让 text 与 claim 不同，证明入库确实读的是
-    Verified.text 而不是 Finding.claim（否则改回 text=x.claim 这条也会
-    “碰巧”通过）。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="",
-        text="行业平均稼动率 78%，环比持平。",
-        final_url=x.url, tier=x.tier))
-    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
-          "| SEMI | 2026-07-01\n")
-    corpus = Corpus(as_of=AS_OF)
-    collect(_Client(ok, ""), [_rev()], _led("capacity"), corpus, "封测", AS_OF)
-    assert any("环比持平" in d.text for d in corpus.docs)
-
-
 def test_不可联网时不中断只标无数据():
     """联网不可用是能力边界，不是故障 —— 整轮研究不该因此停摆。"""
     import ir_agent.sources.web as W
@@ -232,22 +174,6 @@ def test_年报优先于研报():
     assert data["utilization"].status == "年报披露"
 
 
-def test_年报研报都未命中才落到外部网络(monkeypatch):
-    """②③都没命中，现有④的行为不变（Task 6 起④先核验，这里用假
-    verify_finding 避免单元测试真的发起网络请求）。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text=x.claim,
-        final_url=x.url, tier=x.tier))
-    sections = _sections(("core_competency", "核心竞争力分析", "公司专注于主业发展"))
-    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
-          "| SEMI | 2026-07-01\n")
-    data = collect(_Client(ok, ""), [_rev()], _led("capacity"),
-                   Corpus(as_of=AS_OF), "封测", AS_OF, sections=sections)
-    assert data["utilization"].status == "外部来源"
-
-
 def test_sections与corpus为None时不崩溃():
     """调用方没取到年报或语料库都要容错，直接落到④。"""
     data = collect(_Client("", ""), [_rev()], _led("capacity"),
@@ -294,24 +220,6 @@ def test_研报命中记下该文档自己的真实url与抓取日期():
     fd = data["utilization"]
     assert fd.source_url == "https://research.example/x"
     assert fd.source_retrieved == AS_OF          # _doc() 里 retrieved=AS_OF
-
-
-def test_外部来源状态不填source_url(monkeypatch):
-    """EXTERNAL 状态下证据是 findings 列表，可能有好几条各自的 url，
-    没有一个"唯一"来源可以预先填在 source_url 上——这两个字段就该
-    保持默认空值，不能塞进某一条 Finding 的 url 造成误导。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text=x.claim,
-        final_url=x.url, tier=x.tier))
-    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
-          "| SEMI | 2026-07-01\n")
-    data = collect(_Client(ok, ""), [_rev()], _led("capacity"),
-                   Corpus(as_of=AS_OF), "封测", AS_OF)
-    fd = data["utilization"]
-    assert fd.status == "外部来源"
-    assert fd.source_url == ""
 
 
 def test_摘要区分文字依据与已核实数值():
@@ -479,16 +387,15 @@ def test_否定语境之外的真实命中不受连坐():
 def test_MEDIA语料不产生研报测算命中(monkeypatch):
     """语料库里只有一篇 MEDIA 文档、文本命中核心词时，③不能把它判成
     「研报测算」——那等于一篇网络博客单独支撑了因子取值，是本轮修复
-    要堵的洞。落空后应正常退到④，④命中官方来源则算「外部来源」。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text=x.claim,
-        final_url=x.url, tier=x.tier))
+    要堵的洞。落空后应正常退到④，④有结论则算「外部来源」。"""
+    import ir_agent.sources.conclusions as CC
+    from ir_agent.sources.openweb import Fetched
+    monkeypatch.setattr(CC, "fetch", lambda url, **k: Fetched(
+        final_url=url, text="平均稼动率约78%", meta_published=None))
     corpus = Corpus(as_of=AS_OF)
     corpus.add(_doc("我们测算行业稼动率将于下半年回升。", tier=Tier.MEDIA))
-    ok = ("发现: utilization | 平均稼动率约78% | https://semi.org/x "
-          "| SEMI | 2026-07-01\n")
+    ok = ("文章: 1 | https://semi.org/x | SEMI | 2026-07-01\n"
+          "结论: utilization | 平均稼动率约78% | 依据 1\n")
     data = collect(_Client(ok, ""), [_rev()], _led("capacity", "asp"),
                    corpus, "封测", AS_OF)
     fd = data["utilization"]
@@ -620,152 +527,6 @@ def test_ANNOUNCE_标签文案():
 # 但不能撑因子取值——这条契约的落地处是这里，不是 web.supports_value
 # 本身（它已经不知道调用方是不是核实过）。
 
-def test_核验不通过的发现不算合格来源(monkeypatch):
-    """降级为线索：不丢弃、不阻断，但不能撑因子取值。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    from ir_agent.sources.external import Corpus, Tier
-    from ir_agent.sources.web import Finding
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://m.example.com/a", publisher="某财经网",
-                tier=Tier.MEDIA, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=False, reason="…未能在原页核实", text="",
-        final_url=x.url, tier=x.tier))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert fd.status == G.MISSING
-    assert "核实" in fd.note
-
-
-def test_核验通过的发现入库用抓回的全文(monkeypatch):
-    """在此之前入库的 Document.text 是模型转述的一句话，与代码抓回的
-    文档在同一个 Corpus 里分不出来（子项目 A 终审 NEW-3）。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    from ir_agent.sources.external import Corpus, Tier
-    from ir_agent.sources.web import Finding
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://m.example.com/a", publisher="某财经网",
-                tier=Tier.MEDIA, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="",
-        text="产能 300 万平方米，全年满产。",
-        final_url="https://m.example.com/a", tier=Tier.MEDIA))
-    cp = Corpus(as_of=AS_OF)
-    data = _collect_one_factor(G, corpus=cp)
-    assert data["capacity"].status == G.EXTERNAL
-    doc = next(d for d in cp.docs if d.url == "https://m.example.com/a")
-    assert "全年满产" in doc.text, "入库要用抓回的全文"
-
-
-def test_仅媒体支撑的因子在清单上被标注(monkeypatch):
-    """放宽之后媒体能撑因子，但证据强度要让人在批准时看得见。
-
-    **人在批准时读的是 `G.summary()` 的渲染结果，不是 `FactorData.note`
-    这个字段本身**——Fix A 之前 `summary()` 的 EXTERNAL 行只渲染
-    publisher/url 这个来源列表，note 被整个丢在地上，人从清单上根本
-    看不到"仅财经媒体支撑"这句话，只看得到模型自称的来源。这里补一条
-    对 `summary()` 输出的断言，钉住这句话确实渲染出来了。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    from ir_agent.sources.external import Corpus, Tier
-    from ir_agent.sources.web import Finding
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://m.example.com/a", publisher="某财经网",
-                tier=Tier.MEDIA, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text="产能 300 万平方米。",
-        final_url=x.url, tier=Tier.MEDIA))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    assert "仅财经媒体支撑" in data["capacity"].note
-    assert "仅财经媒体支撑" in G.summary(data), (
-        "note 里有这句话不够——人在批准清单上读的是 summary() 的渲染"
-        "结果，EXTERNAL 行如果只印来源列表、不带上 note，这句话就永远"
-        "到不了人眼前。")
-
-
-def test_部分核实的因子清单上写明另有几条已降级(monkeypatch):
-    """**终审补的：`if unverified:` 那一支此前没有任何测试能走到。**
-    仓库里所有 `ok=False` 的桩都只造单条 finding，`passed` 恒为空，
-    而这一支在 `if ok:` 里面——删掉整块 `if unverified:`，旧套件照绿。
-
-    它守的是「缺什么必须显式列出来」：一个因子由 1 条核实过的转述撑着，
-    另外 1 条被代码证伪、被悄悄丢掉——读清单的人若只看到「1 条依据」，
-    就永远不知道还有一条被证伪的转述曾经存在。**人读的是
-    `G.summary()` 的渲染，不是 `note` 字段**，所以断言落在渲染结果上
-    （同 `test_仅媒体支撑的因子在清单上被标注`）。
-
-    对「放着这句话不拼的实现」会红：note 里就没有「另有 1 条」，渲染
-    里自然也没有；而「核实不通过」这几个字在渲染里会因别处措辞凑巧
-    出现，所以钉的是只有这句模板才会拼出的数量短语。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    from ir_agent.sources.external import Corpus, Tier
-    from ir_agent.sources.web import Finding
-
-    good = Finding(factor_key="capacity", claim="产能 300 万",
-                   url="https://m.example.com/a", publisher="某财经网",
-                   tier=Tier.MEDIA, published=date(2026, 6, 1))
-    bad = Finding(factor_key="capacity", claim="产能 999 万",
-                  url="https://m.example.com/b", publisher="某财经网",
-                  tier=Tier.MEDIA, published=date(2026, 6, 2))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [good, bad])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=(x is good),
-        reason="" if x is good else "未能在原页核实",
-        text=x.claim if x is good else "",
-        final_url=x.url, tier=x.tier))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert fd.status == G.EXTERNAL
-    assert [x.claim for x in fd.findings] == ["产能 300 万"], \
-        "被证伪的转述不能进 findings——assume._match_finding 不看核验状态"
-    assert "另有 1 条模型转述未能在原页核实，已降级为线索" in fd.note
-    assert "另有 1 条模型转述未能在原页核实，已降级为线索" in G.summary(data), \
-        "note 里有不够——人在批准清单上读的是 summary() 的渲染结果"
-
-
-def test_一条抓取失败不牵连同因子其余已核实的发现(monkeypatch):
-    """spec §8 第 9 条的后半句：「B2：抓取抛 `FetchFailed` → 同上，**且
-    不牵连同因子的其余 finding**」。前半句有测试，后半句此前没有。
-
-    不 stub `verify_finding`，只 stub 更底层的 `OW.fetch`：一条 URL 抛
-    真实的 `FetchFailed`，另一条返回含原话的正文。证明真实 `verify_
-    finding` 把前者判成 `ok=False` 之后，后者照样撑起因子。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-    from ir_agent.sources.external import Corpus, Tier
-    from ir_agent.sources.web import Finding
-
-    good = Finding(factor_key="capacity", claim="产能 300 万",
-                   url="https://m.example.com/a", publisher="某财经网",
-                   tier=Tier.MEDIA, published=date(2026, 6, 1))
-    dead = Finding(factor_key="capacity", claim="产能 320 万",
-                   url="https://m.example.com/dead", publisher="某财经网",
-                   tier=Tier.MEDIA, published=date(2026, 6, 2))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [dead, good])
-
-    def _fake_fetch(url, **k):
-        if url.endswith("/dead"):
-            raise OW.FetchFailed(f"{url}：连接超时")
-        return OW.Fetched(final_url=url, text="据报道，产能 300 万平方米。",
-                          meta_published=None)
-
-    monkeypatch.setattr(OW, "fetch", _fake_fetch)
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert fd.status == G.EXTERNAL
-    assert [x.claim for x in fd.findings] == ["产能 300 万"]
-    assert "另有 1 条模型转述未能在原页核实，已降级为线索" in G.summary(data)
-
-
 # ── Fix wave 1（审查发现）──────────────────────────────────────────
 #
 # 五条 review 发现里落在 gaps.py 这一侧的回归测试。Fix 1 的容纳测试
@@ -773,169 +534,6 @@ def test_一条抓取失败不牵连同因子其余已核实的发现(monkeypatc
 # Fix 1 要证明的正是"verify_finding 自己接住了 FetchFailed 之外的异常，
 # 不需要 collect() 另加一层"，如果连 verify_finding 都 stub 掉就什么都
 # 证明不了。
-
-def test_verify_finding抛出非FetchFailed异常不逃出collect(monkeypatch):
-    """`collect()` 的④分支在 `verify_finding` 外层没有另加 try/except
-    ——这一步全靠 `verify_finding` 自己接住 `FetchFailed` 之外的异常。
-    这里不 stub `verify_finding`，只 stub 更底层的 `OW.fetch`，走一遍
-    真实的 `verify_finding`，证明一个非 `FetchFailed` 的裸异常不会逃出
-    `collect()`——Fix 1 之前，这个异常会原样冒出 collect()，这条测试
-    会因为 RuntimeError 而不是断言失败而失败。
-
-    **代价说准：逃出去不会中止整个研究轮次。** `full.py:1292-1293` 把
-    `gaps.collect()` 包在 `except Exception` 里、记进 `skipped`，整轮
-    继续。真实代价是这一轮的 factor_data 整体拿不到——丢的不是一条
-    finding，是全部因子的采集结果。这条测试原本的名字与说明写的是
-    「阻断整轮研究」，那是审查第一轮的判断，审查者自己在第二轮撤回了；
-    此处与 `openweb.verify_finding` 的 except 注释保持同一个说法。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://m.example.com/a", publisher="某财经网",
-                tier=Tier.MEDIA, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-
-    def _boom(url, **k):
-        raise RuntimeError("惰性读取抛出的裸异常，不是 FetchFailed")
-
-    monkeypatch.setattr(OW, "fetch", _boom)
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    assert data["capacity"].status == G.MISSING
-
-
-def test_主机安全校验降级会写进因子的note(monkeypatch):
-    """`Fetched.host_check_degraded` 的契约是"必须一路传到产物清单"
-    ——这里钉住它确实传到了 `FactorData.note`，**并且经 `G.summary()`
-    渲染之后仍然可见**。人在批准清单上读的是 `summary()` 的输出，不是
-    `FactorData.note` 这个字段本身：Fix A 之前 `summary()` 的 EXTERNAL
-    行只渲染来源列表，这里算出来的 note 会被整个丢在地上，`fd.note`
-    这个字段级断言即使全部通过，人也看不到这句话——两条 review 都是
-    因为这类断言只停在字段上才漏掉这个洞的。同时钉住 Fix C 新增的结构
-    化字段 `FactorData.host_check_degraded`，不能只有 note 里的人话。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://www.miit.gov.cn/a", publisher="SEMI",
-                tier=Tier.OFFICIAL, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text="产能 300 万平方米。",
-        final_url=x.url, tier=Tier.OFFICIAL, host_check_degraded=True))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert fd.status == G.EXTERNAL
-    assert "主机安全校验降级" in fd.note
-    assert "内网地址拦截" in fd.note
-    assert fd.host_check_degraded is True
-    txt = G.summary(data)
-    assert "主机安全校验降级" in txt, (
-        "note 里有这句话不够——EXTERNAL 行如果只印来源列表、不带上 "
-        "note，这句话到不了人在批准清单上会读的那张表。")
-    assert "内网地址拦截" in txt
-
-
-def test_未降级时note不提主机安全校验(monkeypatch):
-    """对照：没有降级发生时不该无中生有地提这件事——否则上一条测试
-    即使把 `if any(...)` 改成恒真也会"碰巧"通过。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://www.miit.gov.cn/a", publisher="SEMI",
-                tier=Tier.OFFICIAL, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=True, reason="", text="产能 300 万平方米。",
-        final_url=x.url, tier=Tier.OFFICIAL, host_check_degraded=False))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    assert "主机安全校验" not in data["capacity"].note
-    assert data["capacity"].host_check_degraded is False
-    assert "主机安全校验" not in G.summary(data)
-
-
-def test_外部来源按代码观测到的tier排序不看模型自报(monkeypatch):
-    """一条发现模型自报 publisher 是「国家统计局」（若按 `Finding.tier`
-    排会被当成 OFFICIAL 排最前），但核验时代码实际抓到的最终域名只是
-    一个普通博客——`Verified.tier` 因此落 MEDIA。呈现顺序必须服从代码
-    观测到的这个 MEDIA，不能服从模型的自称，否则一条从没被核实过的
-    自称就赢得了排在前面的位置，这正是本次改动要停止相信的东西。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-
-    liar = Finding(factor_key="capacity", claim="产能 300 万",
-                   url="https://blog.example.com/a", publisher="国家统计局",
-                   tier=Tier.OFFICIAL, published=date(2026, 6, 1))
-    honest = Finding(factor_key="capacity", claim="产能 320 万",
-                     url="https://www.miit.gov.cn/b", publisher="某财经网",
-                     tier=Tier.MEDIA, published=date(2026, 6, 2))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [liar, honest])
-
-    def _fake_verify(x):
-        if x is liar:
-            # 模型自报「国家统计局」，但代码实际抓到的域名只是个博客。
-            return OW.Verified(finding=x, ok=True, reason="", text=x.claim,
-                               final_url=x.url, tier=Tier.MEDIA)
-        # 模型自报「某财经网」，但代码实际抓到的域名是 .gov.cn。
-        return OW.Verified(finding=x, ok=True, reason="", text=x.claim,
-                           final_url=x.url, tier=Tier.OFFICIAL)
-
-    monkeypatch.setattr(G, "verify_finding", _fake_verify)
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert [x.claim for x in fd.findings] == ["产能 320 万", "产能 300 万"], (
-        "排序要服从核验后 Verified.tier（honest 落 OFFICIAL）排最前，"
-        "不能服从 Finding.tier（liar 自报的 OFFICIAL）排最前——按后者排"
-        "会得到相反的顺序 ['产能 300 万', '产能 320 万']")
-
-
-def test_未核实的发现不进无数据分支的findings(monkeypatch):
-    """核验不通过的发现只应通过 note 可见，不该进 `FactorData.findings`
-    ——`assume._match_finding` 按 `finding.claim` 逐字匹配、不看核验
-    状态，留在 `findings` 里就会被判定为已核实的 `Basis.external`，
-    一个被代码证伪的转述因此能骗到一个看起来正当的依据。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-
-    f = Finding(factor_key="capacity", claim="产能 300 万",
-                url="https://m.example.com/a", publisher="某财经网",
-                tier=Tier.MEDIA, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(G, "verify_finding", lambda x: OW.Verified(
-        finding=x, ok=False, reason="未能在原页核实", text="",
-        final_url=x.url, tier=x.tier))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert fd.status == G.MISSING
-    assert fd.findings == []
-
-
-def test_端到端_verify_finding核验不过时因子仍落无数据(monkeypatch):
-    """此前的端到端测试 `test_端到端_证券时报网单源不支撑取值` 已被
-    这次改动替换成纯粹的分级测试（见 test_web_source.py），把关的是
-    "没人核实过的媒体来源不能撑因子取值"这件事——但那道门槛现在实际
-    落在 `gaps.collect` 调用真实 `verify_finding` 这一步，而本文件里
-    覆盖新行为的测试全部把 `verify_finding` 整体 stub 掉了，没有一条
-    真正跑过"真实核验判定这个分支"这条链路。这里只 stub 最底层的
-    `OW.fetch`（正文里不含 `finding.claim`），`verify_finding` 用真实
-    实现——如果把 `verify_finding` 里的逐字比对删掉（比如让它对任何
-    claim 都判 ok=True），这条测试会失败。"""
-    import ir_agent.gaps as G
-    import ir_agent.sources.openweb as OW
-
-    f = Finding(factor_key="capacity", claim="名义产能约 300 万平方米",
-                url="https://m.example.com/a", publisher="某财经网",
-                tier=Tier.MEDIA, published=date(2026, 6, 1))
-    monkeypatch.setattr(G, "search", lambda *a, **k: [f])
-    monkeypatch.setattr(OW, "fetch", lambda url, **k: OW.Fetched(
-        final_url=url, text="本文讨论覆铜板行业的竞争格局，与产能无关。",
-        meta_published=None))
-    data = _collect_one_factor(G, corpus=Corpus(as_of=AS_OF))
-    fd = data["capacity"]
-    assert fd.status == G.MISSING
-    assert "未能在原页核实" in fd.note
-
 
 # ── B3：因子标签的关键词提取 ──────────────────────────────────
 #
@@ -1353,3 +951,160 @@ def test_研究时点之后才披露的不算():
                  method=Method.COMPUTED))
     assert ledger_refs("[[industry.revenue_yoy]]", led, AS_OF) == (
         [], ["industry.revenue_yoy"])
+
+
+# ══ 第二次调用试跑后的修订 ②：④改为模型综合结论 + 引用文章 ═══════════
+
+from ir_agent.sources import conclusions as _CC
+from ir_agent.sources.openweb import Fetched, FetchFailed
+
+_REPLY = ("文章: 1 | https://www.stats.gov.cn/a | 国家统计局 | 2026-07-01\n"
+          "文章: 2 | https://news.example.com/b | 某媒体 | 2026-08-01\n"
+          "结论: capacity | 名义产能约120万吨，同比提升3个百分点 | 依据 1,2\n")
+
+
+def _pages(pages: dict, degraded=False):
+    def f(url, **k):
+        if url not in pages:
+            raise FetchFailed("404")
+        return Fetched(final_url=url, text=pages[url], meta_published=None,
+                       host_check_degraded=degraded)
+    return f
+
+
+def _one(client, corpus=None):
+    d = Decomposition(target="revenue_growth", op=Op.MULTIPLY,
+                      factors=[Factor(key="capacity", label="名义产能",
+                                      unit="变化率", source_hint="")])
+    return collect(client, [d], FactLedger(), corpus or Corpus(as_of=AS_OF),
+                   "电子/元件", AS_OF, sections=None, annual_url="")
+
+
+class TestExternalConclusions:
+    PAGES = {"https://www.stats.gov.cn/a": "名义产能约120万吨。",
+             "https://news.example.com/b": "同比提升3个百分点。"}
+
+    def test_年报研报都未命中才联网(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        cl = _Client(_REPLY)
+        fd = _one(cl)["capacity"]
+        assert fd.status == "外部来源"
+        assert "名义产能" in cl.prompts[0]
+
+    def test_打开的文章全文进语料库(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        cp = Corpus(as_of=AS_OF)
+        _one(_Client(_REPLY), cp)
+        texts = {d.text for d in cp.docs}
+        assert texts == set(self.PAGES.values()), "入库的是代码抓回的全文"
+        assert all(d.date_source == "model" for d in cp.docs)
+
+    def test_文章按最终域名分级(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        c = _one(_Client(_REPLY))["capacity"].findings[0]
+        assert c.articles[0].tier is Tier.OFFICIAL
+        assert c.tier is Tier.OFFICIAL
+
+    def test_外部来源状态不填source_url_结论版(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        fd = _one(_Client(_REPLY))["capacity"]
+        # 前提：真的走到了外部来源。没有这一行，旧代码解析不了新格式、
+        # 落「无数据」时 source_url 也是空串 —— 实现前就通过的空心测试。
+        assert fd.status == "外部来源"
+        assert fd.source_url == ""
+
+    def test_一篇打不开不牵连同结论的其余文章(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(
+            {"https://www.stats.gov.cn/a": "名义产能约120万吨。"}))
+        fd = _one(_Client(_REPLY))["capacity"]
+        c = fd.findings[0]
+        assert fd.status == "外部来源"
+        assert c.articles[0].opened and not c.articles[1].opened
+        assert "代码无法打开" in c.flags()
+        assert "其中 1 条带 ⚠" in fd.note
+
+    def test_抓取抛任意异常不逃出collect(self, monkeypatch):
+        def boom(url, **k):
+            raise RuntimeError("连接被重置")
+        monkeypatch.setattr(_CC, "fetch", boom)
+        fd = _one(_Client(_REPLY))["capacity"]
+        assert fd.status == "外部来源"
+        assert all("抓取失败" in a.why_not for a in fd.findings[0].articles)
+
+    def test_数字找不到出处时note计数(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(
+            {"https://www.stats.gov.cn/a": "名义产能约120万吨。",
+             "https://news.example.com/b": "同比有所提升。"}))
+        fd = _one(_Client(_REPLY))["capacity"]
+        assert fd.findings[0].missing_numbers() == ["3"]
+        assert "其中 1 条带 ⚠" in fd.note and "待人工复核" in fd.note
+
+    def test_引的文章都晚于as_of时落无数据并说明(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
+        late = ("文章: 1 | https://www.stats.gov.cn/a | 国家统计局 | 2026-12-01\n"
+                "结论: capacity | x | 依据 1\n")
+        fd = _one(_Client(late))["capacity"]
+        assert fd.status == "无数据" and "晚于" in fd.note
+
+    def test_主机安全校验降级写进结构化字段与note(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES, degraded=True))
+        fd = _one(_Client(_REPLY))["capacity"]
+        assert fd.host_check_degraded and "主机安全校验降级" in fd.note
+        monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES, degraded=False))
+        fd2 = _one(_Client(_REPLY))["capacity"]
+        assert not fd2.host_check_degraded and "主机安全校验" not in fd2.note
+
+
+class TestFactorsJsonV2:
+    def _data(self, monkeypatch):
+        monkeypatch.setattr(_CC, "fetch", _pages(TestExternalConclusions.PAGES))
+        d = Decomposition(target="revenue_growth", op=Op.MULTIPLY,
+                          factors=[Factor(key="capacity", label="名义产能",
+                                          unit="变化率", source_hint="")])
+        return d, collect(_Client(_REPLY), [d], FactLedger(), Corpus(as_of=AS_OF),
+                          "电子/元件", AS_OF)
+
+    def test_往返保留结论与文章正文(self, monkeypatch):
+        from ir_agent.gaps import from_json, to_json
+        d, data = self._data(monkeypatch)
+        raw = to_json(data)
+        assert raw["schema"] == 2
+        back, notes = from_json(raw, [d])
+        c = back["capacity"].findings[0]
+        assert c.claim == data["capacity"].findings[0].claim
+        assert c.articles[0].text == "名义产能约120万吨。"
+        assert c.articles[0].tier is Tier.OFFICIAL and notes == []
+
+    def test_人改了结论后数字标注按改后文字重算(self, monkeypatch):
+        """决定 B：人在门② 直接改 factors.json；标注不能停在改之前。"""
+        from ir_agent.gaps import from_json, to_json
+        d, data = self._data(monkeypatch)
+        raw = to_json(data)
+        raw["factors"]["capacity"]["conclusions"][0]["claim"] = "产能约999万吨"
+        back, _ = from_json(raw, [d])
+        assert back["capacity"].findings[0].missing_numbers() == ["999"]
+
+    def test_人删光结论后落无数据并说明(self, monkeypatch):
+        from ir_agent.gaps import from_json, to_json
+        d, data = self._data(monkeypatch)
+        raw = to_json(data)
+        raw["factors"]["capacity"]["conclusions"] = []
+        back, _ = from_json(raw, [d])
+        assert back["capacity"].status == "无数据"
+        assert "门②" in back["capacity"].note
+
+    def test_年报摘录跨调用存活(self):
+        """此前 to_json 不存 source_excerpt，第三次调用里模型逐字引用年报
+        摘录会被 `_match_excerpt` 判「匹配不到」。"""
+        from ir_agent.gaps import ANNUAL, from_json, to_json
+        f = Factor(key="capacity", label="名义产能", unit="变化率")
+        d = Decomposition(target="revenue_growth", op=Op.MULTIPLY, factors=[f])
+        data = {"capacity": FactorData(factor=f, status=ANNUAL, note="n",
+                                       source_url="http://a", source_excerpt="产能提升")}
+        back, _ = from_json(to_json(data), [d])
+        assert back["capacity"].source_excerpt == "产能提升"
+
+    def test_旧格式抛ValueError(self):
+        from ir_agent.gaps import from_json
+        with pytest.raises(ValueError, match="schema"):
+            from_json({"capacity": {"status": "无数据"}}, [])

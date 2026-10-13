@@ -5137,7 +5137,11 @@ class TestExternalConclusions:
 
     def test_外部来源状态不填source_url_结论版(self, monkeypatch):
         monkeypatch.setattr(_CC, "fetch", _pages(self.PAGES))
-        assert _one(_Client(_REPLY))["capacity"].source_url == ""
+        fd = _one(_Client(_REPLY))["capacity"]
+        # 前提：真的走到了外部来源。没有这一行，旧代码解析不了新格式、
+        # 落「无数据」时 source_url 也是空串 —— 实现前就通过的空心测试。
+        assert fd.status == "外部来源"
+        assert fd.source_url == ""
 
     def test_一篇打不开不牵连同结论的其余文章(self, monkeypatch):
         monkeypatch.setattr(_CC, "fetch", _pages(
