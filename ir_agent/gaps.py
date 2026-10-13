@@ -545,6 +545,62 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
     return out
 
 
+def to_json(data: dict[str, FactorData]) -> dict:
+    """因子采集结果落盘（`factors.json`）。键是 `Factor.key`。
+
+    **为什么要落盘。** 采集发生在第一阶段的第二次调用（`run_brief`），而用它
+    的判断项在第三次调用（`run_assume`），中间隔一个人工门、是两个进程。第一
+    版没落盘，第三次调用拿到的是 `factor_data=None` —— `assume._factor_basis`
+    于是把每个因子都当成「没采到」：逐字核实过的网络发现不能作依据，「无数据
+    （估计）」对所有因子开放。花钱做的定向采集对判断项完全不起作用。
+    """
+    def _fd(fd: FactorData) -> dict:
+        return {"status": fd.status, "note": fd.note,
+                "source_url": fd.source_url,
+                "source_retrieved": (fd.source_retrieved.isoformat()
+                                     if fd.source_retrieved else None),
+                "findings": [{"claim": x.claim, "url": x.url,
+                              "publisher": x.publisher, "tier": x.tier.value,
+                              "published": x.published.isoformat()}
+                             for x in fd.findings]}
+    return {k: _fd(fd) for k, fd in data.items()}
+
+
+def from_json(raw: dict, decomps: list[Decomposition]
+              ) -> tuple[dict[str, FactorData], list[str]]:
+    """读回 `factors.json`，按因子键与**当前**分解式对上。返回 (数据, 说明)。
+
+    人可以在两次调用之间改 `drivers.md`（I2 的承诺）。改过之后，采集结果里
+    可能有分解式已不存在的因子、分解式里也可能有从没采集过的因子 —— 两种
+    都**说出来**，不静默对齐：前者丢弃，后者按「未采集」处理。
+    """
+    from ir_agent.sources.external import Tier
+
+    factors = {f.key: f for d in decomps for f in d.factors}
+    out: dict[str, FactorData] = {}
+    notes: list[str] = []
+    for key, x in (raw or {}).items():
+        f = factors.get(key)
+        if f is None:
+            notes.append(f"因子采集结果里有「{key}」，但当前分解式没有这个因子"
+                         "（drivers.md 在两次调用之间被改过？）—— 已丢弃")
+            continue
+        sr = x.get("source_retrieved")
+        out[key] = FactorData(
+            factor=f, status=x.get("status", MISSING), note=x.get("note", ""),
+            source_url=x.get("source_url", ""),
+            source_retrieved=date.fromisoformat(sr) if sr else None,
+            findings=[Finding(factor_key=key, claim=y["claim"], url=y["url"],
+                              publisher=y.get("publisher", ""),
+                              tier=Tier(y["tier"]),
+                              published=date.fromisoformat(y["published"]))
+                      for y in x.get("findings") or []])
+    for key, f in factors.items():
+        if key not in out:
+            notes.append(f"因子「{f.label}」没有采集结果 —— 按「未采集」处理")
+    return out, notes
+
+
 def summary(data: dict[str, FactorData]) -> str:
     """给人看的采集结果。**遗漏必须可见** —— 这正是分解的价值所在。"""
     lines = ["因子数据采集结果", ""]

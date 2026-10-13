@@ -2775,6 +2775,34 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
             status=gaps.EXTERNAL, host_check_degraded=True)}),
         INFO, "1 个因子")
 
+    # `_read_factors`：第三次调用读回第二次调用落盘的因子采集结果。
+    import json as _json
+
+    from ir_agent.methodology import parse as _parse_meth
+    _meth = _parse_meth(
+        "分解: 营收 | 乘 | 出货量:变化率:年报:出货量 | 单价:变化率:年报:单价\n"
+        "分解: 毛利率 | 加 | 铜箔:pp:年报:铜箔 | 稼动率:pp:年报:稼动率\n")
+    _keys = [f.key for d in _meth.decompositions for f in d.factors]
+    _rf = tmp_path / "rf"
+
+    def read_factors(payload):
+        import shutil
+        shutil.rmtree(_rf, ignore_errors=True)
+        _rf.mkdir()
+        if payload is not None:
+            (_rf / full.FACTORS_JSON).write_text(payload, encoding="utf-8")
+        return full._read_factors(_rf, _meth)[1]
+
+    def _fd(keys):
+        return _json.dumps({k: {"status": "无数据", "findings": []} for k in keys})
+
+    add("_read_factors", "未落盘", read_factors(None), GAP, "未落盘")
+    add("_read_factors", "读不回", read_factors("{坏的"), GAP, "读不回")
+    add("_read_factors", "分解式里有个因子没采集结果",
+        read_factors(_fd(_keys[:-1])), GAP, "没有采集结果")
+    add("_read_factors", "采集结果里多出分解式已删掉的因子",
+        read_factors(_fd(_keys + ["deleted_factor"])), INFO, "已丢弃")
+
     problems: list[str] = []
     for producer, scenario, entries, kind, must in cases:
         tag = f"{producer} / {scenario}"
@@ -2813,7 +2841,13 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
     # 它的欠账与 `_media_tier_note` 同类，见本函数文档字符串。
     covered = {c[0] for c in cases}
     not_asserted = {
-        "_media_tier_note": "main 上就有的同类缺陷，未修（终审明确推迟）",
+        "_media_tier_note": ("2026-10-13 生益科技试跑后已登记前缀，断言在 "
+                             "tests/test_research.py 的 "
+                             "test_财经媒体级来源的警告不被标成未生成"),
+        "_restore_corpus": ("聚合：条目来自 _restore_openweb（见下）与 "
+                            "_restore_announce（上面已断言），外加 _load_sections "
+                            "的「年报叙述章节（…）」—— 那是真缺口，落默认分支渲染"
+                            "成未生成是对的"),
         "_load_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
         "_restore_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
     }
@@ -3502,7 +3536,9 @@ def test_第一阶段之二把辩论一的结论交给预研(tmp_path, monkeypat
     full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
 
     assert got["预研.kwargs"].get("stance_note") == "辩论A的平衡结论"
-    assert got["预研.kwargs"].get("md") == {"战略": "x"}, "定性结论没交给预研"
+    # md 里还会有读回语料库后按实际篇数重渲染的「外部资料」（`_restore_corpus`）。
+    assert got["预研.kwargs"].get("md", {}).get("战略") == "x", "定性结论没交给预研"
+    assert "外部资料" in got["预研.kwargs"]["md"], "读回语料库后没有重渲染外部资料"
 
 
 def test_辩论一失败时停下而不是跳过(tmp_path, monkeypatch, capsys):
@@ -3924,3 +3960,143 @@ def test_预研失败时第三次调用不补做预研(tmp_path, monkeypatch):
     assert o3.stage is full.Stage.AWAITING_ASSUME_REVIEW
     # 辩论② 退回了两标量，判断项拿到的平衡点主题也是两标量的
     assert calls["balances"][0].subject == "营收增速"
+
+
+# ══ 生益科技 2026-10-13 试跑：数据跟着流程走（不打桩读回路径）═══════
+
+def _real_corpus_files(out):
+    """用**真实的** `announce.save` / `openweb.save` 写出第一次调用的落盘文件。"""
+    from ir_agent.sources import announce as A
+    from ir_agent.sources import openweb as W
+    from ir_agent.sources.external import Document, Tier
+
+    ann = Document(doc_id="ann_1", url="http://static.cninfo.com.cn/x/1225195378.PDF",
+                   title="生益科技关于投资建设高性能覆铜板项目的公告",
+                   publisher="生益科技", tier=Tier.COMPANY,
+                   published=date(2026, 4, 25), retrieved=date(2026, 10, 13),
+                   text="公司拟投资18亿元建设高性能覆铜板项目。", rank=1)
+    web = Document(doc_id="web_1", url="https://www.cls.cn/detail/1",
+                   title="覆铜板（CCL）价格上调！PCB概念震荡拉升", publisher="财联社",
+                   tier=Tier.MEDIA, published=date(2026, 9, 1),
+                   retrieved=date(2026, 10, 13), text="建滔积层板宣布覆铜板价格上调10%。")
+    A.save(A.AnnounceResult(docs=[ann], candidates=136, picked=51, rejected=85),
+           out / A.ANNOUNCE_JSON)
+    W.save(W.OpenWebResult(docs=[web]), out / W.OPENWEB_JSON)
+
+
+def test_第二次调用里语料库真的读回来了(tmp_path, monkeypatch):
+    """**第一版漏了读回。** 生益科技试跑时第二次调用里的语料库只剩东财研报，
+    51 篇公告、17 篇网页、年报正文都不在 —— 辩论看不到、预研命中次数全 0、
+    因子采集搜不到公告。端到端测试把语料库整个打了桩，看不到这件事。
+
+    这里**不打桩读回路径**：文件由真实的 save 写出，`run_brief` 自己读。
+    """
+    from ir_agent import full
+
+    _real_corpus_files(tmp_path)
+    real_build_evidence = full._build_evidence      # 打桩之前先抓住真函数
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
+    # 核验面用**真的** `_build_evidence`：要验的正是读回之后它看得见公告。
+    monkeypatch.setattr(full, "_build_evidence", real_build_evidence)
+    seen: dict = {}
+
+    def stance_round(client, out, fname, round_, subjects, ctx, cat, r, *a, **k):
+        if round_ == "A":
+            seen["titles"] = {d.title for d in r.corpus.docs}
+            seen["find_ann"] = cat.evidence.find("公司拟投资18亿元建设高性能覆铜板项目")
+            seen["find_web"] = cat.evidence.find("建滔积层板宣布覆铜板价格上调10%")
+        return _Bal()
+
+    monkeypatch.setattr(full, "_stance_round", stance_round)
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 13), tmp_path, "xhl")
+
+    assert "生益科技关于投资建设高性能覆铜板项目的公告" in seen["titles"], \
+        "公告没读回 —— 辩论与因子采集都看不到它"
+    assert "覆铜板（CCL）价格上调！PCB概念震荡拉升" in seen["titles"], "网页没读回"
+    assert seen["find_ann"] and "生益科技" in seen["find_ann"], \
+        "核验面里没有公告 —— 引它的证据会被冤枉成找不到"
+    assert seen["find_web"], "核验面里没有网页"
+
+
+def test_第三次调用里语料库同样读回(tmp_path, monkeypatch):
+    import json as _j
+
+    from ir_agent import full, stance
+
+    _real_corpus_files(tmp_path)
+    _offline(monkeypatch, full)
+    (tmp_path / "brief.md").write_text("## 一节\n正文。", encoding="utf-8")
+    (tmp_path / "stance_b.json").write_text(_j.dumps(stance.StanceResult(
+        round_="B", balances=stance.parse_balance(
+            "平衡｜营收增速｜0.05｜0.12｜0.20｜理由")).to_json()), encoding="utf-8")
+    seen: dict = {}
+
+    def propose(code, r, body, md, as_of, out, client, arts, **k):
+        seen["n"] = len(r.corpus.docs)
+        return ""
+
+    monkeypatch.setattr(full, "_propose_assumptions", propose)
+    full.run_assume("600183", _PhaseR(), date(2026, 10, 13), tmp_path, "xhl")
+    assert seen["n"] == 2, f"第三次调用里语料库只有 {seen['n']} 篇"
+
+
+def test_因子采集结果从第二次调用传到第三次的判断项(tmp_path, monkeypatch):
+    """**第一版 `run_assume` 传的是 `factor_data=None`。** `assume._factor_basis`
+    于是把每个因子都当成没采到：逐字核实过的网络发现不能作依据，「无数据
+    （估计）」对所有因子开放 —— 定向采集对判断项完全不起作用。
+
+    第二次调用落盘 `factors.json`，第三次读回；判断项拿到的必须是**同一份**。
+    """
+    from ir_agent import full, gaps
+    from ir_agent.methodology import parse as parse_meth
+    from ir_agent.sources.external import Tier
+    from ir_agent.sources.web import Finding
+
+    meth = parse_meth(
+        "分解: 营收 | 乘 | 出货量:变化率:年报:出货量 | 单价:变化率:年报:单价\n"
+        "分解: 毛利率 | 加 | 铜箔:pp:年报:铜箔 | 稼动率:pp:年报:稼动率\n")
+    meth.industry = "测试业"
+    f0 = meth.decompositions[0].factors[0]
+    finding = Finding(factor_key=f0.key, claim="2026年出货量同比增长15%",
+                      url="https://example.cn/a", publisher="某协会",
+                      tier=Tier.OFFICIAL, published=date(2026, 9, 1))
+
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
+
+    def meth_stub(code, r, out, client, **k):
+        (out / "drivers.md").write_text(
+            __import__("ir_agent.methodology", fromlist=["x"]).to_markdown(meth),
+            encoding="utf-8")
+        return meth, ""
+
+    monkeypatch.setattr(full, "_research_methodology", meth_stub)
+    monkeypatch.setattr(full, "_collect_factors", lambda *a, **k: {
+        f0.key: gaps.FactorData(factor=f0, status=gaps.EXTERNAL,
+                                findings=[finding],
+                                source_url="https://example.cn/a",
+                                source_retrieved=date(2026, 9, 1))})
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 13), tmp_path, "xhl")
+    assert (tmp_path / "factors.json").exists(), "因子采集结果没落盘"
+
+    import json as _j
+    from ir_agent import stance
+    (tmp_path / "brief.md").write_text("## 一节\n正文。", encoding="utf-8")
+    (tmp_path / "stance_b.json").write_text(_j.dumps(stance.StanceResult(
+        round_="B", balances=stance.parse_balance(
+            "平衡｜出货量｜0.05｜0.12｜0.20｜理由")).to_json()), encoding="utf-8")
+    got: dict = {}
+
+    def propose(code, r, body, md, as_of, out, client, arts, **k):
+        got.update(k)
+        return ""
+
+    monkeypatch.setattr(full, "_propose_assumptions", propose)
+    full.run_assume("600183", _PhaseR(), date(2026, 10, 13), tmp_path, "xhl")
+
+    fd = got["factor_data"]
+    assert fd is not None, "第三次调用拿到的 factor_data 是 None"
+    assert fd[f0.key].status == gaps.EXTERNAL
+    assert fd[f0.key].findings[0].claim == "2026年出货量同比增长15%"
+    assert fd[f0.key].findings[0].tier is Tier.OFFICIAL

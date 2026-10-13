@@ -1117,6 +1117,7 @@ SOURCES_JSON = "sources.json"
 STANCE_A = "stance_a.json"
 STANCE_B = "stance_b.json"
 REVIEW_MD = "review.md"
+FACTORS_JSON = "factors.json"
 # 多空辩论① 的五个驱动主题。预研的覆盖标注逐个核对它们 —— 同一份清单
 # 两处用（辩论① 的 subjects、覆盖标注的 themes），不各写一遍。
 STANCE_THEMES = ("需求", "价格", "成本", "份额", "政策")
@@ -1222,6 +1223,55 @@ def _save_state(out: Path, code: str, r, as_of: date, md: dict, pr: dict,
     old.update({k: v for k, v in signoff.items() if v})
     f.write_text(json.dumps(old, ensure_ascii=False, indent=2),
                  encoding="utf-8")
+
+
+def _restore_corpus(r, out: Path, md: dict, *, sections: bool) -> list[str]:
+    """第二、三次调用：读回第一次调用落盘的语料库（开放网络、公告）与年报
+    分节。**不重新采集。**
+
+    **第一版漏了这一步。** `_restore_openweb` / `_restore_announce` 只在第二
+    阶段 `run_valuation` 里调，第二、三次调用里的语料库于是只剩确定性层重新
+    抓的东财研报 —— 生益科技试跑时那 51 篇公告、17 篇网页、年报正文都不在：
+    两轮辩论看不到它们，预研的命中次数几乎全是 0，因子采集搜不到公告。
+
+    读回后按实际篇数重渲染 `md["外部资料"]`。两个读回函数在「文件在而读回
+    0 篇」时各自已有措辞说出来，**必须 `skipped +=`**（裸调用会把那些措辞
+    丢掉）。年报分节只在有消费方时读（第二次调用：辩论与撰写的核验面、
+    命中次数、因子采集的年报一级）。
+
+    第二阶段 `run_valuation` 里有同形的三行 —— 那一段按「第二阶段一行不改」
+    保持原样，没有改成调用本函数。
+    """
+    skipped = _restore_openweb(r, out)
+    skipped += _restore_announce(r, out)
+    if sections:
+        secs, err = _load_sections(r)
+        if secs is not None:
+            r.sections = secs
+        elif err:
+            skipped.append(err)
+    _refresh_external_md(r, md)
+    return skipped
+
+
+def _read_factors(out: Path, meth) -> tuple[dict | None, list[str]]:
+    """读回第二次调用落盘的因子采集结果。没有分解式（两标量模式）时返回 None。"""
+    from ir_agent import gaps
+
+    if meth is None:
+        return None, []
+    f = out / FACTORS_JSON
+    if not f.exists():
+        return None, [f"因子采集结果未落盘（{f} 不存在）—— 判断项按「未采集」处理："
+                      "「无数据（估计）」对所有因子开放、采集到的网络发现不能"
+                      "作依据。重跑 --brief 可补"]
+    try:
+        data, notes = gaps.from_json(json.loads(f.read_text(encoding="utf-8")),
+                                     meth.decompositions)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return None, [f"因子采集结果读不回（{e.__class__.__name__}: "
+                      f"{str(e)[:120]}）—— 判断项按「未采集」处理"]
+    return data, notes
 
 
 def _read_drivers(out: Path):
@@ -1970,6 +2020,9 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
 
     md, pr = _restore_state(out)
     _analyse_facts(code, r, as_of, snapshot_dir)      # 重建派生事实，不调模型
+    # **读回必须排在 `_build_evidence` 之前**：它把年报正文按调用时刻抄成
+    # 字符串，晚了核验面就没有年报。
+    skipped += _restore_corpus(r, out, md, sections=True)
     cat = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=as_of,
                                   extra_periods=_catalog_periods(r))
     cat.evidence = _build_evidence(r, code)
@@ -2006,6 +2059,12 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
         factor_data = _collect_factors(r, as_of, research_client, md,
                                        meth.decompositions, meth.industry,
                                        skipped)
+        # 落盘给第三次调用。空字典也写 —— 让「采过、一个都没采到」与「没落盘」
+        # 在第三次调用里可区分。
+        from ir_agent import gaps
+        (out / FACTORS_JSON).write_text(
+            json.dumps(gaps.to_json(factor_data), ensure_ascii=False, indent=2),
+            encoding="utf-8")
 
     # ── 多空辩论②：定取值 ─────────────────────────────────────
     subjects = ([f.label for d in meth.decompositions for f in d.factors]
@@ -2089,6 +2148,7 @@ def run_assume(code: str, r, as_of: date, out_dir: str | Path,
     # 一个新进程。与 `run_valuation` 里那条同源的实测教训（600584 端到端）：
     # 不重建的话，校验时账本还没建好，合法的依据会被判为不存在。
     _analyse_facts(code, r, as_of, snapshot_dir)
+    skipped += _restore_corpus(r, out, md, sections=False)
 
     # **单独一个客户端，开超时重试、给更长的超时。** 这一步是全链路输出最长
     # 的一次调用，瓶颈在输出而不在提示词长度。实测（生益科技 2026-10-06）：
@@ -2102,10 +2162,14 @@ def run_assume(code: str, r, as_of: date, out_dir: str | Path,
     meth, derr = _read_drivers(out)
     if derr:
         skipped.append(derr)
+    # **判断项要用第二次调用采集的同一份数据**，不在这里重新采集 —— 简报与
+    # 辩论② 用的就是那一份。第一版传的是 `factor_data=None`。
+    factor_data, fnotes = _read_factors(out, meth)
+    skipped += fnotes
     aerr = _propose_assumptions(
         code, r, body, md, as_of, out, assume_client, arts,
         decomps=(meth.decompositions if meth is not None else None),
-        factor_data=None, balances=sb.balances)
+        factor_data=factor_data, balances=sb.balances)
     if aerr:
         skipped.append(aerr)
     _save_state(out, code, r, as_of, md, pr, reviewed_by=reviewed_by)

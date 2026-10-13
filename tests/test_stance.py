@@ -41,10 +41,16 @@ class TestParseEvidence:
         with pytest.raises(StanceFailed, match="侧别"):
             parse_evidence("中立｜销量｜看法｜[[revenue.yoy@2025FY]]")
 
-    def test_缺依据的那条报错并指名(self):
-        """依据是这套机制的全部价值所在，缺了不能收。"""
-        with pytest.raises(StanceFailed, match="销量"):
-            parse_evidence("多方｜销量｜需求放量｜")
+    def test_写不成依据的证据保留并标注而不是整场作废(self):
+        """**替换掉第一版的 `test_缺依据的那条报错并指名`。** spec 定的是「依据
+        核验不阻断，核验不过的逐条标注」；第一版的这条测试与之相反，实现照着
+        测试走，生益科技试跑时 25 条证据里 1 条依据写法不对，辩论② 整场作废。
+        """
+        evs = parse_evidence("多方｜销量｜需求放量｜\n"
+                             "空方｜销量｜周期下行｜[[revenue.yoy@2025FY]]")
+        assert len(evs) == 2
+        assert evs[0].bases == [] and "缺少可核验的依据" in evs[0].unverified
+        assert evs[1].unverified == ""
 
     def test_字段数不对报错(self):
         with pytest.raises(StanceFailed, match="四段"):
@@ -340,3 +346,173 @@ class TestLoadManual:
         p = self._write(tmp_path, t)
         with pytest.raises(StanceFailed, match="署名"):
             load_manual(p, round_="B", by="")
+
+
+
+# ══ 生益科技 2026-10-13 试跑暴露的问题（第二次调用）══════════════
+
+from ir_agent.sources.external import Corpus, Document, Tier  # noqa: E402
+
+
+def _doc(title, text, tier=Tier.COMPANY, publisher="生益科技"):
+    return Document(doc_id=title[:8], url=f"http://x/{len(title)}.PDF",
+                    title=title, publisher=publisher, tier=tier,
+                    published=date(2026, 4, 25), retrieved=date(2026, 10, 13),
+                    text=text)
+
+
+class TestRealFailure:
+    """**这份夹具就是让辩论② 作废的那一份模型输出**（25 条证据）。"""
+
+    TITLE = "生益科技关于投资建设高性能覆铜板项目的公告"
+
+    def _raw(self):
+        import pathlib
+        return (pathlib.Path(__file__).parent / "fixtures" /
+                "stance_b_failed_raw_600183.md").read_text(encoding="utf-8")
+
+    def test_真实失败稿现在能解析完且一条不丢(self):
+        cp = Corpus(as_of=date(2026, 10, 13))
+        cp.docs.append(_doc(self.TITLE, "拟投资建设高性能覆铜板项目。"))
+        evs = parse_evidence(self._raw(), corpus=cp, dropped=[])
+        assert len(evs) == 25, len(evs)
+
+    def test_文档标题式引用认得出来并指向那篇文档(self):
+        """那条依据是「发布者《标题》（日期，分级）」—— **正是我们在提示词里
+        展示文档的格式**。模型读过那篇文档，只是没给原文。"""
+        cp = Corpus(as_of=date(2026, 10, 13))
+        doc = _doc(self.TITLE, "拟投资建设高性能覆铜板项目。")
+        cp.docs.append(doc)
+        evs = parse_evidence(self._raw(), corpus=cp, dropped=[])
+        e = next(x for x in evs if not x.bases and x.side == "空方")
+        assert "引了文档" in e.unverified and self.TITLE in e.unverified
+        assert e.source == doc.cite()
+
+    def test_标题对不上语料库时如实说缺依据(self):
+        evs = parse_evidence(self._raw(), corpus=Corpus(as_of=date(2026, 10, 13)),
+                             dropped=[])
+        e = next(x for x in evs if not x.bases and x.side == "空方")
+        assert "缺少可核验的依据" in e.unverified
+
+
+class TestDroppedLines:
+    def test_格式错误的行在编排里跳过并说出来(self):
+        dropped: list[str] = []
+        evs = parse_evidence("多方｜销量｜需求放量｜[[revenue.yoy@2025FY]]\n"
+                             "多方｜销量｜少一段\n"
+                             "中立｜销量｜看法｜[[revenue.yoy@2025FY]]",
+                             dropped=dropped)
+        assert len(evs) == 1 and len(dropped) == 2
+        r = StanceResult(round_="B", evidence=evs, dropped=dropped)
+        assert "2 行因格式错误被跳过" in r.summary()
+        back = StanceResult.from_json(r.to_json())
+        assert back.dropped == dropped
+
+    def test_直接调用时格式错误仍然抛(self):
+        """不给 `dropped` 时照旧抛 —— 让格式错误在单元测试里可见。"""
+        with pytest.raises(StanceFailed, match="四段"):
+            parse_evidence("多方｜销量｜少一段")
+
+
+class TestAnnotateSurface:
+    """**引文对着什么核验。** 第一版对着空串（辩论没有正文），所有引文都被
+    判「与凭空捏造无异」。"""
+
+    def _led(self):
+        from ir_agent.ledger import FactLedger
+        return FactLedger()
+
+    def _evidence(self):
+        from ir_agent.attribution import Evidence as Ev
+        cp = Corpus(as_of=date(2026, 10, 13))
+        cp.docs.append(_doc("覆铜板（CCL）价格上调！PCB概念震荡拉升",
+                            "建滔积层板宣布覆铜板价格上调10%。", tier=Tier.MEDIA,
+                            publisher="财联社"))
+        return Ev(annual="公司2025年营业收入同比增长39.45%。", corpus=cp)
+
+    def test_引文出自语料库算核验通过并记下出处(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence("多方｜价格｜涨价｜「建滔积层板宣布覆铜板价格上调10%」")
+        got = annotate(evs, ledger=self._led(), as_of=date(2026, 10, 13),
+                       evidence=self._evidence())
+        assert got[0].unverified == ""
+        assert "财联社" in got[0].source, "核验通过也要记下出处，门② 要能点开"
+
+    def test_引文出自年报算核验通过(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence("多方｜需求｜放量｜「营业收入同比增长39.45%」")
+        got = annotate(evs, ledger=self._led(), as_of=date(2026, 10, 13),
+                       evidence=self._evidence())
+        assert got[0].unverified == "" and got[0].source == "年报原文"
+
+    def test_引的是本系统结论单独标出而不说捏造(self):
+        """试跑辩论① 的 10 条标注里 8 条引的是「周期定位：衰退」这类本系统
+        的分析结论。那是循环论证，不是证据 —— 但也不是捏造。"""
+        from ir_agent.stance import annotate
+        evs = parse_evidence("空方｜需求｜衰退期｜「周期定位：衰退」")
+        got = annotate(evs, ledger=self._led(), as_of=date(2026, 10, 13),
+                       evidence=self._evidence(),
+                       context="【商业周期】周期定位：衰退（匹配 0.83）")
+        assert "本系统的分析结论" in got[0].unverified
+        assert "循环论证" in got[0].unverified
+        assert "捏造" not in got[0].unverified
+
+    def test_哪里都找不到才说找不到(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence("空方｜需求｜疲软｜「下游需求全面崩塌」")
+        got = annotate(evs, ledger=self._led(), as_of=date(2026, 10, 13),
+                       evidence=self._evidence(), context="无关的分析结论")
+        assert "都找不到" in got[0].unverified
+
+    def test_解析时已标注的不被覆盖(self):
+        from ir_agent.stance import annotate
+        evs = parse_evidence("多方｜销量｜放量｜\n空方｜销量｜下行｜[[x.y@2025FY]]")
+        got = annotate(evs, ledger=self._led(), as_of=date(2026, 10, 13))
+        assert "缺少可核验的依据" in got[0].unverified
+
+
+class TestStancePromptHasCorpus:
+    def _cat(self):
+        from ir_agent.analyst import FactCatalog
+        from ir_agent.attribution import Evidence as Ev
+        from ir_agent.ledger import Fact, FactLedger, Method
+        led = FactLedger()
+        led.put(Fact(key="revenue.yoy", value=D("0.39"), unit="ratio",
+                     currency=None, period="2025FY", as_of=date(2026, 4, 20),
+                     source_id="x", method=Method.COMPUTED))
+        cat = FactCatalog.from_ledger(led, "2025FY", as_of=date(2026, 10, 13))
+        cp = Corpus(as_of=date(2026, 10, 13))
+        cp.docs.append(_doc("生益科技关于投资建设高性能覆铜板项目的公告",
+                            "公司拟投资 18 亿元建设高性能覆铜板项目。"))
+        cat.evidence = Ev(corpus=cp)
+        return cat, led, cp
+
+    def test_辩手提示词里有语料库原文(self):
+        """spec：「双方拿到同一份证据（事实清单 + 语料库 + 定性结论）」。
+        第一版只给了事实与本系统的定性摘要，辩手只能引我们自己的结论。"""
+        from ir_agent.stance import run_stance
+        cat, led, cp = self._cat()
+        seen = []
+
+        def c(p):
+            seen.append(p)
+            return ["多方｜产能｜扩产｜「公司拟投资 18 亿元建设高性能覆铜板项目」",
+                    "空方｜产能｜过剩｜[[revenue.yoy@2025FY]]",
+                    "平衡｜产能｜0.02｜0.08｜0.15｜理由"][len(seen) - 1]
+        r = run_stance(c, round_="B", subjects=["产能"], context="（定性结论）",
+                       catalog=cat, ledger=led, as_of=date(2026, 10, 13), corpus=cp)
+        for p in seen[:2]:
+            assert "公司拟投资 18 亿元建设高性能覆铜板项目" in p, "辩手没看到原文"
+            assert "它们不是证据" in p
+        bull = next(e for e in r.evidence if e.side == "多方")
+        assert bull.unverified == "" and "投资建设" in bull.source
+
+    def test_一方没有可用证据时失败(self):
+        from ir_agent.stance import run_stance
+        cat, led, cp = self._cat()
+        replies = iter(["多方｜产能｜扩产｜[[revenue.yoy@2025FY]]",
+                        "（空方什么也没给）"])
+        with pytest.raises(StanceFailed, match="空方一条可用证据都没有"):
+            run_stance(lambda p: next(replies), round_="B", subjects=["产能"],
+                       context="", catalog=cat, ledger=led,
+                       as_of=date(2026, 10, 13), corpus=cp)

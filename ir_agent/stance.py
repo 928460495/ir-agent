@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
@@ -35,8 +37,11 @@ class Evidence:
     subject: str                 # 驱动主题（辩论①）或因子标签（辩论②）
     claim: str
     bases: list[Basis] = field(default_factory=list)
-    # 代码核验不过时的说明。**空串 = 核验通过。** 不阻断 —— 见 Task 3。
+    # 代码核验不过时的说明。**空串 = 核验通过。** 不阻断 —— 见 `annotate`。
     unverified: str = ""
+    # 引文出自哪里（`Document.cite()` 或「年报原文」）。核验通过时记下，
+    # 门② 的人据此点开原文 —— 「核验通过」本身不告诉人该去哪看。
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,8 +72,36 @@ def _num(tok: str, what: str, raw: str) -> Decimal | None:
     return v / 100 if pct else v
 
 
-def parse_evidence(raw: str) -> list[Evidence]:
-    """解析两侧采集到的证据。格式：`侧别｜主题｜论点｜依据`。"""
+# 「发布者《标题》（日期，分级）」——**这正是我们在提示词里展示文档的格式**
+# （`Document.cite()`）。模型照抄它当依据，说明它确实读过那篇文档，只是没给
+# 逐字原文。生益科技 2026-10-13 试跑：一条证据写成这样，整场辩论② 作废。
+_CITE = re.compile(r"《([^》]{2,})》")
+
+
+def _cited_doc(basis_raw: str, corpus):
+    """依据若是「《标题》」式的文档引用，按标题找语料库里的那篇。"""
+    m = _CITE.search(basis_raw or "")
+    if not m or corpus is None:
+        return None
+    title = m.group(1).strip()
+    return next((d for d in getattr(corpus, "docs", None) or []
+                 if (getattr(d, "title", "") or "").strip() == title), None)
+
+
+def parse_evidence(raw: str, *, corpus=None,
+                   dropped: list[str] | None = None) -> list[Evidence]:
+    """解析两侧采集到的证据。格式：`侧别｜主题｜论点｜依据`。
+
+    **依据写不成可核验形态的那条，保留并标注，不让整场作废。** spec 定的是
+    「多空证据的依据核验不阻断，核验不过的逐条标注」，理由是「实测三场辩论
+    被契约杀掉（占位符缺失、裸数字……），每次损失一整场」。第一版在这里对
+    缺依据直接抛异常 —— 生益科技试跑时 25 条证据里 1 条依据写成了文档标题，
+    辩论② 两次模型调用白花。
+
+    `dropped` 给了列表时，**格式**错的行（段数不对、侧别写错）也跳过并记进
+    列表，而不是抛异常；不给（单元测试的直接调用）则照旧抛 —— 让格式错误在
+    测试里可见。整份输出一条可用证据都没有时，无论如何都失败。
+    """
     from ir_agent.assume import AssumeFailed, _basis
 
     out: list[Evidence] = []
@@ -78,17 +111,33 @@ def parse_evidence(raw: str) -> list[Evidence]:
             continue
         bits = [x.strip() for x in line.split(_SEP)]
         if len(bits) != 4:
-            raise StanceFailed(
-                f"每条证据必须是四段「侧别｜主题｜论点｜依据」，"
-                f"得到 {len(bits)} 段：{line[:60]}", raw=raw)
+            msg = (f"每条证据必须是四段「侧别｜主题｜论点｜依据」，"
+                   f"得到 {len(bits)} 段：{line[:60]}")
+            if dropped is None:
+                raise StanceFailed(msg, raw=raw)
+            dropped.append(msg)
+            continue
         side, subject, claim, basis_raw = bits
         if side not in SIDES:
-            raise StanceFailed(
-                f"侧别只能是「多方」或「空方」，得到 {side!r}", raw=raw)
+            msg = f"侧别只能是「多方」或「空方」，得到 {side!r}"
+            if dropped is None:
+                raise StanceFailed(msg, raw=raw)
+            dropped.append(f"{msg}：{line[:60]}")
+            continue
         try:
             bases = _basis(basis_raw, f"「{subject}」的{side}证据")
-        except AssumeFailed as e:
-            raise StanceFailed(str(e), raw=raw) from e
+        except AssumeFailed:
+            doc = _cited_doc(basis_raw, corpus)
+            if doc is not None:
+                note = (f"引了文档《{doc.title}》但没给逐字原文 —— 文档确实在"
+                        "语料库里，论点是否出自它需人工点开核对")
+                src = doc.cite()
+            else:
+                note = f"缺少可核验的依据：{basis_raw[:60] or '（空）'}"
+                src = ""
+            out.append(Evidence(side=side, subject=subject, claim=claim,
+                                bases=[], unverified=note, source=src))
+            continue
         out.append(Evidence(side=side, subject=subject, claim=claim, bases=bases))
     if not out:
         raise StanceFailed("一条可用证据都没有解析出来。", raw=raw)
@@ -127,6 +176,9 @@ class StanceResult:
     evidence: list[Evidence] = field(default_factory=list)
     balances: list[Balance] = field(default_factory=list)
     manual: str = ""             # 人工补写时的署名
+    # 因格式错误被跳过的证据行（段数不对、侧别写错）。**跳过要说出来**，
+    # 否则读的人以为模型只采了这么多。
+    dropped: list[str] = field(default_factory=list)
 
     @property
     def unverified(self) -> list[Evidence]:
@@ -152,6 +204,9 @@ class StanceResult:
                              f"多 {b.bull} —— {b.note.strip()[:50]}")
         for e in self.unverified:
             lines.append(f"  ⚠ [{e.side}] {e.subject}：{e.unverified}")
+        if self.dropped:
+            lines.append(f"  ⚠ {len(self.dropped)} 行因格式错误被跳过：")
+            lines += [f"    – {x}" for x in self.dropped]
         return "\n".join(lines)
 
     def to_json(self) -> dict:
@@ -161,7 +216,9 @@ class StanceResult:
             "evidence": [{"side": e.side, "subject": e.subject, "claim": e.claim,
                           "bases": [b.ref for b in e.bases],
                           "quotes": [b.quote for b in e.bases],
-                          "unverified": e.unverified} for e in self.evidence],
+                          "unverified": e.unverified,
+                          "source": e.source} for e in self.evidence],
+            "dropped": list(self.dropped),
             "balances": [{"subject": b.subject,
                           "bear": None if b.bear is None else str(b.bear),
                           "mid": None if b.mid is None else str(b.mid),
@@ -188,7 +245,8 @@ class StanceResult:
                     bases.append(Basis.report(q))
             evs.append(Evidence(side=x["side"], subject=x["subject"],
                                 claim=x.get("claim", ""), bases=bases,
-                                unverified=x.get("unverified", "")))
+                                unverified=x.get("unverified", ""),
+                                source=x.get("source", "")))
         bals = []
         for x in d.get("balances") or []:
             g = lambda k: (None if x.get(k) in (None, "") else Decimal(x[k]))
@@ -196,7 +254,8 @@ class StanceResult:
                                 mid=g("mid"), bull=g("bull"),
                                 note=x.get("note", "")))
         return cls(round_=d.get("round", ""), evidence=evs, balances=bals,
-                   manual=d.get("manual", ""))
+                   manual=d.get("manual", ""),
+                   dropped=list(d.get("dropped") or []))
 
 
 def check_interval(balances: list[Balance]) -> list[str]:
@@ -224,25 +283,60 @@ def check_interval(balances: list[Balance]) -> list[str]:
     return out
 
 
-def annotate(evs: list[Evidence], *, ledger, body: str, as_of,
-             corpus=None) -> list[Evidence]:
+def annotate(evs: list[Evidence], *, ledger, as_of, body: str = "",
+             corpus=None, evidence=None, context: str = "") -> list[Evidence]:
     """逐条核验证据的依据，**核验不过的打标记，不丢弃、不驳回**。
 
-    为什么不阻断: 实测三场辩论被占位符契约杀掉（占位符缺失、裸数字、
-    分位数后多写一个单位），每次损失一整场。而这个项目已经有一个现成的
-    折中 —— 判断项那边的「N 行依据未能逐字核验（已标注，未阻断，需人工
-    复核）」。核验+标注不降低成功率，又保留检出能力。
+    为什么不阻断: 实测三场辩论被占位符契约杀掉，每次损失一整场。这个项目
+    已经有一个现成的折中 —— 判断项那边的「N 行依据未能逐字核验（已标注，
+    未阻断，需人工复核）」。核验+标注不降低成功率，又保留检出能力。
 
-    代价：若某条证据是编的，人要到门②才看到标注（而那时预研、因子采集、
-    简报都已基于它跑完）。所以标注必须进产物与摘要，不能只写日志。
+    **引文类依据对着什么核验。** 辩论没有「正文」—— 第一版把引文拿去和空串
+    比（`body=""`），于是所有引文都判「在正文中找不到 —— 与凭空捏造无异」。
+    生益科技试跑辩论① 的 10 条标注里：2 条逐字出现在语料库里（冤枉的），
+    8 条引的是**本系统自己的定性分析结论**（「周期定位：衰退」「政策取向：
+    宽松」）。现在：
+
+    - 核验面用 `evidence`（`attribution.Evidence`，**撰写简报时用的同一个**：
+      年报正文 + 语料库）。找到就核验通过，并记下出处供门② 点开
+    - 只在 `context`（喂给辩手的本系统分析结论）里找到 —— **单独标出**：
+      那是循环论证，不是证据；但也不是捏造，不能那么说
+    - 哪里都找不到才说找不到
+    - 占位符与外部资料（URL+引文）照旧走 `basis.validate`
+    - 依据在解析时就写不成（`bases` 为空）的，保留解析时的标注
     """
-    from ir_agent.basis import validate
+    from ir_agent.basis import BasisKind, validate
+    from ir_agent.sources.external import norm
 
+    ctx = norm(context or "")
+    plain = norm(body or "")
     out: list[Evidence] = []
     for e in evs:
-        probs = validate(e.bases, ledger, body, as_of, corpus=corpus)
+        if not e.bases:
+            out.append(e)                   # 解析时已标注，不覆盖
+            continue
+        probs: list[str] = []
+        src = ""
+        rest = []
+        for b in e.bases:
+            if b.kind is not BasisKind.REPORT:
+                rest.append(b)
+                continue
+            q = norm(b.quote)
+            hit = evidence.find(b.quote) if evidence is not None else None
+            if hit:
+                src = src or hit
+            elif q and q in plain:
+                src = src or "正文"
+            elif q and q in ctx:
+                probs.append(f"引的是本系统的分析结论「{b.quote[:30]}」，不是原始"
+                             "资料（循环论证）—— 请人工判断这条论点另有何据")
+            else:
+                probs.append(f"引文「{b.quote[:30]}」在年报与语料库里都找不到")
+        if rest:
+            probs += validate(rest, ledger, body, as_of, corpus=corpus)
         out.append(Evidence(side=e.side, subject=e.subject, claim=e.claim,
-                            bases=e.bases,
+                            bases=e.bases, source=src,
                             unverified="；".join(probs)[:200] if probs else ""))
     return out
 
@@ -257,6 +351,10 @@ _RULES_COMMON = """本轮为内部研究评审。你的产出只进辩论记录�
   · 账本占位符    [[字段@期间]]
   · 正文引文      「逐字照抄的一句话」
   · 外部资料      URL（抓取日期）「逐字引文」
+
+**引公告、研报、网页时，依据写「逐字引文」**（从下面「语料库原文」里照抄
+一句），不要只写文档标题 —— 只写标题的话，代码核验不了这条论点是否真出自
+那篇文档。
 
 **依据是这套机制的全部价值所在。** 给不出依据的论点请直接不写 —— 写了会被
 标注为「代码核验不过」并原样交给人复核，那对谁都没有帮助。
@@ -297,6 +395,24 @@ _JUDGE_B = """你的角色是**裁决者**。多空两侧各自挑出了材料�
 """
 
 
+def _corpus_block(corpus) -> str:
+    """语料库原文，喂给辩手。与 `strategy` / `value_chain` / `macro_view`
+    同一种渲染（分级规矩 + 每篇的引用行与截断正文）、同一份文档
+    （`prompt_docs()`）。"""
+    if corpus is None or not getattr(corpus, "docs", None):
+        return ""
+    from ir_agent.sources.external import TIER_LABEL, TIER_RULE
+
+    docs = corpus.prompt_docs()
+    lines = []
+    for t in sorted({d.tier for d in docs}, key=lambda t: t.value):
+        lines.append(f"  [{TIER_LABEL[t]}] 的可引用范围：{TIER_RULE[t]}")
+    for d in docs:
+        lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
+        lines.append("  " + d.for_prompt().replace("\n", "\n  "))
+    return "\n".join(lines)
+
+
 def template_json(round_: str, subjects: list[str]) -> dict:
     """人工补写的待填模板。**代码给模板，不让人猜格式。**
 
@@ -335,15 +451,33 @@ def run_stance(client, *, round_: str, subjects: list[str], context: str,
 
     facts = catalog.render_for_prompt()
     topics = "、".join(subjects)
+    # **语料库原文必须给。** spec：「双方拿到同一份证据（事实清单 + 语料库 +
+    # 定性结论）」。第一版只给了事实与 `context`（本系统的定性分析摘要），
+    # 辩手于是只能引我们自己的结论 —— 生益科技试跑辩论① 被标注的 10 条里
+    # 8 条就是这么来的。给的是 `corpus.prompt_docs()`：与定性三节**同一份**
+    # 按档排好的文档，双方拿同一份。
+    docs = _corpus_block(corpus)
     ctx = (f"\n**本轮要覆盖的{'因子' if round_ == 'B' else '主题'}**\n{topics}\n"
-           f"\n**可用事实**\n{facts}\n\n**已采集的证据面**\n{context}\n")
+           f"\n**可用事实**\n{facts}\n"
+           + (f"\n**语料库原文**\n{docs}\n" if docs else "")
+           + f"\n**本系统的定性分析结论**（供参考；**它们不是证据**，"
+             f"请引上面的原文或事实）\n{context}\n")
 
     print(f"多空辩论{round_}：多方采证…", file=sys.stderr)
     bull_raw = client(_BULL + ctx)
     print(f"多空辩论{round_}：空方采证…", file=sys.stderr)
     bear_raw = client(_BEAR + ctx)
-    evs = annotate(parse_evidence(bull_raw + "\n" + bear_raw),
-                   ledger=ledger, body=body, as_of=as_of, corpus=corpus)
+    dropped: list[str] = []
+    evs = annotate(parse_evidence(bull_raw + "\n" + bear_raw, corpus=corpus,
+                                  dropped=dropped),
+                   ledger=ledger, body=body, as_of=as_of, corpus=corpus,
+                   evidence=getattr(catalog, "evidence", None), context=context)
+    # **一方没有任何可用证据，这场辩论就没有意义** —— 裁决者只看到一面之词。
+    # 比「总数为零才失败」更严：25 条全是多方的，同样不是辩论。
+    for side in SIDES:
+        if not any(e.side == side for e in evs):
+            raise StanceFailed(f"{side}一条可用证据都没有 —— 单边的材料"
+                               "裁决不出平衡点", raw=bull_raw + "\n" + bear_raw)
 
     listed = "\n".join(f"{e.side}｜{e.subject}｜{e.claim}" for e in evs)
     base = ((_JUDGE_A if round_ == "A" else _JUDGE_B) + ctx
@@ -363,7 +497,8 @@ def run_stance(client, *, round_: str, subjects: list[str], context: str,
             continue
         probs = check_interval(bals)
         if not probs:
-            return StanceResult(round_=round_, evidence=evs, balances=bals)
+            return StanceResult(round_=round_, evidence=evs, balances=bals,
+                                dropped=dropped)
         last = "；".join(probs)
         prompt = f"{base}\n---\n**上一稿被驳回**：{last}\n请据此重写全部行。\n"
     raise StanceFailed(f"连续 {max_attempts} 次给不出可用的平衡点：{last}", raw=raw)
