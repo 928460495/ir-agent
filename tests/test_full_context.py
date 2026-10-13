@@ -3250,3 +3250,58 @@ def test_辩论结论与定性结论真的进了预研的提示词(tmp_path):
     assert "护城河" in p and "铜箔集中度" in p, "定性结论没进提示词"
     assert "【定性结论】" in p and "【已入库资料】" in p
     assert "共 12 篇" in p, "语料库构成没进提示词"
+
+
+def test_因子采集失败时上下文显式说出来而不是留空段落():
+    """**空段落让辩手把「没采到」读成「采到了但没有」。** 前者该降低双方的
+    置信度，后者不该 —— 产物上必须能区分。"""
+    from ir_agent.full import _factor_ctx
+
+    for empty in (None, {}):
+        assert "未成功" in _factor_ctx(empty)
+
+
+def test_停下来的指引里年度取自报告期而不是当前年(capsys):
+    """可粘贴的命令必须真能跑。as_of 是今天（2026），报告期是 2025FY ——
+    用 as_of.year 拼出来的 `--year 2026` 会把人引到一个空账本上。
+
+    **断言必须落在年度上。** 第一版这条测试只断言了
+    `o.stage is Stage.INCOMPLETE`，名字说的那件事一条没测 —— 把
+    `r.period[:4]` 换回 `as_of.year` 它照样绿。
+    """
+    import datetime
+    from ir_agent import full
+
+    class _R:
+        period, ledger, quotes, corpus = "2025FY", None, None, None
+        verdicts, store = [], None
+
+    class _C:
+        total_cost_usd = 0.0
+
+    o = full._stop_for_manual("600183", _R(), datetime.date(2026, 10, 12),
+                              __import__("pathlib").Path("out/x"), {}, [],
+                              _C(), round_="A")
+    err = capsys.readouterr().err
+    assert "--year 2025" in err, err
+    assert "2026" not in err, "年度取成了 as_of.year"
+    assert "--accept-manual" in err, "第二条路（人工补写）没打出来"
+    assert o.stage is full.Stage.INCOMPLETE
+
+
+def test_后一次调用不清掉前一次算出来的_upheld(tmp_path):
+    import datetime
+    from ir_agent.full import STATE, _restore_state, _save_state
+
+    class _R:
+        period = "2025FY"
+
+    d = datetime.date(2026, 10, 12)
+    _save_state(tmp_path, "600183", _R(), d, {"a": "1"}, {}, upheld=5)
+    _save_state(tmp_path, "600183", _R(), d, {"a": "1"}, {},
+                verified_by="xhl")          # 不传 upheld
+    import json as _j
+    saved = _j.loads((tmp_path / STATE).read_text(encoding="utf-8"))
+    assert saved["upheld"] == 5, "没算过 upheld 的调用把它清掉了"
+    assert saved["verified_by"] == "xhl"
+    assert _restore_state(tmp_path) == ({"a": "1"}, {})

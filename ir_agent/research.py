@@ -33,6 +33,9 @@ ASSUMPTIONS_MD = "assumptions.md"
 
 class Stage(str, Enum):
     AWAITING_REVIEW = "awaiting_review"      # 假设待定（模型未能给出合法假设）
+    AWAITING_SOURCES = "awaiting_sources"              # 停在门①：来源待核验
+    AWAITING_BRIEF_REVIEW = "awaiting_brief_review"    # 停在门②：简报待审阅
+    AWAITING_ASSUME_REVIEW = "awaiting_assume_review"  # 停在门③：判断项待核实
     NOT_APPLICABLE = "not_applicable"        # 路由判定不适用 DCF
     # 这一轮没跑完（模型额度、网络、接口失败……），与「不适用 DCF」
     # **不是一回事**：前者重跑就能好，后者重跑多少次都一样。实测踩到：

@@ -1312,6 +1312,46 @@ def _collect_factors(r, as_of: date, client, md: dict, decomps,
     return factor_data
 
 
+def _factor_ctx(factor_data: dict | None) -> str:
+    """把因子采集结果渲染进辩论②的提示词。
+
+    **采集失败时必须显式说出来**，不能给一个空段落 —— 见
+    `test_因子采集失败时上下文显式说出来而不是留空段落`。
+    """
+    if not factor_data:
+        return ("（本轮因子数据采集未成功；以下取值只能基于上面的定量事实"
+                "与语料库，双方都应据此降低置信度）")
+    from ir_agent import gaps
+    return gaps.summary(factor_data)
+
+
+def _stop_for_manual(code: str, r, as_of: date, out: Path, arts: dict,
+                     skipped: list[str], client, *,
+                     round_: str) -> ResearchOutcome:
+    """多空环节失败时停下，给出两条可粘贴的命令。
+
+    **没有「跳过」这条路。** 每份研报的多空输入要么来自模型、要么来自人。
+    已知代价：某家公司反复失败时流程会卡住，直到有人手写那份 JSON。
+
+    年度取自 `r.period` 而不是 `as_of.year`：as_of 是今天，报告期是上一个
+    年度，拼错了这条命令就把人引到一个空账本上。
+    """
+    low = round_.lower()
+    cmd = (f"python -m ir_agent {code} --year {r.period[:4]} "
+           f"--brief {out} --verified-by <名字>")
+    print(f"\n多空辩论{round_} 未完成。最后一稿与待填模板已落盘：\n"
+          f"  {out}/stance_{low}_failed_raw.md\n"
+          f"  {out}/stance_{low}.template.json\n\n"
+          f"  ① 原样重试（模型重抽）\n     {cmd}\n\n"
+          f"  ② 人工补写：按模板填好 {out}/stance_{low}.json，然后\n"
+          f"     {cmd} --accept-manual\n", file=sys.stderr)
+    skipped.append(f"多空辩论{round_} 未完成 —— 需重跑或人工补写")
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of, stage=Stage.INCOMPLETE,
+        artifacts=arts, skipped=skipped,
+        cost_usd=Decimal(str(client.total_cost_usd)), phase="brief")
+
+
 def _methodology_failed(out: Path, e) -> tuple[None, str]:
     """预研给不出闭合的分解式 —— 退回不分解模式，整轮继续。
 
