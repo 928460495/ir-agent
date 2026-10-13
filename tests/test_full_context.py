@@ -925,7 +925,8 @@ def test_判断项没写出来时不能说待人工核实(tmp_path):
 
     stage2, reason2 = full._review_stage(
         {ASSUMPTIONS_ART_KEY: "out/600584/assumptions.md"})
-    assert stage2 is Stage.AWAITING_REVIEW
+    # 第一阶段拆三段之后，判断项产出即停在门③。
+    assert stage2 is Stage.AWAITING_ASSUME_REVIEW
     assert "assumptions.md" in reason2 and "待人工核实" in reason2
 
 
@@ -3559,8 +3560,13 @@ def test_第一阶段之三把平衡点交给判断项且不联网重新预研(t
     got: dict = {}
 
     def propose(code, r, body, md, as_of, out, client, arts, **k):
+        # 与真实的 `_propose_assumptions` 同形：写文件**并登记 arts**。
+        # `run_assume` 按本轮登记的产物定状态，只写文件不登记会被判为
+        # 未完成 —— 那正是要的行为（见 test_上一轮残留的判断项不能冒充本轮产物）。
         got.update(k)
         (out / "assumptions.json").write_text("{}", encoding="utf-8")
+        (out / "assumptions.md").write_text("# 判断项\n", encoding="utf-8")
+        arts[full.ASSUMPTIONS_ART] = str(out / "assumptions.md")
         return ""
 
     monkeypatch.setattr(full, "_research_methodology", no_predict)
@@ -3659,3 +3665,80 @@ def test_accept_manual是开关而不是取值():
         ["600183", "--year", "2025", "--brief", "out/x",
          "--verified-by", "xhl", "--accept-manual"])
     assert a.accept_manual is True
+
+
+def test_上一轮残留的判断项不能冒充本轮产物(tmp_path, monkeypatch):
+    """**按本轮登记的产物定状态，不看磁盘上有没有那个文件。**
+
+    Task 10 初稿写的是 `AWAITING_ASSUME_REVIEW if (out / ASSUMPTIONS_JSON).exists()`
+    —— 上一轮残留的 assumptions.json 会让这一轮 `_propose_assumptions` 的失败
+    伪装成成功，人照指引去跑 --value，拿的是旧分解式下的旧判断项。与「上一轮
+    残留的 assumptions.md 把第一阶段的失败伪装成第二阶段的失败」（生益科技
+    重跑实测）同一个洞。`_review_stage` 看的是 `arts`。
+    """
+    import json as _j
+
+    from ir_agent import full, stance
+
+    _offline(monkeypatch, full)
+    (tmp_path / "brief.md").write_text("## 一节\n正文。", encoding="utf-8")
+    sb = stance.StanceResult(round_="B", balances=stance.parse_balance(
+        "平衡｜营收增速｜0.05｜0.12｜0.20｜理由"))
+    (tmp_path / "stance_b.json").write_text(_j.dumps(sb.to_json()),
+                                            encoding="utf-8")
+    (tmp_path / "assumptions.json").write_text('{"rows": "上一轮的"}',
+                                               encoding="utf-8")
+    monkeypatch.setattr(full, "_propose_assumptions",
+                        lambda *a, **k: "DCF 判断项（测试：本轮失败）")
+    o = full.run_assume("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "xhl")
+    assert o.stage is full.Stage.INCOMPLETE, "残留文件冒充了本轮产物"
+
+
+def test_三个签名各落在自己那道门的产物上(tmp_path, monkeypatch):
+    """spec ①B：签名只进第一阶段产物，第二阶段一行不改。
+
+    sources.json ← 门① 的 verified_by（run_brief 回填）；brief.md 顶部印门①；
+    assumptions.md 顶部印门①②；state.json 两个都有。
+    """
+    import json as _j
+
+    from ir_agent import full, stance
+
+    seq = _offline(monkeypatch, full)
+    _stub_brief(monkeypatch, full, seq)
+    (tmp_path / "sources.json").write_text('{"rows": [], "verified_by": ""}',
+                                           encoding="utf-8")
+
+    class _Audit:
+        def with_sources(self):
+            return "## 一节\n正文。"
+
+    monkeypatch.setattr(full, "write_body",
+                        lambda *a, **k: ("## 一节\n正文。", None))
+    monkeypatch.setattr(full, "audit", lambda *a, **k: _Audit())
+    monkeypatch.setattr(full, "_audit_note", lambda *a, **k: "")
+    monkeypatch.setattr(full, "_write_review", lambda *a, **k: None)
+    full.run_brief("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "甲")
+
+    assert _j.loads((tmp_path / "sources.json").read_text(
+        encoding="utf-8"))["verified_by"] == "甲"
+    assert (tmp_path / "brief.md").read_text(
+        encoding="utf-8").startswith("> 资料来源经 甲 核验")
+
+    sb = stance.StanceResult(round_="B", balances=stance.parse_balance(
+        "平衡｜营收增速｜0.05｜0.12｜0.20｜理由"))
+    (tmp_path / "stance_b.json").write_text(_j.dumps(sb.to_json()),
+                                            encoding="utf-8")
+
+    def propose(code, r, body, md, as_of, out, client, arts, **k):
+        (out / "assumptions.json").write_text("{}", encoding="utf-8")
+        (out / "assumptions.md").write_text("# 判断项\n", encoding="utf-8")
+        arts[full.ASSUMPTIONS_ART] = str(out / "assumptions.md")
+        return ""
+
+    monkeypatch.setattr(full, "_propose_assumptions", propose)
+    full.run_assume("600183", _PhaseR(), date(2026, 10, 12), tmp_path, "乙")
+    head = (tmp_path / "assumptions.md").read_text(encoding="utf-8").split("\n")[0]
+    assert "资料来源经 甲 核验" in head and "简报结论经 乙 审阅" in head, head
+    st = _j.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert st["verified_by"] == "甲" and st["reviewed_by"] == "乙"

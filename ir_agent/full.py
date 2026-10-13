@@ -1539,7 +1539,7 @@ def _review_stage(arts: dict):
     **只按预期路径下结论，不查结果。**
     """
     if ASSUMPTIONS_ART in arts:
-        return Stage.AWAITING_REVIEW, (
+        return Stage.AWAITING_ASSUME_REVIEW, (
             "分析完成，DCF 判断项待人工核实。核实 "
             f"{arts[ASSUMPTIONS_ART]}（需改数值就改 {ASSUMPTIONS_JSON}），"
             "确认后运行第二阶段建模")
@@ -1874,6 +1874,54 @@ def _write_review(out: Path, sa, sb, gaps_rows) -> None:
     (out / REVIEW_MD).write_text("\n".join(lines), encoding="utf-8")
 
 
+def _sign_sources(out: Path, verified_by: str) -> None:
+    """把门① 的署名回填进 `sources.json`。
+
+    `run_analyse` 落盘时写的是 `"verified_by": ""` —— 那时还没人核验。署名
+    是下一次调用（`--brief --verified-by`）才带进来的，所以回填发生在这里。
+    **读不回就跳过、不崩**：清单本身已经在盘上，签名写不进去是个瑕疵，不该
+    让整次调用失败。
+    """
+    f = out / SOURCES_JSON
+    if not f.exists() or not verified_by.strip():
+        return
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    d["verified_by"] = verified_by.strip()
+    f.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _sign_header(path: Path, out: Path) -> None:
+    """在产物顶部印出它的上游经谁核过（spec ①B：签名只进第一阶段产物）。
+
+    `brief.md` 产出时门② 还没开，能印的只有门① 的核验人；`assumptions.md`
+    产出时门①② 都已签过。签名从 `state.json` 读（`_save_state` 写进去的），
+    不另传参数 —— 同一个事实只有一个来源。
+
+    **最终研报的附录不改**：第二阶段一行都不动。已知代价（spec 写明）：
+    半年后读最终研报的人，翻不到资料来源与简报结论有没有人核过。
+    """
+    if not path.exists():
+        return
+    try:
+        st = json.loads((out / STATE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    parts = []
+    if (v := st.get("verified_by")):
+        parts.append(f"资料来源经 {v} 核验")
+    if (v := st.get("reviewed_by")):
+        parts.append(f"简报结论经 {v} 审阅")
+    if not parts:
+        return
+    body = path.read_text(encoding="utf-8")
+    line = "> " + "；".join(parts) + "\n\n"
+    if not body.startswith("> "):
+        path.write_text(line + body, encoding="utf-8")
+
+
 def run_brief(code: str, r, as_of: date, out_dir: str | Path,
               verified_by: str, *, model: str | None = None,
               snapshot_dir: str | Path = "snapshots",
@@ -1895,6 +1943,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     out.mkdir(parents=True, exist_ok=True)
     arts: dict[str, str] = {}
     skipped: list[str] = []
+    _sign_sources(out, verified_by)
 
     # **两个 client，不能合成一个。** 预研要联网补方法论、`gaps.collect` 的
     # ④分支要联网找因子数据 —— 不开联网工具不会报错，只会安静地什么都搜
@@ -1981,6 +2030,8 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     _write_dashboard(r, out, md, code, arts)
     skipped += _media_tier_note(getattr(r, "corpus", None))
     _save_state(out, code, r, as_of, md, pr, verified_by=verified_by)
+    if body:
+        _sign_header(out / BRIEF, out)
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of,
         stage=Stage.AWAITING_BRIEF_REVIEW if body else Stage.INCOMPLETE,
@@ -2043,11 +2094,16 @@ def run_assume(code: str, r, as_of: date, out_dir: str | Path,
     if aerr:
         skipped.append(aerr)
     _save_state(out, code, r, as_of, md, pr, reviewed_by=reviewed_by)
+    if ASSUMPTIONS_ART in arts:
+        _sign_header(out / ASSUMPTIONS_MD, out)
+    # **按本轮登记的产物定状态，不看磁盘上有没有那个文件。** 上一轮残留的
+    # assumptions.json 会让这一轮 `_propose_assumptions` 的失败伪装成成功 ——
+    # 与「上一轮残留的 assumptions.md 把第一阶段的失败伪装成第二阶段的失败」
+    # （生益科技重跑实测）同一个洞。`_review_stage` 看的是 `arts`。
+    stage, reason = _review_stage(arts)
     return ResearchOutcome(
-        code=code, period=r.period, as_of=as_of,
-        stage=(Stage.AWAITING_ASSUME_REVIEW
-               if (out / ASSUMPTIONS_JSON).exists() else Stage.INCOMPLETE),
-        artifacts=arts, skipped=skipped,
+        code=code, period=r.period, as_of=as_of, stage=stage,
+        artifacts=arts, skipped=skipped, route_reason=reason,
         cost_usd=Decimal(str(assume_client.total_cost_usd)), phase="assume")
 
 

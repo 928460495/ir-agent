@@ -77,7 +77,11 @@ class ResearchOutcome:
             lines.append(f"  · 模型开销：${self.cost_usd:.2f}")
         if self.route_reason:
             lines.append(f"  · 估值方法：{self.route_reason}")
-        if self.stage is Stage.AWAITING_REVIEW:
+        if self.stage is Stage.AWAITING_SOURCES:
+            lines.append("  ⏸ 停在门①：资料来源待核验（估值未建模）")
+        elif self.stage is Stage.AWAITING_BRIEF_REVIEW:
+            lines.append("  ⏸ 停在门②：简报结论待审阅（估值未建模）")
+        elif self.stage in (Stage.AWAITING_REVIEW, Stage.AWAITING_ASSUME_REVIEW):
             lines.append("  ⚠ 估值未建模 —— 假设尚未定案，报告尚不完整")
         elif self.stage is Stage.NOT_APPLICABLE:
             lines.append("  ⚠ 估值未建模 —— 本标的不适用 DCF")
@@ -144,6 +148,23 @@ _PREFIX = (
     # 因子**采到了**，这是一条降级警告。同样刻意与真缺口分开：
     # 「因子数据采集（…失败）」是整体没采到，仍落「未生成」。
     ("因子外部资料采集：", "  · "),
+    # ── 第一阶段拆三段（spec 2026-10-12）新增的清单生产者 ──
+    # **失败的前缀必须排在通用前缀之前**（`_mark` 是 startswith 逐条匹配、
+    # 先中先得）。计划原稿只登记了一条 `("多空辩论", "  · ")`，而它自己的
+    # 注释写着「『人工补写』是成功路径，『未完成』才是缺口 —— 两者刻意分开
+    # 前缀」：照抄的话「多空辩论B 未完成」会以「·」打出来，把一次失败渲染成
+    # 一条普通说明。轮次字母（A/B）在前缀里，所以两轮各登记一条。
+    ("多空辩论A 未完成", "  ⚠ "),
+    ("多空辩论B 未完成", "  ⚠ "),
+    ("多空辩论A 已有产物不可用", "  ⚠ "),
+    ("多空辩论B 已有产物不可用", "  ⚠ "),
+    ("多空辩论", "  · "),          # 人工补写 / 沿用已有产物 —— 成功路径
+    # 清单产出了，只是其中一条指向的文件不在盘上。
+    ("来源清单：", "  ⚠ "),
+    # 预研成功了，但有辩论主题没进分解式 —— 要人在门② 看。注意与预研
+    # **失败**区分：失败条目是「方法论预研（…）」（全角括号），落默认分支的
+    # 「未生成」是对的；这一条是「方法论预研：」（全角冒号）。
+    ("方法论预研：", "  ⚠ "),
 )
 
 
@@ -168,7 +189,29 @@ def next_actions(stage: Stage, code: str,
     """
     out = out_dir or f"out/{code}"
     y = f"--year {year}" if year else "--year <年度>"
-    if stage is Stage.AWAITING_REVIEW:
+    if stage is Stage.AWAITING_SOURCES:
+        return [
+            f"核验资料来源：{out}/sources.md\n"
+            "     逐条点开出处与本地文件。清单顶部若列出「缺原始接口快照」，"
+            "那是结构性限制，不是本轮故障。",
+            "核验完进入第一阶段之二 —— 多空辩论、方法论预研、因子采集、"
+            "撰写简报：\n"
+            f"     python -m ir_agent {code} {y} --brief {out} "
+            f"--verified-by <你的名字>",
+        ]
+    if stage is Stage.AWAITING_BRIEF_REVIEW:
+        return [
+            f"审阅简报结论：{out}/brief.md\n"
+            f"     待核清单 {out}/review.md 汇总了代码没把握的项（证据核验"
+            "不过、缺快照的引用）。",
+            f"多空平衡点：{out}/stance_b.md；分解式：{out}/drivers.md"
+            "（分解不对就改这个文件后重跑 --brief，已有的辩论产物会沿用，"
+            "要重抽加 --refresh-stance）。",
+            "审阅完进入第一阶段之三 —— AI 填 DCF 判断项：\n"
+            f"     python -m ir_agent {code} {y} --assume {out} "
+            f"--reviewed-by <你的名字>",
+        ]
+    if stage in (Stage.AWAITING_REVIEW, Stage.AWAITING_ASSUME_REVIEW):
         return [
             f"核实 DCF 判断项（营收增速与毛利率三档）：{out}/assumptions.md\n"
             "     这两项模型推不出来，只能靠分析判断 —— 其余假设"
@@ -199,10 +242,35 @@ def next_actions(stage: Stage, code: str,
                 f"     python -m ir_agent {code} {y} --value {out} "
                 f"--approved-by <你的名字>",
             ]
+        if phase == "brief":
+            acts = [
+                "第一阶段之二未跑完（原因见上方清单）。原样重跑：\n"
+                f"     python -m ir_agent {code} {y} --brief {out} "
+                f"--verified-by <你的名字>",
+            ]
+            for rnd in ("a", "b"):
+                tmpl = Path(out) / f"stance_{rnd}.template.json"
+                if tmpl.exists():
+                    acts.append(
+                        f"多空辩论{rnd.upper()} 未完成。若要人工补写：按 {tmpl} "
+                        f"填好 {out}/stance_{rnd}.json，然后在上面那条命令后"
+                        "加 --accept-manual。")
+            return acts
+        if phase == "assume":
+            acts = [
+                "第一阶段之三未跑完（原因见上方清单）。重跑：\n"
+                f"     python -m ir_agent {code} {y} --assume {out} "
+                f"--reviewed-by <你的名字>",
+            ]
+            if stale:
+                acts.append(
+                    f"⚠ {out}/{ASSUMPTIONS_MD} 是**上一轮**留下的，不是本轮产物"
+                    "——**不要拿它跑第二阶段**；重跑成功后会被覆盖。")
+            return acts
         if phase == "analyse":
             acts = [
                 "本轮未产出估值。若因分析步骤失败（模型额度、网络等），"
-                f"重跑第一阶段即可：\n"
+                f"重跑第一阶段之一即可：\n"
                 f"     python -m ir_agent {code} {y} --analyse {out}",
             ]
             if stale:

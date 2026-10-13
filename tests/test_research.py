@@ -224,3 +224,105 @@ def test_判断项保留意见的文案由纯函数产出():
         rows = [_Row(), _Row()]
 
     assert _assumption_caveat_note(_Clean()) == ""
+
+
+
+# ══ 第一阶段拆三段（Task 12）══════════════════════════════════
+
+def test_四个阶段各给出可粘贴的下一条命令():
+    """`next_actions` 的 docstring 写着「过时的指引是会主动误导人的那种错」。
+    四次调用的流程里，它必须按产物推断当前停在哪道门。"""
+    from ir_agent.research import Stage, next_actions
+
+    for stage, flag in ((Stage.AWAITING_SOURCES, "--brief"),
+                        (Stage.AWAITING_BRIEF_REVIEW, "--assume"),
+                        (Stage.AWAITING_ASSUME_REVIEW, "--value")):
+        joined = "\n".join(next_actions(stage, "600183", out_dir="out/x",
+                                        year=2025))
+        assert flag in joined, f"{stage} 没给出下一条命令"
+        assert "600183" in joined and "--year 2025" in joined
+
+
+def test_三道门的签名要求各自出现在指引里():
+    from ir_agent.research import Stage, next_actions
+
+    for stage, sig in ((Stage.AWAITING_SOURCES, "--verified-by"),
+                       (Stage.AWAITING_BRIEF_REVIEW, "--reviewed-by"),
+                       (Stage.AWAITING_ASSUME_REVIEW, "--approved-by")):
+        assert sig in "\n".join(
+            next_actions(stage, "600183", out_dir="out/x", year=2025))
+
+
+def test_指引里的命令都能被真实解析器接受():
+    """**不比对字符串，拿真实解析器去解析指引里的每一条命令。**
+
+    `build_parser` 单独成函数正是为此：此前靠比对字符串守，删掉 --review
+    之后测试照样过，而打给用户的命令已经跑不动了。
+    """
+    import shlex
+
+    from ir_agent.__main__ import build_parser
+    from ir_agent.research import Stage, next_actions
+
+    p = build_parser()
+    for stage in (Stage.AWAITING_SOURCES, Stage.AWAITING_BRIEF_REVIEW,
+                  Stage.AWAITING_ASSUME_REVIEW):
+        for act in next_actions(stage, "600183", out_dir="out/x", year=2025):
+            for line in act.splitlines():
+                line = line.strip()
+                if line.startswith("python -m ir_agent"):
+                    argv = shlex.split(line.replace("<你的名字>", "xhl"))[3:]
+                    p.parse_args(argv)          # 解析失败会 SystemExit
+
+
+def test_第二次与第三次调用未完成时教人重跑自己那一次(tmp_path):
+    from ir_agent.research import Stage, next_actions
+
+    b = "\n".join(next_actions(Stage.INCOMPLETE, "600183", out_dir=str(tmp_path),
+                               year=2025, phase="brief"))
+    a = "\n".join(next_actions(Stage.INCOMPLETE, "600183", out_dir=str(tmp_path),
+                               year=2025, phase="assume"))
+    assert "--brief" in b and "--analyse" not in b, "教人重跑了第一次调用"
+    assert "--assume" in a and "--analyse" not in a
+
+    (tmp_path / "stance_b.template.json").write_text("{}", encoding="utf-8")
+    b2 = "\n".join(next_actions(Stage.INCOMPLETE, "600183", out_dir=str(tmp_path),
+                                year=2025, phase="brief"))
+    assert "--accept-manual" in b2 and "stance_b.template.json" in b2
+
+
+def test_新前缀都注册进了白名单且失败与成功分开():
+    """`_PREFIX` 的兜底是「未生成」—— 最强的那个断言，所以每个新生产者都要
+    来登记。**而且登记对了还不够，符号也要对。** 计划原稿的这条测试只断言
+    「不是『未生成』」，于是「多空辩论B 未完成」被登记成「·」（信息性）也能
+    过 —— 一次失败被渲染成一条普通说明。
+    """
+    from ir_agent.research import _mark
+
+    warn = ("多空辩论A 未完成（裁决者三次给不出区间内的平衡值）",
+            "多空辩论B 未完成 —— 需重跑或人工补写",
+            "多空辩论B 已有产物不可用（…）—— 请修正",
+            "来源清单：[公司公告] x：清单列出的本地文件不存在",
+            "方法论预研：2 个辩论主题未进入分解式（份额、政策）")
+    info = ("多空辩论A：由 xhl 人工补写",
+            "多空辩论B：沿用已有产物（要重抽加 --refresh-stance）")
+    for s in warn:
+        assert _mark(s) == "  ⚠ ", f"失败/待核项没标成 ⚠：{s} → {_mark(s)!r}"
+    for s in info:
+        assert _mark(s) == "  · ", f"成功路径被标成了别的：{s} → {_mark(s)!r}"
+    # 预研**失败**仍落默认分支（「未生成」是对的：分解式确实没产出）
+    assert _mark("方法论预研（连续 3 次给不出闭合的分解式）") == "  – 未生成："
+
+
+def test_停在门一门二时摘要说清停在哪():
+    from datetime import date
+    from decimal import Decimal
+
+    from ir_agent.research import ResearchOutcome, Stage
+
+    for stage, word in ((Stage.AWAITING_SOURCES, "门①"),
+                        (Stage.AWAITING_BRIEF_REVIEW, "门②")):
+        o = ResearchOutcome(code="600183", period="2025FY",
+                            as_of=date(2026, 10, 12), stage=stage,
+                            cost_usd=Decimal(0))
+        assert word in o.summary(), stage
