@@ -335,6 +335,9 @@ class AssumptionSet:
     # 因子结构审查结果（`factor_review.ReviewResult`）。派生量，不进 JSON。
     # 它**不是闸门**：只给结论与理由，印在清单上给批准人看。
     review: object = None
+    # 门③ [对账] 判出矛盾、退回重填一次的记录（第一稿的审核意见）。派生量，
+    # 不进 JSON。
+    refill_note: list = field(default_factory=list)
     # 假设的数据合理性辩论结果（`debate.DebateResult`）。派生量，不进 JSON。
     # **同样不是闸门**：成立的挑战不改任何取值，只印在清单上 —— 自动改数
     # 会绕过人工门，而这道门的意义正是让人负责。
@@ -392,6 +395,8 @@ class AssumptionSet:
         if self.method_review:
             lines += ["🧭 **方法论审核遗留**（预研阶段审核者判为提醒/待采集的条目）：", ""]
             lines += list(self.method_review) + [""]
+        if self.refill_note:
+            lines += ["🔁 **对账退回重填**：", ""] + list(self.refill_note) + [""]
         if self.review is not None and getattr(self.review, "flagged", None):
             # 审核意见印在清单顶部而不是末尾 —— 批准人要在看三档数值之前
             # 先知道「有哪几条已经被质疑过」。实测那条重复计算的因子若有
@@ -1914,6 +1919,11 @@ def _formula_head(m: FormulaModel, factor_data: dict,
               "**单位规则**：单位是变化率或 % 的，取值带 %（如 −3.5%）；单位是 pp "
               "的，填数字不带 %（如 −3）；其他单位（万吨、元/平方米…）按原数填，"
               "不带 %。",
+              # 生益科技 2026-10-14：理由栏写「毛利率提升 5.47 个百分点」，表里
+              # 填 0.0547 —— 公式里的 /100 再除一次，影响缩小 100 倍。
+              "**pp 填的是百分点数字本身，不是小数**：毛利率提升 5.47 个百分点"
+              "写 5.47，不写 0.0547（0.0547 会被当成 0.0547 个百分点，缩小 100 "
+              "倍）。换成小数是公式里 /100 的事，你不用自己换。",
               "",
               *_BASIS_RULES,
               "",

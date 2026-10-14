@@ -2452,15 +2452,15 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     latest_annual = _latest_annual_period(r.ledger, as_of)
     base_margin = (_fact_value(r.ledger, "gross_margin", latest_annual, as_of)
                   if latest_annual else None)
+    decide_kw = dict(ledger=r.ledger, body=body, as_of=as_of, code=code,
+                     decomps=decomps, factor_data=factor_data,
+                     base_margin=base_margin,
+                     # 锚定输入：清单上展示的毛利率路径与建模时同一套基期。
+                     anchor=assume.anchor_from_cal(cal),
+                     # 辩论② 的平衡三元组：偏离它的行必须填 deviation。
+                     balances=balances)
     try:
-        a = assume.decide(client, cal["judg"], labels, ctx,
-                          ledger=r.ledger, body=body, as_of=as_of, code=code,
-                          decomps=decomps, factor_data=factor_data,
-                          base_margin=base_margin,
-                          # 锚定输入：清单上展示的毛利率路径与建模时同一套基期。
-                          anchor=assume.anchor_from_cal(cal),
-                          # 辩论② 的平衡三元组：偏离它的行必须填 deviation。
-                          balances=balances)
+        a = assume.decide(client, cal["judg"], labels, ctx, **decide_kw)
     except assume.AssumeFailed as e:
         return f"DCF 判断项（{str(e)[:200]}）"
     except ClaudeCliError as e:
@@ -2496,6 +2496,12 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
             # 与本仓库「这一步失败不该毙掉已经写好的正文」同一条原则。
             a.review = None
             print(f"因子结构审查未完成：{str(e)[:120]}", file=sys.stderr)
+        contra = [f for f in (getattr(a.review, "flagged", None) or [])
+                  if f.kind == "对账"]
+        if contra:
+            a = _refill_on_contradiction(a, contra, client=client,
+                                         judg=cal["judg"], labels=labels,
+                                         ctx=ctx, decide_kw=decide_kw)
 
     # ── 假设的数据合理性辩论（第 4 道：开放式，同样不设闸门）────────
     # 与 factor_review 分工: 那边清单式（可枚举），这边开放式（产能、竞争
@@ -2537,6 +2543,47 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     return _assumption_caveat_note(a)
 
 
+def _refill_on_contradiction(a, contra, *, client, judg, labels, ctx, decide_kw):
+    """门③ [对账] 判出「矛盾」→ 把审核意见与上一稿交回填写者，重填一次。
+
+    生益科技 2026-10-14：毛利率两个 pp 因子按小数填（理由栏「5.47 个百分点」、
+    表里 0.0547），[对账] 判出了矛盾，但它只标注不阻断，数值原样进了批准清单。
+    与方法论预研「审核者给建议、提出者改」同一个闭环：判断仍由模型做，不加代码
+    闸门；只重填一次，重填稿仍矛盾就照常标注、交人工。重填失败或退回两标量模式
+    时保留第一稿 —— 补充环节失败不该毙掉已经填好的判断项。
+    """
+    from ir_agent import assume, factor_review
+
+    first = [f"- [{f.kind}] {f.subject}：**{f.verdict}** —— {f.why}" for f in contra]
+    draft = a.describe()
+    fb = (f"{ctx}\n\n【门③ 对账审核：上一稿判为「矛盾」，请据此重填】\n"
+          "审核者意见：\n" + "\n".join(first)
+          + f"\n\n上一稿（三档取值与理由）：\n{draft}\n\n"
+          "逐条回应审核意见：数值写错单位的改数值；理由与取值对不上的，改取值或"
+          "改理由，使二者自洽。重新输出全部假设行。")
+    try:
+        b = assume.decide(client, judg, labels, fb, **decide_kw)
+    except (assume.AssumeFailed, ClaudeCliError) as e:
+        a.refill_note = [f"对账判出矛盾，退回重填失败（{str(e)[:120]}），保留第一稿。"]
+        return a
+    if b.degraded and not a.degraded:
+        a.refill_note = ["对账判出矛盾，重填稿退回了两标量模式，保留第一稿。"]
+        return a
+    b.method_review = list(a.method_review)
+    if b.implied is not None:
+        try:
+            b.review = factor_review.review(
+                client, b._m() or b.decomps, checklist=b.describe(),
+                implied=b.implied.describe(),
+                drivers=tuple(assume.DRIVERS) if not assume.has_model(b) else ())
+        except Exception as e:                              # noqa: BLE001
+            b.review = None
+            print(f"因子结构审查（重填稿）未完成：{str(e)[:120]}", file=sys.stderr)
+    # 审完再挂第一稿的意见 —— 挂在前面会进 describe()，喂给审核者就带了偏见。
+    b.refill_note = ["对账判出矛盾，已退回填写者重填一次；以下是第一稿的意见：", *first]
+    return b
+
+
 def _assumption_caveat_note(a) -> str:
     """判断项**产出之后**的保留意见。空串 = 没有保留。
 
@@ -2558,6 +2605,9 @@ def _assumption_caveat_note(a) -> str:
     # 留在 assumptions.md 的表格里等人自己逐行发现——终端产物清单是
     # 读者第一眼看到的地方，同一件事要在这里也露出来，而不是非致命
     # 就等于"没有的事"。
+    if getattr(a, "refill_note", None):
+        notes.append("门③ 对账判出矛盾，已退回重填" if "已退回填写者重填一次"
+                     in a.refill_note[0] else a.refill_note[0].rstrip("。"))
     upheld = getattr(getattr(a, "debate", None), "upheld_count", 0)
     if upheld:
         notes.append(f"假设辩论有 {upheld} 项挑战成立（数据合理性，"
