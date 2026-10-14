@@ -629,7 +629,7 @@ class TestSearchTermLabel:
         公式化后（2026-10-14）格式行换成 `因子:` 行，仍用尖括号占位。"""
         from ir_agent import methodology
         assert "因子名:单位:数据线索:检索词" not in methodology.PROMPT
-        assert "`因子: <短名> | <完整名> | <单位> | <数据线索> | <检索词>`" \
+        assert "\n因子: <短名> | <完整名> | <单位> | <数据线索> | <检索词>\n" \
             in methodology.PROMPT
 
 
@@ -682,8 +682,8 @@ class TestCoverageDeclared:
 
     def test_提示词要求两种声明行(self):
         from ir_agent import methodology
-        assert "`覆盖: <主题> | <" in methodology.PROMPT
-        assert "`未覆盖: <主题> | <" in methodology.PROMPT
+        assert "\n覆盖: <主题> | <" in methodology.PROMPT
+        assert "\n未覆盖: <主题> | <" in methodology.PROMPT
 
 
 class TestLedgerKeyDecl:
@@ -803,3 +803,54 @@ class TestFormulaDSL:
         hits = term_hits(m.model, sections="Prismark 数据显示。调价函。")
         assert dict(hits["行业（覆铜板）全球市场规模同比增速"])["Prismark"] == 1
         assert dict(theme_coverage(m.model, ["成本"]))["成本"] == ""
+
+
+# ---- 生益科技第二次调用（2026-10-14）：三轮都卡在行首反引号 -----------------
+
+_SYTECH_R3 = """`模式: 变化`
+`因子: 产销量增速 | 覆铜板、粘结片、PCB产销量同比增速 | 变化率 | 生益科技2026年半年度/三季度业绩预增公告中产销量披露 | 产销量`
+`因子: 份额增速 | 本司市占率同比变动幅度 | pp | [[company.market_share_delta]] | 市占率变化`
+`因子: 提价贡献 | 常规覆铜板综合提价对毛利率的当期拉动 | pp | 东莞证券、太平洋深度报告价格跟踪及财经媒体涨价报道 | 多轮涨价`
+`因子: 原材料成本侵蚀 | 铜箔、玻纤布等核心原材料涨价对毛利率的当期侵蚀 | pp | 需新采集（年报成本构成明细） | 铜箔采购价格`
+`常量: 基期市占率 | 0.0889 | [[company.market_share@2025FY]]`
+`公式: 营收 = 上期(营收) × (1 + 产销量增速) × (1 + 份额增速 / 100 / 基期市占率)`
+`公式: 毛利率 = 上期(毛利率) + (提价贡献 + 原材料成本侵蚀) / 100`
+`覆盖: 需求 | 产销量增速`
+`未覆盖: 政策 | 政策传导作用于跨年期的客户认证节奏与终值增长假设`
+`陷阱: 产销量增速本身已内含份额扩张效应，若份额增速再单独乘入营收公式，会把同一份额扩张贡献算两次`
+"""
+
+
+def test_生益科技第三轮原文_行首反引号也能解析():
+    from ir_agent.methodology import parse
+    m = parse(_SYTECH_R3)
+    assert m.model.mode == "变化"
+    assert [f.short for f in m.model.factors] == [
+        "产销量增速", "份额增速", "提价贡献", "原材料成本侵蚀"]
+    assert set(m.model.formulas) == {"revenue", "gross_margin"}
+    assert [c.name for c in m.model.constants] == ["基期市占率"]
+    assert m.coverage_decl[0] == ("覆盖", "需求", "产销量增速")
+    assert m.pitfalls[0].endswith("算两次")
+
+
+def test_一条公式行和分解行都没认出时_直说没识别出_不报缺少两条():
+    """三轮都收到「缺少 营收、毛利率 的分解式」，可它明明写了两条 —— 错的理由
+    让提出者无从改起。认不出任何一行时，要说的是「没认出」。"""
+    from ir_agent.methodology import MethodologyFailed, parse
+    with pytest.raises(MethodologyFailed) as e:
+        parse(">公式: 营收 = 上期(营收) × (1 + a)\n>公式: 毛利率 = 上期(毛利率)\n")
+    assert "没有识别出任何公式行或分解行" in str(e.value)
+    assert "缺少" not in str(e.value)
+
+
+def test_提示词的格式行放在代码块里_不写成单行反引号():
+    """格式行写成单行反引号，模型就照抄反引号（生益科技三轮全是）。"""
+    import re
+
+    from ir_agent.methodology import PROMPT
+    keys = "模式|因子|常量|公式|覆盖|未覆盖|陷阱"
+    assert not re.search(rf"^`({keys})\s*[:：]", PROMPT, re.M)
+    blocks = re.findall(r"```text\n(.*?)```", PROMPT, re.S)
+    inside = "\n".join(blocks)
+    for k in keys.split("|"):
+        assert re.search(rf"^{k}\s*:", inside, re.M), k

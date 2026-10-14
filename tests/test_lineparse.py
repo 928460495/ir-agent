@@ -108,3 +108,34 @@ def test_三个模块都接了宽容取值(mod, line, ok):
     m = importlib.import_module(f"ir_agent.{mod}")
     src = __import__("inspect").getsource(m.parse)
     assert "pick(" in src, f"{mod}.parse 仍在用严格相等"
+
+
+# ---- 行首反引号（生益科技第二次调用 2026-10-14）----------------------------
+# 预研提示词把格式行写成单行反引号，提出者照抄，三轮全写成 `公式: 营收 = …`。
+# 行首的反引号让 `公式:` 一行都没认出来，代码报「缺少 营收、毛利率 的分解式」
+# —— 理由是错的，提出者照着改不对，三轮同样失败，审核者一次没被调用。
+
+@pytest.mark.parametrize("line", [
+    "`传导: a | b`",
+    "- `传导: a | b`",
+    "1. `传导：a | b`  ",
+])
+def test_整行包在反引号里也认_且不把收尾反引号吃进内容(line):
+    assert keyed("传导").search(line).group(1).strip() == "a | b"
+
+
+def test_内容末尾自带的代码片段不被剥掉():
+    """只剥「整行包裹」的那一对；内容里成对的反引号是内容。"""
+    h = keyed("陷阱").search("陷阱: 注意 `上期(营收)`")
+    assert h.group(1).strip() == "注意 `上期(营收)`"
+
+
+def test_整行包裹且内容里也有代码片段():
+    h = keyed("陷阱").search("`陷阱: 用 `x` 替代 y`")
+    assert h.group(1).strip() == "用 `x` 替代 y"
+
+
+def test_反引号行之间互不吞并():
+    text = "`模式: 变化`\n`因子: a | b`\n"
+    assert keyed("模式").search(text).group(1).strip() == "变化"
+    assert keyed("因子").search(text).group(1).strip() == "a | b"
