@@ -222,3 +222,101 @@ def test_规则正文不出现与清单同形的条目行():
     了）。说明一律用「类别名：」。"""
     import re
     assert not re.search(r"(?m)^\s*-\s*\[(模式|因子|正交|公式|常量|账本|覆盖)\]", R.RULES)
+
+
+# ══ 生益科技第二次调用试跑后的修订（2026-10-14）════════════════════════════
+# 第 3 轮审核「未完成」：漏掉 [公式] 营收、[公式] 毛利率 与两条 [账本]，审核者
+# 原文没落盘，原因只能推测。用户决定：A 原文落盘、B 条目名容错、C [正交] 口径、
+# 并且审核者要给提出者修改建议。
+
+class TestJudgeRawSaved:
+    """A：审核者每次作答（含被退回补答的）都落进 drivers_rounds.md。"""
+
+    def test_通过时_被退回补答的那次也落盘(self):
+        class Once(Judge):
+            def __call__(self, prompt):
+                self.skip = {("模式", "模式")} if not self.prompts else set()
+                return super().__call__(prompt)
+        _, res, rounds = _run(_Proposer(CHANGE), Once())
+        md = R.rounds_markdown(rounds)
+        assert "审核者原文（第 1 次作答）" in md and "审核者原文（第 2 次作答）" in md
+        assert "没有给出结论" in md.split("审核者原文（第 2 次作答）")[0]
+
+    def test_未完成时_三次原文都落盘(self):
+        with pytest.raises(R.ReviewStop) as e:
+            _run(_Proposer(CHANGE), Judge(skip={("模式", "模式")}))
+        md = R.rounds_markdown(e.value.rounds)
+        assert "审核者原文（第 3 次作答）" in md
+        assert md.count("[因子] 份额增速（") >= 3
+
+    def test_原文里有三个反引号也不破坏围栏(self):
+        rounds = [R.Round(1, "```text\n模式: 变化\n```", code_error="x")]
+        md = R.rounds_markdown(rounds)
+        assert "````text" in md
+
+
+class TestSubjectTolerance:
+    """B：审核者照提出者原文写条目名 —— 带不带 @期间、[公式] 后面抄不抄公式都认。"""
+
+    def test_账本条目照提出者原文列_保留期间(self):
+        m = _model(CHANGE.replace("[[company.market_share_delta]]",
+                                  "[[company.market_share_delta@2025FY]]"))
+        assert ("账本", "份额增速 [[company.market_share_delta@2025FY]]") \
+            in R.checklist(m, [])
+
+    @pytest.mark.parametrize("exp,ans", [
+        ("份额增速 [[company.market_share_delta]]",
+         "份额增速 [[company.market_share_delta@2025FY]]"),
+        ("份额增速 [[company.market_share_delta@2025FY]]",
+         "份额增速 [[company.market_share_delta]]"),
+    ])
+    def test_账本条目_期间写不写都认(self, exp, ans):
+        got = R.parse(f"[账本] {ans}：提醒　口径待对齐 [[x.y@2025FY]]", [("账本", exp)])
+        assert got[0].subject == exp and got[0].level == "提醒"
+        assert got[0].why == "口径待对齐 [[x.y@2025FY]]", "理由里的占位符不能被剥"
+
+    def test_公式条目后面抄了公式也认(self):
+        raw = ("[公式] 营收 = 上期(营收) × (1 + 行业需求增速/100)：致命　量纲错　建议：去掉 /100\n"
+               "[公式] 毛利率=基期(毛利率) + (a + b) / 100：通过")
+        got = R.parse(raw, [("公式", "营收"), ("公式", "毛利率")])
+        assert [v.level for v in got] == ["致命", "通过"]
+
+
+class TestOrthogonalRule:
+    def test_共用证据来源不判致命(self):
+        """C：[正交] 只看量是否重复；两个不同的量共用一条证据是资料问题。
+        第 2 轮「成本转嫁 × 高端认证进度」因共用 Q2 环比 +4.53pct 被判致命，提出者
+        第 3 轮改成残差估算，反而更牵强。"""
+        rule = [l for l in R.RULES.splitlines() if l.startswith("- 正交：")][0]
+        block = R.RULES.split(rule)[1].split("\n- 公式：")[0]
+        text = rule + block
+        assert "证据" in text and "不判致命" in text
+
+
+class TestSuggestions:
+    """审核者要给提出者修改建议：致命必写「建议：…」，提醒/待采集可选。"""
+
+    EXP = [("模式", "模式"), ("公式", "营收")]
+
+    def test_致命必须附建议_否则算不完整(self):
+        with pytest.raises(R.ReviewIncomplete, match="没给修改建议.*\\[公式\\] 营收"):
+            R.parse("[模式] 模式：通过\n[公式] 营收：致命　重复计算", self.EXP)
+
+    def test_建议与理由分开存(self):
+        got = R.parse("[模式] 模式：提醒　牵强　建议：改水平\n"
+                      "[公式] 营收：致命　重复计算　建议：删掉份额增量", self.EXP)
+        assert got[1].why == "重复计算" and got[1].suggest == "删掉份额增量"
+        assert got[0].suggest == "改水平"
+        assert "建议：删掉份额增量" in got[1].line()
+
+    def test_反馈给提出者带上建议(self):
+        p = _Proposer(CHANGE, CHANGE)
+        _run(p, Judge({("正交", "份额增速 × 行业增速"): "致命"}, {}))
+        assert "建议：" in p.prompts[1]
+
+    def test_json往返保留建议(self):
+        res = R.ReviewResult(verdicts=[R.Verdict("模式", "模式", "提醒", "x", suggest="y")])
+        assert R.ReviewResult.from_json(res.to_json()).verdicts == res.verdicts
+
+    def test_规则写明致命要给建议(self):
+        assert "建议：" in R.RULES and "致命" in R.RULES.split("建议：")[0]

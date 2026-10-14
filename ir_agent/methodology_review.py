@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from itertools import combinations
 
@@ -42,6 +42,9 @@ _HEAD = re.compile(rf"\[({'|'.join(KINDS)})\]\s*(.*)", re.S)
 _QUOTE = re.compile(r"「([^」]{4,})」")
 _REF = re.compile(r"\[\[([^\]@]+)@([^\]]+)\]\]")
 _KEY_DECL = re.compile(r"\[\[([A-Za-z_][\w.]*)(?:@[^\]]*)?\]\]")
+# [账本] 条目照提出者原文列（带不带 @期间 原样保留）：审核者照它看到的原文作答。
+_KEY_AS_WRITTEN = re.compile(r"\[\[([A-Za-z_][\w.]*(?:@[^\]]*)?)\]\]")
+_SUGGEST = re.compile(r"\s*建议\s*[:：]\s*")
 
 
 class ReviewIncomplete(Exception):
@@ -63,10 +66,12 @@ class Verdict:
     level: str
     why: str
     quote_note: str = ""     # 引文核验不过时的标注（只标注，不改结论）
+    suggest: str = ""        # 审核者给提出者的修改建议（致命必写，其余可选）
 
     def line(self) -> str:
         tail = f"（⚠ {self.quote_note}）" if self.quote_note else ""
-        return f"[{self.kind}] {self.subject}：{self.level}　{self.why}{tail}"
+        sug = f"　建议：{self.suggest}" if self.suggest else ""
+        return f"[{self.kind}] {self.subject}：{self.level}　{self.why}{tail}{sug}"
 
 
 @dataclass
@@ -74,6 +79,8 @@ class ReviewResult:
     verdicts: list = field(default_factory=list)
     rounds: int = 1
     fingerprint: str = ""
+    # 审核者每次作答的原文与问题（补答也算一次）。只进 drivers_rounds.md，不进 json。
+    attempts: list = field(default_factory=list, compare=False)
 
     def fatal(self) -> list[Verdict]:
         return [v for v in self.verdicts if v.level == "致命"]
@@ -89,12 +96,14 @@ class ReviewResult:
         return {"fingerprint": self.fingerprint, "rounds": self.rounds,
                 "verdicts": [{"kind": v.kind, "subject": v.subject,
                               "level": v.level, "why": v.why,
-                              "quote_note": v.quote_note} for v in self.verdicts]}
+                              "quote_note": v.quote_note, "suggest": v.suggest}
+                             for v in self.verdicts]}
 
     @classmethod
     def from_json(cls, d: dict) -> "ReviewResult":
         return cls(verdicts=[Verdict(x["kind"], x["subject"], x["level"],
-                                     x.get("why", ""), x.get("quote_note", ""))
+                                     x.get("why", ""), x.get("quote_note", ""),
+                                     x.get("suggest", ""))
                              for x in d.get("verdicts") or []],
                    rounds=int(d.get("rounds", 1)),
                    fingerprint=d.get("fingerprint", ""))
@@ -120,6 +129,7 @@ class Round:
     code_error: str = ""
     review: ReviewResult | None = None
     incomplete: str = ""
+    attempts: list = field(default_factory=list)   # [(审核者原文, 不完整原因)]
 
 
 def fingerprint(dsl: str) -> str:
@@ -143,9 +153,20 @@ def checklist(model, themes: list[str]) -> list[tuple[str, str]]:
               for t in ("revenue", "gross_margin") if t in model.formulas]
     items += [("常量", c.name) for c in model.constants]
     items += [("账本", f"{f.short} [[{k}]]") for f in model.factors
-              for k in dict.fromkeys(_KEY_DECL.findall(f.source_hint or ""))]
+              for k in dict.fromkeys(_KEY_AS_WRITTEN.findall(f.source_hint or ""))]
     items += [("覆盖", th) for th in themes]
     return items
+
+
+def _subject_rx(kind: str, subject: str) -> re.Pattern[str]:
+    """条目名的匹配式。审核者照它看到的原文写条目名（生益科技第二次调用第 3 轮漏掉
+    [公式] 与 [账本] 共 4 条，审核未完成）：`[[key]]` 带不带 `@期间` 都认；[公式]
+    条目名后面抄了「= …」也认。"""
+    base = re.sub(r"@[^\]]*(?=\]\])", "", subject)
+    pat = re.escape(base).replace(r"\]\]", r"(?:@[^\]]*)?\]\]")
+    if kind == "公式":
+        pat += r"(?:\s*[=＝][^：:\n]*)?"
+    return re.compile(pat)
 
 
 def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
@@ -160,11 +181,12 @@ def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
         if not m:
             continue
         kind, rest = m.group(1), m.group(2).strip()
-        subj = next((s for s in sorted(by_kind.get(kind, []), key=len, reverse=True)
-                     if rest.startswith(s)), None)
-        if subj is None:
+        hit = next(((s, h) for s in sorted(by_kind.get(kind, []), key=len, reverse=True)
+                    if (h := _subject_rx(kind, s).match(rest))), None)
+        if hit is None:
             continue
-        tail = rest[len(subj):].lstrip()
+        subj, h = hit
+        tail = rest[h.end():].lstrip()
         if not tail or tail[0] not in "：:":
             continue
         tail = tail[1:].strip().lstrip("*")
@@ -172,11 +194,13 @@ def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
                       if tail.startswith(lv)), None)
         if level is None:
             continue
-        why = tail[len(level):].strip(" 　\t*：:")
-        got[(kind, subj)] = Verdict(kind, subj, level, " ".join(why.split()))
+        why, sug = (_SUGGEST.split(tail[len(level):], 1) + [""])[:2]
+        why, sug = (" ".join(x.strip(" 　\t*：:").split()) for x in (why, sug))
+        got[(kind, subj)] = Verdict(kind, subj, level, why, suggest=sug)
     missing = [e for e in expected if e not in got]
     no_reason = [v for v in got.values() if v.level != "通过" and not v.why]
-    if missing or no_reason:
+    no_suggest = [v for v in got.values() if v.level == "致命" and v.why and not v.suggest]
+    if missing or no_reason or no_suggest:
         parts = []
         if missing:
             parts.append("以下条目没有给出结论（每一条都必须回答，沉默不等于通过）："
@@ -184,6 +208,9 @@ def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
         if no_reason:
             parts.append("以下条目判为提醒/致命/待采集却没写理由："
                          + "、".join(f"[{v.kind}] {v.subject}" for v in no_reason[:10]))
+        if no_suggest:
+            parts.append("以下条目判为致命却没给修改建议（理由之后写「建议：…」）："
+                         + "、".join(f"[{v.kind}] {v.subject}" for v in no_suggest[:10]))
         raise ReviewIncomplete("；".join(parts))
     return [got[e] for e in expected]
 
@@ -205,7 +232,7 @@ def annotate_quotes(verdicts: list[Verdict], *, hay: str, ledger, as_of) -> list
                 ledger.get(key, per, as_of=as_of)
             except Exception:                              # noqa: BLE001
                 notes.append(f"[[{key}@{per}]] 账本里没有")
-        out.append(Verdict(v.kind, v.subject, v.level, v.why, "；".join(notes)))
+        out.append(replace(v, quote_note="；".join(notes)))
     return out
 
 
@@ -283,8 +310,9 @@ def _latest_annual(ledger, key: str, as_of):
         return None
 
 
-RULES = """你是研究总监，正在审核一份**驱动因子分解式**能不能用。你不改分解式，只
-逐项给结论与理由 —— 有一项「致命」，提出者就要重写。
+RULES = """你是研究总监，正在审核一份**驱动因子分解式**能不能用。你不直接改写
+分解式，而是逐项给结论、理由与修改建议 —— 有一项「致命」，提出者就要按你的建议
+重写。
 
 **四级结论**（只能用这四个词）：
 - **通过**：逻辑完全正确，资料能够对得上；
@@ -301,7 +329,8 @@ RULES = """你是研究总监，正在审核一份**驱动因子分解式**能�
   占比变动不等于营收变动）；现有资料能否支撑；是否进了公式；检索词是否过短或
   过泛（下面给了实际命中次数）。
 - 正交：这两个因子是不是同一个量被重复计算（销量×售价已是收入，再乘一个营收
-  增速就算了两遍）。
+  增速就算了两遍）。只看量是否重复：两个不同的量共用同一条证据来源（比如都只能
+  引同一个季度数字），是资料问题，判提醒或待采集，不判致命。
 - 公式：量纲是否自洽（pp 换成变化率要除以上期水平、毛利率按小数计等）；能否
   算回营收与毛利率；`基期(·)`（相对基期累计）还是 `上期(·)`（逐年）与因子的填法
   是否一致；因子个数是否合适（一个不叫分解，超过五个人核实不过来）。
@@ -309,9 +338,13 @@ RULES = """你是研究总监，正在审核一份**驱动因子分解式**能�
 - 账本：账本里这个 key 与因子是不是同一个量、口径是否一致（下面给了实际取值）。
 - 覆盖：这个多空主题有没有因子承载；声明「未覆盖」的理由是否成立。
 
-**每条一行，格式严格如下**（结论与理由之间用全角空格）：
+**每条一行，格式严格如下**（结论、理由、建议之间用全角空格）：
 
-[类别] <条目>：<通过|提醒|致命|待采集>　<理由>
+[类别] <条目>：<通过|提醒|致命|待采集>　<理由>　建议：<具体怎么改>
+
+**判为致命的条目必须写「建议：…」** —— 具体怎么改：换掉哪个因子、公式怎么写、
+哪两个因子合并或删掉哪一个。提醒、待采集有建议也写上；通过不必写。条目名照上面
+清单原样抄，后面不要加公式或别的内容。
 """
 
 
@@ -324,22 +357,28 @@ def review(judge, *, proposal: str, model, materials: str, extra: str,
             f"**提出者给的分解式（原文）**\n{proposal}\n\n"
             f"**提出者看到的资料**\n{materials}\n\n"
             f"**只给你的、代码算出的事实**\n{extra}\n")
-    prompt, last = base, ""
+    prompt, last, attempts = base, "", []
     for _ in range(JUDGE_TRIES):
         raw = judge(prompt)
         try:
             verdicts = parse(raw, expected)
         except ReviewIncomplete as e:
             last = str(e)
+            attempts.append((raw, last))
             prompt = f"{base}\n---\n**上一次回答不完整**：{last}\n请补全后重新输出全部条目。\n"
             continue
+        attempts.append((raw, ""))
         return ReviewResult(verdicts=annotate_quotes(verdicts, hay=hay,
-                                                     ledger=ledger, as_of=as_of))
-    raise ReviewIncomplete(last)
+                                                     ledger=ledger, as_of=as_of),
+                            attempts=attempts)
+    err = ReviewIncomplete(last)
+    err.attempts = attempts
+    raise err
 
 
 def _feedback(n: int, res: ReviewResult) -> str:
-    lines = [f"**上一轮审核驳回（第 {n} 轮）**：以下条目判为致命，必须修改："]
+    lines = [f"**上一轮审核驳回（第 {n} 轮）**：以下条目判为致命，必须修改"
+             "（每条附审核者的修改建议）："]
     lines += [f"- {v.line()}" for v in res.fatal()]
     if res.flagged():
         lines += ["以下为提醒/待采集，可改可不改："]
@@ -385,12 +424,13 @@ def propose_and_review(proposer, judge, *, industry: str, code: str,
                          materials=materials, extra=extra, themes=themes,
                          hay=hay, ledger=ledger, as_of=as_of)
         except ReviewIncomplete as e:
-            rounds.append(Round(n, raw, incomplete=str(e)))
+            rounds.append(Round(n, raw, incomplete=str(e),
+                                attempts=getattr(e, "attempts", [])))
             raise ReviewStop(f"方法论审核未完成：审核者补答 {JUDGE_TRIES - 1} 次仍不全"
                              f"（{str(e)[:120]}）", rounds) from e
         res.rounds = n
         res.fingerprint = fingerprint(methodology._to_dsl(m))
-        rounds.append(Round(n, raw, review=res))
+        rounds.append(Round(n, raw, review=res, attempts=res.attempts))
         if not res.fatal():
             return m, res, rounds
         prompt = f"{prompt}\n\n---\n{_feedback(n, res)}\n"
@@ -405,8 +445,7 @@ def rounds_markdown(rounds: list[Round]) -> str:
     驳回无从查证。"""
     lines = ["# 方法论预研：各轮记录", ""]
     for r in rounds:
-        lines += [f"## 第 {r.n} 轮", "", "### 提出者原文", "", "```text",
-                  r.raw.strip(), "```", ""]
+        lines += [f"## 第 {r.n} 轮", "", "### 提出者原文", "", *_fenced(r.raw), ""]
         if r.code_error:
             lines += ["### 代码检查：不过", "", r.code_error, ""]
         if r.incomplete:
@@ -418,7 +457,19 @@ def rounds_markdown(rounds: list[Round]) -> str:
                       f"通过 {c['通过']}）", ""]
             lines += [f"- {v.line()}" for v in r.review.verdicts]
             lines.append("")
+        for i, (raw, problem) in enumerate(r.attempts, 1):
+            lines += [f"### 审核者原文（第 {i} 次作答）", "", *_fenced(raw), ""]
+            if problem:
+                lines += [f"→ 不完整：{problem}", ""]
     return "\n".join(lines)
+
+
+def _fenced(text: str) -> list[str]:
+    """围栏比原文里最长的一串反引号多一个 —— 提示词改用代码块后，模型的回答
+    里也可能带 ```，三个反引号的围栏会被提前闭合。"""
+    run = max((len(x) for x in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, run + 1)
+    return [f"{fence}text", text.strip(), fence]
 
 
 def dump_review(res: ReviewResult) -> str:

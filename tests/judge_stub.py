@@ -18,9 +18,10 @@ class Judge:
     """`levels`：{(类别, 条目) 或 类别: 结论}；没列的答「通过」。可给多轮剧本
     `script=[levels_1, levels_2, ...]`，第 n 次调用用第 n 份（用完沿用最后一份）。"""
 
-    def __init__(self, *script, skip=()):
+    def __init__(self, *script, skip=(), suggest=True):
         self.script = list(script) or [{}]
         self.skip = set(skip)          # 故意漏答的条目
+        self.suggest = suggest         # 致命时附「建议：…」（规则要求必写）
         self.prompts: list[str] = []
 
     def __call__(self, prompt: str) -> str:
@@ -32,5 +33,7 @@ class Judge:
                 continue
             lv = levels.get((k, s), levels.get(k, "通过"))
             why = "" if lv == "通过" else f"理由：{k}{s}"
+            if lv == "致命" and self.suggest:
+                why += f"　建议：改{k}{s}"
             out.append(f"[{k}] {s}：{lv}　{why}".rstrip())
         return "\n".join(out)
