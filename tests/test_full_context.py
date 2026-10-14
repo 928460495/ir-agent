@@ -12,6 +12,7 @@ from ir_agent.debate import DebateRefused
 from ir_agent.full import _macro_periods, _prior_period
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.research import assumption_template
+from judge_stub import Judge
 
 
 class _R:
@@ -297,16 +298,21 @@ def test_研究方法论产出落盘为drivers_md(tmp_path, monkeypatch):
         code = "600584"
 
     m, err = full._research_methodology("600584", _R(), tmp_path,
-                                        lambda prompt: lines)
+                                        lambda prompt: lines, judge=Judge())
     assert err == ""
     assert m is not None and len(m.decompositions) == 2
     assert (tmp_path / full.DRIVERS_MD).exists()
+    # 子项目二：审核结论与各轮记录都落盘；drivers.md 有「方法论审核」一节。
+    assert (tmp_path / full.DRIVERS_REVIEW_JSON).exists()
+    assert (tmp_path / full.DRIVERS_ROUNDS_MD).exists()
+    assert "## 方法论审核" in (tmp_path / full.DRIVERS_MD).read_text(encoding="utf-8")
     assert "封测" in (tmp_path / full.DRIVERS_MD).read_text(encoding="utf-8")
 
 
-def test_研究方法论解析失败时退回不分解(tmp_path, monkeypatch):
-    """联网拿不到闭合分解式是常态（比如模型答非所问），不该让整轮
-    研究停摆 —— 退回不分解模式并如实说明原因。"""
+def test_研究方法论三轮都过不了代码检查时停下交人工(tmp_path, monkeypatch):
+    """**子项目二决定 2：不再退回两标量模式**（那条路让因子采集、辩论② 的逐因子
+    取值整套悄悄消失）。代码检查不过也算一轮，3 轮后停下：各轮记录与最后一稿
+    落盘，drivers.md 不生成。"""
     import ir_agent.sources.taxonomy as tax
     from ir_agent import full
     from ir_agent.sources.taxonomy import Entry
@@ -317,11 +323,15 @@ def test_研究方法论解析失败时退回不分解(tmp_path, monkeypatch):
     class _R:
         code = "600584"
 
-    m, err = full._research_methodology(
-        "600584", _R(), tmp_path, lambda prompt: "胡言乱语，没有任何分解行")
-    assert m is None
-    assert "退回不分解" in err
+    import pytest
+    with pytest.raises(full.MethodologyStop, match="3 轮未通过"):
+        full._research_methodology(
+            "600584", _R(), tmp_path, lambda prompt: "胡言乱语，没有任何分解行",
+            judge=Judge())
     assert not (tmp_path / full.DRIVERS_MD).exists()
+    assert (tmp_path / full.DRIVERS_ROUNDS_MD).read_text(
+        encoding="utf-8").count("## 第 ") == 3
+    assert (tmp_path / full.DRIVERS_FAILED_RAW).exists()
 
 
 def test_drivers_md已存在时读回而不重新联网(tmp_path, monkeypatch):
@@ -350,8 +360,10 @@ def test_drivers_md已存在时读回而不重新联网(tmp_path, monkeypatch):
     class _R:
         code = "600584"
 
-    m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client)
-    assert err == ""
+    m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client,
+                                        judge=_boom_client)
+    # 没有审核记录的 drivers.md（旧文件或人手写）：不送审，标注未经审核。
+    assert "人工修改后未经审核" in err
     assert m is not None and len(m.decompositions) == 2
     assert m.industry == "电子-半导体-封测"
 
@@ -381,8 +393,8 @@ def test_drivers_md人工改过的内容读回后生效(tmp_path, monkeypatch):
 
     m, err = full._research_methodology(
         "600584", _R(), tmp_path, lambda p: (_ for _ in ()).throw(
-            AssertionError("不该再联网预研")))
-    assert err == ""
+            AssertionError("不该再联网预研")), judge=Judge())
+    assert "人工修改后未经审核" in err
     assert m.decompositions[0].factors[0].source_hint == "人工改过：管理层交流纪要"
 
 
@@ -405,7 +417,8 @@ def test_drivers_md读不回时明确报错且不重新联网(tmp_path, monkeypa
     class _R:
         code = "600584"
 
-    m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client)
+    m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client,
+                                        judge=_boom_client)
     assert m is None
     assert "drivers.md" in err
     assert "未重新联网" in err or "不重新" in err or "不会再联网" in err
@@ -425,7 +438,7 @@ def test_研究方法论取不到行业分类时降级(tmp_path, monkeypatch):
         code = "600584"
 
     m, err = full._research_methodology(
-        "600584", _R(), tmp_path, lambda prompt: "不会被调用")
+        "600584", _R(), tmp_path, lambda prompt: "不会被调用", judge=Judge())
     assert m is None
     assert "方法论预研" in err
     assert not (tmp_path / full.DRIVERS_MD).exists()
@@ -823,7 +836,7 @@ def test_未替换的占位符要进终端产物清单():
     assert full._audit_note("完整研报", good) == ""
 
 
-def test_预研撞上额度上限时降级而不是把整轮炸掉(tmp_path, monkeypatch):
+def test_预研撞上额度上限时停下并说明是接口问题(tmp_path, monkeypatch):
     """**今天 17:53 的实跑现场复现。** `python -m ir_agent 600584 --year
     2025 --analyse out/600584` 跑了 25 秒，确定性层全部完成——eastmoney
     2930 条事实、sina 95 条、三表勾稽通过、跨源勾稽一致、可溯源率
@@ -861,9 +874,11 @@ def test_预研撞上额度上限时降级而不是把整轮炸掉(tmp_path, mon
     class _R:
         code = "600584"
 
-    m, err = full._research_methodology("600584", _R(), tmp_path, _limit)
-
-    assert m is None
+    # 子项目二决定 2：接口失败也停下（不退回两标量），但措辞要说清是接口问题。
+    import pytest
+    with pytest.raises(full.MethodologyStop) as e:
+        full._research_methodology("600584", _R(), tmp_path, _limit, judge=Judge())
+    err = str(e.value)
     assert "session limit" in err, "原始错误要如实带出来，人才知道该等额度还是改代码"
     assert "接口" in err, "要说清这是接口失败，不是这个行业分解不了"
     assert "重跑" in err, "要告诉人接口恢复后重跑就能拿回因子分解"
@@ -2851,6 +2866,8 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
                             "成未生成是对的"),
         "_load_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
         "_restore_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
+        "_method_review_lines": ("不是终端清单的生产者：返回 review.md 与 "
+                                 "assumptions.md 的「方法论审核」行，不进 skipped"),
         "_review_factor_lines": ("不是终端清单的生产者：返回 review.md 的 markdown "
                                  "行，不进 skipped；渲染断言在 test_待核清单_快照"
                                  "一节逐条_因子结论一节警示在前"),
@@ -3231,7 +3248,7 @@ def test_预研没收到辩论结论时不做覆盖标注(tmp_path):
     orig, full._industry_path = full._industry_path, _fake_path
     try:
         m, err = full._research_methodology("600183", _R(), tmp_path,
-                                            lambda p: lines)
+                                            lambda p: lines, judge=Judge())
         assert m is not None and err == "", err
         md = (tmp_path / "drivers.md").read_text(encoding="utf-8")
         assert "主题覆盖" not in md, "没有辩论结论却印了覆盖标注"
@@ -3240,7 +3257,7 @@ def test_预研没收到辩论结论时不做覆盖标注(tmp_path):
         # 传了辩论结论就该核对
         (tmp_path / "drivers.md").unlink()
         m2, err2 = full._research_methodology(
-            "600183", _R(), tmp_path, lambda p: lines,
+            "600183", _R(), tmp_path, lambda p: lines, judge=Judge(),
             stance_note="需求：多方看 AI 放量；份额：空方看份额在丢")
         assert "辩论主题没有声明由哪个因子承载" in err2, err2
         md2 = (tmp_path / "drivers.md").read_text(encoding="utf-8")
@@ -3280,7 +3297,7 @@ def test_辩论结论与定性结论真的进了预研的提示词(tmp_path):
     orig, full._industry_path = full._industry_path, lambda c: "电子/元件/覆铜板"
     try:
         full._research_methodology(
-            "600183", _R(), tmp_path, _client,
+            "600183", _R(), tmp_path, _client, judge=Judge(),
             md={"外部资料": "共 12 篇（卖方 7 / 官方 3 / 媒体 2）",
                 "战略": "护城河在高频高速板的客户认证周期",
                 "产业链": "上游铜箔集中度高，议价能力弱",
@@ -3442,11 +3459,10 @@ def _stub_brief(monkeypatch, full, seq):
         got[f"辩论{round_}.client"] = client
         return _Bal(note=f"辩论{round_}的平衡结论")
 
-    class _M:
-        decompositions, industry, model = [], "测试业", None
+    from ir_agent.methodology import Methodology as _Meth
 
-        def factors(self):
-            return []
+    def _M():
+        return _Meth(industry="测试业")
 
     def meth(code, r, out, client, **k):
         seq.append("预研")
@@ -3806,6 +3822,7 @@ def _e2e(monkeypatch, full, tmp_path):
     """
     import ir_agent.gaps as G
     import ir_agent.methodology as Me
+    import ir_agent.methodology_review as MR
     import ir_agent.stance as St
 
     calls = {"run_stance": 0, "research": 0}
@@ -3822,12 +3839,15 @@ def _e2e(monkeypatch, full, tmp_path):
                 f"空方｜{subjects[0]}｜疲软｜「{subjects[0]}」"),
             balances=St.parse_balance(line))
 
-    def research(client, industry, code, *a, **k):
+    real_review = MR.propose_and_review
+
+    def research(proposer, judge, **k):
+        """子项目二：预研 = 提出者 + 审核者。编排（`propose_and_review`）真跑，
+        只把两次模型调用换掉 —— 提出者给固定分解式，审核者全判通过。"""
         calls["research"] += 1
-        calls["research.stance_note"] = k.get("stance_note", "")
-        m = Me.parse(_E2E_DSL)
-        m.industry = industry
-        return m
+        calls["research.stance_note"] = k.get("prompt", "")
+        calls["judge"] = Judge(*calls.get("judge_script", ({},)))
+        return real_review(lambda p: _E2E_DSL, calls["judge"], **k)
 
     def propose(code, r, body, md, as_of, out, client, arts, **k):
         calls["balances"] = k.get("balances")
@@ -3838,7 +3858,7 @@ def _e2e(monkeypatch, full, tmp_path):
         return ""
 
     monkeypatch.setattr(St, "run_stance", run_stance)
-    monkeypatch.setattr(Me, "research", research)
+    monkeypatch.setattr(MR, "propose_and_review", research)
     monkeypatch.setattr(G, "collect", lambda *a, **k: {})
     monkeypatch.setattr(full, "_build_evidence", lambda r, code: None)
     monkeypatch.setattr(full, "write_body",
@@ -3892,6 +3912,7 @@ def test_四次调用的产物集合与停止点(tmp_path, monkeypatch):
     # 相同。变异验证时把 run_assume 换成 `_research_methodology`，本测试照样
     # 绿。能区分的场景见 `test_预研失败时第三次调用不补做预研`。
     assert calls["research"] == 1
+    assert calls["judge"].prompts, "预研必须经过审核者"
     head = (tmp_path / "assumptions.md").read_text(encoding="utf-8").split("\n")[0]
     assert "资料来源经 甲 核验" in head and "简报结论经 乙 审阅" in head
     st = _j.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
@@ -3949,21 +3970,18 @@ def test_预研失败时第三次调用不补做预研(tmp_path, monkeypatch):
     from ir_agent import full
 
     calls = _e2e(monkeypatch, full, tmp_path)
-
-    def fail(*a, **k):
-        calls["research"] += 1
-        raise Me.MethodologyFailed("测试：给不出闭合的分解式")
-
-    monkeypatch.setattr(Me, "research", fail)
+    # 子项目二之后审核不过会停下（不退回两标量）；仍退回两标量的只剩「取不到
+    # 申万行业分类、根本无从预研」这一条 —— 用它构造同一个场景。
+    monkeypatch.setattr(full, "_industry_path", lambda code: "")
     d = date(2026, 10, 12)
     full.run_analyse("600183", _PhaseR(), d, tmp_path)
     o2 = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
     assert not (tmp_path / "drivers.md").exists()
-    assert calls["research"] == 1
+    assert calls["research"] == 0
     assert o2.stage is full.Stage.AWAITING_BRIEF_REVIEW, "预研失败不该中断简报"
 
     o3 = full.run_assume("600183", _PhaseR(), d, tmp_path, "乙")
-    assert calls["research"] == 1, "第三次调用在 drivers.md 缺失时补做了预研"
+    assert calls["research"] == 0, "第三次调用在 drivers.md 缺失时补做了预研"
     assert o3.stage is full.Stage.AWAITING_ASSUME_REVIEW
     # 辩论② 退回了两标量，判断项拿到的平衡点主题也是两标量的
     assert calls["balances"][0].subject == "营收增速"
@@ -4274,3 +4292,68 @@ def test_公式化分解式从第二次调用一路传到判断项(tmp_path, mon
     assert isinstance(m, FormulaModel) and m.mode == "水平" and not m.legacy, \
         "第三次调用交给判断项的不是从 drivers.md 读回的公式模型"
     assert set(got["factor_data"]) == {f.key for f in m.factors}
+
+
+# ══ 子项目二：方法论预研 = 提出者 + 审核者（端到端）════════════════
+
+def test_审核三轮不过就停在预研_不往下走(tmp_path, monkeypatch):
+    from ir_agent import full
+    from ir_agent.research import next_actions
+
+    calls = _e2e(monkeypatch, full, tmp_path)
+    calls["judge_script"] = ({"模式": "致命"},)
+    d = date(2026, 10, 12)
+    full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    o = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert o.stage is full.Stage.INCOMPLETE
+    assert not (tmp_path / "drivers.md").exists()
+    assert not (tmp_path / "stance_b.json").exists(), "停下后不该跑辩论②"
+    assert not (tmp_path / full.BRIEF).exists(), "停下后不该写简报"
+    assert (tmp_path / full.DRIVERS_ROUNDS_MD).exists()
+    assert any(x.startswith("方法论审核 3 轮未通过") for x in o.skipped)
+    assert "  ⚠ 方法论审核" in o.summary()
+    acts = "\n".join(next_actions(o.stage, "600183", out_dir=str(tmp_path),
+                                  year=2025, phase=o.phase))
+    assert "drivers_failed_raw.md" in acts and "人工修改后未经审核" in acts
+
+
+def test_第一轮驳回第二轮通过_一路到简报(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    calls = _e2e(monkeypatch, full, tmp_path)
+    calls["judge_script"] = ({"模式": "致命"}, {"因子": "待采集"})
+    d = date(2026, 10, 12)
+    full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    o = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert o.stage is full.Stage.AWAITING_BRIEF_REVIEW
+    assert len(calls["judge"].prompts) == 2
+    drivers = (tmp_path / "drivers.md").read_text(encoding="utf-8")
+    assert "第 2 轮通过" in drivers
+    review = (tmp_path / full.REVIEW_MD).read_text(encoding="utf-8")
+    assert "## 方法论审核" in review and "待采集" in review
+
+
+def test_人改过drivers_md后重跑_不送审_门二标注未经审核(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    calls = _e2e(monkeypatch, full, tmp_path)
+    d = date(2026, 10, 12)
+    full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert calls["research"] == 1
+    path = tmp_path / "drivers.md"
+    # 只改说明文字（定义块之外）不算改动分解式：指纹不变，沿用审核结论。
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "本次研究采用的分解式。", "本次研究采用的分解式（人看过）。", 1),
+        encoding="utf-8")
+    o0 = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert not any("未经审核" in x for x in o0.skipped)
+    # 改定义块（加一条陷阱）才算改动。
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "\n陷阱: 出货量", "\n陷阱: 人工补充的一条\n陷阱: 出货量", 1), encoding="utf-8")
+    o = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    assert calls["research"] == 1, "人改过的 drivers.md 不该重新预研或送审"
+    assert path.read_text(encoding="utf-8").startswith(full.UNREVIEWED_BANNER)
+    assert any("人工修改后未经审核" in x for x in o.skipped)
+    assert "人工修改后未经审核" in (tmp_path / full.REVIEW_MD).read_text(encoding="utf-8")
+

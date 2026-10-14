@@ -165,6 +165,8 @@ _PREFIX = (
     # **失败**区分：失败条目是「方法论预研（…）」（全角括号），落默认分支的
     # 「未生成」是对的；这一条是「方法论预研：」（全角冒号）。
     ("方法论预研：", "  ⚠ "),
+    # 子项目二：审核 3 轮未通过 / 审核未完成 —— 停下交人工。
+    ("方法论审核", "  ⚠ "),
     # 依据核验通过、但来源分级是 MEDIA（`full._media_tier_note`）。这是一条
     # 算出来了、必须被看见的警告 —— 落默认分支会被印成「未生成」，读者会去
     # 找什么东西没产出。重构前就漏登记了，生益科技 2026-10-13 试跑时在门①
@@ -258,6 +260,13 @@ def next_actions(stage: Stage, code: str,
                 f"     python -m ir_agent {code} {y} --brief {out} "
                 f"--verified-by <你的名字>",
             ]
+            if ((Path(out) / "drivers_rounds.md").exists()
+                    and not (Path(out) / "drivers.md").exists()):
+                acts.append(
+                    f"方法论预研停下。若要人工给出分解式：以 {out}/drivers_failed_raw.md"
+                    f" 为底稿改好，存为 {out}/drivers.md（各轮审核意见见 "
+                    f"{out}/drivers_rounds.md），再跑上面那条命令 —— 读回时会标注"
+                    "「人工修改后未经审核」。")
             for rnd in ("a", "b"):
                 tmpl = Path(out) / f"stance_{rnd}.template.json"
                 if tmpl.exists():

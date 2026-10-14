@@ -354,6 +354,9 @@ class AssumptionSet:
     base_values: dict = field(default_factory=dict)
     # 第 0 年营收（亿元，与工作簿同口径）。旧的乘法链与尺度无关，缺省按 1。
     base_revenue: Decimal | None = None
+    # 方法论审核遗留（子项目二）：预研阶段审核者判为提醒/待采集的条目，或
+    # 「人工修改后未经审核」。派生量，不进 JSON —— 第三次调用从 drivers_review.json 读。
+    method_review: list = field(default_factory=list)
 
     def _m(self) -> FormulaModel | None:
         if self.model is None and self.decomps:
@@ -386,6 +389,9 @@ class AssumptionSet:
             # 实测: 那条路径过了单位检查、三表勾稽、140 格复算、每股价值
             # 量级对账与人工门，没有一道闸门把假设换算成它的后果。
             lines += [f"📐 **算术后果**：{self.implied.describe()}", ""]
+        if self.method_review:
+            lines += ["🧭 **方法论审核遗留**（预研阶段审核者判为提醒/待采集的条目）：", ""]
+            lines += list(self.method_review) + [""]
         if self.review is not None and getattr(self.review, "flagged", None):
             # 审核意见印在清单顶部而不是末尾 —— 批准人要在看三档数值之前
             # 先知道「有哪几条已经被质疑过」。实测那条重复计算的因子若有

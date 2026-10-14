@@ -673,7 +673,7 @@ def term_hits(decomps: list, *, sections=None, corpus=None
 
 
 def to_markdown(m: Methodology, coverage=(), hits=None,
-                coverage_notes=(), key_refs=None) -> str:
+                coverage_notes=(), key_refs=None, review=None) -> str:
     """分解式落盘为 drivers.md。
 
     `coverage` / `hits` 是**标注**，不参与 `from_markdown` 的往返解析 ——
@@ -721,6 +721,10 @@ def to_markdown(m: Methodology, coverage=(), hits=None,
         lines += ["", "声明了的因子直接取账本数据、不再联网采集。**口径是否与"
                       "因子名一致（例如因子写的是某机构口径、账本是同业聚合口径）"
                       "由人判断。**", ""]
+    if review is not None:
+        # 方法论审核（子项目二）：第几轮通过、提醒与待采集逐条。**不参与
+        # from_markdown 的往返解析** —— 与上面两段标注同一处理。
+        lines += review.markdown()
     if m.model is not None and not m.model.legacy:
         lines += _formula_markdown(m.model)
     for d in (m.decompositions if (m.model is None or m.model.legacy) else []):

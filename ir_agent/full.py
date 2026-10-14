@@ -1087,6 +1087,16 @@ FAILED_RAW = "assumptions_failed_raw.txt"
 # 撰写被驳回时最后一稿的落盘名。两个阶段各一个 —— 同一个目录，同名就会
 # 把另一阶段的证据冲掉（与 debate.md / debate_report.md 同一处理）。
 DRIVERS_FAILED_RAW = "drivers_failed_raw.md"
+# 方法论审核（子项目二）：最后一轮逐项结论与指纹；每一轮的完整记录。
+DRIVERS_REVIEW_JSON = "drivers_review.json"
+DRIVERS_ROUNDS_MD = "drivers_rounds.md"
+UNREVIEWED_BANNER = "> ⚠ 本分解式人工修改后未经审核（与审核时的分解式不一致，或没有审核记录）。"
+
+
+class MethodologyStop(Exception):
+    """方法论预研停下交人工（子项目二决定 2）：审核 3 轮未通过、审核者答不完整、
+    模型接口失败。**不再退回两标量模式** —— 那条路让因子采集、辩论② 的逐因子
+    取值整套悄悄消失。"""
 WRITE_FAILED_BRIEF = "brief_failed_raw.md"
 WRITE_FAILED_REPORT = "report_failed_raw.md"
 
@@ -1450,7 +1460,7 @@ def _facts_digest(r) -> str:
         return ""
 
 
-def _research_methodology(code: str, r, out: Path, client, *,
+def _research_methodology(code: str, r, out: Path, client, *, judge,
                           md: dict | None = None, stance_note: str = ""):
     """方法论预研 —— **就多空争执的这几点，这家公司该怎么分解**。
 
@@ -1483,28 +1493,50 @@ def _research_methodology(code: str, r, out: Path, client, *,
     from ir_agent import methodology
 
     path = out / DRIVERS_MD
+    from ir_agent import methodology_review as MR
+
     m, derr = _read_drivers(out)
-    if m is not None or derr:
+    if m is not None:
+        # 重跑读回：指纹一致沿用审核结论；不一致或没有审核记录 = 人改过，不送审，
+        # 只标注（子项目二决定 8）。
+        return m, _unreviewed_note(out, m)
+    if derr:
         return m, derr
 
     industry = _industry_path(code)
     if not industry:
         return None, "方法论预研（取不到申万行业分类）"
 
+    themes = list(STANCE_THEMES) if stance_note.strip() else []
+    prompt = methodology.build_prompt(
+        industry, code,
+        facts=_facts_digest(r),
+        corpus_note=(md or {}).get("外部资料", ""),
+        qualitative="\n\n".join(
+            f"【{k}】\n{v}" for k, v in (md or {}).items()
+            if k in ("宏观定性", "战略", "产业链") and v),
+        stance_note=stance_note,
+        available_keys=_ledger_keys(r))
     try:
-        m = methodology.research(
-            client, industry, code,
-            facts=_facts_digest(r),
-            corpus_note=(md or {}).get("外部资料", ""),
-            qualitative="\n\n".join(
-                f"【{k}】\n{v}" for k, v in (md or {}).items()
-                if k in ("宏观定性", "战略", "产业链") and v),
-            stance_note=stance_note,
-            available_keys=_ledger_keys(r))
-    except methodology.MethodologyFailed as e:
-        return _methodology_failed(out, e)
+        # 提出者联网（`client`）；审核者不联网（`judge`）。审核者看到的「与提出
+        # 者相同的资料」就是提出者的提示词本身。
+        m, review, rounds = MR.propose_and_review(
+            client, judge, industry=industry, code=code, prompt=prompt,
+            materials=prompt, themes=themes, ledger=getattr(r, "ledger", None),
+            as_of=getattr(r, "as_of", None), sections=getattr(r, "sections", None),
+            corpus=getattr(r, "corpus", None))
+    except MR.ReviewStop as e:
+        (out / DRIVERS_ROUNDS_MD).write_text(MR.rounds_markdown(e.rounds),
+                                             encoding="utf-8")
+        dumped = _dump_refused(out, e.rounds[-1].raw if e.rounds else "",
+                               DRIVERS_FAILED_RAW)
+        raise MethodologyStop(
+            f"{e} —— 各轮记录：{out / DRIVERS_ROUNDS_MD}"
+            + (f"；最后一稿：{dumped}" if dumped else "")) from e
     except ClaudeCliError as e:
-        return _methodology_api_failed(e)
+        raise MethodologyStop(_methodology_api_failed(e)[1]) from e
+    (out / DRIVERS_ROUNDS_MD).write_text(MR.rounds_markdown(rounds), encoding="utf-8")
+    (out / DRIVERS_REVIEW_JSON).write_text(MR.dump_review(review), encoding="utf-8")
 
     # ── 两段标注（都不阻断）─────────────────────────────────────
     # **没有辩论① 的结论就不做覆盖标注。** spec 对 `theme_coverage` 写的是
@@ -1527,13 +1559,75 @@ def _research_methodology(code: str, r, out: Path, client, *,
                 refs[f.label] = (have, miss)
     path.write_text(methodology.to_markdown(m, coverage=cov, hits=hits,
                                                 coverage_notes=cov_notes,
-                                                key_refs=refs),
+                                                key_refs=refs, review=review),
                     encoding="utf-8")
     note = ""
     if (open_ := [c.theme for c in cov if c.mark != "✓"]):
         note = (f"方法论预研：{len(open_)} 个辩论主题没有声明由哪个因子承载"
                 f"（{'、'.join(open_)}）—— 已标注，未阻断，需在门② 复核")
     return m, note
+
+
+def _method_review(out: Path, m):
+    """读回方法论审核结论。返回 `(ReviewResult 或 None, 是否未经审核)`。
+
+    指纹 = 当前 drivers.md 分解式定义（经解析再输出，空白差异不算改动）的哈希；
+    与 `drivers_review.json` 记录的一致 → 沿用；否则视为人改过。"""
+    from ir_agent import methodology
+    from ir_agent import methodology_review as MR
+
+    if m is None:
+        return None, False
+    f = out / DRIVERS_REVIEW_JSON
+    fp = MR.fingerprint(methodology._to_dsl(m))
+    if f.exists():
+        try:
+            res = MR.ReviewResult.from_json(json.loads(f.read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError, TypeError):
+            res = None
+        if res is not None and res.fingerprint == fp:
+            return res, False
+    return None, True
+
+
+def _unreviewed_note(out: Path, m) -> str:
+    """人改过的 drivers.md：不送审，标注（drivers.md 顶部、终端清单）。"""
+    _, unreviewed = _method_review(out, m)
+    if not unreviewed:
+        return ""
+    path = out / DRIVERS_MD
+    text = path.read_text(encoding="utf-8")
+    if UNREVIEWED_BANNER not in text:
+        path.write_text(UNREVIEWED_BANNER + "\n\n" + text, encoding="utf-8")
+    return ("方法论预研：drivers.md 人工修改后未经审核（与审核时的分解式不一致，"
+            "或没有审核记录）—— 人的判断优先，未送审，已标注")
+
+
+def _method_review_lines(out: Path, m) -> list[str]:
+    """门② 待核清单与门③ 判断项清单共用：方法论审核遗留的提醒与待采集。"""
+    if m is None:
+        return []
+    res, unreviewed = _method_review(out, m)
+    if unreviewed:
+        return ["⚠ 分解式人工修改后未经审核"]
+    return [f"- {v.line()}" for v in res.flagged()] if res else []
+
+
+def _stop_for_methodology(code: str, r, as_of: date, out: Path, arts: dict,
+                          skipped: list[str], client, why: str) -> ResearchOutcome:
+    """方法论预研停下交人工。两条做法：重跑，或以最后一稿为底手写 drivers.md。"""
+    cmd = (f"python -m ir_agent {code} --year {r.period[:4]} "
+           f"--brief {out} --verified-by <名字>")
+    print(f"\n方法论预研停下：{why}\n\n"
+          f"  ① 原样重试（重新预研）\n     {cmd}\n\n"
+          f"  ② 人工给出分解式：以 {out}/{DRIVERS_FAILED_RAW} 为底稿改好，存为 "
+          f"{out}/{DRIVERS_MD}（各轮审核意见见 {out}/{DRIVERS_ROUNDS_MD}），再跑\n"
+          f"     {cmd}\n     读回时会标注「人工修改后未经审核」。\n", file=sys.stderr)
+    skipped.append(why)
+    return ResearchOutcome(
+        code=code, period=r.period, as_of=as_of, stage=Stage.INCOMPLETE,
+        artifacts=arts, skipped=skipped,
+        cost_usd=Decimal(str(client.total_cost_usd)), phase="brief")
 
 
 def _catalog_periods(r) -> tuple[str, ...]:
@@ -2004,7 +2098,8 @@ def _review_factor_lines(factor_data) -> list[str]:
     return lines
 
 
-def _write_review(out: Path, sa, sb, missing=(), factor_data=None) -> None:
+def _write_review(out: Path, sa, sb, missing=(), factor_data=None,
+                  method=None) -> None:
     """门② 的待核清单：把所有「代码没把握」的东西聚到一处。"""
     from ir_agent.sources.manifest import KNOWN_GAPS
 
@@ -2014,6 +2109,9 @@ def _write_review(out: Path, sa, sb, missing=(), factor_data=None) -> None:
             lines += [f"## {name}：{len(s.unverified)} 条证据代码核验不过", ""]
             lines += [f"- [{e.side}] {e.subject}：{e.unverified}"
                       for e in s.unverified] + [""]
+    if method is not None:
+        lines += ["## 方法论审核（预研阶段审核者的提醒与待采集）", ""]
+        lines += (method or ["提醒、待采集 0 条。"]) + [""]
     lines += _review_factor_lines(factor_data)
     if missing:
         groups: dict[str, list] = {}
@@ -2138,8 +2236,15 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     # ── 方法论预研：现在能看到全部证据与多空结论 ────────────────
     # `stance_note=sa.summary()` 是「辩论① 排在预研之前」唯一的兑现处 ——
     # 不传它，辩论① 的结论就到不了预研，流程图上它在那儿而数据流上它不在。
-    meth, merr = _research_methodology(code, r, out, research_client,
-                                       md=md, stance_note=sa.summary())
+    try:
+        meth, merr = _research_methodology(code, r, out, research_client,
+                                           judge=client, md=md,
+                                           stance_note=sa.summary())
+    except MethodologyStop as e:
+        o = _stop_for_methodology(code, r, as_of, out, arts, skipped, client,
+                                  str(e))
+        o.cost_usd = _cost()
+        return o
     if merr:
         skipped.append(merr)
     if meth is not None:
@@ -2190,7 +2295,9 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
         arts["研究简报"] = str(out / BRIEF)
         if (note := _audit_note("研究简报", r.audit)):
             skipped.append(note)
-        _write_review(out, sa, sb, _missing_snapshot_notes(r.audit), factor_data)
+        _write_review(out, sa, sb, _missing_snapshot_notes(r.audit), factor_data,
+                      method=(_method_review_lines(out, meth)
+                              if meth is not None else None))
         arts["待核清单"] = str(out / REVIEW_MD)
 
     _write_dashboard(r, out, md, code, arts)
@@ -2261,7 +2368,8 @@ def run_assume(code: str, r, as_of: date, out_dir: str | Path,
     aerr = _propose_assumptions(
         code, r, body, md, as_of, out, assume_client, arts,
         decomps=(meth.model if meth is not None else None),
-        factor_data=factor_data, balances=sb.balances)
+        factor_data=factor_data, balances=sb.balances,
+        method_review=_method_review_lines(out, meth))
     if aerr:
         skipped.append(aerr)
     _save_state(out, code, r, as_of, md, pr, reviewed_by=reviewed_by)
@@ -2320,7 +2428,8 @@ def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
 
 
 def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
-                         decomps=None, factor_data=None, balances=None) -> str:
+                         decomps=None, factor_data=None, balances=None,
+                         method_review=None) -> str:
     """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。
 
     `decomps`/`factor_data` 给定时按因子分解填写（方法论预研 + 定向
@@ -2365,6 +2474,9 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         # 采集、撰写/辩论），唯独这一处漏了。**能力边界不是故障，
         # 整轮研究不该因此停摆。**
         return f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
+
+    # 预研阶段审核者的提醒/待采集带进门③ 清单（子项目二决定 7）。
+    a.method_review = list(method_review or [])
 
     # ── 因子结构审查（第 3 道：清单式，不设闸门）────────────────
     # **必须在写盘之前跑，但 checklist 要取写盘之前的 describe()** ——
