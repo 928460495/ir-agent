@@ -32,13 +32,9 @@ def _decomp():
                  Factor(key="seg", label="分部收入增速", unit="变化率")])
 
 
+# 子项目二（2026-10-14）起门③ 只对账：[因子]、[正交] 已在方法论预研阶段由
+# 审核者审过（`methodology_review`）。
 FULL = """
-[因子] 销量增速：可测　年报产销量章节有口径。
-[因子] 售价增速：可测　分产品销售数据可算。
-[因子] 分部收入增速：可测　分部报告有。
-[正交] 销量增速 × 售价增速：独立　一个是量一个是价。
-[正交] 销量增速 × 分部收入增速：重叠　分部收入里已含该产品的销量。
-[正交] 售价增速 × 分部收入增速：重叠　分部收入里已含该产品的价。
 [对账] revenue：矛盾　理由栏引用行业 CAGR 12.8%，合成值 71.75% 是其 5.6 倍。
 """
 
@@ -47,13 +43,11 @@ class TestExpectedItems:
     def test_条目清单由代码生成(self):
         """**清单由代码出，不由模型出** —— 否则模型可以靠少列条目回避问题。"""
         items = expected_items([_decomp()])
-        assert ("因子", "销量增速") in items
-        assert ("正交", "销量增速 × 分部收入增速") in items
-        assert ("对账", "revenue") in items
+        assert items == [("对账", "revenue")]
 
-    def test_三个因子要三对正交(self):
+    def test_不再出因子与正交条目_预研阶段已审(self):
         items = expected_items([_decomp()])
-        assert len([1 for k, _ in items if k == "正交"]) == 3
+        assert not any(k in ("因子", "正交") for k, _ in items)
 
     def test_没有分解式就不审(self):
         assert expected_items([]) == []
@@ -62,18 +56,17 @@ class TestExpectedItems:
 class TestParse:
     def test_完整回答解析出全部条目(self):
         got = parse(FULL, expected_items([_decomp()]))
-        assert len(got) == 7
+        assert len(got) == 1
 
     def test_缺一条就退回(self):
         """沉默不等于通过。"""
-        partial = "\n".join(FULL.strip().splitlines()[:4])
-        with pytest.raises(ReviewIncomplete, match="正交"):
-            parse(partial, expected_items([_decomp()]))
+        with pytest.raises(ReviewIncomplete, match="对账"):
+            parse("（什么都没答）", expected_items([_decomp()]))
 
     def test_需要人看的条目被挑出来(self):
         r = ReviewResult(findings=parse(FULL, expected_items([_decomp()])))
-        assert len(r.flagged) == 3                 # 两条重叠 + 一条矛盾
-        assert "重叠" in r.summary() and "矛盾" in r.summary()
+        assert len(r.flagged) == 1
+        assert "矛盾" in r.summary()
 
     def test_认不出来的结论词算需要人看(self):
         """兜底值选最弱的那个断言 —— 与 research._mark 那次事故同一条教训:
@@ -97,16 +90,14 @@ class TestReview:
         return c
 
     def test_回答不完整会被退回重写(self):
-        partial = "\n".join(FULL.strip().splitlines()[:3])
-        c = self._client(partial, FULL)
+        c = self._client("（什么都没答）", FULL)
         r = review(c, [_decomp()], checklist="（清单）")
-        assert len(r.findings) == 7 and len(c.seen) == 2
+        assert len(r.findings) == 1 and len(c.seen) == 2
         assert "不完整" in c.seen[1]
 
     def test_反复不完整则抛错(self):
-        partial = "\n".join(FULL.strip().splitlines()[:3])
         with pytest.raises(ReviewIncomplete):
-            review(self._client(partial), [_decomp()], checklist="（清单）",
+            review(self._client("（什么都没答）"), [_decomp()], checklist="（清单）",
                    max_attempts=2)
 
     def test_算术后果要进提示词(self):
@@ -153,7 +144,7 @@ class TestTwoScalarMode:
         assert len(r.flagged) == 1
 
 
-def test_公式化分解式的条目按公式分组且共用因子不重复():
+def test_公式化分解式只出两条对账():
     from ir_agent.factor_review import expected_items
     from ir_agent.methodology import parse as parse_meth
 
@@ -164,7 +155,4 @@ def test_公式化分解式的条目按公式分组且共用因子不重复():
 公式: 营收 = 量 × 价
 公式: 毛利率 = (价 − 本) ÷ 价
 """).model
-    items = expected_items(m)
-    assert items.count(("因子", "单价")) == 1
-    assert ("正交", "出货量 × 单价") in items and ("正交", "单价 × 单位成本") in items
-    assert ("对账", "revenue") in items and ("对账", "gross_margin") in items
+    assert expected_items(m) == [("对账", "revenue"), ("对账", "gross_margin")]

@@ -230,3 +230,15 @@ class TestPhase2:
         # （`path()` 是两标量路径专用的措辞）。
         with pytest.raises(AssumeFailed, match=r"path\(\)"):
             _check(back, 1, back.decomps or None)
+
+
+def test_判断项清单顶部有方法论审核遗留():
+    """子项目二决定 7：预研阶段审核者的提醒/待采集，人在批准判断项时要看得到。"""
+    a = assume.parse(_level_lines(), 1, decomps=LEVEL)
+    _check(a, 1, LEVEL)
+    a.labels = ["2026E"]
+    a.method_review = ["- [因子] 本（覆铜板单位成本）：待采集　年报未披露单位成本"]
+    txt = a.describe()
+    assert "方法论审核遗留" in txt and "年报未披露单位成本" in txt
+    assert txt.index("方法论审核遗留") < txt.index("## 分解式")
+

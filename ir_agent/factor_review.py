@@ -91,23 +91,17 @@ def expected_items(decomps: list,
         # 而那正是最该看一眼的一轮。此时没有因子、谈不上两两正交，但「取值
         # 与它自己的理由是否自洽」照样要对账。
         return [("对账", d) for d in drivers]
+    # **子项目二（2026-10-14）起只出 [对账]。** [因子]（可测性）与 [正交]（两两
+    # 重叠）已在方法论预研阶段由审核者逐项审过、有权驳回重写；这里再审一遍只会
+    # 给人两份可能互相矛盾的结论。留下的是填了数值以后才看得出的问题：合成值与
+    # 理由栏是否自洽。
     from ir_agent.formula import FormulaModel
 
     if isinstance(decomps, FormulaModel):
-        groups = [(t, [f.label for f in decomps.factors_of(t)])
-                  for t in ("revenue", "gross_margin") if t in decomps.formulas]
+        targets = [t for t in ("revenue", "gross_margin") if t in decomps.formulas]
     else:
-        groups = [(d.target, [f.label for f in d.factors]) for d in decomps or []]
-    # 水平模式下同一因子被两条公式共用：「因子」「正交」条目去重，否则同一条
-    # 要答两遍。
-    seen: set[tuple[str, str]] = set()
-    for target, labels in groups:
-        for it in ([("因子", l) for l in labels]
-                   + [("正交", f"{a} × {b}") for a, b in combinations(labels, 2)]
-                   + [("对账", target)]):
-            if it not in seen:
-                seen.add(it)
-                out.append(it)
+        targets = [d.target for d in decomps or []]
+    out += [("对账", t) for t in dict.fromkeys(targets)]
     return out
 
 
@@ -136,24 +130,16 @@ _RULES = """你是研究总监，正在审查一份**驱动因子分解式**本�
 
 **逐项回答，每条一行，格式严格如下**（结论与理由之间用全角空格分隔）：
 
-[因子] <因子标签>：可测/不可测　<理由>
-[正交] <因子A> × <因子B>：独立/重叠　<理由>
 [对账] <分解目标>：一致/矛盾　<理由>
 
-三类各自要判什么：
+（因子可测性与两两重叠已在方法论预研阶段审过，这里只对账。）
 
-- **[因子] 可测性**：这个因子有没有公开可查的口径？若它只能靠估计，说明
-  它事实上是一个判断而不是一次测量。
-- **[正交] 两两重叠**：这两个因子衡量的是不是同一个量的不同说法？
-  乘法链里这一点要命 —— 销量 × 售价已经等于收入，若再乘一个「某产品线
-  收入增速」，同一个量被算了两遍，两个 20% 会变成 44%，五年复合下来是
-  数倍的差距。判「重叠」时请指出重复计算的是哪一个量。
 - **[对账] 合成值 vs 理由栏**：把各因子的中性档相乘（或相加）得到的合成值，
   与因子理由栏自己引用的参照（行业增速、历史增速、同业水平）是否自洽？
   实测踩到过: 理由栏写「取接近行业三年 CAGR 12.8% 之上」，而合成结果是
   71.75% —— 是它自己引用的参照的 5.6 倍。
 
-**不要吝惜「重叠」「矛盾」这两个结论。** 这一步的价值在于把问题摆上台面，
+**不要吝惜「矛盾」这个结论。** 这一步的价值在于把问题摆上台面，
 而不是在于让清单看起来干净；你给出的每一条都会有人读。
 """
 

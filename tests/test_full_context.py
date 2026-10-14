@@ -3851,6 +3851,7 @@ def _e2e(monkeypatch, full, tmp_path):
 
     def propose(code, r, body, md, as_of, out, client, arts, **k):
         calls["balances"] = k.get("balances")
+        calls["method_review"] = k.get("method_review")
         (out / "assumptions.json").write_text('{"rows": [], "approved_by": ""}',
                                               encoding="utf-8")
         (out / "assumptions.md").write_text("# DCF 判断项\n", encoding="utf-8")
@@ -4331,6 +4332,12 @@ def test_第一轮驳回第二轮通过_一路到简报(tmp_path, monkeypatch):
     assert "第 2 轮通过" in drivers
     review = (tmp_path / full.REVIEW_MD).read_text(encoding="utf-8")
     assert "## 方法论审核" in review and "待采集" in review
+
+    # 门③：预研审核的待采集项带进第三次调用（不重新审核）。
+    (tmp_path / full.BRIEF).write_text("## 一节\n正文。", encoding="utf-8")
+    full.run_assume("600183", _PhaseR(), d, tmp_path, "乙")
+    assert calls["method_review"] and all("待采集" in x for x in calls["method_review"])
+    assert len(calls["judge"].prompts) == 2, "第三次调用不该再调审核者"
 
 
 def test_人改过drivers_md后重跑_不送审_门二标注未经审核(tmp_path, monkeypatch):
