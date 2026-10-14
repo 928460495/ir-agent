@@ -425,10 +425,17 @@ def test_检索词的长度下限仍然生效():
     """
     import pytest
 
-    from ir_agent.drivers import DecompositionInvalid, Factor
+    from ir_agent.drivers import DecompositionInvalid, Factor, check_search_term
+    from ir_agent.methodology import MethodologyFailed, parse
 
+    # 2026-10-14 子项目二：长度检查移出 `Factor` 构造，只对旧 `分解:` 写法生效；
+    # 公式化写法交给审核者的 [因子] 条目判「检索词是否过短或过泛」。
     with pytest.raises(DecompositionInvalid):
-        Factor(key="k", label="产能利用率", unit="变化率", search_term="率")
+        check_search_term(Factor(key="k", label="产能利用率", unit="变化率",
+                                 search_term="率"))
+    with pytest.raises(MethodologyFailed, match="只有一个字"):
+        parse("分解: 营收 | 乘 | 产能利用率:变化率:年报:率 | 单价:变化率:年报:单价\n"
+              "分解: 毛利率 | 加 | 铜箔:pp:年报:铜箔 | 稼动率:pp:年报:稼动率\n")
     # 空检索词通过——旧的 3 段 DSL 与旧的 JSON 都靠这条向后兼容
     assert Factor(key="k", label="产能利用率", unit="变化率").search_term == ""
 

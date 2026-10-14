@@ -771,7 +771,6 @@ class TestFormulaDSL:
         (_NEW.replace("公式: 毛利率 = 基期(毛利率) + (提价 + 原料) / 100\n", ""),
          "缺少 毛利率"),
         (_NEW.replace("(提价 + 原料)", "(提价 + 原料 + 没声明)"), "未声明的名字「没声明」"),
-        (_NEW.replace("(提价 + 原料) / 100", "提价 / 100"), "引用了 1 个因子"),
         (_NEW.replace("常量: 上期稼动率 | 78% | 年报经营情况讨论「产能利用率约78%」",
                       "常量: 上期稼动率 | 78% |"), "出处不能空"),
         (_NEW.replace("因子: 原料 |", "因子: 原 料 |"), "不合法"),
@@ -783,10 +782,14 @@ class TestFormulaDSL:
         with pytest.raises(MethodologyFailed, match=frag):
             parse(text)
 
-    def test_声明了却没用到的因子被驳回(self):
-        from ir_agent.methodology import MethodologyFailed, parse
-        with pytest.raises(MethodologyFailed, match="没有任何公式用到"):
-            parse(_NEW.replace("陷阱:", "因子: 闲置 | 闲置因子 | pp | x | 闲置因子\n陷阱:"))
+    def test_移交审核者的三项代码不再拦(self):
+        """子项目二（2026-10-14）：因子个数、声明了须进公式、检索词长度移交
+        审核者 —— [公式] 判因子个数，[因子] 判是否进了公式、检索词是否过短。"""
+        from ir_agent.methodology import parse
+        m = parse(_NEW.replace("(提价 + 原料) / 100", "提价 / 100")
+                  .replace("陷阱:", "因子: 闲置 | 闲置因子 | pp | x | 率\n陷阱:"))
+        assert len(m.model.factors_of("gross_margin")) == 1
+        assert m.model.factor("闲置").search_term == "率"
 
     def test_覆盖声明写短名也认_显示完整名(self):
         from ir_agent.methodology import coverage, parse

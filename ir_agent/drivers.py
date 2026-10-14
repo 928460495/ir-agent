@@ -65,16 +65,20 @@ class Factor:
     # 它，读回时由 `formula.short_from_label` 从完整名生成。
     short: str = ""
 
-    def __post_init__(self) -> None:
-        # **只查长度，这是唯一的闸门。** 1 字检索词（「率」「价」）在任何
-        # 年报里都必然命中，那不是「模型决定」而是「定然命中」，会把所有
-        # 因子都抬成「年报披露」、让这个状态标签彻底失去信息量。
-        # frozen=True 只禁赋值，不禁在这里抛异常。
-        if self.search_term and len(self.search_term) < 2:
-            raise DecompositionInvalid(
-                f"因子「{self.label}」的检索词 {self.search_term!r} 只有一个字"
-                "——一个字的词在任何年报里都必然命中，那不是依据而是巧合。"
-                "请给一个至少两个字、且指向这个因子本身的词。")
+
+def check_search_term(f: "Factor") -> None:
+    """检索词至少两个字。**只对旧的 `分解:` 写法生效**（读回旧文件时）。
+
+    1 字检索词（「率」「价」）在任何年报里都必然命中，那不是「模型决定」而是
+    「定然命中」，会把所有因子都抬成「年报披露」。公式化写法（2026-10-14 子项目
+    二）把这一项移交审核者：[因子] 条目判「检索词是否过短或过泛」并附实际命中
+    次数 —— 所以它不再是 `Factor` 构造时的硬检查。
+    """
+    if f.search_term and len(f.search_term) < 2:
+        raise DecompositionInvalid(
+            f"因子「{f.label}」的检索词 {f.search_term!r} 只有一个字"
+            "——一个字的词在任何年报里都必然命中，那不是依据而是巧合。"
+            "请给一个至少两个字、且指向这个因子本身的词。")
 
 
 @dataclass

@@ -36,6 +36,7 @@ from ir_agent.formula import (FormulaError, FormulaInvalid, FormulaModel,
                               parse_formula, simulate, Constant as _Constant,
                               parse_constant)
 from ir_agent.drivers import (Decomposition, DecompositionInvalid, Factor, Op,
+                              check_search_term,
                               TARGET_LABEL, Residual, check_dimensions, compose,
                               reconcile)
 from ir_agent.gaps import FactorData
@@ -184,12 +185,13 @@ def _decomp_to_dict(d: Decomposition) -> dict:
 
 def _decomp_from_dict(d: dict) -> Decomposition:
     op = next(o for o in Op if o.value == d["op"])
-    return Decomposition(
-        target=d["target"], op=op,
-        factors=[Factor(key=f["key"], label=f["label"], unit=f["unit"],
-                        source_hint=f.get("source_hint", ""),
-                        search_term=f.get("search_term", ""))
-                for f in d["factors"]])
+    factors = [Factor(key=f["key"], label=f["label"], unit=f["unit"],
+                      source_hint=f.get("source_hint", ""),
+                      search_term=f.get("search_term", ""))
+               for f in d["factors"]]
+    for f in factors:                  # 旧格式读回：检索词长度仍由代码查
+        check_search_term(f)
+    return Decomposition(target=d["target"], op=op, factors=factors)
 
 
 def to_json(a: "AssumptionSet", **extra) -> dict:

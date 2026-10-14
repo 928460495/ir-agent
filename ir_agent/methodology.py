@@ -20,9 +20,9 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from ir_agent.drivers import (MAX_FACTORS, MIN_FACTORS, TARGET_LABEL,
-                              Decomposition, DecompositionInvalid, Factor, Op,
-                              check_closure)
+from ir_agent.drivers import (TARGET_LABEL, Decomposition,
+                              DecompositionInvalid, Factor, Op, check_closure,
+                              check_search_term)
 from ir_agent.formula import (MODES, RESERVED, TARGETS as _FORMULA_TARGETS,
                               Constant, FormulaInvalid, FormulaModel,
                               flat_factors as _flat, from_decomps,
@@ -139,15 +139,11 @@ def _parse_formulas(text: str) -> Methodology:
                 "这个 key 对采集结果与工作簿行，撞车的那个会被错认。换一个更有"
                 "区分度的完整名。")
         keys[key] = label
-        try:
-            factors.append(Factor(
-                key=key, label=label, unit=unit,
-                source_hint=parts[3] if len(parts) > 3 else "",
-                search_term=(_strip_term_label(parts[4])
-                             if len(parts) > 4 else ""),
-                short=short))
-        except DecompositionInvalid as e:
-            raise MethodologyFailed(str(e)) from e
+        factors.append(Factor(
+            key=key, label=label, unit=unit,
+            source_hint=parts[3] if len(parts) > 3 else "",
+            search_term=(_strip_term_label(parts[4]) if len(parts) > 4 else ""),
+            short=short))
     consts: list[Constant] = []
     for h in _CONST.finditer(text):
         parts = _fields(h.group(1))
@@ -181,19 +177,9 @@ def _parse_formulas(text: str) -> Methodology:
         model.validate()
     except FormulaInvalid as e:
         raise MethodologyFailed(str(e)) from e
-    for tgt in formulas:
-        n = len(model.factors_of(tgt))
-        if not MIN_FACTORS <= n <= MAX_FACTORS:
-            raise MethodologyFailed(
-                f"「{TARGET_LABEL[tgt]}」的公式引用了 {n} 个因子 —— 每条 "
-                f"{MIN_FACTORS}–{MAX_FACTORS} 个：一个不叫分解，超过五个人"
-                "核实不过来。")
-    used = {f.short for t in formulas for f in model.factors_of(t)}
-    unused = [f.label for f in factors if f.short not in used]
-    if unused:
-        raise MethodologyFailed(
-            f"声明了却没有任何公式用到的因子：{'、'.join(unused)} —— 删掉，或写进"
-            "公式。不进公式的因子不影响营收与毛利率，却要逐年填值、联网采集。")
+    # 因子个数（每条 2–5）、声明了必须进公式、检索词长度：子项目一过渡期由代码
+    # 查，子项目二（2026-10-14）移交审核者 —— [公式] 判因子个数是否合适，[因子]
+    # 判是否进了公式、检索词是否过短或过泛。代码只留会让计算或存储做不下去的。
     return Methodology(model=model)
 
 
@@ -256,6 +242,7 @@ def _parse_legacy(text: str) -> Methodology:
                 factors.append(Factor(key=_slug(label), label=label,
                                       unit=unit, source_hint=hint,
                                       search_term=term))
+                check_search_term(factors[-1])
             except DecompositionInvalid as e:
                 raise MethodologyFailed(str(e)) from e
         d = Decomposition(target=_TARGETS[tgt], op=_OPS[op], factors=factors)
@@ -479,23 +466,9 @@ def research(client, industry: str, code: str,
     这样已开启联网工具的 client，否则这里的「先搜索」要求形同虚设。
     这条前提容易被后来人忽略，因此单独写在这里。
     """
-    # **新输入全部可选，不传就退回行业级预研。** 那条路是
-    # `_research_methodology` 的既有降级出口（预研失败 → 两标量模式），
-    # 不能因为新增输入而失效 —— 见 `test_不传新输入时仍退回行业级预研`。
-    blocks = []
-    if facts:
-        blocks.append(f"【可用事实】\n{facts}")
-    if corpus_note:
-        blocks.append(f"【已入库资料】\n{corpus_note}")
-    if qualitative:
-        blocks.append(f"【定性结论】\n{qualitative}")
-    if stance_note:
-        blocks.append(f"【多空平衡点】\n{stance_note}")
-    if available_keys:
-        blocks.append("【账本里已有的 key】\n" + "、".join(available_keys))
-    prompt = PROMPT.format(industry=industry, code=code,
-                           context=("\n" + "\n\n".join(blocks) + "\n"
-                                    if blocks else ""))
+    prompt = build_prompt(industry, code, facts=facts, corpus_note=corpus_note,
+                          qualitative=qualitative, stance_note=stance_note,
+                          available_keys=available_keys)
     last, raw = "", ""
     for attempt in range(1, max_attempts + 1):
         raw = client(prompt)
@@ -513,6 +486,31 @@ def research(client, industry: str, code: str,
         f"连续 {max_attempts} 次给不出闭合的分解式：{last}"
         f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}",
         raw=raw)
+
+
+def build_prompt(industry: str, code: str, *, facts: str = "",
+                 corpus_note: str = "", qualitative: str = "",
+                 stance_note: str = "",
+                 available_keys: tuple[str, ...] = ()) -> str:
+    """预研提示词。提出者用它；审核者看的「与提出者相同的资料」也是这一份
+    （`methodology_review`，spec 2026-10-14 子项目二 二）。
+
+    **新输入全部可选，不传就退回行业级预研**（两标量降级路径要走它）。
+    """
+    blocks = []
+    if facts:
+        blocks.append(f"【可用事实】\n{facts}")
+    if corpus_note:
+        blocks.append(f"【已入库资料】\n{corpus_note}")
+    if qualitative:
+        blocks.append(f"【定性结论】\n{qualitative}")
+    if stance_note:
+        blocks.append(f"【多空平衡点】\n{stance_note}")
+    if available_keys:
+        blocks.append("【账本里已有的 key】\n" + "、".join(available_keys))
+    return PROMPT.format(industry=industry, code=code,
+                         context=("\n" + "\n\n".join(blocks) + "\n"
+                                  if blocks else ""))
 
 
 _RAW_HEADING = "## 分解式原始定义（供人工编辑与重跑读回）"
