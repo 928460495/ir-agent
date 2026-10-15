@@ -248,3 +248,14 @@ def test_判断项清单顶部有方法论审核遗留():
     assert "方法论审核遗留" in txt and "年报未披露单位成本" in txt
     assert txt.index("方法论审核遗留") < txt.index("## 分解式")
 
+
+
+def test_旧写法翻译成的FormulaModel也能出提示词():
+    """第三次调用传的是 drivers.md 读回的 `FormulaModel`（旧「分解:」写法翻译过来，
+    legacy=True），此前 build_prompt 把它当分解式列表迭代，直接 TypeError。"""
+    m = parse_meth("分解: 营收 | 乘 | 出货量:变化率:年报:出货量 | 单价:变化率:年报:单价\n"
+                   "分解: 毛利率 | 加 | 铜箔:pp:年报:铜箔 | 稼动率:pp:年报:稼动率\n").model
+    assert m.legacy
+    txt = assume.build_prompt({"g_stats": (), "gm_stats": ()}, ["2026E"], "上下文",
+                              decomps=m, factor_data={})
+    assert "出货量" in txt and "公式" in txt

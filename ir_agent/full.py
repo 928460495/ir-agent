@@ -1718,6 +1718,15 @@ def _review_stage(arts: dict):
         "但估值尚无从谈起")
 
 
+def _stop_if_uncomputable(facts) -> None:
+    """第二阶段唯一会停下的情况：批准的判断项**算不下去**（缺年份、缺基期、重复
+    行、公式算不动 —— 多半是人手改坏了 JSON）。内容上的问题（三档、单调、依据、
+    平衡点）不再拦人批准过的判断项（子项目三）。"""
+    if facts.blocking:
+        raise SystemExit("批准的判断项算不下去，无法建模：\n"
+                         + "\n".join(f"  - {x}" for x in facts.blocking))
+
+
 def _unreviewed_assumptions(out: Path, a, edits: list[str]) -> str:
     """第二阶段读回的判断项是不是审核通过的那一份。空串 = 是。
 
@@ -2716,9 +2725,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
                          # 退回两标量口径，人批准的公式在这里一行都不生效。
                          decomps=a._m(), base_margin=base_margin,
                          anchor=anchor)
-    if facts.blocking:
-        raise SystemExit("批准的判断项算不下去，无法建模：\n"
-                         + "\n".join(f"  - {x}" for x in facts.blocking))
+    _stop_if_uncomputable(facts)
 
     # I3（final-fix-D 终审）：`check()` 通过后 `a.margin_bases` 就定了——
     # 非空说明毛利率加法链第 2 年起的基期已从年报基期换成各档锚定后的

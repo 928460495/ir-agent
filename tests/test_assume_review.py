@@ -246,6 +246,45 @@ class TestPhase2:
         src = inspect.getsource(full.run_valuation)
         assert "_unreviewed_assumptions(" in src
         assert src.index("_unreviewed_assumptions(") < src.index("dcf.run(")
-        assert "facts.blocking" in src
+        assert "_stop_if_uncomputable(facts)" in src
+        assert src.index("_stop_if_uncomputable(facts)") < src.index("dcf.run(")
         assert 'raise SystemExit(f"批准的假设不合法' not in src
+
+    def test_只在算不下去时停下_内容问题不拦(self):
+        from ir_agent import full
+        full._stop_if_uncomputable(assume.Facts(problems=["第 1 年三档未拉开"]))
+        with pytest.raises(SystemExit, match="(?s)算不下去.*缺第"):
+            full._stop_if_uncomputable(assume.Facts(blocking=["因子「提价」缺第 [2] 年"]))
         assert "重新校验" not in full._APPROVE_NOTE
+
+
+class TestShengyiReplay:
+    """生益科技 2026-10-15 第三次调用：三次被代码闸门拒绝、整个因子分解退回两标量。
+    三种情形现在都不再被代码拒绝，原拒绝理由出现在审核者手里的事实里。"""
+
+    BAL = [Balance("提价传导", D("0.02"), D("0.035"), D("0.05"), "辩论② 平衡点（单位写成了小数）")]
+
+    def _draft(self, gm1="1 | 3.5 | 4", raw1="-8 | -4 | -1") -> str:
+        return _draft().replace("假设: 提价 | 第1年 | 1 | 3.5 | 5.47",
+                                f"假设: 提价 | 第1年 | {gm1}").replace(
+            "假设: 原料 | 第1年 | -8 | -4 | -1", f"假设: 原料 | 第1年 | {raw1}")
+
+    def test_第一次_偏离一个单位写错的平衡点(self):
+        j = Judge()
+        a, res, _ = _run(_Filler(self._draft()), j, balances=self.BAL)
+        assert res.rounds == 1
+        assert "偏离多空平衡点 0.035" in j.prompts[0]
+        assert ("平衡点", "提价（提价传导）") in items(j.prompts[0])
+
+    def test_第二次_两个pp因子各自拉开_加总后倒序(self):
+        j = Judge()
+        _run(_Filler(self._draft(raw1="-8 | -4 | -6")), j)
+        assert "第 1 年的毛利率合成后不单调" in j.prompts[0]
+
+    def test_第三次_七段的行依据在第七段(self):
+        seven = self._draft().replace(
+            "假设: 行业 | 第1年 | 10% | 20% | 30% | 平衡点 | 无数据（估计），参照行业",
+            "假设: 行业 | 第1年 | 10% | 20% | 30% | 中性档采纳辩论平衡点20% | 无数据（估计），参照行业")
+        j = Judge()
+        a, _, _ = _run(_Filler(seven), j)
+        assert "缺少可核验的依据" not in j.prompts[0]

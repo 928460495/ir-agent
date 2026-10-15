@@ -13,7 +13,7 @@ from ir_agent.debate import DebateRefused
 from ir_agent.full import _macro_periods, _prior_period
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.research import assumption_template
-from judge_stub import Judge
+from judge_stub import Judge, items
 
 
 class _R:
@@ -4312,3 +4312,71 @@ def test_人改过drivers_md后重跑_不送审_门二标注未经审核(tmp_pat
     assert any("人工修改后未经审核" in x for x in o.skipped)
     assert "人工修改后未经审核" in (tmp_path / full.REVIEW_MD).read_text(encoding="utf-8")
 
+
+
+# ══ 子项目三：判断项 = 填写者 + 审核者（端到端）════════════════════
+
+_E2E_DRAFT = "\n".join(
+    f"假设: {name} | 第{y}年 | {lo} | {mid} | {hi} | 理由 | 无数据（估计），参照行业"
+    for y in (1, 2)
+    for name, lo, mid, hi in (("高端覆铜板出货量", "2%", "8%", "15%"),
+                              ("平均单价", "-3%", "0%", "3%"),
+                              ("铜箔采购价", "-3", "-1", "0.5"),
+                              ("稼动率摊薄", "-1", "0.5", "1")))
+
+
+def _assume_e2e(monkeypatch, full, tmp_path, *script):
+    """前两次调用照 `_e2e` 跑；第三次调用**不打桩 `_propose_assumptions`**，
+    只把模型换成按提示词分派的假模型：审核提示词给假审核者，其余给假填写者。"""
+    from ir_agent import dcf
+
+    real = full._propose_assumptions
+    _e2e(monkeypatch, full, tmp_path)
+    d = date(2026, 10, 12)
+    full.run_analyse("600183", _PhaseR(), d, tmp_path)
+    full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
+    monkeypatch.setattr(full, "_propose_assumptions", real)
+    monkeypatch.setattr(dcf, "calibrate_only", lambda code, as_of, ledger: {
+        "judg": {"g_stats": (), "gm_stats": ()}, "periods": {"proj": ["2026E", "2027E"]}})
+    judge, fills = Judge(*script), []
+
+    class _C:
+        total_cost_usd = 0
+
+        def __call__(self, p):
+            if "**必须逐条作答的条目**" in p:
+                return judge(p)
+            fills.append(p)
+            return _E2E_DRAFT
+    monkeypatch.setattr(full, "make_client", lambda **k: _C())
+    return full.run_assume("600183", _PhaseR(), d, tmp_path, "乙"), judge, fills
+
+
+def test_判断项审核_第一轮驳回第二轮通过(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    o, judge, fills = _assume_e2e(
+        monkeypatch, full, tmp_path, {("取值", "铜箔采购价"): "致命"}, {})
+    assert o.stage is full.Stage.AWAITING_ASSUME_REVIEW, o.skipped
+    assert len(fills) == 2 and "建议：改取值铜箔采购价" in fills[1]
+    assert ("平衡点", "高端覆铜板出货量") in items(judge.prompts[0]), \
+        "辩论② 的平衡点没进审核清单"
+    rev = json.loads((tmp_path / full.ASSUMPTIONS_REVIEW_JSON).read_text(encoding="utf-8"))
+    assert rev["passed"] is True and rev["rounds"] == 2
+    assert "## 第 2 轮" in (tmp_path / full.ASSUMPTIONS_ROUNDS_MD).read_text(encoding="utf-8")
+    assert "判断项审核" in (tmp_path / "assumptions.md").read_text(encoding="utf-8")
+
+
+def test_判断项审核三轮不过_停在第三次调用_给两条做法(tmp_path, monkeypatch):
+    from ir_agent import full
+    from ir_agent.research import next_actions
+
+    o, _, fills = _assume_e2e(monkeypatch, full, tmp_path, {"后果": "致命"})
+    assert len(fills) == 3
+    assert o.stage is full.Stage.INCOMPLETE
+    assert any(s.startswith("判断项审核 3 轮未通过") for s in o.skipped), o.skipped
+    assert not (tmp_path / "assumptions.json").exists()
+    assert (tmp_path / full.ASSUMPTIONS_FAILED_JSON).exists()
+    acts = "\n".join(next_actions(o.stage, "600183", out_dir=str(tmp_path),
+                                  year=2025, phase="assume"))
+    assert "--assume" in acts and full.ASSUMPTIONS_FAILED_JSON in acts

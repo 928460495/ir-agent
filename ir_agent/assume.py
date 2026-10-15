@@ -1921,7 +1921,10 @@ def build_prompt(judg: dict, labels: list[str], context: str,
     m = as_model(decomps)
     if m is None:
         head = _SCALAR_HEAD
-    elif m.legacy:
+    elif m.legacy and isinstance(decomps, list):
+        # 旧的乘/加分解式列表：提示词与改动前一字不差。第三次调用从 drivers.md
+        # 读回的是 `FormulaModel`（旧写法翻译过来、legacy=True）—— 它没有 `.factors`
+        # 列表可迭代，走公式化的头部（子项目三端到端测试抓到）。
         head = _factor_head(decomps, factor_data or {})
     else:
         head = _formula_head(m, factor_data or {}, ledger_bases)
