@@ -1718,7 +1718,28 @@ def _review_stage(arts: dict):
         "但估值尚无从谈起")
 
 
-def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
+def _unreviewed_assumptions(out: Path, a, edits: list[str]) -> str:
+    """第二阶段读回的判断项是不是审核通过的那一份。空串 = 是。
+
+    比对 `assumptions_review.json` 里审核时的取值指纹（只算因子、年、三档与基期
+    值，不算理由文字）。没有审核记录、审核未通过（人以底稿补写）、指纹对不上
+    （人改了数），都要标注 —— 不送审（子项目三决定 5）。"""
+    from ir_agent import assume_review
+
+    f = out / ASSUMPTIONS_REVIEW_JSON
+    if not f.exists():
+        return "没有判断项审核记录（未经 AI 审核，或审核停下后人工补写）"
+    d = json.loads(f.read_text(encoding="utf-8"))
+    if not d.get("passed"):
+        return "判断项审核未通过，这份是人工以底稿补写的"
+    if d.get("fingerprint") != assume_review.fingerprint(a):
+        n = f"（改动 {len(edits)} 格，逐条见「判断项经人工调整」）" if edits else ""
+        return f"判断项经人工修改，修改后未经审核{n}"
+    return ""
+
+
+def _assumption_caveats(a, anchor_note: str = "",
+                        unreviewed: str = "") -> tuple[str, str]:
     """判断项的软处要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
 
     两件事，分别说：
@@ -1754,10 +1775,14 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
     unverified = assume.unverified_labels(a)
     estimated = assume.estimated_labels(a)
     rebased = bool(a.margin_bases)
-    if not unverified and not estimated and not anchor_note and not rebased:
+    if (not unverified and not estimated and not anchor_note and not rebased
+            and not unreviewed):
         return "", ""
 
     says: list[str] = []
+    # 人改过、未经 AI 审核：读者必须知道这份判断项没有审核者背书（子项目三）。
+    if unreviewed:
+        says.append("**判断项经人工修改或补写，修改后未经 AI 审核**")
     # 锚定影响最大，先说：首年批准值整个没进模型，研报正文却一直按它讲。
     if anchor_note:
         says.append("**首个预测年由已披露中期锚定**，批准清单上该年的营收增速"
@@ -1781,6 +1806,8 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
                    + "。不要把它们写得与有确凿出处的判断项同等确定。")
 
     body: list[str] = ["", "---", "", "## ⚠ 判断项依据核验", ""]
+    if unreviewed:
+        body += [f"**{unreviewed}。**", ""]
     if anchor_note:
         body += [f"**{anchor_note}**", "",
                  "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
@@ -2573,8 +2600,9 @@ _APPROVE_NOTE = """
 不在此列，也不需要你确认。
 
 - 认可就直接进入第二阶段建模。
-- 要改数值，改 `{js}` 里的 `rows`，再进入第二阶段；改完仍会重新校验
-  （三档必须严格拉开、每年都要有值），改坏了会被挡下来而不是算出个错数。
+- 要改数值，改 `{js}` 里的 `rows`，再进入第二阶段。改过的格子**不再送 AI 审核**：
+  第二阶段比对审核时的取值指纹，在终端与研报里写明「判断项经人工修改，修改后
+  未经审核」并列出改动；代码只查算不算得下去（缺年份、缺基期等），不按内容拒绝。
 """
 
 
@@ -2627,6 +2655,11 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     skipped: list[str] = []
     for x in edits:
         skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
+    # **人改过的不再送审，只标注**（子项目三决定 5）：人在门③ 签字就是承担责任，
+    # AI 不该否决人的决定；但「这几格没经过审核」必须让读者看见。
+    unreviewed = _unreviewed_assumptions(out, a, edits)
+    if unreviewed:
+        skipped.append(f"判断项未经审核：{unreviewed}")
 
     # **重建派生事实必须排在校验之前。** industry.* / comps.* / macro.*
     # 这些 key 只存在于内存账本，由 _analyse_facts 算出来；第一阶段的
@@ -2738,7 +2771,8 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     cost = 0.0
     # 判断项的软处（依据未逐字核验 / 取值是估计）要跟着交付物走，见 `_assumption_caveats`。
     caveat, caveats_md = _assumption_caveats(
-        a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""))
+        a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""),
+        unreviewed=unreviewed)
     if dcf_res is not None:
         full, cost, ferr, debate_md, dnote = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), out,

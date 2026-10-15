@@ -196,3 +196,56 @@ def test_清单与提示词里的条目一致():
 def test_规则正文不出现与清单同形的条目行():
     import re
     assert not re.search(r"(?m)^\s*-\s*\[(取值|平衡点|依据|合成|后果)\]", AR.RULES)
+
+
+class TestPhase2:
+    """第二阶段读回人改过的判断项：不送审，只标注（spec 三、用户决定 5）。"""
+
+    def _saved(self, tmp_path, *, passed=True):
+        from ir_agent import full
+        from ir_agent.methodology_review import ReviewResult
+        a = assume.parse(_draft(), 2, decomps=MODEL)
+        res = ReviewResult(rounds=1, fingerprint=AR.fingerprint(a))
+        (tmp_path / full.ASSUMPTIONS_REVIEW_JSON).write_text(
+            AR.dump_review(res, passed=passed), encoding="utf-8")
+        return assume.to_json(a)
+
+    def test_指纹一致_不标注(self, tmp_path):
+        from ir_agent import full
+        a, edits = assume.from_json(self._saved(tmp_path))
+        assert full._unreviewed_assumptions(tmp_path, a, edits) == ""
+
+    def test_人改了数_标注并说改了几格(self, tmp_path):
+        from ir_agent import full
+        d = self._saved(tmp_path)
+        d["rows"][0]["base"] = "0.21"
+        a, edits = assume.from_json(d)
+        got = full._unreviewed_assumptions(tmp_path, a, edits)
+        assert "人工修改，修改后未经审核" in got and "1 格" in got
+
+    def test_没有审核记录或审核未通过_都标注(self, tmp_path):
+        from ir_agent import full
+        a, edits = assume.from_json(self._saved(tmp_path, passed=False))
+        assert "审核未通过" in full._unreviewed_assumptions(tmp_path, a, edits)
+        (tmp_path / full.ASSUMPTIONS_REVIEW_JSON).unlink()
+        assert "没有判断项审核记录" in full._unreviewed_assumptions(tmp_path, a, edits)
+
+    def test_研报附录写明未经审核_提示词那句不带数字(self, tmp_path):
+        import re
+
+        from ir_agent import full
+        a, _ = assume.from_json(self._saved(tmp_path))
+        line, md = full._assumption_caveats(a, unreviewed="判断项经人工修改，修改后未经审核（改动 3 格）")
+        assert "未经" in line and not re.search(r"\d", line)
+        assert "改动 3 格" in md
+
+    def test_第二阶段比对指纹且不再按内容拒绝(self):
+        import inspect
+
+        from ir_agent import full
+        src = inspect.getsource(full.run_valuation)
+        assert "_unreviewed_assumptions(" in src
+        assert src.index("_unreviewed_assumptions(") < src.index("dcf.run(")
+        assert "facts.blocking" in src
+        assert 'raise SystemExit(f"批准的假设不合法' not in src
+        assert "重新校验" not in full._APPROVE_NOTE
