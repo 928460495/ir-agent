@@ -162,6 +162,9 @@ class Row:
     # 这一行必须带着标记** —— 与 `basis_unverified` 同一处理：派生结果，不进
     # to_json；第二阶段没有 factor_data，算出来恒为空，行为不变。
     basis_flag: str = ""
+    # 三档的原文（悲观、中性、乐观）。给审核者「原文 → 读作」并排看（子项目三：
+    # 0.0547 与「5.47 个百分点」就是这样对出来的）。派生量，不进 JSON。
+    raw: tuple = ()
 
 
 @dataclass
@@ -360,6 +363,9 @@ class AssumptionSet:
     # 方法论审核遗留（子项目二）：预研阶段审核者判为提醒/待采集的条目，或
     # 「人工修改后未经审核」。派生量，不进 JSON —— 第三次调用从 drivers_review.json 读。
     method_review: list = field(default_factory=list)
+    # 代码读数时发现的问题（读不出、单位写法、依据写法、重复行……）。**只是事实，
+    # 不驳回**，交给判断项审核者（子项目三）。派生量，不进 JSON。
+    read_notes: list = field(default_factory=list)
 
     def _m(self) -> FormulaModel | None:
         if self.model is None and self.decomps:
@@ -735,94 +741,119 @@ def parse(text: str, years: int,
     return _parse_factors(text, years, decomps, factor_data, as_of)
 
 
-def _unit_guard(unit: str, label: str, cells: list[str]) -> None:
-    """按单位挡字面量。C4：pp 与 % 不是一回事；I1：变化率必须显式带 %、不认 bp；
-    公式化后的其他单位（万吨、元…）按原数，不带 % 也不带 bp。"""
+def _shown(raw: str) -> str:
+    try:
+        return f"{_pct(raw)}"
+    except AssumeFailed:
+        return "读不出"
+
+
+def _unit_notes(unit: str, where: str, cells: list[str]) -> list[str]:
+    """代码按什么读法读了这几格。**只报事实，不驳回**（子项目三，2026-10-15）。
+
+    读法固定：带 % 的除以 100，裸数按原数，bp 不换算。单位与写法对不上时，把
+    「原文 → 读作」摆给审核者，由它判断是不是填写者的本意 —— 生益科技
+    2026-10-15：理由栏写「5.47 个百分点」，表里填 0.0547，代码照读、合成照算，
+    只有对着理由栏才看得出缩小了 100 倍。此前这里是三道字面闸门（C4 pp 带 %、
+    I1 变化率裸数、bp），它们拦得住字面写法，拦不住 0.0547 这种合法的数，反倒
+    让模型连挂三次后整个分解式被丢掉。
+    """
     norm = [c.replace("％", "%") for c in cells]
+    shown = " / ".join(_shown(c) for c in cells)
+    raw = " / ".join(cells)
+    if any("bp" in n.lower() for n in norm):
+        return [f"{where}写了 bp（{raw}），代码不换算 bp，按原数读作 {shown}"]
     if unit == "pp":
-        if any("%" in c for c in norm):
-            raise AssumeFailed(
-                f"因子「{label}」按 pp 计，不按 %：{' / '.join(cells)} 里带了 % "
-                "—— pp 与 % 不是一回事，85%→82% 是 −3pp，写成 −3% 会被当成 "
-                "−0.03pp，缩小 100 倍。请直接填数字（如 −3），不要带 %。")
-        return
+        if any("%" in n for n in norm):
+            return [f"{where}单位是 pp，却写了 %（{raw}），按 ÷100 读作 {shown}pp"
+                    " —— 百分点应直接写数字"]
+        return []
     if unit in _PCT_UNITS:
-        for raw, n in zip(cells, norm):
-            if "bp" in n.lower():
-                raise AssumeFailed(
-                    f"因子「{label}」按变化率（%）计，不认 bp：{raw} —— "
-                    "bp 与 % 不是同一套单位，不做隐式换算，请直接换算"
-                    f"成百分比再填（如 −350bp 请写成 −3.5%）。")
-            # I-a（final-fix-D）：守卫必须复用 `_pct` 自己会用到的那个 token
-            # 来判断，"0.5 %" 这样的空格骗不过去。
-            if not (_pct_token(raw) or "").endswith("%"):
-                raise AssumeFailed(
-                    f"因子「{label}」按变化率计，必须带 %：{raw} —— "
-                    "裸数会被当成小数直接使用而不是百分比（0.5 会被"
-                    "解释成 50%，而不是你想表达的 0.5%），且这类错误"
-                    "合成后看起来仍然合理，人从清单上发现不了。"
-                    "请直接填百分比，如 −3.5%。")
-        return
-    for raw, n in zip(cells, norm):
-        if "%" in n or "bp" in n.lower():
-            raise AssumeFailed(
-                f"因子「{label}」的单位是「{unit}」，按原数填，不要带 % 或 bp："
-                f"{raw}")
+        bare = [c for c in cells if not (_pct_token(c) or "").endswith("%")]
+        if bare:
+            return [f"{where}单位是{unit}，却写了裸数（{' / '.join(bare)}），"
+                    "按小数读（0.2 读作 20%）"]
+        return []
+    if unit and any("%" in n for n in norm):
+        return [f"{where}单位是「{unit}」，却写了 %（{raw}），按 ÷100 读作 {shown}"]
+    return []
+
+
+def _cells(raw: str) -> list[str]:
+    """一行按 `|` 切段。**第 6 段起全部算依据栏**（理由 + 依据）：生益科技
+    2026-10-15 第 3 次被拒，模型写了 7 段（理由一段、`[[key]]` 一段）——因为
+    第 1 次驳回信息让它「在第 7 字段填偏离说明」，而解析器只读第 6 段，真正的
+    依据被丢掉、判为「缺少可核验的依据」。"""
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) > 6:
+        parts = parts[:5] + [" | ".join(parts[5:])]
+    return parts
+
+
+def _year(raw: str, years: int, what: str, notes: list[str]) -> int | None:
+    try:
+        y = int(re.search(r"\d+", raw).group(0))
+    except (AttributeError, ValueError):
+        notes.append(f"{what}的年份「{raw}」读不出，这一行没读进来")
+        return None
+    if not 1 <= y <= years:
+        notes.append(f"{what}第 {y} 年超出预测期 1..{years}，这一行没读进来")
+        return None
+    return y
+
+
+def _three(cells: list[str], where: str, notes: list[str]) -> list[Decimal] | None:
+    try:
+        return [_pct(c) for c in cells]
+    except AssumeFailed:
+        notes.append(f"{where}的三档「{' / '.join(cells)}」有读不出数的，这一行没读进来")
+        return None
+
+
+def _put(out: "AssumptionSet", row: "Row", key: tuple, what: str) -> None:
+    """同一项同一年出现多行时**按最后一行读**，并记下这件事。重复行不能留在
+    `rows` 里：`path()` 按年份排序后整体错位一格（C-a），清单显示的值也会与参与
+    合成的值不是同一行。"""
+    for i, r in enumerate(out.rows):
+        if (r.factor_key or r.driver, r.year) == key:
+            out.read_notes.append(f"{what}第 {row.year} 年出现了不止一行，按最后一行读")
+            del out.rows[i]
+            break
+    out.rows.append(row)
 
 
 def _parse_scalar(text: str, years: int) -> AssumptionSet:
+    """两标量模式（取不到申万行业分类时）的读数。**只读，不驳回**：读不出的
+    行跳过并记进 `read_notes`，由审核者判断（子项目三）。"""
     out = AssumptionSet(code="", labels=[])
-    # C-a（final-fix-D）：`_parse_factors` 早就查了 (factor_key, year)
-    # 重复，这条降级路径漏了同一道门——而它恰恰是因子模式连续 3 次被
-    # 「请修正后重新输出全部行」驳回之后才会走到的路径，模型此时已经
-    # 被连续训练成输出"修正前/修正后"两版。比因子模式更糟：`path()`
-    # 把全部行按年份排序后直接返回一个列表，一条重复行会让它后面
-    # 每一年整体错位一格（`ashare_build.py` 按下标 `i` 取值，不是按
-    # 年份查找），人批准的某一年会被静默丢弃、多出的一项顶替了别的
-    # 年份。降级模式不删，那它就必须和主路径一样硬。
-    seen: set[tuple[str, int]] = set()
     for m in _LINE.finditer(text):
-        parts = [p.strip() for p in m.group(1).split("|")]
+        parts = _cells(m.group(1))
         if len(parts) < 6:
-            raise AssumeFailed(
-                f"假设一行字段不足（需 6 段：项目|年|悲观|中性|乐观|依据），"
-                f"得到 {len(parts)}：{m.group(1)}")
+            out.read_notes.append(
+                f"一行字段不足 6 段（项目|年|悲观|中性|乐观|依据），没读进来：{m.group(1)}")
+            continue
         cn = pick(parts[0], list(DRIVERS))
         if cn is None:
-            raise AssumeFailed(
-                f"未知的判断项 {parts[0]!r}，只能填：{'、'.join(DRIVERS)}。"
-                "费用率、周转天数、折旧率等由历史数据校准，不在此处填写。")
-        try:
-            year = int(re.search(r"\d+", parts[1]).group(0))
-        except (AttributeError, ValueError) as e:
-            raise AssumeFailed(f"年份不可解析：{parts[1]!r}") from e
-        if not 1 <= year <= years:
-            raise AssumeFailed(f"年份 {year} 超出预测期 1..{years}")
-        if (DRIVERS[cn], year) in seen:
-            raise AssumeFailed(
-                f"{cn} 第 {year} 年出现了不止一行——重试提示词里的「请"
-                "修正后重新输出全部行」很容易诱发模型把修正前/修正后"
-                "两版都留在同一次回复里。重复行会让 path() 按年份排序"
-                "后整体错位一格，后面每一年都会取到前一行的数字，请只"
-                "保留一行，不要让代码替你决定该采信哪一行。")
-        seen.add((DRIVERS[cn], year))
-        # Minor-5（final-fix-D）：与因子侧同形的窄口径守卫——不要求
-        # 必须带 %，小数记法（"0.02" = 2%）是这条路径本就认可的既有
-        # 约定（见 test_百分号与小数都认），营收增速/毛利率本身没有
-        # 像因子那样的 pp/% 双单位歧义，谈不上"必须带 %"。但 bp 是
-        # 另一套单位，混进来会被 `_pct` 当裸数直接吞下（"-350bp" 被
-        # 解析成 -350，渲染成 -35000%），必须显式拒绝。
-        for label, i in (("悲观", 2), ("中性", 3), ("乐观", 4)):
-            raw = parts[i]
-            if "bp" in raw.replace("％", "%").lower():
-                raise AssumeFailed(
-                    f"{cn} 第 {year} 年 {label}档 {raw!r} 按小数或百分比"
-                    "计，不认 bp —— bp 与 %/小数不是同一套单位，不做"
-                    "隐式换算，请换算成百分比或小数再填。")
-        out.rows.append(Row(
-            driver=DRIVERS[cn], year=year,
-            bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
-            bases=_basis(parts[5], cn), note=_note(parts[5])))
+            out.read_notes.append(
+                f"未知的判断项 {parts[0]!r}（只能填：{'、'.join(DRIVERS)}；费用率、"
+                "周转天数、折旧率等由历史数据校准，不在此处填写），这一行没读进来")
+            continue
+        year = _year(parts[1], years, f"{cn} ", out.read_notes)
+        if year is None:
+            continue
+        where = f"{cn} 第 {year} 年"
+        vals = _three(parts[2:5], where, out.read_notes)
+        if vals is None:
+            continue
+        # 营收增速/毛利率本身没有 pp/% 双单位歧义，小数与百分比都认；只报 bp。
+        out.read_notes += _unit_notes("", where, parts[2:5])
+        bases, prob = _basis(parts[5])
+        if prob:
+            out.read_notes.append(f"{where}：{prob}")
+        _put(out, Row(driver=DRIVERS[cn], year=year, bear=vals[0], base=vals[1],
+                      bull=vals[2], bases=bases, note=_note(parts[5]),
+                      raw=tuple(parts[2:5])),
+             (DRIVERS[cn], year), f"{cn} ")
     return out
 
 
@@ -830,12 +861,17 @@ def _parse_factors(text: str, years: int,
                    decomps,
                    factor_data: dict | None = None,
                    as_of: date | None = None) -> AssumptionSet:
-    """按因子解析。每一行对应分解式里的一个因子，而不是营收增速/毛利率
+    """按因子读数。每一行对应分解式里的一个因子，而不是营收增速/毛利率
     本身 —— 合成交给 `synthesize`，模型只负责填因子。
 
     `decomps` 是旧分解式列表或 `FormulaModel`。因子按**短名或完整名**认（公式化
     后提示词让模型写短名）。另认 `基期: <短名> | <值> | <依据>` 行：需要第 0 年
     取值、而账本里没有的因子由 AI 补填（spec 2026-10-14 三）。
+
+    **只读，不驳回**（子项目三，2026-10-15）：字段不足、因子名认不出、年份越界、
+    数读不出的行跳过；重复行按最后一行；单位写法、依据写法的问题照读。全部记进
+    `read_notes`，作为事实交给审核者。生益科技第三次调用就是被这里的闸门连挂
+    三次、整个因子分解退回两标量的。
     """
     factor_data = factor_data or {}
     model = as_model(decomps)
@@ -851,61 +887,65 @@ def _parse_factors(text: str, years: int,
     out = AssumptionSet(code="", labels=[],
                         decomps=list(decomps) if isinstance(decomps, list) else [],
                         model=model)
-    # C2：同一因子同一年出现两行，重复行本身说明模型在一次回复里生成了
-    # 「修正前/修正后」两版，应当直接驳回重填，而不是替它决定该采信哪一行。
-    seen: set[tuple[str, int]] = set()
-    # 「同上」出口③按因子回指同一个 `factor_key` 之前处理过的那一行。
+    # 「同上」按因子回指同一个 `factor_key` 之前读进来的那一行。
     last_basis: dict[str, list[Basis]] = {}
     for m in _LINE.finditer(text):
-        parts = [p.strip() for p in m.group(1).split("|")]
+        parts = _cells(m.group(1))
         if len(parts) < 6:
-            raise AssumeFailed(
-                f"假设一行字段不足（需 6 段：因子|年|悲观|中性|乐观|依据），"
-                f"得到 {len(parts)}：{m.group(1)}")
+            out.read_notes.append(
+                f"一行字段不足 6 段（因子|年|悲观|中性|乐观|依据），没读进来：{m.group(1)}")
+            continue
         hit = pick(parts[0], list(names))
         if hit is None:
-            raise AssumeFailed(
-                f"未知的因子 {parts[0]!r}，本次分解式里只有："
-                + "、".join(f.short or f.label for f in model.factors))
+            out.read_notes.append(
+                f"未知的因子 {parts[0]!r}（本次分解式里只有："
+                + "、".join(f.short or f.label for f in model.factors) + "），这一行没读进来")
+            continue
         f = names[hit]
-        label = f.label
-        try:
-            year = int(re.search(r"\d+", parts[1]).group(0))
-        except (AttributeError, ValueError) as e:
-            raise AssumeFailed(f"年份不可解析：{parts[1]!r}") from e
-        if not 1 <= year <= years:
-            raise AssumeFailed(f"年份 {year} 超出预测期 1..{years}")
-        if (f.key, year) in seen:
-            raise AssumeFailed(
-                f"因子「{label}」第 {year} 年出现了不止一行——重试提示词"
-                "里的「请修正后重新输出全部行」很容易诱发模型把修正前/"
-                "修正后两版都留在同一次回复里。重复行本身说明这个因子还"
-                "没想清楚，请只保留一行，不要让代码替你决定该采信哪一行。")
-        seen.add((f.key, year))
-        _unit_guard(f.unit, label, parts[2:5])
-        bases = _factor_basis(parts[5], label, factor_data.get(f.key),
-                             as_of, prior=last_basis.get(f.key))
+        year = _year(parts[1], years, f"因子「{f.label}」", out.read_notes)
+        if year is None:
+            continue
+        where = f"因子「{f.label}」第 {year} 年"
+        vals = _three(parts[2:5], where, out.read_notes)
+        if vals is None:
+            continue
+        out.read_notes += _unit_notes(f.unit, where, parts[2:5])
+        bases, prob = _factor_basis(parts[5], factor_data.get(f.key), as_of,
+                                    prior=last_basis.get(f.key))
+        if prob:
+            out.read_notes.append(f"{where}：{prob}")
         last_basis[f.key] = bases
-        out.rows.append(Row(
+        _put(out, Row(
             driver=target_of.get(f.key, "factor"), year=year,
-            bear=_pct(parts[2]), base=_pct(parts[3]), bull=_pct(parts[4]),
+            bear=vals[0], base=vals[1], bull=vals[2],
             bases=bases, note=_note(parts[5]), factor_key=f.key,
-            basis_flag=_conclusion_flags(bases, factor_data.get(f.key))))
+            basis_flag=_conclusion_flags(bases, factor_data.get(f.key)),
+            raw=tuple(parts[2:5])), (f.key, year), f"因子「{f.label}」")
     for m in _BASE_LINE.finditer(text):
-        parts = [p.strip() for p in m.group(1).split("|")]
+        parts = _cells(m.group(1))
         if len(parts) < 3:
-            raise AssumeFailed(
-                f"基期一行字段不足（需 3 段：因子|取值|依据），得到：{m.group(1)}")
+            out.read_notes.append(
+                f"基期一行字段不足 3 段（因子|取值|依据），没读进来：{m.group(1)}")
+            continue
         hit = pick(parts[0], list(names))
         if hit is None:
-            raise AssumeFailed(f"基期行里未知的因子 {parts[0]!r}")
+            out.read_notes.append(f"基期行里未知的因子 {parts[0]!r}，没读进来")
+            continue
         f = names[hit]
+        where = f"因子「{f.label}」基期"
+        try:
+            value = _pct(parts[1])
+        except AssumeFailed:
+            out.read_notes.append(f"{where}「{parts[1]}」读不出数，没读进来")
+            continue
         if f.short in out.base_values:
-            raise AssumeFailed(f"因子「{f.label}」的基期出现了不止一行，只保留一行。")
-        _unit_guard(f.unit, f.label, [parts[1]])
-        bases = _factor_basis(parts[2], f.label, factor_data.get(f.key), as_of)
+            out.read_notes.append(f"{where}出现了不止一行，按最后一行读")
+        out.read_notes += _unit_notes(f.unit, where, [parts[1]])
+        bases, prob = _factor_basis(" | ".join(parts[2:]), factor_data.get(f.key), as_of)
+        if prob:
+            out.read_notes.append(f"{where}：{prob}")
         out.base_values[f.short] = BaseValue(
-            value=_pct(parts[1]), bases=bases, note=_note(parts[2]), source="AI")
+            value=value, bases=bases, note=_note(" | ".join(parts[2:])), source="AI")
     return out
 
 
@@ -1030,24 +1070,26 @@ def _note(raw: str) -> str:
     """第 6 字段里的散文部分 —— 去掉引文与占位符后剩下的理由。"""
     t = _REF.sub("", raw)
     t = _QUOTE.sub("", t)
-    return re.sub(r"\s+", " ", t).strip(" ，,。;；")
+    return re.sub(r"\s+", " ", t).strip(" ，,。;；|")
 
 
-def _basis(raw: str, what: str) -> list[Basis]:
+def _basis(raw: str) -> tuple[list[Basis], str]:
+    """两标量模式的依据：账本占位符或正文原话。返回 (依据, 问题)；问题非空时
+    依据为空 —— 只报事实，由审核者判断（子项目三）。"""
     raw = raw.strip()
     ref = _REF.search(raw)
     if ref:
         try:
-            return [Basis.fact(ref.group(0))]
+            return [Basis.fact(ref.group(0))], ""
         except InvalidBasis as e:
-            raise AssumeFailed(f"{what} 的占位符不合法: {e}") from e
+            return [], f"占位符不合法：{e}"
     q = _QUOTE.search(raw)
     if not q:
-        raise AssumeFailed(f"{what} 缺少可核验的依据（需正文原话或占位符）")
+        return [], "缺少可核验的依据（没有正文原话或占位符）"
     try:
-        return [Basis.report(q.group(1))]
+        return [Basis.report(q.group(1))], ""
     except InvalidBasis as e:
-        raise AssumeFailed(f"{what} 的依据不合法: {e}") from e
+        return [], f"依据不合法：{e}"
 
 
 # 引文核验的规范化从 sources/external.py 导入——「同一套规范化」此前
@@ -1141,10 +1183,13 @@ def _match_excerpt(fd: FactorData | None, quote: str) -> bool:
     return bool(qn) and bool(fd.source_excerpt) and qn in _norm(fd.source_excerpt)
 
 
-def _factor_basis(raw: str, label: str, fd: FactorData | None,
+def _factor_basis(raw: str, fd: FactorData | None,
                   as_of: date | None,
-                  prior: list[Basis] | None = None) -> list[Basis]:
-    """因子模式下依据的合法写法——比两标量模式（`_basis`）多三条出口。
+                  prior: list[Basis] | None = None) -> tuple[list[Basis], str]:
+    """因子模式下依据的写法——比两标量模式（`_basis`）多三条出口。
+
+    **返回 (依据, 问题)，不驳回**（子项目三，2026-10-15）：下面三条出口的边界
+    原样保留，越界不再抛错，而是把问题作为事实交给审核者 [依据] 条目判断。
 
     **这两条出口要修的契约缺口**：真实联网跑出的分解式常有一多半因子
     正文一次都没提过（600584 实测：9 因子 7 个正文零命中），此前只认
@@ -1221,9 +1266,9 @@ def _factor_basis(raw: str, label: str, fd: FactorData | None,
     ref = _REF.search(raw)
     if ref:
         try:
-            return [Basis.fact(ref.group(0))]
+            return [Basis.fact(ref.group(0))], ""
         except InvalidBasis as e:
-            raise AssumeFailed(f"{label} 的占位符不合法: {e}") from e
+            return [], f"占位符不合法：{e}"
 
     q = _QUOTE.search(raw)
     if q:
@@ -1231,46 +1276,33 @@ def _factor_basis(raw: str, label: str, fd: FactorData | None,
         finding = _match_finding(fd, quote)
         if finding is not None:
             return [Basis.external(url=finding.url, quote=quote.strip(),
-                                   retrieved=as_of)]
+                                   retrieved=as_of)], ""
         if _match_excerpt(fd, quote):
             if not fd.source_url:
-                # 内部一致性错误，不是模型的问题——gaps.collect 命中
-                # ②③时理应同时记下 source_url（见该函数），走到这里
-                # 说明采集与解析这两处对同一份 factor_data 的假设不一致。
-                raise AssumeFailed(
-                    f"{label} 引用的年报/研报片段缺失真实出处"
-                    "（factor_data 内部不一致：source_url 为空）——"
-                    "请检查 gaps.collect 是否遗漏了 source_url。")
+                # 内部一致性错误，不是模型的问题——gaps.collect 命中②③时理应
+                # 同时记下 source_url。如实报告，按正文引用处理。
+                return [], ("引用的年报/研报片段缺失真实出处（factor_data 内部"
+                            "不一致：source_url 为空，代码问题）")
             return [Basis.external(url=fd.source_url, quote=quote.strip(),
-                                   retrieved=fd.source_retrieved or as_of)]
+                                   retrieved=fd.source_retrieved or as_of)], ""
         try:
-            return [Basis.report(quote)]
+            return [Basis.report(quote)], ""
         except InvalidBasis as e:
-            raise AssumeFailed(f"{label} 的依据不合法: {e}") from e
+            return [], f"依据不合法：{e}"
 
     if _looks_like_estimate(raw):
         if fd is None or fd.status == gaps.MISSING:
-            return []
-        raise AssumeFailed(
-            f"{label} 写了「无数据（估计）」，但该因子的采集状态是"
-            f"「{fd.status}」，不是「{gaps.MISSING}」——「无数据」只对"
-            "确实没有数据支撑的因子开放，不能图省事对有数据的因子也这么"
-            "写，那会让这条出口变成谁都能用的万能逃生口。")
+            return [], ""
+        return [], (f"写了「无数据（估计）」，但该因子的采集状态是「{fd.status}」，"
+                    f"不是「{gaps.MISSING}」")
 
     if _looks_like_ditto(raw):
         if prior is None:
-            raise AssumeFailed(
-                f"{label} 写了「同上」，但这是该因子出现的第一行，"
-                "没有上一行可以回指——「同上」指的是同一因子（而不是"
-                "文本里紧邻的上一行，那可能是别的因子）上一行的依据，"
-                "第一次出现该因子时必须给出完整依据（正文原话、占位符、"
-                "采集到的证据引文，或「无数据（估计）」）。")
-        return list(prior)
+            return [], "写了「同上」，但这是该因子读进来的第一行，没有上一行可回指"
+        return list(prior), ""
 
-    raise AssumeFailed(
-        f"{label} 缺少可核验的依据（需正文原话、账本占位符、该因子自身"
-        "采集到的证据引文、对确实无数据的因子明说「无数据（估计）」，"
-        "或对同一因子上一行的依据回指「同上」）")
+    return [], ("缺少可核验的依据（没有正文原话、账本占位符、该因子采集到的证据"
+                "引文、「无数据（估计）」或「同上」）")
 
 
 # 隐含份额的阻断阈值。

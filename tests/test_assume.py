@@ -14,6 +14,11 @@ from ir_agent.ledger import FactLedger
 from ir_agent.sources.external import Tier
 from ir_agent.sources.web import Finding
 
+
+def _notes(a) -> str:
+    """代码读数/核对时记下的事实（子项目三：只报事实，不驳回）。"""
+    return "\n".join(a.read_notes + list(getattr(getattr(a, "facts", None), "problems", [])))
+
 D = Decimal
 AS_OF = date(2026, 9, 7)
 BODY = "行业营收同比高于本司，份额在丢，因此基准增速取低于行业。"
@@ -44,10 +49,9 @@ def test_只认两个判断项():
     assert set(assume.DRIVERS) == {"营收增速", "毛利率"}
 
 
-def test_填校准项被驳回且说明原因():
-    with pytest.raises(AssumeFailed) as e:
-        assume.parse(_line(item="销售费用率"), 2)
-    assert "由历史数据校准" in str(e.value)
+def test_填校准项记进读数事实且说明原因():
+    a = assume.parse(_line(item="销售费用率"), 2)
+    assert "由历史数据校准" in _notes(a)
 
 
 # ── 三档必须拉开 ─────────────────────────────────────────────
@@ -84,16 +88,16 @@ def test_漏掉某年被驳回():
         _ok(a, 3)
 
 
-def test_年份越界被驳回():
-    with pytest.raises(AssumeFailed, match="超出预测期"):
-        assume.parse(_line(y=9), 5)
+def test_年份越界记进读数事实():
+    a = assume.parse(_line(y=9), 5)
+    assert re.search("超出预测期", _notes(a)), _notes(a)
 
 
 # ── 依据 ─────────────────────────────────────────────────────
 
-def test_缺依据被驳回():
-    with pytest.raises(AssumeFailed, match="缺少可核验的依据"):
-        assume.parse("假设: 营收增速 | 第1年 | 2% | 6% | 10% | 我的判断", 1)
+def test_缺依据记进读数事实():
+    a = assume.parse("假设: 营收增速 | 第1年 | 2% | 6% | 10% | 我的判断", 1)
+    assert re.search("缺少可核验的依据", _notes(a)), _notes(a)
 
 
 def test_依据查无此句被驳回():
@@ -286,11 +290,10 @@ def test_按因子解析():
         "capacity", "asp", "util_leverage", "input_cost"}
 
 
-def test_未知因子被驳回并列出可选():
+def test_未知因子记进读数事实并列出可选():
     bad = f"假设: 品牌力 | 第1年 | 1% | 2% | 3% | 「{Q}」"
-    with pytest.raises(AssumeFailed) as e:
-        assume.parse(bad, 1, decomps=_decomps())
-    assert "产能" in str(e.value) and "单价" in str(e.value)
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert "产能" in _notes(a) and "单价" in _notes(a)
 
 
 def test_缺某个因子被驳回():
@@ -802,14 +805,14 @@ def test_gm_hist为空时报错而不是静默复用gm0():
 
 # ── C4：pp 因子写成百分号被静默缩小 100 倍 ───────────────────
 
-def test_pp因子写百分号被拒绝():
+def test_pp因子写百分号记进读数事实():
     """C4 实测复现：`_pct('-3pp') == -3`（贡献 -3pp，正确），但
     `_pct('-3%') == -0.03`（贡献 -0.03pp，缩小 100 倍）。单调性校验、
     闭合校验都不会抓住这个错——因子各自的三档依旧严格拉开，只是
     合成结果几乎不动。必须在解析时就把带 % 的字面量挡下来。"""
     bad = f"假设: 稼动率摊薄 | 第1年 | -3% | -1 | 0.5 | 「{Q}」"
-    with pytest.raises(AssumeFailed, match="pp"):
-        assume.parse(bad, 1, decomps=_decomps())
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("pp", _notes(a)), _notes(a)
 
 
 def test_pp因子不带百分号正常解析():
@@ -843,15 +846,17 @@ def test_c4修复后pp显示为pp不是百分号():
 # 校验全部通过，因为拉开/闭合看的是同一行的三档，不看重复行之间的
 # 分歧。
 
-def test_同一因子同一年重复行被驳回():
+def test_同一因子同一年重复行记进读数事实():
     """C2 实测复现：重试提示词里的「请修正后重新输出全部行」很容易
     诱发模型把修正前/修正后两版都留在同一次回复里。必须在解析阶段
     就拒绝，不能留给下游两处各自选一行、选出两个不同的数。"""
     bad = ("假设: 产能 | 第1年 | -1% | 1% | 3% | 「先给1%」\n"
            "假设: 产能 | 第1年 | -5% | 30% | 35% | 「修正后」\n")
-    with pytest.raises(AssumeFailed, match="产能") as e:
-        assume.parse(bad, 1, decomps=_decomps())
-    assert "第 1 年" in str(e.value)
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("产能", _notes(a)), _notes(a)
+    assert "第 1 年" in _notes(a)
+    got = [r for r in a.rows if r.factor_key == "capacity"]
+    assert len(got) == 1 and got[0].base == D("0.30"), "按最后一行读，前一行丢掉"
 
 
 def _dup_rows():
@@ -913,29 +918,29 @@ def test_to_driver_block与synthesize取值规则一致():
 # 裸数 0.5：合成后渲染成 "50.00%"，对一个扩产故事完全看得过去，人
 # 不会觉得异常。
 
-def test_变化率因子裸数被拒绝():
+def test_变化率因子裸数记进读数事实():
     """I1 实测复现：修复前 `产能 | 第1年 | 0.5 | 0.5 | 0.6` 会被
     `_pct` 当成小数 0.5 直接使用，合成/显示成 50.00%——对一个扩产
     故事看起来完全正常，人根本看不出这里想表达的其实是 0.5%。"""
     bad = f"假设: 产能 | 第1年 | 0.5 | 0.5 | 0.6 | 「{Q}」"
-    with pytest.raises(AssumeFailed, match="变化率"):
-        assume.parse(bad, 1, decomps=_decomps())
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("变化率", _notes(a)), _notes(a)
 
 
-def test_变化率因子写成pp后缀被拒绝():
+def test_变化率因子写成pp后缀记进读数事实():
     """I1 实测复现：`-3.5pp` 没有 %，会被当裸数 -3.5 直接使用，合成
     显示成 -350.00%——把 pp 误当变化率填的写法此前被静默吞下。"""
     bad = f"假设: 产能 | 第1年 | -3.5pp | -1pp | 0.5pp | 「{Q}」"
-    with pytest.raises(AssumeFailed, match="变化率"):
-        assume.parse(bad, 1, decomps=_decomps())
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("变化率", _notes(a)), _notes(a)
 
 
-def test_变化率因子写成bp被拒绝():
+def test_变化率因子写成bp记进读数事实():
     """I1 实测复现：`-350bp` 没有 %，会被当裸数 -350 直接使用——
     bp 与 % 不是同一套单位，不做隐式换算，必须显式拒绝并提示换算。"""
     bad = f"假设: 产能 | 第1年 | -350bp | -100bp | 50bp | 「{Q}」"
-    with pytest.raises(AssumeFailed, match="bp"):
-        assume.parse(bad, 1, decomps=_decomps())
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("bp", _notes(a)), _notes(a)
 
 
 def test_变化率因子全角百分号被规范化接受():
@@ -948,14 +953,14 @@ def test_变化率因子全角百分号被规范化接受():
     assert row.bear == D("-0.06")
 
 
-def test_pp因子全角百分号也被拒绝():
+def test_pp因子全角百分号也记进读数事实():
     """I1：pp 侧的守卫此前只认 ASCII %，全角 ％ 能绕过去（`-3％` 被
     当裸数 -3 直接使用，对 pp 而言"碰巧对"，但下一次全角换成
     `-3.5％` 就会变成 -3.5pp 与 -350% 傻傻分不清）。规范化后全角
     ％ 与半角 % 一视同仁，同样被拒绝。"""
     bad = f"假设: 稼动率摊薄 | 第1年 | -3％ | -1 | 0.5 | 「{Q}」"
-    with pytest.raises(AssumeFailed, match="pp"):
-        assume.parse(bad, 1, decomps=_decomps())
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("pp", _notes(a)), _notes(a)
 
 
 # ── I5：pp 的参照点在提示词里没定义 ───────────────────────────
@@ -1077,7 +1082,7 @@ def test_两标量模式本身连续失败仍照常拒绝():
 # `ashare_build.py` 按下标 `i`（不是按年份）取值，一条重复行会让它
 # 后面每一年整体错位一格。
 
-def test_两标量模式重复行被驳回():
+def test_两标量模式重复行记进读数事实():
     """C-a 实测复现：`_parse_scalar` 修复前不查重，"先给的" 与 "修正
     后" 两行会一起留下来，交给 `path()` 排序后返回，下游按下标取值时
     会整体错位。必须在解析阶段就拒绝。"""
@@ -1087,9 +1092,9 @@ def test_两标量模式重复行被驳回():
         _line("营收增速", 2, "3%", "7%", "11%"),
         _line("毛利率", 1, "12%", "14%", "16%"),
         _line("毛利率", 2, "12%", "14%", "16%")])
-    with pytest.raises(AssumeFailed, match="营收增速") as e:
-        assume.parse(bad, 2)
-    assert "第 1 年" in str(e.value)
+    a = assume.parse(bad, 2)
+    assert re.search("营收增速", _notes(a)), _notes(a)
+    assert "第 1 年" in _notes(a)
 
 
 def test_两标量模式check也拒绝重复行不只依赖parse():
@@ -1164,8 +1169,8 @@ def test_变化率因子裸数与不相干百分号不再绕过守卫():
     `_pct` 却会解析出裸数 2026（渲染成 202600%）。守卫必须复用
     `_pct` 自己会用到的那个 token 来判断，两处才是同一套判据。"""
     bad = f"假设: 产能 | 第1年 | 2026年+5% | -2% | 1% | 「{Q}」"
-    with pytest.raises(AssumeFailed, match="变化率"):
-        assume.parse(bad, 1, decomps=_decomps())
+    a = assume.parse(bad, 1, decomps=_decomps())
+    assert re.search("变化率", _notes(a)), _notes(a)
 
 
 def test_变化率单位守卫不误伤已确认合法的写法():
@@ -1250,13 +1255,13 @@ def test_to_driver_block缺行时报出因子与年份而不是裸KeyError():
 
 # ── Minor-5：两标量降级模式没有任何单位守卫 ───────────────────────
 
-def test_两标量模式bp字面量被拒绝():
+def test_两标量模式bp字面量记进读数事实():
     """Minor-5 实测复现：与 C-a 同一片薄弱区域——两标量降级模式此前
     完全没有单位守卫，`-350bp` 会被 `_pct` 当裸数 -350 直接吞下，
     渲染成 -35000%。"""
     bad = _line("营收增速", 1, "-350bp", "-100bp", "50bp")
-    with pytest.raises(AssumeFailed, match="bp"):
-        assume.parse(bad, 1)
+    a = assume.parse(bad, 1)
+    assert re.search("bp", _notes(a)), _notes(a)
 
 
 def test_两标量模式小数记法不受因子侧必须带百分号的约束():
@@ -1309,18 +1314,18 @@ def test_无数据因子明说估计不再被驳回():
     assert a.rows[0].bases == [], "无数据估计应落地为空依据，不是编一个假依据"
 
 
-def test_对有数据的因子写无数据估计仍被驳回():
+def test_对有数据的因子写无数据估计仍记进读数事实():
     """「无数据」只对确实没有数据支撑的因子开放——否则会变成模型对任何
     因子都想用的万能逃生口，防的正是这个。"""
     d = _one_factor_decomp()
     fd = {"utilization": gaps.FactorData(
         factor=d.factors[0], status=gaps.ANNUAL, note="「稼动率保持稳定」——《核心竞争力分析》")}
     raw = "假设: 稼动率 | 第1年 | -2% | 0% | 2% | 无数据（估计），图省事"
-    with pytest.raises(AssumeFailed, match="无数据"):
-        assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assert re.search("无数据", _notes(a)), _notes(a)
 
 
-def test_提示词列出的会被驳回的状态等于门实际驳回的状态():
+def test_提示词列出的状态等于代码会记进读数事实的状态():
     """**这条锁的是「提示词没说、门却会驳回」这类遗漏**：子项目 B 加了
     ②.5 公司公告（`gaps.ANNOUNCE`），门对它照样驳回「无数据（估计）」，
     提示词的枚举却漏了「公告披露」——公告摘录常常根本没有数字，这时
@@ -1342,9 +1347,8 @@ def test_提示词列出的会被驳回的状态等于门实际驳回的状态()
     for st in statuses:
         fd = {"utilization": gaps.FactorData(
             factor=d.factors[0], status=st, note="占位")}
-        try:
-            assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
-        except AssumeFailed:
+        if assume.parse(raw, 1, decomps=[d], factor_data=fd,
+                        as_of=AS_OF).read_notes:
             rejected.append(st)
     # 门的语义：除 MISSING 外一律驳回——先把这一前提钉住，否则下面的
     # 比对可能在比两个都错的东西。
@@ -1796,13 +1800,13 @@ def test_同上写法变体_同前_见上_同该因子上一年():
         assert a.rows[1].bases == a.rows[0].bases, variant
 
 
-def test_因子第一次出现就写同上被驳回():
+def test_因子第一次出现就写同上记进读数事实():
     """「同上」指的是同一因子上一行的依据——该因子第一次出现（没有
     上一行可回指）时必须驳回，不能悄悄放行成"没有依据"。"""
     d = _one_factor_decomp()
     raw = "假设: 稼动率 | 第1年 | 5% | 8% | 12% | 同上，参照上次报告"
-    with pytest.raises(AssumeFailed, match="没有上一行"):
-        assume.parse(raw, 1, decomps=[d], factor_data={}, as_of=AS_OF)
+    a = assume.parse(raw, 1, decomps=[d], factor_data={}, as_of=AS_OF)
+    assert re.search("没有上一行", _notes(a)), _notes(a)
 
 
 def test_同上不跨因子继承():
@@ -1819,8 +1823,8 @@ def test_同上不跨因子继承():
         "假设: 稼动率 | 第1年 | 2% | 4% | 6% | 「平均稼动率约78%」，参照采集数据",
         "假设: 单价 | 第1年 | -1% | 1% | 3% | 同上，判断口径一致",
     ])
-    with pytest.raises(AssumeFailed, match="没有上一行"):
-        assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    a = assume.parse(raw, 1, decomps=[d], factor_data=fd, as_of=AS_OF)
+    assert re.search("没有上一行", _notes(a)), _notes(a)
 
 
 def test_同行真实引文优先于同上字样():
@@ -2595,3 +2599,16 @@ def test_没有factor_data时不标记():
     raw = "假设: 稼动率 | 第1年 | 2% | 4% | 6% | [[revenue@2025FY]]"
     a = assume.parse(raw, 1, decomps=[d], factor_data=None, as_of=AS_OF)
     assert a.rows[0].basis_flag == ""
+
+
+def test_七段的行_第六段起全算依据栏():
+    """生益科技 2026-10-15 第 3 次被拒的原文：模型写了 7 段（理由一段、`[[key]]`
+    一段）—— 第 1 次驳回信息让它「在第 7 字段填偏离说明」，而解析器只读第 6 段，
+    真正的依据被丢掉、判为「缺少可核验的依据」。内容其实是对的。"""
+    raw = ("假设: 产能 | 第1年 | 12% | 20% | 30% | 中性档采纳辩论平衡点20%；"
+           "结构性AI算力需求是驱动 | [[industry.revenue_yoy@2025FY]]")
+    a = assume.parse(raw, 1, decomps=_decomps())
+    r = [x for x in a.rows if x.factor_key == "capacity"][0]
+    assert [b.describe() for b in r.bases] and "revenue_yoy" in r.bases[0].describe()
+    assert r.note.startswith("中性档采纳辩论平衡点20%") and not r.note.endswith("|")
+    assert "缺少可核验的依据" not in _notes(a)

@@ -102,7 +102,7 @@ def parse_evidence(raw: str, *, corpus=None,
     列表，而不是抛异常；不给（单元测试的直接调用）则照旧抛 —— 让格式错误在
     测试里可见。整份输出一条可用证据都没有时，无论如何都失败。
     """
-    from ir_agent.assume import AssumeFailed, _basis
+    from ir_agent.assume import _basis
 
     out: list[Evidence] = []
     for line in raw.splitlines():
@@ -124,9 +124,8 @@ def parse_evidence(raw: str, *, corpus=None,
                 raise StanceFailed(msg, raw=raw)
             dropped.append(f"{msg}：{line[:60]}")
             continue
-        try:
-            bases = _basis(basis_raw, f"「{subject}」的{side}证据")
-        except AssumeFailed:
+        bases, prob = _basis(basis_raw)
+        if prob:
             doc = _cited_doc(basis_raw, corpus)
             if doc is not None:
                 note = (f"引了文档《{doc.title}》但没给逐字原文 —— 文档确实在"

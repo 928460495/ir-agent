@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal as D
 
@@ -13,6 +14,11 @@ from ir_agent import assume
 from ir_agent.assume import AssumeFailed, Case
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.methodology import parse as parse_meth
+
+
+def _notes(a) -> str:
+    """代码读数/核对时记下的事实（子项目三：只报事实，不驳回）。"""
+    return "\n".join(a.read_notes + list(getattr(getattr(a, "facts", None), "problems", [])))
 
 AS_OF = date(2026, 10, 14)
 
@@ -86,16 +92,16 @@ class TestParse:
         assert a.base_values["量"].value == D(100)
         assert a.base_values["本"].source == "AI"
 
-    def test_基期行重复被驳回(self):
-        with pytest.raises(AssumeFailed, match="基期出现了不止一行"):
-            assume.parse(_level_lines() + f"\n基期: 量 | 99 | {Q}", 1, decomps=LEVEL)
+    def test_基期行重复记进读数事实(self):
+        a = assume.parse(_level_lines() + f"\n基期: 量 | 99 | {Q}", 1, decomps=LEVEL)
+        assert re.search("基期出现了不止一行", _notes(a)), _notes(a)
 
     @pytest.mark.parametrize("bad", ["110%", "110bp"])
     def test_其他单位不带百分号(self, bad):
         txt = _level_lines().replace("假设: 量 | 第1年 | 100 | 110 |",
                                      f"假设: 量 | 第1年 | 100 | {bad} |")
-        with pytest.raises(AssumeFailed, match="按原数填"):
-            assume.parse(txt, 1, decomps=LEVEL)
+        a = assume.parse(txt, 1, decomps=LEVEL)
+        assert re.search("单位是「|bp", _notes(a)), _notes(a)
 
 
 class TestLevelMode:
