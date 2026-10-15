@@ -371,6 +371,8 @@ class AssumptionSet:
     # 判断项审核结论（`methodology_review.ReviewResult`，子项目三）。派生量，不进
     # JSON —— 落盘在 assumptions_review.json。
     judge_review: object = None
+    # 判断项审核的各轮记录（`assume_review.Round`），写 assumptions_rounds.md 用。
+    judge_rounds: list = field(default_factory=list)
 
     def _m(self) -> FormulaModel | None:
         if self.model is None and self.decomps:
@@ -1735,6 +1737,10 @@ PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 **各层分析口径摘要**（供你判断，**不是可引用的正文**）
 {context}
 
+**你交的稿子由审核者逐项审核**（代码不做判定，只把读到的值、算出的路径、引文
+核验结果交给审核者）。有致命项，会带着修改建议退回给你重填，最多 3 轮 ——
+被退回时按建议改，并重新输出全部行。
+
 **硬性要求**
 - 三档必须**严格拉开**（悲观 < 中性 < 乐观）。模板默认三档同值，
   那等于没有情景 —— 拉不开的情景分析只是把同一个数抄三遍。
@@ -1775,21 +1781,20 @@ _BASIS_RULES = (
               "「无数据（估计）」「同上」回指——这几类代码都能逐字反查，"
               "人工批准时不用再多看一眼。不要用省略号（…/...）缩写引文，"
               "也不要把原文里不相邻的句子拼起来当一句引文。",
-              "**引文核验不过不会被驳回，但会被标注。** 因子分解要填的"
+              "**引文核验不过会被标注，并交给审核者看。** 因子分解要填的"
               "行很多（一个分解式常有好几个因子、好几个预测年），逐字"
               "引文有时确实凑不出来——若引文没能在来源里逐字找到，这一"
-              "行仍会通过，只是会在待核实清单上被显著标出「依据未能"
+              "行仍会读进来，只是会在待核实清单上被显著标出「依据未能"
               "逐字核验」，与核验通过的行一眼可分，需要人工多担一分"
               "风险去复核。**这不等于随便写都行**：标注是有代价的——"
               "能给出逐字引文就一定给逐字引文，只有在你要表达的意思在"
               "来源里确实没有逐字对应的句子时，才退而求其次转述，并把"
               "推理写进理由列；转述得越多，清单上被标注的行就越多，人工"
               "复核的负担就越重。",
-              "**这条放宽只针对引文本身，账本占位符不受影响**："
-              "`[[key@period]]` 必须真实指向账本里存在的事实，写错的"
-              "占位符（账本里根本没有这个 key/period）依旧会被直接驳回"
-              "——那是对账本的假陈述，下游会拿它去做字符串替换，错了会"
-              "让整段估值替换失败，跟「转述 vs 逐字」不是一类问题。",
+              "**账本占位符要格外小心**："
+              "`[[key@period]]` 必须真实指向账本里存在的事实——写错的"
+              "占位符（账本里根本没有这个 key/period）是对账本的假陈述，"
+              "审核者会看到它在账本里不存在，跟「转述 vs 逐字」不是一类问题。",
               "",
               "**依据除了「正文原话」「[[占位符]]」，还有三条路——"
               "很多因子正文根本没提过，也不在账本里，这些路才是它们"
@@ -1803,8 +1808,8 @@ _BASIS_RULES = (
               "写「无数据（估计）」，但理由里**必须**说明这个估计是怎么"
               "来的（参照哪个可比公司、哪个行业惯例、哪条常识……）——"
               "「无数据」只对确实没有数据支撑的因子开放，对「已披露」"
-              "「年报披露」「公告披露」「研报测算」「外部来源」的因子这么写"
-              "会被直接驳回，不能图省事整表都写「无数据」。",
+              "「年报披露」「公告披露」「研报测算」「外部来源」的因子这么写，"
+              "审核者会看到它其实有数据——不能图省事整表都写「无数据」。",
               "③ **同一个因子在不同年份的依据经常是同一段引文**"
               "（同一份年报表述往往能支撑好几个年份的判断）——从第 2 次"
               "出现该因子起，依据可以直接写「同上」「同上引文」等"
@@ -1813,7 +1818,7 @@ _BASIS_RULES = (
               "**「同上」指的是同一因子上一年的依据，不是这一行上面紧邻"
               "的那一行**——那有可能是别的因子。**第一次出现该因子时"
               "必须给出完整依据**（①②或「正文原话」「[[占位符]]」"
-              "之一），没有上一行可回指的「同上」会被直接驳回。理由"
+              "之一），没有上一行可回指的「同上」，审核者会看到它没有依据。理由"
               "（为什么这一年这么判断）不受影响，仍然要每年单独写"
               "清楚——「同上」只省依据，不省理由。",
 )
@@ -1956,103 +1961,34 @@ def build_prompt(judg: dict, labels: list[str], context: str,
                          context=context, brief=brief or "（无）")
 
 
-def _decide_once(client, judg: dict, labels: list[str], context: str, *,
-                 ledger: FactLedger, body: str, as_of: date, code: str,
-                 max_attempts: int, decomps,
-                 factor_data: dict | None,
-                 base_margin: Decimal | None,
-                 anchor: dict | None = None,
-                 balances: list | None = None) -> AssumptionSet:
-    """单一模式（因子或两标量）内的重试循环。
-
-    只管一种模式，失败就抛 `AssumeFailed`——**模式之间要不要降级，是
-    `decide()` 的职责，不是这里的**：因子模式连续失败后可以退回两标量
-    模式再试一次，但两标量模式本身连续失败没有更低的台阶可退，必须
-    原样拒绝。两件事分开才不会在这里意外递归。
-    """
-    model = as_model(decomps)
-    ledger_bases = {}
-    if model is not None and not model.legacy:
-        probe = AssumptionSet(code="", labels=[], model=model)
-        _fill_from_ledger(probe, ledger, as_of)
-        ledger_bases = probe.base_values
-    prompt = build_prompt(judg, labels, context, brief=body, decomps=decomps,
-                          factor_data=factor_data, ledger_bases=ledger_bases)
-    last, raw = "", ""
-    for attempt in range(1, max_attempts + 1):
-        raw = client(prompt)
-        try:
-            a = parse(raw, len(labels), decomps=decomps,
-                     factor_data=factor_data, as_of=as_of)
-            facts = check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
-                          decomps=decomps, base_margin=base_margin, anchor=anchor,
-                          balances=balances)
-            if facts.blocking:
-                raise AssumeFailed("算不下去：" + "；".join(facts.blocking))
-        except AssumeFailed as e:
-            last = str(e)
-            prompt = (f"{prompt}\n\n---\n"
-                      f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
-                      "请修正后重新输出全部行。\n")
-            continue
-        a.code, a.labels = code, labels
-        a.decomps = list(decomps) if isinstance(decomps, list) else []
-        a.model = model
-        a.factor_data = dict(factor_data or {})
-        a.base_margin = base_margin
-        if model is not None:
-            # C2：reconcile() 写得对、测试充分，缺的是「在真实流程里被
-            # 调用一次并把结果交给人看」这个动作。
-            a.residuals = _reconcile_model(model, ledger, as_of)
-        return a
-    raise AssumeFailed(
-        f"连续 {max_attempts} 次给不出可核验的假设：{last}"
-        f"\n最后一次的原始输出（末 400 字）：\n{raw.strip()[-400:]}",
-        raw=raw)
 
 
 def decide(client, judg: dict, labels: list[str], context: str, *,
-           ledger: FactLedger, body: str, as_of: date, code: str = "",
-           max_attempts: int = 3, decomps=None,
-           factor_data: dict | None = None,
-           base_margin: Decimal | None = None,
-           anchor: dict | None = None,
-           balances: list | None = None) -> AssumptionSet:
-    """AI 填判断项，因子模式连续失败时回落到两标量路径（I4）。
+           judge, ledger: FactLedger, body: str, as_of: date, code: str = "",
+           decomps=None, factor_data: dict | None = None,
+           base_margin: Decimal | None = None, anchor: dict | None = None,
+           balances: list | None = None, catalog: str = "",
+           method_review=()) -> AssumptionSet:
+    """AI 填判断项，AI 审核（子项目三，spec 2026-10-15）。
 
-    因子模式要填 N 因子 × Y 年 × 3 档，比两标量模式的 2×5×3 重数倍，
-    失败概率明显更高。一旦连续 `max_attempts` 次都填不出合格的因子，
-    直接向上抛错会让**整个 DCF 判断项都没有**——能力边界不是故障，
-    整轮研究不该因此停摆，这里改为退回两标量模式再试一次，并把降级
-    原因记在 `AssumptionSet.degraded` 上（`describe()` 会把它印在清单
-    顶部）：**降级但继续、如实说明降级原因，不能假装成功，也不能中断。**
+    `client` 是填写者，`judge` 是审核者（必须显式给 —— 两个角色）。流程见
+    `assume_review.fill_and_review`：代码只读数、计算、核对，把结果作为事实交给
+    审核者；有致命即带着建议退回重填，最多 3 轮；仍不通过、审核者答不全、或审核
+    通过但算不下去 → `assume_review.ReviewStop`，停下交人工。
 
-    两标量模式（`decomps` 为空）本身连续失败没有更低的台阶可退，原样
-    向上抛出。
+    **不再退回两标量模式。** 此前因子模式连续 3 次被代码闸门拒绝就退回两标量
+    （I4）—— 生益科技 2026-10-15 的因子分解就是这样丢的，而三次被拒都与分解式
+    内容无关。两标量只在取不到行业分类（`decomps` 为空）时出现。
     """
-    try:
-        return _decide_once(client, judg, labels, context, ledger=ledger,
-                            body=body, as_of=as_of, code=code,
-                            max_attempts=max_attempts, decomps=decomps,
-                            factor_data=factor_data, base_margin=base_margin,
-                            anchor=anchor, balances=balances)
-    except AssumeFailed as e:
-        if not decomps:
-            raise
-        a = _decide_once(client, judg, labels, context, ledger=ledger,
-                         body=body, as_of=as_of, code=code,
-                         max_attempts=max_attempts, decomps=None,
-                         # **降级路径也要带 balances。** 两标量模式下
-                         # `_row_label` 返回中文驱动名，而辩论② 在预研失败时
-                         # 正是用 `DRIVERS` 的键做 subjects —— 匹配得上。
-                         # 不传就等于「降级之后这条约束静默失效」。
-                         factor_data=None, base_margin=None,
-                         balances=balances)
-        a.degraded_raw = getattr(e, "raw", "")
-        a.degraded = (f"因子模式连续 {max_attempts} 次填不出合格的判断项"
-                      f"（{str(e)[:160]}）—— 已退回两标量模式（营收增速/"
-                      "毛利率），损失的是因子层面的精度，不是担保")
-        return a
+    from ir_agent import assume_review
+
+    a, res, rounds = assume_review.fill_and_review(
+        client, judge, judg=judg, labels=labels, context=context, ledger=ledger,
+        body=body, as_of=as_of, code=code, decomps=decomps,
+        factor_data=factor_data, base_margin=base_margin, anchor=anchor,
+        balances=balances, catalog=catalog, method_review=method_review)
+    a.judge_rounds = rounds
+    return a
 
 
 def _historical_series(ledger: FactLedger, key: str, periods: list[str],

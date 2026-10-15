@@ -2436,7 +2436,7 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     采集的产出），否则退回两标量模式 —— 预研失败时的降级路径，见
     `_research_methodology`。
     """
-    from ir_agent import assume
+    from ir_agent import assume, assume_review
 
     try:
         cal = dcf.calibrate_only(code, as_of=as_of, ledger=r.ledger)
@@ -2460,7 +2460,9 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                      # 辩论② 的平衡三元组：偏离它的行必须填 deviation。
                      balances=balances)
     try:
-        a = assume.decide(client, cal["judg"], labels, ctx, **decide_kw)
+        a = assume.decide(client, cal["judg"], labels, ctx, judge=client, **decide_kw)
+    except assume_review.ReviewStop as e:
+        return f"DCF 判断项（{e}）"
     except assume.AssumeFailed as e:
         return f"DCF 判断项（{str(e)[:200]}）"
     except ClaudeCliError as e:

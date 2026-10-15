@@ -173,10 +173,10 @@ def facts_for_judge(a, *, balances=(), ledger=None, as_of=None) -> str:
                                         if a.base_margin is not None else Decimal(0),
                                         a.margin_bases)
                    for c in (assume.Case.BEAR, assume.Case.BASE, assume.Case.BULL)}
-            for y in range(len(got[assume.Case.BASE][0])):
-                g = " / ".join(f"{got[c][0][y]:.2%}" for c in got)
-                gm = " / ".join(f"{got[c][1][y]:.2%}" for c in got)
-                lines.append(f"- 第{y + 1}年 营收增速 {g}；毛利率 {gm}（悲观 / 中性 / 乐观）")
+            for i, cn in ((0, "营收增速"), (1, "毛利率")):
+                for y in range(len(got[assume.Case.BASE][i])):
+                    v = " / ".join(f"{got[c][i][y]:.2%}" for c in got)
+                    lines.append(f"- 第{y + 1}年 {cn} {v}（悲观 / 中性 / 乐观）")
         except assume.AssumeFailed as e:
             lines.append(f"- 算不出来：{e}")
     if a.implied is not None:

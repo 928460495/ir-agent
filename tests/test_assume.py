@@ -13,6 +13,7 @@ from ir_agent.assume import AssumeFailed, Case
 from ir_agent.ledger import FactLedger
 from ir_agent.sources.external import Tier
 from ir_agent.sources.web import Finding
+from judge_stub import Judge
 
 
 def _notes(a) -> str:
@@ -159,15 +160,14 @@ def test_提示词点明边界与拉开():
     assert "不是理由" in txt          # 不许复述历史当依据
 
 
-def test_连续失败则拒绝():
-    class _C:
-        def __init__(self): self.n = 0
-        def __call__(self, p):
-            self.n += 1
-            return "假设: 营收增速 | 第1年 | 5% | 5% | 5% | 「x」"
-    with pytest.raises(AssumeFailed, match="连续"):
-        assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=FactLedger(), body=BODY, as_of=AS_OF)
+def test_审核三轮不过则停下交人工():
+    """子项目三：合格与否由审核者判。三轮都有致命 → 停下，带着最后一稿。"""
+    from ir_agent.assume_review import ReviewStop
+    with pytest.raises(ReviewStop, match="3 轮未通过") as e:
+        assume.decide(lambda p: _full(1), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      judge=Judge({"合成": "致命"}), ledger=FactLedger(), body=BODY,
+                      as_of=AS_OF)
+    assert e.value.last is not None and len(e.value.rounds) == 3
 
 
 # ── 理由必须进清单 ───────────────────────────────────────────
@@ -603,7 +603,7 @@ def test_decide把reconcile的结果存进residuals():
             f"假设: 单价 | 第1年 | -6% | -2% | 1% | 竞争压价 「{Q}」"])
 
     a = assume.decide(client, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=led, body=BODY, as_of=AS_OF, code="600584",
+                      judge=Judge(), ledger=led, body=BODY, as_of=AS_OF, code="600584",
                       decomps=d)
     assert "revenue" in a.residuals
     res = a.residuals["revenue"]["residuals"]
@@ -635,7 +635,7 @@ def test_历史值取不到标为无历史校验而不是静默跳过():
             f"假设: 单价 | 第1年 | -6% | -2% | 1% | 竞争压价 「{Q}」"])
 
     a = assume.decide(client, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=led, body=BODY, as_of=AS_OF, code="600584",
+                      judge=Judge(), ledger=led, body=BODY, as_of=AS_OF, code="600584",
                       decomps=d)
     assert a.residuals["revenue"]["no_history"] == ["单价"]
     txt = a.describe()
@@ -1021,53 +1021,19 @@ def test_全角减号在标量模式下解析出正确符号():
 # 连 assumptions.md 都不写。硬约束「降级但继续、并如实说明降级原因」
 # 在这一层缺位：能力边界不是故障，整轮研究不该因此停摆。
 
-def test_因子模式连续失败后回落两标量模式():
-    """实测复现：因子模式怎么喂都给不出合格的行（写了个分解式里根本
-    不存在的因子名），修复前这里会直接抛 AssumeFailed，调用方拿到的
-    只有一句错误串，整段判断项凭空消失——这条测试在修复前必须失败。"""
-    class _C:
-        def __call__(self, p):
-            if "本次按驱动因子分解填写" in p:
-                # 因子模式无论怎么重试都给不出合法的因子名
-                return "假设: 不存在的因子 | 第1年 | 1% | 2% | 3% | 「x」"
-            return _full(1)     # 退回两标量模式后能正常给出
+def test_因子模式填不出也不退回两标量模式():
+    """生益科技 2026-10-15：因子模式被代码闸门连挂三次后退回两标量，整个因子
+    分解丢失。现在代码不驳回；因子名全写错时一行都读不进来 —— 审核者若放行，
+    就停下说明算不下去，**绝不悄悄换成两标量**。"""
+    from ir_agent.assume_review import ReviewStop
 
-    a = assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=FactLedger(), body=BODY, as_of=AS_OF,
+    def _c(p):
+        return "假设: 不存在的因子 | 第1年 | 1% | 2% | 3% | 「x」"
+    with pytest.raises(ReviewStop, match="无法计算") as e:
+        assume.decide(_c, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
+                      judge=Judge(), ledger=FactLedger(), body=BODY, as_of=AS_OF,
                       decomps=_decomps())
-    assert a.decomps == [], "应已退回两标量模式，不应再带着分解式"
-    assert {r.driver for r in a.rows} == {"growth", "gm"}
-    assert a.degraded, "必须如实写明降级原因，不能假装成功"
-    assert "因子" in a.degraded
-
-
-def test_因子模式降级原因出现在待核实清单里():
-    """降级但继续——损失的是精度，不是担保，读者必须在清单上看到这件事，
-    而不是打开 assumptions.md 却看不出这轮其实是降级产出的。"""
-    class _C:
-        def __call__(self, p):
-            if "本次按驱动因子分解填写" in p:
-                return "假设: 不存在的因子 | 第1年 | 1% | 2% | 3% | 「x」"
-            return _full(1)
-
-    a = assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=FactLedger(), body=BODY, as_of=AS_OF,
-                      decomps=_decomps())
-    a.code, a.labels = "600584", ["2026E"]
-    txt = a.describe()
-    assert a.degraded in txt
-
-
-def test_两标量模式本身连续失败仍照常拒绝():
-    """回归：没有 decomps（本来就是两标量模式）时，连续失败不该被当成
-    "因子模式失败"再退化一次——那样会造成无限递归或行为混乱，必须原样
-    拒绝。"""
-    class _C:
-        def __call__(self, p):
-            return "假设: 营收增速 | 第1年 | 5% | 5% | 5% | 「x」"
-    with pytest.raises(AssumeFailed, match="连续"):
-        assume.decide(_C(), {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    assert e.value.last._m() is not None, "仍是因子模式"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1358,8 +1324,8 @@ def test_提示词列出的状态等于代码会记进读数事实的状态():
     # 因子模式的提示词才带这段规则（两标量模式没有「无数据（估计）」出口）。
     txt = assume.build_prompt({"g_stats": (), "gm_stats": ()}, ["2026E"], "上下文",
                               decomps=[d], factor_data={})
-    m = re.search(r"开放，对((?:「[^」]+」)+)的因子这么写会被直接", txt)
-    assert m, "提示词里找不到「对…的因子这么写会被直接驳回」这句枚举"
+    m = re.search(r"开放，对((?:「[^」]+」)+)的因子这么写，审核者会看到", txt)
+    assert m, "提示词里找不到「对…的因子这么写，审核者会看到…」这句枚举"
     listed = re.findall(r"「([^」]+)」", m.group(1))
     # 顺序也跟着梯子走：`gaps` 里的常量就是按 ①②②.5③④ 的顺序声明的。
     assert listed == rejected, \
@@ -1455,11 +1421,10 @@ def test_决策层面因子模式一次就能给出合格判断项不再降级()
     client = _C()
     body = "境外收入敞口大小暂无法量化。"
     a = assume.decide(client, {"g_stats": (), "gm_stats": ()}, ["2026E"], "",
-                      ledger=FactLedger(), body=body, as_of=AS_OF,
+                      judge=Judge(), ledger=FactLedger(), body=body, as_of=AS_OF,
                       decomps=[d], factor_data=fd)
     assert client.calls == 1, "应当第一次就通过，不需要重试更不需要降级"
     assert a.decomps == [d], "不应该退回两标量模式——因子分解本该被保留"
-    assert not a.degraded
     assert a.rows[0].bases == []
 
 
