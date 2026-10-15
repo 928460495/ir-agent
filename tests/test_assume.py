@@ -38,7 +38,7 @@ def _full(years=2):
 
 
 def _ok(a, years=2):
-    assume.check(a, years, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    return assume.check(a, years, ledger=FactLedger(), body=BODY, as_of=AS_OF)
 
 
 # ── 边界：只填判断项 ─────────────────────────────────────────
@@ -56,22 +56,22 @@ def test_填校准项记进读数事实且说明原因():
 
 # ── 三档必须拉开 ─────────────────────────────────────────────
 
-def test_三档同值被驳回():
+def test_三档同值记进事实():
     """模板默认 Bull=Base=Bear，那等于没有情景 —— 拉不开的情景分析
     只是把同一个数抄三遍。"""
     a = assume.parse("\n".join([
         _line("营收增速", 1, "5%", "5%", "5%"),
         _line("毛利率", 1, "12%", "14%", "16%")]), 1)
-    with pytest.raises(AssumeFailed, match="三档未拉开"):
-        _ok(a, 1)
+    facts = _ok(a, 1)
+    assert re.search("三档未拉开", facts.text()), facts.text()
 
 
-def test_顺序颠倒被驳回():
+def test_顺序颠倒记进事实():
     a = assume.parse("\n".join([
         _line("营收增速", 1, "10%", "6%", "2%"),
         _line("毛利率", 1, "12%", "14%", "16%")]), 1)
-    with pytest.raises(AssumeFailed, match="三档未拉开|严格递增"):
-        _ok(a, 1)
+    facts = _ok(a, 1)
+    assert re.search("三档未拉开|严格递增", facts.text()), facts.text()
 
 
 def test_拉开则通过():
@@ -80,12 +80,12 @@ def test_拉开则通过():
 
 # ── 每一年都要给 ─────────────────────────────────────────────
 
-def test_漏掉某年被驳回():
+def test_漏掉某年记进事实():
     """漏掉的年份会沿用模板默认值，而那不是你的判断。"""
     a = assume.parse("\n".join([_line("营收增速", 1),
                                 _line("毛利率", 1, "12%", "14%", "16%")]), 3)
-    with pytest.raises(AssumeFailed, match="缺第"):
-        _ok(a, 3)
+    facts = _ok(a, 3)
+    assert re.search("缺第", facts.text()), facts.text()
 
 
 def test_年份越界记进读数事实():
@@ -100,12 +100,12 @@ def test_缺依据记进读数事实():
     assert re.search("缺少可核验的依据", _notes(a)), _notes(a)
 
 
-def test_依据查无此句被驳回():
+def test_依据查无此句记进事实():
     a = assume.parse("\n".join([
         _line("营收增速", 1, q="行业景气全面回升"),
         _line("毛利率", 1, "12%", "14%", "16%")]), 1)
-    with pytest.raises(AssumeFailed, match="不可核验"):
-        _ok(a, 1)
+    facts = _ok(a, 1)
+    assert re.search("核验不过", facts.text()), facts.text()
 
 
 # ── 解析容错（与四个定性模块同一套） ─────────────────────────
@@ -235,8 +235,8 @@ def test_读回后仍要过全部校验():
     d = assume.to_json(a)
     d["rows"][0]["bull"] = d["rows"][0]["base"]      # 人手改坏：三档不再拉开
     back, _ = assume.from_json(d)
-    with pytest.raises(AssumeFailed, match="三档未拉开"):
-        _ok(back, 1)
+    facts = _ok(back, 1)
+    assert re.search("三档未拉开", facts.text()), facts.text()
 
 
 def test_人改过的数值要被报出来():
@@ -296,13 +296,13 @@ def test_未知因子记进读数事实并列出可选():
     assert "产能" in _notes(a) and "单价" in _notes(a)
 
 
-def test_缺某个因子被驳回():
+def test_缺某个因子记进事实():
     """漏掉的因子会沿用模板默认值，而那不是你的判断。"""
     partial = f"假设: 产能 | 第1年 | 5% | 10% | 14% | 「{Q}」"
     a = assume.parse(partial, 1, decomps=_decomps())
-    with pytest.raises(AssumeFailed, match="单价|缺"):
-        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
-                     decomps=_decomps())
+    facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                 decomps=_decomps())
+    assert re.search("单价|缺", facts.text()), facts.text()
 
 
 def test_合成营收增速与毛利率():
@@ -325,7 +325,7 @@ def test_三档合成后仍然单调():
     assert lo[0] < mid[0] < hi[0]
 
 
-def test_合成后不单调则驳回():
+def test_合成后不单调则记进事实():
     """构造一组因子: 各自三档拉开，但相乘后悲观反而高于中性。"""
     weird = "\n".join([
         f"假设: 产能 | 第1年 | 50% | 10% | 11% | 「{Q}」",   # 悲观档产能暴涨
@@ -335,9 +335,9 @@ def test_合成后不单调则驳回():
         Factor(key="asp", label="单价", unit="变化率")])]
     a = assume.parse(weird, 1, decomps=d)
     a.decomps = d
-    with pytest.raises(AssumeFailed, match="合成后"):
-        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
-                     decomps=d, base_margin=D("0.14"))
+    facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                 decomps=d, base_margin=D("0.14"))
+    assert re.search("合成后", facts.text()), facts.text()
 
 
 def test_提示词列出因子与单位():
@@ -877,16 +877,16 @@ def _dup_rows():
     ]
 
 
-def test_check也拒绝重复行不只依赖parse():
+def test_check也记进事实重复行不只依赖parse():
     """C2 纵深防御：`check()` 在人工核实之后的第二阶段（`full.
     run_valuation` 里 `from_json` 读回）会被再跑一遍，那时的
     `AssumptionSet` 未必经过 `_parse_factors`——人手改 JSON 也可能
     引入重复行。`_check_factors` 不能假设上游一定已经查过重。"""
     a = assume.AssumptionSet(code="", labels=["2026E"], decomps=_decomps())
     a.rows = _dup_rows()
-    with pytest.raises(AssumeFailed, match="产能"):
-        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
-                     decomps=_decomps(), base_margin=D("0.1415"))
+    facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                 decomps=_decomps(), base_margin=D("0.1415"))
+    assert re.search("产能", facts.text()), facts.text()
 
 
 def test_to_driver_block与synthesize取值规则一致():
@@ -1097,7 +1097,7 @@ def test_两标量模式重复行记进读数事实():
     assert "第 1 年" in _notes(a)
 
 
-def test_两标量模式check也拒绝重复行不只依赖parse():
+def test_两标量模式check也记进事实重复行不只依赖parse():
     """C-a 纵深防御：`check()` 在人工核实之后（`from_json` 读回）会被
     再跑一遍（`full.run_valuation`），那时的 `AssumptionSet` 未必经过
     `_parse_scalar`——人手改 JSON 也可能引入重复行。"""
@@ -1110,8 +1110,8 @@ def test_两标量模式check也拒绝重复行不只依赖parse():
         assume.Row(driver="gm", year=1, bear=D("0.12"), base=D("0.14"),
                   bull=D("0.16")),
     ]
-    with pytest.raises(AssumeFailed, match="营收增速"):
-        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    assert re.search("营收增速", facts.text()), facts.text()
 
 
 def test_两标量模式重复行会让path按年份整体错位():
@@ -1376,7 +1376,7 @@ def test_因子压根没被采集也能用无数据出口():
     assert a.rows[0].bases == []
 
 
-def test_无数据估计没给理由被check挡下():
+def test_无数据估计没给理由记进事实():
     """空依据 + 空理由 = 一个数字凭空出现在清单上，连"这是怎么估出来的"
     都无从判断——`_factor_basis` 只在解析阶段判过一次"这个因子确实
     MISSING"，理由是否给出要在 `check()` 里再挡一道，因为 `check()`
@@ -1387,9 +1387,9 @@ def test_无数据估计没给理由被check挡下():
     a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"),
                          base=D("0.08"), bull=D("0.12"),
                          factor_key="utilization", note="")]
-    with pytest.raises(AssumeFailed, match="没有给理由"):
-        assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
-                    decomps=[d])
+    facts = assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
+                decomps=[d])
+    assert re.search("没有给理由", facts.text()), facts.text()
 
 
 def test_全部因子都无数据时check仍能通过():
@@ -1923,7 +1923,7 @@ def test_因子模式引文核验不过被标注而非驳回_600584实测复现(
     assert "产能规模第1年" in txt
 
 
-def test_两标量模式对同款引文场景仍然驳回_回归锁():
+def test_两标量模式对同款引文场景仍记进事实_回归锁():
     """回归锁：同一个真实失败场景（引文「修复但未完全追平」，正文里
     没有这句话）放到两标量降级模式下，必须仍然驳回——这次放宽只针对
     因子行，两标量模式引的是正文，正文本来就覆盖增速/毛利率两项，
@@ -1938,11 +1938,11 @@ def test_两标量模式对同款引文场景仍然驳回_回归锁():
         assume.Row(driver="gm", year=1, bear=D("0.12"), base=D("0.14"),
                   bull=D("0.16"), note="理由", bases=[assume.Basis.report(Q)]),
     ]
-    with pytest.raises(AssumeFailed, match="不可核验"):
-        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    assert re.search("核验不过", facts.text()), facts.text()
 
 
-def test_两标量模式一条依据都没给仍然驳回_全局闸门不能被顺手拆掉():
+def test_两标量模式一条依据都没给仍记进事实_全局闸门不能被顺手拆掉():
     """**回归锁：放宽因子引文，不能把「整批一条依据都没给」这道全局
     闸门一起拆掉。**
 
@@ -1966,11 +1966,11 @@ def test_两标量模式一条依据都没给仍然驳回_全局闸门不能被�
         assume.Row(driver="gm", year=1, bear=D("0.12"), base=D("0.14"),
                   bull=D("0.16"), note="理由", bases=[]),
     ]
-    with pytest.raises(AssumeFailed, match="未提供任何依据"):
-        assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF)
+    assert re.search("未提供任何依据", facts.text()), facts.text()
 
 
-def test_因子模式伪造账本占位符依旧驳回():
+def test_因子模式伪造账本占位符仍记进事实():
     """**放宽不能连坐到账本占位符。** `[[key@period]]` 指向账本里根本
     不存在的事实，是对账本的假陈述，且下游会拿占位符去做字符串替换
     ——错了会让整段估值替换失败（实测踩过整段漏成未替换占位符）。这
@@ -1981,12 +1981,12 @@ def test_因子模式伪造账本占位符依旧驳回():
     a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.05"), base=D("0.08"),
                          bull=D("0.12"), note="理由", factor_key="utilization",
                          bases=[assume.Basis.fact("[[revenue.yoy@2099FY]]")])]
-    with pytest.raises(AssumeFailed, match="不可核验"):
-        assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
-                    decomps=[d])
+    facts = assume.check(a, 1, ledger=FactLedger(), body="无关正文", as_of=AS_OF,
+                decomps=[d])
+    assert re.search("核验不过", facts.text()), facts.text()
 
 
-def test_两标量模式的引文驳回不附加因子出路():
+def test_两标量模式的引文记进事实不附加因子出路():
     """回归锁：出口二只存在于因子模式，两标量模式不该看到这段指引
     ——那会让人以为标量假设也能写「无数据（估计）」。"""
     from datetime import date
@@ -2002,10 +2002,9 @@ def test_两标量模式的引文驳回不附加因子出路():
     a.rows = [A.Row(driver="growth", year=1, bear=D("-0.02"), base=D("0.03"),
                     bull=D("0.08"), note="理由",
                     bases=[Basis.report("正文里没有的话")])]
-    with pytest.raises(A.AssumeFailed) as ei:
-        A.check(a, 1, ledger=FactLedger(), body="别的内容",
-                as_of=date(2026, 9, 12))
-    assert "无数据（估计）" not in str(ei.value)
+    facts = A.check(a, 1, ledger=FactLedger(), body="别的内容",
+            as_of=date(2026, 9, 12))
+    assert "无数据（估计）" not in facts.text()
 
 
 def _estimate_note():
@@ -2078,9 +2077,9 @@ def test_读回的判断项要重过分解式闸门():
     a.rows = [assume.Row(driver="revenue", year=1, bear=D("0.01"), base=D("0.05"),
                          bull=D("0.09"), note="理由", factor_key=k)
               for k in ("cap", "mix")]
-    with pytest.raises(AssumeFailed, match="占比"):
-        assume.check(a, 1, ledger=FactLedger(), body="正文", as_of=AS_OF,
-                     decomps=[rev])
+    facts = assume.check(a, 1, ledger=FactLedger(), body="正文", as_of=AS_OF,
+                 decomps=[rev])
+    assert re.search("占比", facts.text()), facts.text()
 
 
 # ── 锚定开启时，毛利率第 2 年起从各档锚定水平接着走 ─────────────────────
@@ -2155,9 +2154,9 @@ def test_合成后单调性按平移后的路径查():
     assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds,
                  base_margin=D("0.2647"))
     a2, ds2 = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
-    with pytest.raises(AssumeFailed, match="毛利率"):
-        assume.check(a2, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds2,
-                     base_margin=D("0.2647"), anchor=_anchor_600183())
+    facts = assume.check(a2, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds2,
+                 base_margin=D("0.2647"), anchor=_anchor_600183())
+    assert re.search("毛利率", facts.text()), facts.text()
 
 
 def test_清单上的合成结果与建模同一套基期():
@@ -2180,12 +2179,17 @@ def test_工作簿三档列与1b表用同一套按年基期():
     assert out["judg"]["gm_scen"]["base"] == [float(x) for x in want]
 
 
-def test_建模时平移后不单调也要拒绝():
-    """`apply_to` 自己要再查一次单调（哪怕调用方已经用同一个 anchor 查过一次），
-    不能让不合格的路径靠"上游肯定查过"这种假设溜进工作簿。"""
-    a, _ = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
-    with pytest.raises(AssumeFailed, match="毛利率"):
-        assume.apply_to(_cal_600183(), a)
+def test_建模时只计算_平移后不单调由第一阶段审核者判():
+    """子项目三：第二阶段只计算，不再拒绝人批准过的判断项（600584 实测：人批准
+    了，建模前一刻又被代码拒绝，人工门被架空）。平移后不单调是第一阶段交给审核者
+    [合成] 条目的事实。"""
+    a, ds = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
+    out = assume.apply_to(_cal_600183(), a)
+    assert out["judg"]["gm_scen"]["bull"], "照常算出三档"
+    a2, ds2 = _two_year_set(bull_gm=((5.0, 5.0), (2.5, 2.5)))
+    facts = assume.check(a2, 2, ledger=FactLedger(), body="正文", as_of=AS_OF,
+                         decomps=ds2, base_margin=D("0.2647"), anchor=_anchor_600183())
+    assert "毛利率合成后不单调" in facts.text()
 
 
 # ── C1：两阶段 check() 必须用同一个 anchor，否则批准的东西下一步就不合法 ──
@@ -2229,9 +2233,9 @@ def test_两阶段用不同anchor会给出相反结论():
 
     # 第二阶段修复前的口径：不带 anchor，查未平移的路径 —— FAIL，
     # 且报出的三档数字与实跑现场一致。
-    with pytest.raises(AssumeFailed, match=r"26\.97%.*29\.57%.*29\.47%"):
-        assume.check(build(), 2, ledger=FactLedger(), body="正文", as_of=AS_OF,
-                    decomps=[gm], base_margin=base_margin)
+    facts = assume.check(build(), 2, ledger=FactLedger(), body="正文", as_of=AS_OF,
+                decomps=[gm], base_margin=base_margin)
+    assert re.search(r"26\.97%.*29\.57%.*29\.47%", facts.text()), facts.text()
 
 
 def test_读回的分解式里过短检索词不会让第二阶段崩成traceback():
@@ -2413,8 +2417,8 @@ def test_隐含份额超限时退回让模型重算():
     for r in a.rows:
         if r.driver == "growth":
             r.bear, r.base, r.bull = D("0.9"), D("1.0"), D("1.1")
-    with pytest.raises(assume.AssumeFailed, match="隐含份额"):
-        assume.check(a, 2, ledger=_ledger_with_share(), body=BODY, as_of=AS_OF)
+    facts = assume.check(a, 2, ledger=_ledger_with_share(), body=BODY, as_of=AS_OF)
+    assert re.search("隐含份额", facts.text()), facts.text()
 
 
 def test_正常路径不被阻断且算术后果印在清单顶部():
@@ -2544,9 +2548,9 @@ class TestDeviation:
         for r in a.rows:
             if r.driver == "growth":
                 r.bear, r.bull = D("0.10"), D("0.26")
-        with pytest.raises(assume.AssumeFailed, match="偏离说明"):
-            assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
-                         balances=self._bal())
+        facts = assume.check(a, 1, ledger=FactLedger(), body=BODY, as_of=AS_OF,
+                     balances=self._bal())
+        assert re.search("偏离多空平衡点", facts.text()), facts.text()
 
     def test_不传balances时check不受影响(self):
         """这条约束只在有平衡点时生效 —— 老的调用点一个都不该因此变红。"""

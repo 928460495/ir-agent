@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, timedelta
 from decimal import Decimal as D
 
@@ -100,15 +101,15 @@ class TestSeamStanceToAssume:
     而双方各自的单元测试都是绿的。
     """
 
-    def test_真实平衡点能让偏离的判断项被驳回(self):
+    def test_真实平衡点能让偏离的判断项记进事实(self):
         res, led = _run_b("平衡｜产能｜0.05｜0.20｜0.30｜中性取产能爬坡更快")
         assert res.balances and res.balances[0].subject == "产能"
 
         a = assume.parse(_factor_lines(), 1, decomps=_decomps())
         # 产能 中性档 10%，平衡点 20% —— 偏离 10pp 且未填 deviation
-        with pytest.raises(assume.AssumeFailed, match="偏离说明"):
-            assume.check(a, 1, ledger=led, body=BODY, as_of=AS_OF,
-                         decomps=_decomps(), balances=res.balances)
+        facts = assume.check(a, 1, ledger=led, body=BODY, as_of=AS_OF,
+                     decomps=_decomps(), balances=res.balances)
+        assert re.search("偏离多空平衡点", facts.text()), facts.text()
 
     def test_填了偏离说明就放行(self):
         res, led = _run_b("平衡｜产能｜0.05｜0.20｜0.30｜中性取产能爬坡更快")
@@ -150,7 +151,7 @@ class TestSeamStanceThroughDisk:
     `stance_b.json` 一落盘就再也读不回来。
     """
 
-    def test_落盘读回后平衡点仍能驳回偏离的判断项(self, tmp_path):
+    def test_落盘读回后平衡点仍能记进事实偏离的判断项(self, tmp_path):
         res, led = _run_b("平衡｜产能｜0.05｜0.20｜0.30｜理由")
         f = tmp_path / "stance_b.json"
         f.write_text(json.dumps(res.to_json(), ensure_ascii=False, indent=2),
@@ -162,9 +163,9 @@ class TestSeamStanceThroughDisk:
         assert len(back.evidence) == 2, "两侧证据都要读回来"
 
         a = assume.parse(_factor_lines(), 1, decomps=_decomps())
-        with pytest.raises(assume.AssumeFailed, match="偏离说明"):
-            assume.check(a, 1, ledger=led, body=BODY, as_of=AS_OF,
-                         decomps=_decomps(), balances=back.balances)
+        facts = assume.check(a, 1, ledger=led, body=BODY, as_of=AS_OF,
+                     decomps=_decomps(), balances=back.balances)
+        assert re.search("偏离多空平衡点", facts.text()), facts.text()
 
     def test_人工补写的模板填好后走同一条路(self, tmp_path):
         """`--accept-manual` 的真实路径：模板 → 人填 → load_manual → 校验。"""
@@ -178,9 +179,9 @@ class TestSeamStanceThroughDisk:
         assert back.manual == "xhl" and "人工补写" in back.summary()
 
         a = assume.parse(_factor_lines(), 1, decomps=_decomps())
-        with pytest.raises(assume.AssumeFailed, match="偏离说明"):
-            assume.check(a, 1, ledger=_led(), body=BODY, as_of=AS_OF,
-                         decomps=_decomps(), balances=back.balances)
+        facts = assume.check(a, 1, ledger=_led(), body=BODY, as_of=AS_OF,
+                     decomps=_decomps(), balances=back.balances)
+        assert re.search("偏离多空平衡点", facts.text()), facts.text()
 
 
 # ── 接缝 C / D / E：公告入库 → 门①清单 / 因子检索 / 定性提示词 ──

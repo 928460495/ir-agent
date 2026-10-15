@@ -335,6 +335,8 @@ class AssumptionSet:
     # 算出并挂在这里，`describe()` 原样印在清单顶部。**算的人和显示的人用
     # 同一个对象**，否则清单上的数和校验用的数会分叉。
     implied: object = None
+    # 代码读数、计算、核对的事实（`Facts`），由 check() 挂上。派生量，不进 JSON。
+    facts: object = None
     # 因子结构审查结果（`factor_review.ReviewResult`）。派生量，不进 JSON。
     # 它**不是闸门**：只给结论与理由，印在清单上给批准人看。
     review: object = None
@@ -1457,7 +1459,10 @@ DEVIATION_TOL = Decimal("0.01")
 
 def check_deviation(a: AssumptionSet, balances: list,
                     tol: Decimal = DEVIATION_TOL) -> list[str]:
-    """判断项偏离平衡点时，该行必须填 `deviation`。返回问题列表。
+    """判断项偏离平衡点的行。返回事实列表，**不驳回**（子项目三）：此前这里
+    要求「第 7 字段」写偏离说明，而解析器从不读第 7 段 —— 规则实际变成「中性档
+    必须等于平衡点」，生益科技 2026-10-15 的中性档被钉在一个单位写错的平衡点
+    （pp 因子写成小数 0.035）上。现在偏离只是交给审核者 [平衡点] 条目的事实。
 
     **只查存在性。** 填得对不对由结构审查对账 —— 代码能确定判断的是「有没有
     填」，不是「这个理由站不站得住」。实测教训: 隐含份额检查想用算术判断一件
@@ -1487,155 +1492,125 @@ def check_deviation(a: AssumptionSet, balances: list,
             continue
         out.append(
             f"第 {r.year} 年「{name}」的中性档 {r.base} 偏离多空平衡点 "
-            f"{mid}（容差 {tol}），但没有给出偏离说明 —— 请在该行的第 7 字段"
-            f"填一句话说明为什么偏离；若采纳平衡点，把取值改成 {mid}。")
+            f"{mid}（容差 {tol}）—— 理由栏是否说明了为什么偏离、平衡点本身的"
+            "单位是否可信，由审核者判断")
     return out
+
+
+@dataclass
+class Facts:
+    """代码对一份判断项读数、计算、核对的结果。**只是事实，不驳回**（子项目三，
+    2026-10-15）：此前这里是 49 处 `AssumeFailed`，合格与否全由代码定；生益科技
+    第三次调用被其中三条连挂三次、整个因子分解退回两标量。现在合格与否全部由
+    判断项审核者定，代码只说它读到了什么、算出了什么、核对出了什么。
+
+    - `problems`：交给审核者的问题（单位写法、依据核验、三档、平衡点、隐含份额……）；
+    - `blocking`：真的算不下去的地方（缺年份、缺基期、重复行、公式算不动）。
+      审核者判通过、这里却非空 → 停下交人工，写明算不下去在哪（spec 一）。
+    """
+
+    problems: list[str] = field(default_factory=list)
+    blocking: list[str] = field(default_factory=list)
+
+    def text(self) -> str:
+        out = []
+        if self.blocking:
+            out += ["**算不下去的地方**："] + [f"- {x}" for x in self.blocking] + [""]
+        if self.problems:
+            out += ["**代码读数与核对发现的问题**（只是事实，是否要紧由你判断）："]
+            out += [f"- {x}" for x in self.problems]
+        return "\n".join(out) or "（代码读数与核对没有发现问题）"
 
 
 def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
           as_of: date, decomps: list[Decomposition] | None = None,
           base_margin: Decimal | None = None, anchor: dict | None = None,
-          balances: list | None = None) -> None:
+          balances: list | None = None) -> Facts:
+    """读数之后的计算与核对。**不驳回**，返回 `Facts`（并挂在 `a.facts` 上）。
+
+    做的事与此前相同 —— 取账本基期、算锚定平移、合成三档、算隐含份额、核验
+    依据、比对平衡点 —— 只是结论从「抛错退回」变成「记成事实」。第二阶段
+    `run_valuation` 也调它：那里只看 `blocking`（算不下去才停），不看 `problems`。
+    """
+    facts = Facts(problems=list(a.read_notes))
     model = as_model(decomps)
     if model is not None:
         a.model = model
         if a.base_margin is None:
             a.base_margin = base_margin
         _fill_from_ledger(a, ledger, as_of)
-        _check_factors(a, years, decomps, base_margin, anchor)
+        _check_factors(a, years, decomps, base_margin, anchor, facts)
     else:
-        _check_scalar(a, years)
-    # 多空平衡点的偏离说明。**接在隐含份额之前** —— 偏离说明缺失是格式问题，
-    # 隐含份额越界是实质问题，先让模型把格式补齐，驳回信息才不会混在一起。
+        _check_scalar(a, years, facts)
     if balances:
-        if (probs := check_deviation(a, balances)):
-            raise AssumeFailed("；".join(probs))
-    # **增速路径的算术后果。** 阻断的含义是退回让模型重算（本函数抛
-    # AssumeFailed 会进 `_decide_once` 的重试循环并把理由附进提示词），
-    # 不是毙掉整轮 —— 连续失败后 `decide()` 仍会降级到两标量模式。
-    a.implied = _implied_for(a, ledger, as_of, decomps)
-    if a.implied is not None and a.implied.blocking:
-        raise AssumeFailed(
-            f"中性档营收路径的算术后果不成立：{a.implied.reason}。"
-            f"（{a.implied.describe()}）"
-            "请下调各因子的中性档取值，使隐含份额落在可能的范围内；"
-            "若分解式本身把同一个量算了两遍（例如销量×售价之外又乘了一个"
-            "收入量级的增速），请在理由里指出，并按不重复计算的口径给值。")
+        facts.problems += check_deviation(a, balances)
+    a.implied = None
+    if not facts.blocking:
+        try:
+            a.implied = _implied_for(a, ledger, as_of, decomps)
+        except AssumeFailed as e:
+            facts.blocking.append(str(e))
+    if a.implied is not None and a.implied.reason:
+        facts.problems.append(f"增速路径的算术后果：{a.implied.reason}"
+                              f"（{a.implied.describe()}）")
+    facts.problems += _basis_problems(a, ledger=ledger, body=body, as_of=as_of,
+                                      decomps=decomps)
+    a.facts = facts
+    return facts
 
-    # 出口二（「无数据（估计）」）合法时 `Row.bases` 就是空列表——
-    # `basis.validate([])` 的原意是防"整批一条依据都没给"，但因子模式
-    # 下"每一行都被 `_factor_basis` 判定为合法的无数据估计"是一种真实
-    # 可能出现、且**应当被允许**的情形（分解式里的因子确实可能全部
-    # 缺数据），不是"没做功课"。这种情形已经在 `_factor_basis`/
-    # `_check_factors` 里逐行验过一遍（确实 MISSING、且有理由），不需要
-    # 再套用这条本来是给"完全没有产出"设的全局闸门；反过来，只要有任何
-    # 一行不是走这条出口，就仍然照常校验，不放过真正缺依据的情形。
-    all_estimated = bool(a.rows) and decomps and all(not r.bases for r in a.rows)
-    if all_estimated:
-        return
-    # 上面那条出口之外，"整批一条依据都没给"这道全局闸门必须原样保留。
-    # 放宽把整批核验（`validate(flat)`）改成了逐行逐依据核验，而逐行
-    # 循环对空 `bases` 的行直接跳过——因子模式没事（空 `bases` 是
-    # 「无数据（估计）」这条合法出口，`_check_factors` 另有"没给理由
-    # 就驳回"兜底），**两标量模式却没有任何兜底**：`_parse_scalar` 里
-    # 缺依据必然抛错，但 `check()` 会在人工核实之后、`from_json` 读回
-    # 时脱离解析器再跑一遍（`full.run_valuation`），人手把 `bases` 清空
-    # 就能一路通过。这道门守的是真实踩过的事故（见
-    # `test_依据跨阶段存活`：依据没跨阶段带过去，读回来一律"未提供任何
-    # 依据"而拒绝建模——门是对的）。这次放宽只针对因子引文，不该顺手
-    # 把它拆掉。
-    if not any(r.bases for r in a.rows):
-        raise AssumeFailed("依据不可核验：未提供任何依据。")
-    # **放宽因子模式的引文审核（用户明确决定）**：真实实跑（600584，
-    # 9 因子×5 年×3 档=45 行）显示逐字引文这道闸门约拦下一半产出，卡点
-    # 几乎都是模型对正文含义的**概括**而非**捏造**——「上游议价能力弱
-    # 意味着公司对设备与原材料价格波动的传导能力有限」「修复但未完全
-    # 追平」，这两句正文里都没有逐字对应，却也不是编出来的。规则要求
-    # 逐字，连续 3 次被拒后整个因子分解被丢掉、退回两标量模式——而
-    # 因子分解正是这条产品线的全部意义。用户判断：因子该按数值是否
-    # 合理来审，不该被引文格式卡死。
-    #
-    # 因此逐 Basis 校验（而不是像原来那样把全部 Basis 拼成一个 `flat`
-    # 列表一次性核验）：这样才能按 `BasisKind` 精确分流——只有 REPORT
-    # （引正文逐字核验不过）在因子模式下降级为标注在对应 `Row` 上；
-    # FACT（占位符指向的账本事实不存在）与 EXTERNAL（外部资料核验
-    # 不过）继续致命，理由见下面分支的注释。两标量模式（`decomps`
-    # 为空）完全不受影响——那条路径引的是正文，正文本来就覆盖增速/
-    # 毛利率两项，逐字核验在那里可满足，这次放宽只针对因子行。
-    fatal: list[str] = []
+
+def _basis_problems(a: AssumptionSet, *, ledger: FactLedger, body: str,
+                    as_of: date, decomps) -> list[str]:
+    """逐条核验依据。核验不过的行打上 `basis_unverified`（清单上显著标 ⚠），
+    问题作为事实返回。**不分 BasisKind 一律不驳回**：此前 REPORT 已放宽为标注
+    （600584：逐字引文约拦下一半产出，卡点几乎都是概括而非捏造），FACT 与
+    EXTERNAL 仍致命 —— 现在三类都交审核者 [依据] 条目判断。"""
+    out: list[str] = []
+    if a.rows and not any(r.bases for r in a.rows) and not decomps:
+        out.append("依据：未提供任何依据（两标量模式一行可核验的依据都没有）")
     for short, bv in a.base_values.items():
         if bv.source != "AI" or not bv.bases:
             continue
-        soft_b: list[str] = []
-        for b in bv.bases:
-            problems = validate([b], ledger=ledger, body=body, as_of=as_of)
-            if not problems:
-                continue
-            if b.kind is BasisKind.REPORT:
-                soft_b.extend(problems)
-            else:
-                fatal.append(f"基期 {short}：" + "；".join(problems))
-        if soft_b:
-            bv.basis_unverified = "；".join(soft_b)
+        probs = [p for b in bv.bases
+                 for p in validate([b], ledger=ledger, body=body, as_of=as_of)]
+        if probs:
+            bv.basis_unverified = "；".join(probs)
+            out.append(f"基期 {short} 的依据核验不过：{bv.basis_unverified}")
     for r in a.rows:
         if not r.bases:
             continue
-        soft: list[str] = []
-        for b in r.bases:
-            problems = validate([b], ledger=ledger, body=body, as_of=as_of)
-            if not problems:
-                continue
-            if decomps and b.kind is BasisKind.REPORT:
-                soft.extend(problems)
-            else:
-                # FACT：占位符格式合法但指向的 key@period 在账本里不存在
-                # ——这是对账本的**假陈述**，且下游会拿占位符去做字符串
-                # 替换，编造的占位符会让替换失败或替换出错的值（实测踩
-                # 过整段估值漏成未替换占位符）。EXTERNAL：外部资料核验
-                # 不过。两者都与"对正文的转述 vs 逐字"不是一类问题，
-                # 不在这次放宽范围内，继续致命。
-                fatal.append(f"{_row_label(r, a._m() or a.decomps)} 第{r.year}年："
-                            + "；".join(problems))
-        if soft:
-            r.basis_unverified = "；".join(soft)
-    if fatal:
-        raise AssumeFailed("依据不可核验：" + "；".join(fatal))
+        probs = [p for b in r.bases
+                 for p in validate([b], ledger=ledger, body=body, as_of=as_of)]
+        if probs:
+            r.basis_unverified = "；".join(probs)
+            out.append(f"{_row_label(r, a._m() or a.decomps)} 第{r.year}年的依据核验"
+                       f"不过：{r.basis_unverified}")
+    return out
 
 
-def _check_scalar(a: AssumptionSet, years: int) -> None:
-    # C-a 纵深防御（final-fix-D）：`_parse_scalar` 已在解析阶段拒绝
-    # 重复行，但 `check()` 也会在人工核实之后、`from_json` 读回时被
-    # 再跑一遍（`full.run_valuation`）——那时的 `AssumptionSet` 未必
-    # 经过 `_parse_scalar`，人手改 JSON 也可能引入重复行。这里再挡
-    # 一次，不依赖上游一定已经查过重（与 `_check_factors` 同一套
-    # 纵深防御思路）。
+def _check_scalar(a: AssumptionSet, years: int, facts: "Facts") -> None:
+    """两标量模式的计算前提与事实。重复行、缺年份 → 算不下去（`path()` 按年份
+    排序后按下标取值，错位一格就是错数）；三档没拉开 → 事实，交审核者 [合成]。"""
     inv = {v: k for k, v in DRIVERS.items()}
     seen: set[tuple[str, int]] = set()
     for r in a.rows:
         key = (r.driver, r.year)
         if key in seen:
-            raise AssumeFailed(
-                f"{inv.get(r.driver, r.driver)} 第 {r.year} 年出现了不止"
-                "一行——重复行会让 path() 按年份排序后整体错位一格，"
-                "必须只保留一行。")
+            # `_parse_scalar` 已按最后一行去重；走到这里是人手改 JSON 引入的。
+            facts.blocking.append(
+                f"{inv.get(r.driver, r.driver)} 第 {r.year} 年出现了不止一行"
+                "（path() 会整体错位一格）")
         seen.add(key)
-
     for cn, key in DRIVERS.items():
         got = {r.year for r in a.rows if r.driver == key}
         missing = sorted(set(range(1, years + 1)) - got)
         if missing:
-            raise AssumeFailed(
-                f"{cn} 缺第 {missing} 年 —— 预测期每一年都要给，"
-                "漏掉的年份会沿用模板默认值，而那不是你的判断")
-
+            facts.blocking.append(f"{cn} 缺第 {missing} 年")
     for r in a.rows:
-        # **三档必须拉开。** 模板默认 Bull=Base=Bear，那等于没有情景；
-        # 拉不开的情景分析只是把同一个数抄三遍。
         if not (r.bear < r.base < r.bull):
-            raise AssumeFailed(
+            facts.problems.append(
                 f"第 {r.year} 年的{'营收增速' if r.driver == 'growth' else '毛利率'}"
-                f"三档未拉开（悲观 {r.bear} / 中性 {r.base} / 乐观 {r.bull}）"
-                " —— 必须严格递增，否则情景分析没有意义")
+                f"三档未拉开（悲观 {r.bear} / 中性 {r.base} / 乐观 {r.bull}，未严格递增）")
 
 
 def _fill_from_ledger(a: AssumptionSet, ledger: FactLedger, as_of: date) -> None:
@@ -1666,24 +1641,22 @@ def _fill_from_ledger(a: AssumptionSet, ledger: FactLedger, as_of: date) -> None
 
 
 def _check_factors(a: AssumptionSet, years: int, decomps,
-                   base_margin: Decimal | None, anchor: dict | None = None) -> None:
-    """分解模式下的校验。
+                   base_margin: Decimal | None, anchor: dict | None,
+                   facts: "Facts") -> None:
+    """分解模式下的计算前提与事实。
 
-    **不在这里逐因子比较 bear<base<bull。** 单个因子档位的方向性因子而异，
-    代码判断不了「这个因子往哪个方向走算悲观」。真正要卡的是**合成结果**——
-    三档营收增速 / 毛利率必须严格拉开。
+    重复行、缺年份、缺基期 → 算不下去；合成后三档不单调、「无数据（估计）」
+    没给理由 → 事实，交审核者。**不在这里逐因子比较 bear<base<bull**：单个
+    因子档位的方向因因子而异（侵蚀类因子悲观更负），由审核者 [取值] 判断。
     """
-    # **读回的旧分解式要重过闸门。** `_decomp_from_dict` 直接构造对象，预研时的
-    # 闸门在读回路径上一次都没跑。只对旧的乘/加分解式（公式化写法不跑这些字面
-    # 闸门，spec 2026-10-14 五）。
+    # 读回的旧分解式：预研时的字面闸门在读回路径上一次都没跑。只对旧的乘/加
+    # 分解式，结论交审核者（公式化写法本就不跑这些字面闸门）。
     if isinstance(decomps, list):
         for d in decomps:
             try:
                 check_dimensions(d)
             except DecompositionInvalid as e:
-                raise AssumeFailed(
-                    f"判断项里的分解式已不合法：{e}　——请重跑第一阶段，"
-                    "重新预研分解式后再填判断项。") from e
+                facts.problems.append(f"旧分解式的量纲检查不过：{e}")
     m = a._m()
     label_of = {f.key: f.label for f in m.factors}
     seen: set[tuple[str, int]] = set()
@@ -1692,68 +1665,56 @@ def _check_factors(a: AssumptionSet, years: int, decomps,
             continue
         key = (r.factor_key, r.year)
         if key in seen:
-            raise AssumeFailed(
-                f"因子「{label_of.get(r.factor_key, r.factor_key)}」"
-                f"第 {r.year} 年出现了不止一行——重复行会让清单显示的值"
-                "与实际参与合成的值不是同一行，必须只保留一行。")
+            facts.blocking.append(
+                f"因子「{label_of.get(r.factor_key, r.factor_key)}」第 {r.year} 年"
+                "出现了不止一行（清单显示的值与参与合成的值不是同一行）")
         seen.add(key)
-        # 出口二（「无数据（估计）」）落地为空的 `bases`——那不能免除「说明
-        # 依据什么估的」这一要求：空依据 + 空理由 = 一个数字凭空出现在清单上。
         if not r.bases and not r.note.strip():
-            raise AssumeFailed(
-                f"因子「{label_of.get(r.factor_key, r.factor_key)}」"
-                f"第 {r.year} 年写了「无数据（估计）」却没有给理由——"
-                "理由要说明这个估计依据什么给出（参照哪个可比公司、"
-                "哪个行业惯例……），不能只留一句「无数据」。")
-
+            facts.problems.append(
+                f"因子「{label_of.get(r.factor_key, r.factor_key)}」第 {r.year} 年"
+                "没有依据也没有给理由（一个数字凭空出现在清单上）")
     for f in m.factors:
         got = {r.year for r in a.rows if r.factor_key == f.key}
         missing = sorted(set(range(1, years + 1)) - got)
         if missing:
-            raise AssumeFailed(
-                f"因子「{f.label}」缺第 {missing} 年 —— 预测期每一年都要给，"
-                "漏掉的年份会沿用模板默认值，而那不是你的判断")
-
+            facts.blocking.append(f"因子「{f.label}」缺第 {missing} 年")
     lacking = [f for f in m.needs_base() if f.short not in a.base_values]
     if lacking:
-        raise AssumeFailed(
-            "以下因子需要第 0 年（基期）的取值，账本里没有："
-            + "、".join(f"{f.short}（{f.label}）" for f in lacking)
-            + " —— 请各补一行「基期: <短名> | <值> | <依据>」（已发生的实际值，"
-            "单值不分档）。")
-
-    # **合成后再验一次单调。** 这是本模块真正的闸门。
-    if base_margin is None:
-        base_margin = Decimal("0.10")
+        facts.blocking.append(
+            "以下因子需要第 0 年（基期）的取值，账本里没有、AI 也没补："
+            + "、".join(f"{f.short}（{f.label}）" for f in lacking))
     if isinstance(decomps, list):
         a.decomps = list(decomps)
-    # 锚定开启时查的必须是平移后的路径——那才是建模用的。
-    a.margin_bases = margin_bases(a, base_margin, anchor)
-    _check_monotonic(a, base_margin, a.margin_bases)
+    if facts.blocking:
+        return
+    if base_margin is None:
+        base_margin = Decimal("0.10")
+    try:
+        # 锚定开启时看的必须是平移后的路径——那才是建模用的。
+        a.margin_bases = margin_bases(a, base_margin, anchor)
+        facts.problems += _monotonic_problems(a, base_margin, a.margin_bases)
+    except AssumeFailed as e:
+        facts.blocking.append(str(e))
 
 
-def _check_monotonic(a: AssumptionSet, base_margin: Decimal,
-                     bases: dict | None) -> None:
-    """合成后三档必须严格拉开。check() 与 apply_to 共用：第二阶段的 check()
-    拿不到 calibrate 结果、不做锚定平移，平移发生在 apply_to，那里要再查一次，
-    不能让不合格的路径进工作簿。"""
+def _monotonic_problems(a: AssumptionSet, base_margin: Decimal,
+                        bases: dict | None) -> list[str]:
+    """合成后三档是否严格拉开。**事实，不驳回** —— 交审核者 [合成] 条目（生益
+    科技 2026-10-15：两个 pp 因子各自拉开，加总后第 4 年毛利率倒序；代码只会说
+    「不单调」，审核者能给出「怎么拉开」）。"""
     lo, lom = synthesize(a, Case.BEAR, base_margin, bases)
     mid, midm = synthesize(a, Case.BASE, base_margin, bases)
     hi, him = synthesize(a, Case.BULL, base_margin, bases)
+    out: list[str] = []
     for i in range(len(mid)):
         if not (lo[i] < mid[i] < hi[i]):
-            raise AssumeFailed(
-                f"第 {i + 1} 年的营收增速**合成后**不再单调"
-                f"（悲观 {lo[i]:.2%} / 中性 {mid[i]:.2%} / 乐观 {hi[i]:.2%}）"
-                " —— 因子各自拉开不等于合成结果拉开，请调整因子取值，"
-                "不要悄悄修正合成结果")
+            out.append(f"第 {i + 1} 年的营收增速合成后不单调"
+                       f"（悲观 {lo[i]:.2%} / 中性 {mid[i]:.2%} / 乐观 {hi[i]:.2%}）")
     for i in range(len(midm)):
         if not (lom[i] < midm[i] < him[i]):
-            raise AssumeFailed(
-                f"第 {i + 1} 年的毛利率**合成后**不再单调"
-                f"（悲观 {lom[i]:.2%} / 中性 {midm[i]:.2%} / 乐观 {him[i]:.2%}）"
-                " —— 因子各自拉开不等于合成结果拉开，请调整因子取值，"
-                "不要悄悄修正合成结果")
+            out.append(f"第 {i + 1} 年的毛利率合成后不单调"
+                       f"（悲观 {lom[i]:.2%} / 中性 {midm[i]:.2%} / 乐观 {him[i]:.2%}）")
+    return out
 
 
 PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
@@ -2020,9 +1981,11 @@ def _decide_once(client, judg: dict, labels: list[str], context: str, *,
         try:
             a = parse(raw, len(labels), decomps=decomps,
                      factor_data=factor_data, as_of=as_of)
-            check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
-                  decomps=decomps, base_margin=base_margin, anchor=anchor,
-                  balances=balances)
+            facts = check(a, len(labels), ledger=ledger, body=body, as_of=as_of,
+                          decomps=decomps, base_margin=base_margin, anchor=anchor,
+                          balances=balances)
+            if facts.blocking:
+                raise AssumeFailed("算不下去：" + "；".join(facts.blocking))
         except AssumeFailed as e:
             last = str(e)
             prompt = (f"{prompt}\n\n---\n"
@@ -2337,11 +2300,9 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
         # 第 0 年营收按工作簿口径（亿元）——公式用到绝对金额时，ir-agent 与
         # 工作簿必须代入同一个数。
         a.base_revenue = _base_revenue_of(cal)
-        # 锚定开启时毛利率第 2 年起从各档锚定水平接着走（见 margin_bases）；
-        # 第二阶段的 check() 不做这一步，所以这里要再查一次单调。
+        # 锚定开启时毛利率第 2 年起从各档锚定水平接着走（见 margin_bases）。
+        # 这里只计算：合成后单调与否是审核者在第一阶段判过的事实（子项目三）。
         bases = margin_bases(a, base_margin, anchor_from_cal(cal))
-        if bases:
-            _check_monotonic(a, base_margin, bases)
         growth_scen, gm_scen = {}, {}
         for c in Case:
             g, m = synthesize(a, c, base_margin, bases)

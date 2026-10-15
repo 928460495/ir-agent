@@ -76,7 +76,7 @@ def _ledger(asp="9.5"):
 
 
 def _check(a, years, model, ledger=None, base_margin=D("0.25")):
-    assume.check(a, years, ledger=ledger or _ledger(), body=f"正文 {Q} 依据原文",
+    return assume.check(a, years, ledger=ledger or _ledger(), body=f"正文 {Q} 依据原文",
                  as_of=AS_OF, decomps=model, base_margin=base_margin)
 
 
@@ -112,10 +112,10 @@ class TestLevelMode:
         assert a.base_values["价"].value == D("9.5")
         assert a.base_values["价"].bases[0].ref == "[[ccl.asp@2025FY]]"
 
-    def test_缺基期明确驳回(self):
+    def test_缺基期明确记进事实(self):
         a = assume.parse(_level_lines(base=False), 1, decomps=LEVEL)
-        with pytest.raises(AssumeFailed, match="需要第 0 年.*量.*本"):
-            _check(a, 1, LEVEL)
+        facts = _check(a, 1, LEVEL)
+        assert re.search("需要第 0 年.*量.*本", facts.text()), facts.text()
 
     def test_口径不混用_第0年由基期因子代入公式(self):
         """营收₀ = 100 × 9.5 = 950，与账本营收 20 亿无关。"""
@@ -125,12 +125,12 @@ class TestLevelMode:
         assert g == [D(110) * D(10) / (D(100) * D("9.5")) - 1]
         assert m == [(D(10) - D("7.4")) / D(10)]
 
-    def test_合成后三档不拉开被驳回(self):
+    def test_合成后三档不拉开记进事实(self):
         txt = _level_lines().replace("假设: 价 | 第1年 | 9 | 10 | 11 |",
                                      "假设: 价 | 第1年 | 11 | 10 | 9 |")
         a = assume.parse(txt, 1, decomps=LEVEL)
-        with pytest.raises(AssumeFailed, match="合成后"):
-            _check(a, 1, LEVEL)
+        facts = _check(a, 1, LEVEL)
+        assert re.search("合成后", facts.text()), facts.text()
 
 
 class TestChangeMode:
@@ -234,8 +234,8 @@ class TestPhase2:
         _check(back, 1, back._m())                       # 走因子路径，通过
         # 改动前的写法：退回两标量校验，把因子行当成营收增速/毛利率行去查
         # （`path()` 是两标量路径专用的措辞）。
-        with pytest.raises(AssumeFailed, match=r"path\(\)"):
-            _check(back, 1, back.decomps or None)
+        facts = _check(back, 1, back.decomps or None)
+        assert re.search("缺第", facts.text()), facts.text()
 
 
 def test_判断项清单顶部有方法论审核遗留():

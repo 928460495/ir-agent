@@ -2734,17 +2734,19 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         anchor = assume.anchor_from_cal(cal)
     except dcf.DcfUnavailable:
         anchor = None
-    try:
-        # **人改过的值要重新校验。** 批准不等于豁免 —— 三档拉不开、
-        # 漏掉某一年，都会让模型算出一个看起来正常的错数。
-        assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of,
-                     # **读 `a._m()`，不读 `a.decomps`**：公式化写法下 decomps 是空
-                     # 列表，`decomps=a.decomps or None` 会让第二阶段悄悄退回两标量
-                     # 校验，人批准的公式在这里一行都不生效。
-                     decomps=a._m(), base_margin=base_margin,
-                     anchor=anchor)
-    except assume.AssumeFailed as e:
-        raise SystemExit(f"批准的假设不合法，拒绝建模：\n{e}")
+    # **只计算，不再判断**（子项目三）：人在门③ 签了字，AI 审核也已在第一阶段
+    # 做过；这里只看算不算得下去（缺年份、缺基期、重复行、公式算不动）。此前
+    # 这里会把人批准的判断项再按内容闸门拒绝一遍 —— 600584 实测，人批准了，
+    # 建模前一刻又被拒，人工门被架空。
+    facts = assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of,
+                         # **读 `a._m()`，不读 `a.decomps`**：公式化写法下 decomps
+                         # 是空列表，`decomps=a.decomps or None` 会让第二阶段悄悄
+                         # 退回两标量口径，人批准的公式在这里一行都不生效。
+                         decomps=a._m(), base_margin=base_margin,
+                         anchor=anchor)
+    if facts.blocking:
+        raise SystemExit("批准的判断项算不下去，无法建模：\n"
+                         + "\n".join(f"  - {x}" for x in facts.blocking))
 
     # I3（final-fix-D 终审）：`check()` 通过后 `a.margin_bases` 就定了——
     # 非空说明毛利率加法链第 2 年起的基期已从年报基期换成各档锚定后的
