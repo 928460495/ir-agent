@@ -368,6 +368,9 @@ class AssumptionSet:
     # 代码读数时发现的问题（读不出、单位写法、依据写法、重复行……）。**只是事实，
     # 不驳回**，交给判断项审核者（子项目三）。派生量，不进 JSON。
     read_notes: list = field(default_factory=list)
+    # 判断项审核结论（`methodology_review.ReviewResult`，子项目三）。派生量，不进
+    # JSON —— 落盘在 assumptions_review.json。
+    judge_review: object = None
 
     def _m(self) -> FormulaModel | None:
         if self.model is None and self.decomps:

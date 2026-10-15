@@ -244,26 +244,36 @@ def annotate_quotes(verdicts: list[Verdict], *, hay: str, ledger, as_of) -> list
     return out
 
 
+def ledger_decl_lines(model, *, ledger, as_of) -> list[str]:
+    """因子数据线索里 `[[key]]` 声明在账本里实际取到的值。方法论审核者与判断项
+    审核者（子项目三）共用 —— 第 2 轮那个 100 倍量级错误就是靠这一段对出来的
+    （叙述里 0.87pp，账本里 0.00871）。"""
+    from ir_agent import gaps
+
+    decl = [(f, k) for f in model.factors
+            for k in dict.fromkeys(_KEY_DECL.findall(f.source_hint or ""))]
+    if not decl:
+        return []
+    lines = ["【账本 key 声明的实际取值】"]
+    for f, k in decl:
+        have, _ = gaps.ledger_refs(f"[[{k}]]", ledger, as_of) if ledger else ([], [])
+        if have:
+            key, per = have[0].rsplit("@", 1)
+            lines.append(f"- {f.short} [[{k}]]：账本 {key}@{per} = "
+                         f"{ledger.get(key, per, as_of=as_of).value}")
+        else:
+            lines.append(f"- {f.short} [[{k}]]：账本里没有（或晚于研究时点才披露）")
+    return lines
+
+
 def extra_facts(model, *, ledger, as_of, sections=None, corpus=None,
                 themes=(), coverage_decl=()) -> str:
     """只给审核者看的、代码现算的事实（spec 二）。"""
     from ir_agent import gaps, methodology
     from ir_agent.formula import FormulaError, evaluate
 
-    lines: list[str] = []
     # 1. [[key]] 声明在账本里实际取到的值
-    decl = [(f, k) for f in model.factors
-            for k in dict.fromkeys(_KEY_DECL.findall(f.source_hint or ""))]
-    if decl:
-        lines += ["【账本 key 声明的实际取值】"]
-        for f, k in decl:
-            have, _ = gaps.ledger_refs(f"[[{k}]]", ledger, as_of) if ledger else ([], [])
-            if have:
-                key, per = have[0].rsplit("@", 1)
-                lines.append(f"- {f.short} [[{k}]]：账本 {key}@{per} = "
-                             f"{ledger.get(key, per, as_of=as_of).value}")
-            else:
-                lines.append(f"- {f.short} [[{k}]]：账本里没有（或晚于研究时点才披露）")
+    lines: list[str] = ledger_decl_lines(model, ledger=ledger, as_of=as_of)
     # 2. 检索词命中次数
     hits = methodology.term_hits(model, sections=sections, corpus=corpus)
     lines += ["", "【因子候选词在本轮语料里的命中次数】"]
