@@ -36,9 +36,15 @@ KINDS = ("模式", "因子", "正交", "公式", "常量", "账本", "覆盖")
 MAX_ROUNDS = 3          # 提出者最多写 3 轮（代码检查不过、审核驳回都算一轮）
 JUDGE_TRIES = 3         # 审核者作答 1 次 + 漏答补答 2 次，不消耗提出者轮数
 
-# 行首允许列表符号与加粗（模型常写 `- ` 或 `**[因子] …**`）。
-_ITEM = re.compile(rf"(?m)^[ \t]*[-*•·]*[ \t]*(?=\[(?:{'|'.join(KINDS)})\])")
-_HEAD = re.compile(rf"\[({'|'.join(KINDS)})\]\s*(.*)", re.S)
+# 行首允许列表符号与加粗（模型常写 `- ` 或 `**[因子] …**`）。类别集合由调用方
+# 给（判断项审核 `assume_review` 用另一套类别），默认是本模块的 7 类。
+def _item_rx(kinds) -> re.Pattern[str]:
+    return re.compile(rf"(?m)^[ \t]*[-*•·]*[ \t]*(?=\[(?:{'|'.join(kinds)})\])")
+
+
+def _head_rx(kinds) -> re.Pattern[str]:
+    return re.compile(rf"\[({'|'.join(kinds)})\]\s*(.*)", re.S)
+
 _QUOTE = re.compile(r"「([^」]{4,})」")
 _REF = re.compile(r"\[\[([^\]@]+)@([^\]]+)\]\]")
 _KEY_DECL = re.compile(r"\[\[([A-Za-z_][\w.]*)(?:@[^\]]*)?\]\]")
@@ -161,23 +167,25 @@ def checklist(model, themes: list[str]) -> list[tuple[str, str]]:
 def _subject_rx(kind: str, subject: str) -> re.Pattern[str]:
     """条目名的匹配式。审核者照它看到的原文写条目名（生益科技第二次调用第 3 轮漏掉
     [公式] 与 [账本] 共 4 条，审核未完成）：`[[key]]` 带不带 `@期间` 都认；[公式]
-    条目名后面抄了「= …」也认。"""
+    条目名后面抄了「= …」也认（判断项审核的 [合成] 同理）。"""
     base = re.sub(r"@[^\]]*(?=\]\])", "", subject)
     pat = re.escape(base).replace(r"\]\]", r"(?:@[^\]]*)?\]\]")
-    if kind == "公式":
+    if kind in ("公式", "合成"):
         pat += r"(?:\s*[=＝][^：:\n]*)?"
     return re.compile(pat)
 
 
-def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
+def parse(raw: str, expected: list[tuple[str, str]],
+          kinds: tuple = KINDS) -> list[Verdict]:
     """解析审核者的回答。**按预期条目名匹配**，不靠正则切条目名 —— 完整名里
     可能带冒号、括号。缺条目、或提醒/致命/待采集没写理由 → ReviewIncomplete。"""
     by_kind: dict[str, list[str]] = {}
     for k, s in expected:
         by_kind.setdefault(k, []).append(s)
     got: dict[tuple[str, str], Verdict] = {}
-    for block in _ITEM.split(raw):
-        m = _HEAD.match(block.strip())
+    item_rx, head_rx = _item_rx(kinds), _head_rx(kinds)
+    for block in item_rx.split(raw):
+        m = head_rx.match(block.strip())
         if not m:
             continue
         kind, rest = m.group(1), m.group(2).strip()
