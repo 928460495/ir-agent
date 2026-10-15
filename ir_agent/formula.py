@@ -392,7 +392,7 @@ def flat_factors(xs) -> list:
 
     旧调用方传 `decompositions`（每条带 `.factors`），新调用方传 `FormulaModel`；
     水平模式下同一个因子被两条公式共用，迭代时要去重。assume、gaps、
-    factor_review、methodology 共用这一份，不各写一套。"""
+    methodology 共用这一份，不各写一套。"""
     if xs is None:
         return []
     if isinstance(xs, FormulaModel):

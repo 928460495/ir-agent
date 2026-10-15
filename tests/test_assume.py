@@ -2581,3 +2581,18 @@ def test_七段的行_第六段起全算依据栏():
     assert [b.describe() for b in r.bases] and "revenue_yoy" in r.bases[0].describe()
     assert r.note.startswith("中性档采纳辩论平衡点20%") and not r.note.endswith("|")
     assert "缺少可核验的依据" not in _notes(a)
+
+
+def test_提示词讲清pp填百分点数字本身():
+    """模型把 5.47 个百分点填成了 0.0547。pp 的规则原先只说「不带 %」，没说
+    「填的是百分点数字本身，不是小数」。"""
+    from ir_agent.methodology import parse
+    m = parse("模式: 变化\n"
+              "因子: 提价 | 提价对毛利率的累计贡献 | pp | 调价函 | 调价\n"
+              "因子: 原料 | 原材料对毛利率的累计侵蚀 | pp | 年报 | 原材料价格\n"
+              "因子: 量 | 销量增速 | 变化率 | 年报 | 销量\n"
+              "因子: 价 | 单价增速 | 变化率 | 年报 | 单价\n"
+              "公式: 营收 = 上期(营收) × (1 + 量) × (1 + 价)\n"
+              "公式: 毛利率 = 基期(毛利率) + (提价 + 原料) / 100\n").model
+    head = assume._formula_head(m, {})
+    assert "写 5.47，不写 0.0547" in head

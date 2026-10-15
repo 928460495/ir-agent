@@ -291,6 +291,30 @@ def test_第二次与第三次调用未完成时教人重跑自己那一次(tmp_
     assert "--accept-manual" in b2 and "stance_b.template.json" in b2
 
 
+def test_判断项审核停下时教人以底稿改好再跑第二阶段(tmp_path):
+    """子项目三：审核 3 轮不过 → 停下交人工，终端给两条做法：原样重跑 --assume；
+    以 assumptions_failed.json 为底稿改好存为 assumptions.json 再跑 --value。"""
+    import shlex
+
+    from ir_agent.__main__ import build_parser
+    from ir_agent.research import (ASSUMPTIONS_FAILED_JSON, Stage, _mark,
+                                   next_actions)
+
+    (tmp_path / ASSUMPTIONS_FAILED_JSON).write_text("{}", encoding="utf-8")
+    acts = next_actions(Stage.INCOMPLETE, "600183", out_dir=str(tmp_path),
+                        year=2025, phase="assume")
+    txt = "\n".join(acts)
+    assert "--assume" in txt and "--value" in txt and ASSUMPTIONS_FAILED_JSON in txt
+    assert "判断项未经审核" in txt
+    p = build_parser()
+    for line in txt.splitlines():
+        line = line.strip()
+        if line.startswith("python -m ir_agent"):
+            p.parse_args(shlex.split(line.replace("<你的名字>", "xhl"))[3:])
+    assert _mark("判断项审核 3 轮未通过（最后一轮致命 2 条）").strip() == "⚠"
+    assert _mark("判断项未经审核：人工修改过 3 格").strip() == "⚠"
+
+
 def test_新前缀都注册进了白名单且失败与成功分开():
     """`_PREFIX` 的兜底是「未生成」—— 最强的那个断言，所以每个新生产者都要
     来登记。**而且登记对了还不够，符号也要对。** 计划原稿的这条测试只断言

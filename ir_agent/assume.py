@@ -141,8 +141,8 @@ class Row:
     # 分解模式下这一行对应哪个因子。空串表示旧的两标量模式 ——
     # 预研失败时的降级路径，必须保留。
     factor_key: str = ""
-    # 偏离多空平衡点时的说明。**代码只查存在性，不查合理性** —— 填得对不对
-    # 由结构审查（factor_review）对账。它的作用是让「无视辩论」和「有理由地
+    # 偏离多空平衡点时的说明。**代码不判定**（子项目三）—— 偏离是否成立由
+    # 判断项审核者 [平衡点] 条目判断。它的作用是让「无视辩论」和「有理由地
     # 偏离」在产物上长得不一样：没有它的话，判断项中性档 18%（平衡点 12%）
     # 这件事，无论是模型看到了因子细节而上调、还是模型压根没读辩论，产物上
     # 完全一样。同构的实测案例：判断项被锚定覆盖（批准 19.12% → 实际用
@@ -337,24 +337,6 @@ class AssumptionSet:
     implied: object = None
     # 代码读数、计算、核对的事实（`Facts`），由 check() 挂上。派生量，不进 JSON。
     facts: object = None
-    # 因子结构审查结果（`factor_review.ReviewResult`）。派生量，不进 JSON。
-    # 它**不是闸门**：只给结论与理由，印在清单上给批准人看。
-    review: object = None
-    # 门③ [对账] 判出矛盾、退回重填一次的记录（第一稿的审核意见）。派生量，
-    # 不进 JSON。
-    refill_note: list = field(default_factory=list)
-    # 假设的数据合理性辩论结果（`debate.DebateResult`）。派生量，不进 JSON。
-    # **同样不是闸门**：成立的挑战不改任何取值，只印在清单上 —— 自动改数
-    # 会绕过人工门，而这道门的意义正是让人负责。
-    debate: object = None
-    # I4：因子模式连续填不出合格判断项时，decide() 回落到两标量模式，
-    # 这里记下降级原因。**不进 to_json/from_json**——降级是这一轮研究
-    # 自己的事，不需要跨阶段持久化；describe() 会把它显式印在清单顶部，
-    # 「降级但继续」不能悄悄发生，人必须一眼看到这轮其实是降级产出的。
-    degraded: str = ""
-    # 降级时最后一次的**完整**模型输出，供调用方落盘排查（见 AssumeFailed.raw）。
-    # 不进 describe()——它是给人批准用的清单，不该混进几十行失败草稿。
-    degraded_raw: str = ""
     # 公式化后的分解式（`formula.FormulaModel`）。新写法直接给；旧的 `decomps`
     # 由 `_m()` 惰性翻译。**合成、清单、落盘一律经它。**
     model: object = None
@@ -394,10 +376,6 @@ class AssumptionSet:
         让清单整页空白（C1：人工批准的核心关卡变成一张只有标题的空页）。
         """
         lines = [f"DCF 判断项（{self.code}）—— 需人工核实后方可建模", ""]
-        if self.degraded:
-            # 「降级但继续」不能悄悄发生——清单顶部就要让人看到这轮
-            # 判断项其实是降级产出的，损失的是精度，不是担保。
-            lines += [f"⚠ **降级说明**：{self.degraded}", ""]
         if self.implied is not None:
             # **增速路径的算术后果，印在最前面。** 批准人看到的是三档数值
             # 和理由，而「中性档 71.75%」这种数看不出荒谬 —— 换算成「隐含
@@ -408,24 +386,11 @@ class AssumptionSet:
         if self.method_review:
             lines += ["🧭 **方法论审核遗留**（预研阶段审核者判为提醒/待采集的条目）：", ""]
             lines += list(self.method_review) + [""]
-        if self.refill_note:
-            lines += ["🔁 **对账退回重填**：", ""] + list(self.refill_note) + [""]
-        if self.review is not None and getattr(self.review, "flagged", None):
-            # 审核意见印在清单顶部而不是末尾 —— 批准人要在看三档数值之前
-            # 先知道「有哪几条已经被质疑过」。实测那条重复计算的因子若有
-            # 这一行，批准时一眼就能看到「重叠」。
-            lines += ["🔍 **因子结构审查**（审核者意见，未改任何数值）：", ""]
-            lines += [f"- [{f.kind}] {f.subject}：**{f.verdict}** —— {f.why}"
-                      for f in self.review.flagged]
-            lines += [""]
-        up = [c for c in getattr(getattr(self, "debate", None),
-                                 "challenges", []) if c.upheld]
-        if up:
-            lines += ["⚖️ **假设辩论**（成立的挑战，**取值未因此改动**）：", ""]
-            lines += [f"- [{c.kind.value}] {c.passage[:60]} —— "
-                      f"{(c.rationale or c.objection).strip()[:140]}"
-                      for c in up]
-            lines += [""]
+        if self.judge_review is not None:
+            # 判断项审核（子项目三）：提醒与待采集印在三档数值之前 —— 批准人要
+            # 先知道「哪几条已经被审核者质疑过」。
+            from ir_agent.assume_review import review_markdown
+            lines += review_markdown(self.judge_review)
         m = self._m()
         if m is not None and not m.legacy:
             lines += self._describe_formula()
@@ -450,6 +415,10 @@ class AssumptionSet:
                 lab = self.labels[r.year - 1] if r.year <= len(self.labels) \
                     else f"第{r.year}年"
                 ref = "；".join(b.describe() for b in r.bases)
+                if r.basis_unverified:
+                    ref = "⚠ 依据未能逐字核验：" + ref
+                elif not r.bases:
+                    ref = "⚠ 没有可核验的依据"
                 lines.append(f"| {lab} | {r.bear:.2%} | {r.base:.2%} "
                              f"| {r.bull:.2%} | {r.note or '—'} | {ref} |")
             lines.append("")

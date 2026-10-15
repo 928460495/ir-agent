@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import textwrap
 from datetime import date
 from decimal import Decimal
@@ -559,16 +560,14 @@ def test_第二阶段必须重建派生事实():
 
 # ── I4：因子模式连续失败要回落两标量而非让整段判断项消失 ─────────
 
-def test_因子模式降级时判断项仍写出且降级原因入skipped(tmp_path, monkeypatch):
-    """I4 修复的落地验证：`assume.decide` 拿到 `AssumptionSet.degraded`
-    后，`_propose_assumptions` 仍要把判断项写出来（不是像
-    `assume.AssumeFailed` 那样整段消失），并把降级原因作为非致命说明
-    通过返回值交给调用方——`run_analysis` 会把它塞进 `skipped`，读者
-    在终端产物清单上就能看到这轮其实是降级产出的。"""
+def test_判断项审核停下时只写底稿与记录_不写assumptions_json(tmp_path, monkeypatch):
+    """子项目三：审核 3 轮不过 → 停下交人工。assumptions.json 是门③ 批准的对象，
+    未通过审核的稿子不能冒充它；底稿写 assumptions_failed.json，最后一稿原文
+    **完整**落盘（因子模式一次输出几十行，故障常在中段），各轮记录落盘。"""
     from datetime import date
     from decimal import Decimal
 
-    from ir_agent import assume, dcf, full
+    from ir_agent import assume, assume_review, dcf, full
     from ir_agent.ledger import FactLedger
 
     monkeypatch.setattr(
@@ -576,16 +575,16 @@ def test_因子模式降级时判断项仍写出且降级原因入skipped(tmp_pa
         lambda code, as_of, ledger: {
             "judg": {"g_stats": (), "gm_stats": ()},
             "periods": {"proj": ["2026E"]}})
-
-    degraded_msg = "因子模式连续 3 次填不出合格的判断项——已退回两标量模式"
+    full_raw = "行一\n" * 200 + "中段才出问题的那一行"
 
     def _fake_decide(client, judg, labels, ctx, **kw):
-        a = assume.AssumptionSet(code="600584", labels=labels)
-        a.degraded = degraded_msg
-        a.rows = [assume.Row(driver="growth", year=1, bear=Decimal("0.02"),
-                             base=Decimal("0.06"), bull=Decimal("0.10"),
-                             note="x", bases=[])]
-        return a
+        last = assume.AssumptionSet(code="600584", labels=labels)
+        last.rows = [assume.Row(driver="growth", year=1, bear=Decimal("0.02"),
+                                base=Decimal("0.06"), bull=Decimal("0.10"),
+                                note="x", bases=[])]
+        raise assume_review.ReviewStop(
+            "判断项审核 3 轮未通过（最后一轮致命 1 条）",
+            [assume_review.Round(1, full_raw)], last=last)
     monkeypatch.setattr(assume, "decide", _fake_decide)
 
     class _R:
@@ -597,12 +596,55 @@ def test_因子模式降级时判断项仍写出且降级原因入skipped(tmp_pa
         "600584", _R(), "body", {}, date(2026, 9, 7), tmp_path,
         lambda p: "", arts)
 
-    assert degraded_msg in err, "降级原因必须作为非致命说明返回，供 skipped 使用"
-    assert (tmp_path / full.ASSUMPTIONS_MD).exists(), \
-        "判断项必须照常写出，不能因为降级就整段消失"
-    assert degraded_msg in (tmp_path / full.ASSUMPTIONS_MD).read_text(
-        encoding="utf-8"), "assumptions.md 里也要如实写明降级原因"
-    assert "DCF 判断项（待核实）" in arts
+    assert err.startswith("判断项审核 3 轮未通过")
+    assert not (tmp_path / full.ASSUMPTIONS_JSON).exists()
+    assert full.ASSUMPTIONS_ART not in arts
+    assert (tmp_path / full.ASSUMPTIONS_FAILED_JSON).exists()
+    assert (tmp_path / full.FAILED_RAW).read_text(encoding="utf-8") == full_raw
+    assert "中段才出问题的那一行" in (tmp_path / full.ASSUMPTIONS_ROUNDS_MD).read_text(
+        encoding="utf-8")
+
+
+def test_判断项审核通过时落审核结论与各轮记录(tmp_path, monkeypatch):
+    from datetime import date
+    from decimal import Decimal
+
+    from ir_agent import assume, assume_review, dcf, full
+    from ir_agent.ledger import FactLedger
+    from ir_agent.methodology_review import ReviewResult, Verdict
+
+    monkeypatch.setattr(
+        dcf, "calibrate_only",
+        lambda code, as_of, ledger: {
+            "judg": {"g_stats": (), "gm_stats": ()},
+            "periods": {"proj": ["2026E"]}})
+
+    def _fake_decide(client, judg, labels, ctx, **kw):
+        assert kw["judge"] is client and "catalog" in kw
+        a = assume.AssumptionSet(code="600584", labels=labels)
+        a.rows = [assume.Row(driver="growth", year=1, bear=Decimal("0.02"),
+                             base=Decimal("0.06"), bull=Decimal("0.10"),
+                             note="x", bases=[])]
+        a.judge_review = ReviewResult(verdicts=[Verdict(
+            "合成", "营收", "提醒", "略高于行业", suggest="下调中性档")], rounds=2,
+            fingerprint=assume_review.fingerprint(a))
+        a.judge_rounds = [assume_review.Round(1, "第一稿"), assume_review.Round(2, "第二稿")]
+        return a
+    monkeypatch.setattr(assume, "decide", _fake_decide)
+
+    class _R:
+        ledger = FactLedger()
+        period = "2025FY"
+
+    err = full._propose_assumptions(
+        "600584", _R(), "body", {}, date(2026, 9, 7), tmp_path,
+        lambda p: "", {})
+    rev = json.loads((tmp_path / full.ASSUMPTIONS_REVIEW_JSON).read_text(encoding="utf-8"))
+    assert rev["passed"] is True and rev["rounds"] == 2 and rev["fingerprint"]
+    assert "第二稿" in (tmp_path / full.ASSUMPTIONS_ROUNDS_MD).read_text(encoding="utf-8")
+    md = (tmp_path / full.ASSUMPTIONS_MD).read_text(encoding="utf-8")
+    assert "判断项审核" in md and "建议：下调中性档" in md
+    assert "第 2 轮通过" in err and "提醒 1 条" in err
 
 
 def test_因子模式引文未核验的行数入非致命说明(tmp_path, monkeypatch):
@@ -633,6 +675,8 @@ def test_因子模式引文未核验的行数入非致命说明(tmp_path, monkey
                         base=Decimal("0.04"), bull=Decimal("0.09"), note="y",
                         factor_key="cap", bases=[Basis.report("正文里有的话")])
         a.rows = [r1, r2]
+        from ir_agent.methodology_review import ReviewResult
+        a.judge_review = ReviewResult()
         return a
     monkeypatch.setattr(assume, "decide", _fake_decide)
 
@@ -690,58 +734,6 @@ def test_判断项环节的接口错误降级而不抛出(tmp_path, monkeypatch)
     assert err, "接口错误必须作为非致命说明返回，而不是抛出"
     assert "ClaudeCliError" in err, "说明里要点明是接口错误，便于排查"
     assert "session limit" in err, "原始错误信息要带上，不能只说失败"
-
-
-def test_因子模式降级时完整原始输出要落盘(tmp_path, monkeypatch):
-    """**排查工具本身也要能用。**
-
-    实测教训：因子模式一次要输出几十行（600584 真实分解式是 9 因子 ×
-    5 年 = 45 行），故障常出在中段，而降级说明里只放得下末 400 字。
-    连续几轮排查都只能靠残缺的尾巴反推模型写成了什么格式——最后一次
-    是从 400 字尾巴里认出「贡献**（无数据，估计——依据：…）」这个
-    片段，才判断出模型改用了散文式条目而不是管道分隔行。
-
-    完整草稿必须落盘，但不能混进 assumptions.md——那是给人批准的清单。
-    """
-    from datetime import date
-    from decimal import Decimal
-
-    from ir_agent import assume, dcf, full
-    from ir_agent.ledger import FactLedger
-
-    monkeypatch.setattr(
-        dcf, "calibrate_only",
-        lambda code, as_of, ledger: {
-            "judg": {"g_stats": (), "gm_stats": ()},
-            "periods": {"proj": ["2026E"]}})
-
-    full_raw = "行一\n" * 200 + "中段才出问题的那一行"
-
-    def _fake_decide(client, judg, labels, ctx, **kw):
-        a = assume.AssumptionSet(code="600584", labels=labels)
-        a.degraded = "因子模式连续 3 次填不出合格的判断项"
-        a.degraded_raw = full_raw
-        a.rows = [assume.Row(driver="growth", year=1, bear=Decimal("0.02"),
-                             base=Decimal("0.06"), bull=Decimal("0.10"),
-                             note="x", bases=[])]
-        return a
-    monkeypatch.setattr(assume, "decide", _fake_decide)
-
-    class _R:
-        ledger = FactLedger()
-        period = "2025FY"
-
-    arts: dict[str, str] = {}
-    full._propose_assumptions("600584", _R(), "body", {}, date(2026, 9, 7),
-                              tmp_path, lambda p: "", arts)
-
-    dumped = tmp_path / full.FAILED_RAW
-    assert dumped.exists(), "降级时完整原始输出必须落盘"
-    assert dumped.read_text(encoding="utf-8") == full_raw, "要完整，不能截断"
-    assert "因子模式失败时的原始输出" in arts, "产物清单要指向它"
-    assert "中段才出问题的那一行" not in (
-        tmp_path / full.ASSUMPTIONS_MD).read_text(encoding="utf-8"), \
-        "失败草稿不能混进给人批准的清单"
 
 
 def test_第二阶段先重建派生事实再校验批准的假设():
@@ -3148,79 +3140,35 @@ def test_判断项客户端的创建早于开销累加():
         "客户端的创建晚于它的开销被累加 —— 运行时必然 UnboundLocalError"
 
 
-def test_因子结构审查接进了判断项环节():
-    """**这条钉的是「接上了」。** 审查本身由 tests/test_factor_review.py 钉；
-    这里查三件事: 真的调了、checklist 取的是写盘前的清单（带审查结果的清单
-    喂回审核者是循环引用）、以及它失败时不毙掉判断项。
-    """
+def test_判断项审核接进了判断项环节_原门三两道审核已并入():
+    """子项目三：`factor_review` [对账] 与判断项假设辩论并进审核者 —— 不再单独跑；
+    审核者拿到账本事实目录（原辩论靠它发现过叙事与周转数据相反）。"""
     import inspect
 
     from ir_agent import full
 
     src = inspect.getsource(full._propose_assumptions)
-    assert "factor_review.review(" in src, "审查没接进来"
-    assert src.index("factor_review.review(") < \
-        src.index("(out / ASSUMPTIONS_MD).write_text"), \
-        "审查必须在写盘之前跑，否则清单上看不到它"
-    # 失败不阻断: 异常被接住、a.review 置空、流程继续写盘
-    assert "a.review = None" in src
+    assert "judge=client" in src and "catalog=catalog" in src
+    assert "factor_review" not in src.split('"""', 2)[2]
+    assert "run_debate(" not in src
 
 
-def test_审查标出的条数要进终端清单():
-    """印在 assumptions.md 顶部还不够 —— 终端产物清单是读者第一眼看到的
-    地方，这与「审计未通过」「判断项待复核」同一处理。"""
+def test_判断项审核的提醒要进终端清单():
     from ir_agent.full import _assumption_caveat_note
+    from ir_agent.methodology_review import ReviewResult, Verdict
 
     class _R:
         basis_unverified = ""
 
-    class _Rev:
-        flagged = [object(), object()]
-
     class _A:
-        degraded = ""
         rows = [_R()]
-        review = _Rev()
+        judge_review = ReviewResult(verdicts=[
+            Verdict("取值", "提价", "提醒", "x"), Verdict("依据", "提价", "待采集", "y"),
+            Verdict("后果", "营收路径", "通过", "")], rounds=2)
 
     note = _assumption_caveat_note(_A())
-    assert note.startswith("判断项待复核：") and "2 项" in note
-
-
-def test_假设辩论接进了判断项环节且不改取值():
-    """第 4 道。**不设闸门、不改数**: 成立的挑战只印在清单上 —— 自动改数会
-    绕过人工门，而那道门的意义正是让人负责。"""
-    import inspect
-
-    from ir_agent import full
-
-    src = inspect.getsource(full._propose_assumptions)
-    assert "run_debate(" in src, "假设辩论没接进来"
-    assert "scale=a.implied.describe()" in src, "没把算术后果喂给质疑者"
-    assert src.index("factor_review.review(") < src.index("run_debate("), \
-        "清单式审查应排在开放式辩论之前（先用便宜且可枚举的）"
-    assert src.index("run_debate(") < \
-        src.index("(out / ASSUMPTIONS_MD).write_text"), \
-        "辩论必须在写盘之前跑，否则清单上看不到它"
-    assert "a.debate = None" in src, "辩论失败应不阻断"
-
-
-def test_假设辩论的成立挑战进终端清单():
-    from ir_agent.full import _assumption_caveat_note
-
-    class _R:
-        basis_unverified = ""
-
-    class _D:
-        upheld_count = 2
-
-    class _A:
-        degraded = ""
-        rows = [_R()]
-        review = None
-        debate = _D()
-
-    note = _assumption_caveat_note(_A())
-    assert "假设辩论有 2 项" in note and "未因此改动" in note
+    assert note.startswith("判断项待复核：")
+    assert "第 2 轮通过" in note and "提醒 1 条" in note and "待采集 1 条" in note
 
 
 def test_预研没收到辩论结论时不做覆盖标注(tmp_path):

@@ -29,6 +29,9 @@ from pathlib import Path
 # 导入，不要在两处各写一遍：next_actions 要按这个文件在不在决定
 # 教人重跑哪一阶段，写岔了就会教人去覆盖已核实的判断项。
 ASSUMPTIONS_MD = "assumptions.md"
+# 判断项审核（子项目三）：每一轮的完整记录；停下时最后一稿的可改底稿。
+ASSUMPTIONS_ROUNDS_MD = "assumptions_rounds.md"
+ASSUMPTIONS_FAILED_JSON = "assumptions_failed.json"
 
 
 class Stage(str, Enum):
@@ -129,6 +132,10 @@ _PREFIX = (
     # AssumeFailed / 调用失败）以「DCF 判断项（」开头，那三条确实没产出
     # 判断项，仍落「未生成」。见 `full._assumption_caveat_note`。
     ("判断项待复核：", "  ⚠ "),
+    # 判断项审核（子项目三）停下交人工 / 第二阶段读回人改过的判断项：都是「算
+    # 出来了或停在那儿、必须被看见」，不是「未生成」。
+    ("判断项审核", "  ⚠ "),
+    ("判断项未经审核：", "  ⚠ "),
     # 第二阶段读回第一阶段落盘的公司公告：**成功**路径，为读者报告「读回了
     # 几篇、第一阶段候选与挑选各多少」——既不是警告也不是缺了什么产物。
     # 该条原先以「公司公告 N 篇…」起头、不匹配任何前缀，每一次成功的
@@ -281,6 +288,14 @@ def next_actions(stage: Stage, code: str,
                 f"     python -m ir_agent {code} {y} --assume {out} "
                 f"--reviewed-by <你的名字>",
             ]
+            if (Path(out) / ASSUMPTIONS_FAILED_JSON).exists():
+                acts.append(
+                    f"判断项审核停下。若要人工给出判断项：以 {out}/"
+                    f"{ASSUMPTIONS_FAILED_JSON} 为底稿改好，存为 {out}/assumptions.json"
+                    f"（各轮审核意见见 {out}/{ASSUMPTIONS_ROUNDS_MD}），再跑第二阶段：\n"
+                    f"     python -m ir_agent {code} {y} --value {out} "
+                    "--approved-by <你的名字>\n"
+                    "     —— 读回时会标注「判断项未经审核」。")
             if stale:
                 acts.append(
                     f"⚠ {out}/{ASSUMPTIONS_MD} 是**上一轮**留下的，不是本轮产物"

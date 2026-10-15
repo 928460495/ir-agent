@@ -22,7 +22,9 @@ from ir_agent.drivers import DecompositionInvalid
 from ir_agent.market import market_of
 from ir_agent import dcf
 from ir_agent.research import (
+    ASSUMPTIONS_FAILED_JSON,
     ASSUMPTIONS_MD,
+    ASSUMPTIONS_ROUNDS_MD,
     ResearchOutcome,
     Stage,
     assumption_template,
@@ -1079,6 +1081,8 @@ DEBATE_REPORT = "debate_report.md"
 # 早晚分叉（本仓库已经在占位符期间上踩过这种分叉）。research 不能反向
 # 导入 full（full 依赖 research），所以单一定义放在被依赖的那一侧。
 ASSUMPTIONS_JSON = "assumptions.json"
+# 判断项审核（子项目三）：最后一轮逐条结论、是否通过与取值指纹。
+ASSUMPTIONS_REVIEW_JSON = "assumptions_review.json"
 # 判断项那一步的超时。比默认的 900s 更长 —— 它是全链路输出最长的调用，
 # 而输出长度不受提示词控制。配合 `retry_timeout=True`（见下方调用处）。
 ASSUME_TIMEOUT = 1500
@@ -2430,11 +2434,16 @@ def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
 def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
                          decomps=None, factor_data=None, balances=None,
                          method_review=None) -> str:
-    """校准 → AI 填判断项 → 写出待核实清单。返回失败说明。
+    """校准 → AI 填判断项 → AI 审核 → 写出待核实清单。返回失败或保留说明。
 
-    `decomps`/`factor_data` 给定时按因子分解填写（方法论预研 + 定向
-    采集的产出），否则退回两标量模式 —— 预研失败时的降级路径，见
-    `_research_methodology`。
+    `decomps`/`factor_data` 给定时按因子分解填写（方法论预研 + 定向采集的
+    产出），否则是两标量模式 —— 只在取不到行业分类时出现。
+
+    **判断项合格与否全部由审核者判定**（子项目三，spec 2026-10-15）：代码只读数、
+    计算、核对，把结果作为事实交给审核者；门③ 原先的两道 AI 审核（`factor_review`
+    [对账]、判断项假设辩论）已并进审核者。审核 3 轮不过 / 答不全 / 审核通过但算不
+    下去 → 停下交人工：写各轮记录与最后一稿，**不写 assumptions.json**（那是给门③
+    批准的东西，未通过审核的稿子不能冒充它）。
     """
     from ir_agent import assume, assume_review
 
@@ -2452,76 +2461,33 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     latest_annual = _latest_annual_period(r.ledger, as_of)
     base_margin = (_fact_value(r.ledger, "gross_margin", latest_annual, as_of)
                   if latest_annual else None)
-    decide_kw = dict(ledger=r.ledger, body=body, as_of=as_of, code=code,
-                     decomps=decomps, factor_data=factor_data,
-                     base_margin=base_margin,
-                     # 锚定输入：清单上展示的毛利率路径与建模时同一套基期。
-                     anchor=assume.anchor_from_cal(cal),
-                     # 辩论② 的平衡三元组：偏离它的行必须填 deviation。
-                     balances=balances)
+    # 审核者的账本事实目录：原判断项假设辩论靠它发现过「应付账款天数在同业 17
+    # 分位，证伪了『对供应商占款强』」—— 辩论并进审核者，这份资料一起交过去。
     try:
-        a = assume.decide(client, cal["judg"], labels, ctx, judge=client, **decide_kw)
+        catalog = FactCatalog.from_ledger(r.ledger, period=r.period, as_of=as_of,
+                                          extra_periods=_catalog_periods(r)
+                                          ).render_for_prompt()
+    except Exception:                                       # noqa: BLE001
+        catalog = ""
+    try:
+        a = assume.decide(client, cal["judg"], labels, ctx, judge=client,
+                          ledger=r.ledger, body=body, as_of=as_of, code=code,
+                          decomps=decomps, factor_data=factor_data,
+                          base_margin=base_margin,
+                          # 锚定输入：清单上展示的毛利率路径与建模时同一套基期。
+                          anchor=assume.anchor_from_cal(cal),
+                          # 辩论② 的平衡三元组：作为事实交审核者 [平衡点]。
+                          balances=balances, catalog=catalog,
+                          # 预研阶段审核者的提醒/待采集（子项目二决定 7）。
+                          method_review=list(method_review or []))
     except assume_review.ReviewStop as e:
-        return f"DCF 判断项（{e}）"
-    except assume.AssumeFailed as e:
-        return f"DCF 判断项（{str(e)[:200]}）"
+        return _stop_for_assume_review(out, arts, e, code=code)
     except ClaudeCliError as e:
-        # 模型接口本身失败（额度用尽、超时、CLI 报错）与「填不出合格的
-        # 判断项」是两件事，但处置必须一样: **记进 skipped、让整轮继续**。
-        # 此前这里只捕 AssumeFailed，于是一个额度错误会以未捕获异常的形式
-        # 把已经写好、已经付过钱的 brief.md 与 debate.md 连同整轮分析一起
-        # 带走 —— 实测 600584 第三次实跑正是这样炸的，辩论已完成并回写了
-        # 5 项挑战，却因为下一个调用撞上额度上限而一个产物都没留下。
-        # run_analysis 里其他每一个联网环节都做了这件事（见产业链、因子
-        # 采集、撰写/辩论），唯独这一处漏了。**能力边界不是故障，
-        # 整轮研究不该因此停摆。**
-        return f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
-
-    # 预研阶段审核者的提醒/待采集带进门③ 清单（子项目二决定 7）。
-    a.method_review = list(method_review or [])
-
-    # ── 因子结构审查（第 3 道：清单式，不设闸门）────────────────
-    # **必须在写盘之前跑，但 checklist 要取写盘之前的 describe()** ——
-    # 审查结果自己会进 describe()，拿带结果的清单去喂审核者是循环引用。
-    # **条件是「算得出算术后果」，不是「有分解式」。** 分解式被拒时
-    # `decomps` 为空，而那恰恰是最该审一眼的一轮（实测生益科技 2026-10-06:
-    # 分解式因重复计算被逐出，这两道检查于是一次都没跑）。
-    if a.implied is not None:
-        from ir_agent import factor_review
-        try:
-            a.review = factor_review.review(
-                client, a._m() or a.decomps, checklist=a.describe(),
-                implied=a.implied.describe(),
-                drivers=tuple(assume.DRIVERS) if not assume.has_model(a) else ())
-        except Exception as e:                              # noqa: BLE001
-            # **审查失败不该毙掉判断项。** 它是一道补充意见，不是闸门 ——
-            # 与本仓库「这一步失败不该毙掉已经写好的正文」同一条原则。
-            a.review = None
-            print(f"因子结构审查未完成：{str(e)[:120]}", file=sys.stderr)
-        contra = [f for f in (getattr(a.review, "flagged", None) or [])
-                  if f.kind == "对账"]
-        if contra:
-            a = _refill_on_contradiction(a, contra, client=client,
-                                         judg=cal["judg"], labels=labels,
-                                         ctx=ctx, decide_kw=decide_kw)
-
-    # ── 假设的数据合理性辩论（第 4 道：开放式，同样不设闸门）────────
-    # 与 factor_review 分工: 那边清单式（可枚举），这边开放式（产能、竞争
-    # 格局、周期位置 —— 规则写不出来的那部分）。输入带算术后果，否则它只是
-    # 同一个模型换个角色再说一遍。
-    if a.implied is not None:
-        from ir_agent.debate import run_debate
-        try:
-            cat = FactCatalog.from_ledger(r.ledger, period=r.period,
-                                          as_of=as_of,
-                                          extra_periods=_catalog_periods(r))
-            a.debate = run_debate(cat, draft=a.describe(), client=client,
-                                  period=r.period,
-                                  scale=a.implied.describe(), max_rounds=1)
-        except Exception as e:                              # noqa: BLE001
-            # 同一条原则：这一步失败不该毙掉判断项。
-            a.debate = None
-            print(f"假设辩论未完成：{str(e)[:120]}", file=sys.stderr)
+        # 模型接口本身失败（额度用尽、超时、CLI 报错）：**记进 skipped、让整轮
+        # 继续**，写明是接口问题、重跑即可。实测 600584 第三次实跑：辩论已完成
+        # 并回写了 5 项挑战，却因为下一个调用撞上额度上限而一个产物都没留下。
+        return (f"DCF 判断项（{e.__class__.__name__}: {str(e)[:160]}）"
+                "—— 模型接口问题，原样重跑 --assume 即可")
 
     (out / ASSUMPTIONS_MD).write_text(
         _anchor_banner(cal, labels, rebased=bool(a.margin_bases)) + a.describe()
@@ -2531,59 +2497,40 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
         json.dumps(assume.to_json(a, code=code, approved_by="",
                                   approved_at=""),
                    ensure_ascii=False, indent=2), encoding="utf-8")
+    (out / ASSUMPTIONS_REVIEW_JSON).write_text(
+        assume_review.dump_review(a.judge_review, passed=True), encoding="utf-8")
+    (out / ASSUMPTIONS_ROUNDS_MD).write_text(
+        assume_review.rounds_markdown(a.judge_rounds), encoding="utf-8")
     arts[ASSUMPTIONS_ART] = str(out / ASSUMPTIONS_MD)
-    if getattr(a, "degraded_raw", ""):
-        # 降级时把最后一次的**完整**模型输出落盘。此前只有末 400 字进了
-        # 降级说明，而因子模式一次要输出几十行、故障常在中段——实测排查
-        # 时只能靠残缺的尾巴反推格式，每一轮都是猜。这份草稿不进
-        # assumptions.md（那是给人批准的清单，不该混进失败稿），单独成文件。
-        (out / FAILED_RAW).write_text(a.degraded_raw, encoding="utf-8")
-        arts["因子模式失败时的原始输出"] = str(out / FAILED_RAW)
-    # I4：因子模式连续失败后 assume.decide 会退回两标量模式，不是抛错——
-    # 判断项照常写出，但降级这件事不能只留在 assumptions.md 里，终端的
-    # skipped 清单是读者第一眼看到的地方，同一条原因要在这里再报一次。
+    arts["判断项审核各轮记录"] = str(out / ASSUMPTIONS_ROUNDS_MD)
     return _assumption_caveat_note(a)
 
 
-def _refill_on_contradiction(a, contra, *, client, judg, labels, ctx, decide_kw):
-    """门③ [对账] 判出「矛盾」→ 把审核意见与上一稿交回填写者，重填一次。
+def _stop_for_assume_review(out: Path, arts: dict, e, *, code: str) -> str:
+    """判断项审核停下交人工：落各轮记录、最后一稿的原文与可改的 JSON 底稿。
 
-    生益科技 2026-10-14：毛利率两个 pp 因子按小数填（理由栏「5.47 个百分点」、
-    表里 0.0547），[对账] 判出了矛盾，但它只标注不阻断，数值原样进了批准清单。
-    与方法论预研「审核者给建议、提出者改」同一个闭环：判断仍由模型做，不加代码
-    闸门；只重填一次，重填稿仍矛盾就照常标注、交人工。重填失败或退回两标量模式
-    时保留第一稿 —— 补充环节失败不该毙掉已经填好的判断项。
-    """
-    from ir_agent import assume, factor_review
+    底稿写 `assumptions_failed.json` 而不是 `assumptions.json` —— 后者是门③ 批准的
+    对象；人以底稿改好、自己存成 assumptions.json 再跑 --value，读回时会因没有通过
+    的审核记录而标注「人工修改后未经审核」（spec 一）。"""
+    from ir_agent import assume, assume_review
 
-    first = [f"- [{f.kind}] {f.subject}：**{f.verdict}** —— {f.why}" for f in contra]
-    draft = a.describe()
-    fb = (f"{ctx}\n\n【门③ 对账审核：上一稿判为「矛盾」，请据此重填】\n"
-          "审核者意见：\n" + "\n".join(first)
-          + f"\n\n上一稿（三档取值与理由）：\n{draft}\n\n"
-          "逐条回应审核意见：数值写错单位的改数值；理由与取值对不上的，改取值或"
-          "改理由，使二者自洽。重新输出全部假设行。")
-    try:
-        b = assume.decide(client, judg, labels, fb, **decide_kw)
-    except (assume.AssumeFailed, ClaudeCliError) as e:
-        a.refill_note = [f"对账判出矛盾，退回重填失败（{str(e)[:120]}），保留第一稿。"]
-        return a
-    if b.degraded and not a.degraded:
-        a.refill_note = ["对账判出矛盾，重填稿退回了两标量模式，保留第一稿。"]
-        return a
-    b.method_review = list(a.method_review)
-    if b.implied is not None:
-        try:
-            b.review = factor_review.review(
-                client, b._m() or b.decomps, checklist=b.describe(),
-                implied=b.implied.describe(),
-                drivers=tuple(assume.DRIVERS) if not assume.has_model(b) else ())
-        except Exception as e:                              # noqa: BLE001
-            b.review = None
-            print(f"因子结构审查（重填稿）未完成：{str(e)[:120]}", file=sys.stderr)
-    # 审完再挂第一稿的意见 —— 挂在前面会进 describe()，喂给审核者就带了偏见。
-    b.refill_note = ["对账判出矛盾，已退回填写者重填一次；以下是第一稿的意见：", *first]
-    return b
+    (out / ASSUMPTIONS_ROUNDS_MD).write_text(
+        assume_review.rounds_markdown(e.rounds), encoding="utf-8")
+    arts["判断项审核各轮记录"] = str(out / ASSUMPTIONS_ROUNDS_MD)
+    if e.rounds:
+        (out / FAILED_RAW).write_text(e.rounds[-1].raw, encoding="utf-8")
+        arts["判断项最后一稿（原文）"] = str(out / FAILED_RAW)
+    if e.last is not None and e.last.rows:
+        (out / ASSUMPTIONS_FAILED_JSON).write_text(
+            json.dumps(assume.to_json(e.last, code=code, approved_by="",
+                                      approved_at=""),
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+        arts["判断项最后一稿（可改的底稿）"] = str(out / ASSUMPTIONS_FAILED_JSON)
+    return f"{e} —— 各轮记录：{out / ASSUMPTIONS_ROUNDS_MD}"
+
+
+
+
 
 
 def _assumption_caveat_note(a) -> str:
@@ -2601,24 +2548,14 @@ def _assumption_caveat_note(a) -> str:
     —— 消息自己说未阻断，标签说没生成。
     """
     notes: list[str] = []
-    if a.degraded:
-        notes.append(a.degraded)
-    # 放宽因子模式引文核验之后的代价：依据没被拒绝，但也不能只悄悄
-    # 留在 assumptions.md 的表格里等人自己逐行发现——终端产物清单是
-    # 读者第一眼看到的地方，同一件事要在这里也露出来，而不是非致命
-    # 就等于"没有的事"。
-    if getattr(a, "refill_note", None):
-        notes.append("门③ 对账判出矛盾，已退回重填" if "已退回填写者重填一次"
-                     in a.refill_note[0] else a.refill_note[0].rstrip("。"))
-    upheld = getattr(getattr(a, "debate", None), "upheld_count", 0)
-    if upheld:
-        notes.append(f"假设辩论有 {upheld} 项挑战成立（数据合理性，"
-                     "逐条见清单顶部）——**取值未因此改动**，请自行判断")
-    flagged = getattr(getattr(a, "review", None), "flagged", None)
-    if flagged:
-        notes.append(f"因子结构审查标出 {len(flagged)} 项需人工复核"
-                     "（两两重叠 / 合成值与理由栏矛盾 / 不可测，"
-                     "逐条见清单顶部）")
+    # 判断项审核的提醒、待采集：通过了，但审核者认为有牵强或缺资料的地方 —— 终端
+    # 产物清单是读者第一眼看到的地方，不能只留在 assumptions.md 里。
+    res = getattr(a, "judge_review", None)
+    if res is not None and res.flagged():
+        c = res.counts()
+        notes.append(f"判断项审核第 {res.rounds} 轮通过，提醒 {c['提醒']} 条、"
+                     f"待采集 {c['待采集']} 条（逐条见清单顶部）")
+    # 引文逐字核验不过只标注、交审核者判断 —— 终端也要露出来。
     unverified = sum(1 for r in a.rows if getattr(r, "basis_unverified", ""))
     if unverified:
         notes.append(f"{unverified} 行依据未能逐字核验（已标注，未阻断，"
