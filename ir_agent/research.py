@@ -236,8 +236,9 @@ def next_actions(stage: Stage, code: str,
             "     这两项模型推不出来，只能靠分析判断 —— 其余假设"
             "（费用率、周转天数、折旧率、税率、β、Kd）由历史数据校准，"
             "不需要你确认。",
-            f"要改数值就改 {out}/assumptions.json 的 rows，"
-            "改完仍会重新校验（三档须严格拉开、每年都要有值）。",
+            f"要改数值就改 {out}/assumptions.json 的 rows。改过的格子不再送 AI 审核，"
+            "第二阶段会标注「判断项未经审核」并列出改动；只有算不下去（缺年份、缺基期等）"
+            "才会停下。",
             "确认后进入第二阶段 —— 建模并产出完整研报：\n"
             f"     python -m ir_agent {code} {y} --value {out} "
             f"--approved-by <你的名字>",

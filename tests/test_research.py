@@ -358,3 +358,15 @@ def test_财经媒体级来源的警告不被标成未生成():
     from ir_agent.research import _mark
     s = "依据引用财经媒体级来源 2 处，核验通过但分级规则是「仅作线索，不得作为依据。」"
     assert _mark(s) == "  ⚠ "
+
+
+def test_门三指引不再说改完会重新校验():
+    """子项目三：第二阶段不再按内容拒绝人批准的判断项，只比对取值指纹、标注
+    「判断项未经审核」；只有算不下去才停。指引若还说「改完仍会重新校验（三档须
+    严格拉开…）」，就是在教人一件已经不存在的事。"""
+    from ir_agent.research import Stage, next_actions
+    txt = "\n".join(next_actions(Stage.AWAITING_ASSUME_REVIEW, "600183",
+                                 assumptions_path="out/x/assumptions.md",
+                                 out_dir="out/x", year=2025))
+    assert "重新校验" not in txt and "三档须严格拉开" not in txt
+    assert "未经审核" in txt
