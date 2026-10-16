@@ -1,6 +1,7 @@
 """判断项的审核者（spec 2026-10-15 子项目三）。不调模型。"""
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal as D
 
@@ -288,3 +289,54 @@ class TestShengyiReplay:
         j = Judge()
         a, _, _ = _run(_Filler(seven), j)
         assert "缺少可核验的依据" not in j.prompts[0]
+
+
+# ══ 生益科技 2026-10-17 试跑后：审核者判得对、填写者却改不了的两类致命 ═══════
+
+ANCHOR = {"rev": 190.2561, "cogs": 131.8622,
+          "share3": (0.446, 0.4785, 0.5204), "gm_rest3": (0.3369, 0.3069, 0.2769),
+          "base_rev": 284.3113845944}
+
+
+class TestAnchorFacts:
+    """A：审核者不知道半年报锚定，三轮都把「第 2 年起毛利率比手算高约 4.22pp」判成
+    致命、还在补充里建议技术侧排查合成引擎 —— 它手算得没错，缺的是这条事实。"""
+
+    def test_事实里写明首年锚定值与第二年起的基期平移(self):
+        j = Judge()
+        _run(_Filler(_draft()), j, anchor=ANCHOR)
+        p = j.prompts[0].split("**只给你的、代码算出的事实**")[1].split("**账本事实目录**")[0]
+        assert "【半年报锚定】" in p
+        assert "中性 30.69%" in p, "首年锚定后的毛利率（Base 档）"
+        v = assume._anchor_values(ANCHOR)          # 工作簿用的同一份三档
+        assert f"毛利率 悲观 {v['bear']:.2%} / 中性 {v['base']:.2%} / 乐观 {v['bull']:.2%}" in p
+        assert re.search(r"第 2 年起.*基期平移.*中性 \+\d+\.\d+pp", p, re.S)
+
+    def test_没有锚定就不写(self):
+        j = Judge()
+        _run(_Filler(_draft()), j)
+        facts = j.prompts[0].split("**只给你的、代码算出的事实**")[1].split("**账本事实目录**")[0]
+        assert "【半年报锚定】" not in facts
+
+    def test_规则让审核者手算时加上平移量(self):
+        rule = [l for l in AR.RULES.splitlines() if l.startswith("- 合成：")][0]
+        block = rule + AR.RULES.split(rule)[1].split("\n- 后果：")[0]
+        assert "半年报锚定" in block and "不要当成引擎" in block
+
+
+class TestBalanceIsFixedInput:
+    """B：平衡点是辩论② 的固定输入（门② 已给人审过），填写者改不了。生益科技第 3
+    轮：填写者照审核建议写了「假设: 提价传导 | 平衡点 | 2.0 | 3.5 | 5.47」，代码读
+    不进来，审核者又以「没被系统读取」判致命。"""
+
+    def test_审核规则_平衡点自身的错不判致命_不建议重写(self):
+        rule = [l for l in AR.RULES.splitlines() if l.startswith("- 平衡点：")][0]
+        block = rule + AR.RULES.split(rule)[1].split("\n- 依据：")[0]
+        assert "固定输入" in block and "改不了" in block
+        assert "不要因为平衡点自身的错误判致命" in block
+        assert "不要建议填写者重写平衡点" in block
+
+    def test_填写者提示词_平衡点改不了_按换算后的值对齐(self):
+        txt = assume.build_prompt(JUDG, LABELS, "上下文", decomps=MODEL, factor_data={})
+        assert "平衡点由辩论② 给出，你改不了" in txt
+        assert "不要另写平衡点行" in txt

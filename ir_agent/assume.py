@@ -957,6 +957,19 @@ def _anchor_values(anchor: dict) -> dict[str, Decimal]:
     return out
 
 
+def anchor_year1(anchor: dict) -> dict[str, tuple[float, float]]:
+    """半年报锚定后三档各自首年的 (营收增速, 毛利率)。给判断项审核者看的事实
+    （子项目三：审核者不知道锚定，把第 2 年起的基期平移当成了引擎错误）。三档的
+    排列与 `_anchor_values` 一致。"""
+    from ir_agent.dcf import anchored_year1
+
+    return {name: anchored_year1(rev_h=anchor["rev"], cogs_h=anchor["cogs"],
+                                 share=float(anchor["share3"][i]),
+                                 gm_rest=float(anchor["gm_rest3"][i]),
+                                 base_rev=anchor["base_rev"])
+            for i, name in enumerate(("bull", "base", "bear"))}
+
+
 def margin_bases(a: AssumptionSet, base_margin: Decimal,
                  anchor: dict | None) -> dict[str, list[Decimal]] | None:
     """锚定开启时 `基期(毛利率)` 的按档、按年取值；没有锚定返回 None。
@@ -1709,6 +1722,10 @@ PROMPT = """把前面的分析结论，落到 DCF 模型的判断项上。
 **你交的稿子由审核者逐项审核**（代码不做判定，只把读到的值、算出的路径、引文
 核验结果交给审核者）。有致命项，会带着修改建议退回给你重填，最多 3 轮 ——
 被退回时按建议改，并重新输出全部行。
+
+**平衡点由辩论② 给出，你改不了**（它已在门② 给人审过）。审核者指出平衡点单位
+有误时（pp 因子写成了小数），按换算后的值对齐你的中性档、在理由里写明 ——
+不要另写平衡点行，代码不会读它。
 
 **硬性要求**
 - 三档必须**严格拉开**（悲观 < 中性 < 乐观）。模板默认三档同值，

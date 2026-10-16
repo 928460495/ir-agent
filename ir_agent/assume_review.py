@@ -122,15 +122,17 @@ RULES = """你是研究总监，正在审核一份 **DCF 判断项**（营收与
   「5.47 个百分点」、表里却是 0.0547，就是缩小了 100 倍）。三档方向与间距（侵蚀类
   因子悲观应更负）；逐年路径是否讲得通；公式用 `基期(·)` 时填的应是相对基期的
   累计值，用 `上期(·)` 时是逐年变化。
-- 平衡点：中性档与辩论② 平衡点的关系、偏离的理由是否成立；**平衡点本身的单位
-  是否可信**（pp 因子的平衡点写成小数也是常见错误）。不可信时在建议里写出换算后
-  的值，由填写者换算。
+- 平衡点：辩论② 的平衡点是**固定输入**（已在门② 给人审过），填写者改不了。判的
+  是填写者的中性档与平衡点的关系、偏离的理由是否成立。平衡点本身的单位可疑时
+  （pp 因子写成小数是常见错误），在理由里写出换算后的值，并按换算后的值判断填写者
+  是否对齐 —— 不要因为平衡点自身的错误判致命，也不要建议填写者重写平衡点。
 - 依据：依据能否支撑取值（代码给了引文核验结果；核验不过不等于捏造，可能是
   概括）；「无数据（估计）」是否属实、「同上」是否合理；理由与取值是否自洽；是否
   回应了方法论审核遗留的提醒与待采集。
 - 合成：代码按公式合成的三档营收增速与毛利率是否拉开、是否单调；合成路径与理由
   栏引用的参照（行业增速、历史 CAGR、同业水平）是否自洽；与半年报锚定的首年是否
-  衔接。
+  衔接。有半年报锚定时（见代码事实【半年报锚定】），第 2 年起的毛利率已含基期平移，
+  手算时要加上平移量 —— 那是代码的处理，不要当成引擎错误。
 - 后果：5 年累计倍数、隐含市占率，放到行业格局、产能、CR5、周转与杠杆（账本事实
   目录里有）下看是否可能。
 
@@ -150,7 +152,7 @@ RULES = """你是研究总监，正在审核一份 **DCF 判断项**（营收与
 """
 
 
-def facts_for_judge(a, *, balances=(), ledger=None, as_of=None) -> str:
+def facts_for_judge(a, *, balances=(), ledger=None, as_of=None, anchor=None) -> str:
     """只给审核者看的、代码现算的事实（spec 二）。"""
     from ir_agent import assume
 
@@ -179,6 +181,8 @@ def facts_for_judge(a, *, balances=(), ledger=None, as_of=None) -> str:
                     lines.append(f"- 第{y + 1}年 {cn} {v}（悲观 / 中性 / 乐观）")
         except assume.AssumeFailed as e:
             lines.append(f"- 算不出来：{e}")
+    if anchor:
+        lines += _anchor_lines(a, anchor)
     if a.implied is not None:
         lines += ["", f"【算术后果】{a.implied.describe()}"]
     bal = [b for b in balances or () if getattr(b, "mid", None) is not None]
@@ -194,6 +198,27 @@ def facts_for_judge(a, *, balances=(), ledger=None, as_of=None) -> str:
             lines += [""] + decl
     lines += ["", "【代码读数与核对】", facts.text() if facts else "（未核对）"]
     return "\n".join(lines)
+
+
+def _anchor_lines(a, anchor: dict) -> list[str]:
+    """半年报锚定是代码的处理，填写者改不了 —— 不告诉审核者，它用「年报基期 + 累计
+    pp」手算第 2 年起的毛利率，怎么都对不上（生益科技 2026-10-17 第 1–3 轮）。"""
+    from ir_agent import assume
+
+    y1 = assume.anchor_year1(anchor)
+    order = (("bear", "悲观"), ("base", "中性"), ("bull", "乐观"))
+    g = " / ".join(f"{cn} {y1[k][0]:.2%}" for k, cn in order)
+    m = " / ".join(f"{cn} {y1[k][1]:.2%}" for k, cn in order)
+    lines = ["", "【半年报锚定】（代码的处理，填写者改不了）",
+             f"- 首个预测年由已披露中期锚定，建模时第 1 年用这组值替换合成表的第 1 年：营收增速 "
+             f"{g}；毛利率 {m}"]
+    mb = a.margin_bases or {}
+    if all(len(mb.get(k) or []) > 1 for k, _ in order):
+        sh = "、".join(f"{cn} {(mb[k][1] - mb[k][0]) * 100:+.2f}pp" for k, cn in order)
+        lines.append("- 毛利率公式用 基期(毛利率)，第 2 年起各档的基期平移为「年报基期 + "
+                     f"(锚定值 − 第 1 年公式值)」：{sh} —— 合成表第 2 年起已含这个平移，"
+                     "用「年报基期 + 累计 pp」手算时要加上它。")
+    return lines
 
 
 def review(judge, *, draft: str, materials: str, facts: str, catalog: str,
@@ -318,7 +343,8 @@ def fill_and_review(filler, judge, *, judg: dict, labels: list[str], context: st
         a.model = model
         if model is not None and not facts.blocking:
             a.residuals = assume._reconcile_model(model, ledger, as_of)
-        ftxt = facts_for_judge(a, balances=balances, ledger=ledger, as_of=as_of)
+        ftxt = facts_for_judge(a, balances=balances, ledger=ledger, as_of=as_of,
+                               anchor=anchor)
         try:
             res = review(judge, draft=raw, materials=materials, facts=ftxt,
                          catalog=catalog, expected=checklist(a, balances),
