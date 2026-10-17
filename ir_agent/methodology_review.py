@@ -189,12 +189,22 @@ def parse(raw: str, expected: list[tuple[str, str]],
         if not m:
             continue
         kind, rest = m.group(1), m.group(2).strip()
-        hit = next(((s, h) for s in sorted(by_kind.get(kind, []), key=len, reverse=True)
-                    if (h := _subject_rx(kind, s).match(rest))), None)
-        if hit is None:
-            continue
-        subj, h = hit
-        tail = rest[h.end():].lstrip()
+        cands = sorted(by_kind.get(kind, []), key=len, reverse=True)
+        # **先精确、后容错。** 容错（忽略 @期间、[公式] 后抄了「= …」）会让不同的
+        # 条目撞名 —— 贵州茅台 2026-10-17：同一 key 声明了 @2025FY 与 @2026H1 两期，
+        # 忽略期间后两条匹配式相同，@2026H1 的回答被 @2025FY 先认领，审核卡成「未完成」。
+        # 审核者照抄了条目名（后面紧跟冒号）就按原名认；只有对不上时才容错。
+        subj = next((s for s in cands if rest.startswith(s)
+                     and rest[len(s):].lstrip()[:1] in ("：", ":")), None)
+        if subj is not None:
+            end = len(subj)
+        else:
+            hit = next(((s, h) for s in cands
+                        if (h := _subject_rx(kind, s).match(rest))), None)
+            if hit is None:
+                continue
+            subj, end = hit[0], hit[1].end()
+        tail = rest[end:].lstrip()
         if not tail or tail[0] not in "：:":
             continue
         tail = tail[1:].strip().lstrip("*")

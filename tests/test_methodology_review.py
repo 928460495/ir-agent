@@ -330,3 +330,20 @@ def test_解析器可换一套类别_合成条目后抄了公式也认():
                   kinds=("取值", "平衡点", "依据", "合成", "后果"))
     assert [v.level for v in got] == ["致命", "通过"]
     assert got[0].suggest == "0.0547 改为 5.47"
+
+
+def test_同一key声明了两个期间_两条各认各的():
+    """贵州茅台 2026-10-17 第二次调用：提出者在同一个因子里声明了
+    [[operating_tax_surcharge@2025FY]] 与 [[operating_tax_surcharge@2026H1]]。
+    容错匹配（忽略 @期间）下两条的匹配式一模一样，审核者对 @2026H1 的回答被
+    @2025FY 那条先认领，@2026H1 那条成了「没答」，补答两次照旧 → 审核未完成、整轮
+    停下。审核者照抄了条目名时，必须先精确匹配。"""
+    exp = [("账本", "税金附加率变动_pp [[operating_tax_surcharge@2025FY]]"),
+           ("账本", "税金附加率变动_pp [[operating_tax_surcharge@2026H1]]")]
+    raw = ("[账本] 税金附加率变动_pp [[operating_tax_surcharge@2025FY]]：致命　全年口径　建议：改 H1\n"
+           "[账本] 税金附加率变动_pp [[operating_tax_surcharge@2026H1]]：提醒　半年口径无误")
+    got = R.parse(raw, exp)
+    assert [v.level for v in got] == ["致命", "提醒"]
+    # 顺序反过来也一样
+    got = R.parse("\n".join(reversed(raw.splitlines())), exp)
+    assert [v.level for v in got] == ["致命", "提醒"]
