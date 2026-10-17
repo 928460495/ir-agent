@@ -63,12 +63,19 @@ def _num(tok: str, what: str, raw: str) -> Decimal | None:
     if t in _NONE:
         return None
     pct = t.endswith("%")
+    # **pp 写的是百分点数字本身**：「0.5pp」读作 0.5，与判断项 pp 因子的读法一致。
+    # 贵州茅台 2026-10-17：裁决者写对了「0.5pp」，此前这里不认、还提示「请写成
+    # 0.08 或 8%」，辩论② 连挂三次作废 —— 生益科技把 5.47 个百分点写成 0.0547
+    # 也是被这句报错引过去的。
+    pp = t.lower().endswith("pp")
+    body = t[:-1] if pct else (t[:-2].rstrip() if pp else t)
     try:
-        v = Decimal(t[:-1] if pct else t)
+        v = Decimal(body)
     except InvalidOperation as e:
         raise StanceFailed(
-            f"{what} 的数值 {t!r} 解析不出来 —— 请写成 0.08 或 8% 这类"
-            f"可解析的数，不要写「约」「左右」这类模糊词。", raw=raw) from e
+            f"{what} 的数值 {t!r} 解析不出来 —— 请写成可解析的数：变化率写 8% 或 "
+            f"0.08，pp 写百分点数字本身（0.5 或 0.5pp，不要换成小数）；不要写「约」"
+            f"「左右」这类模糊词。", raw=raw) from e
     return v / 100 if pct else v
 
 

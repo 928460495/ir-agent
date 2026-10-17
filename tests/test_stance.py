@@ -516,3 +516,19 @@ class TestStancePromptHasCorpus:
             run_stance(lambda p: next(replies), round_="B", subjects=["产能"],
                        context="", catalog=cat, ledger=led,
                        as_of=date(2026, 10, 13), corpus=cp)
+
+
+def test_pp后缀照数字本身读():
+    """贵州茅台 2026-10-17：裁决者把 pp 因子的平衡点正确地写成「0.5pp」，代码只认
+    裸数与 %，报「请写成 0.08 或 8%」，连挂三次、辩论② 作废。这句报错也正是生益
+    科技把「5.47 个百分点」写成 0.0547 的源头 —— 下游判断项被平衡点牵着走。
+    pp 写的就是百分点数字本身：0.5pp 读作 0.5，与判断项 pp 因子的读法一致。"""
+    b = parse_balance("平衡｜批价拉动｜0.2pp｜0.5pp｜1 pp｜理由")[0]
+    assert (b.bear, b.mid, b.bull) == (D("0.2"), D("0.5"), D("1"))
+
+
+def test_读不出来的报错不把pp往小数上引():
+    with pytest.raises(StanceFailed) as e:
+        parse_balance("平衡｜批价拉动｜0.2pp｜约0.5pp｜1pp｜理由")
+    msg = str(e.value)
+    assert "pp" in msg and "0.5pp" in msg, "报错要给 pp 的正确写法"
