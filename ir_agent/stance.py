@@ -273,16 +273,18 @@ def check_interval(balances: list[Balance]) -> list[str]:
 
     端点算通过：平衡点取在端点上是合法结论（一侧完全说服了裁决者）。
     纯文字的平衡点（辩论①）跳过 —— 这条检查对它无从适用。
+
+    **不管两侧谁大谁小。** 此前空方值高于多方值即判「倒挂、搞反了」—— 暗含
+    「数值越大越利好」。贵州茅台 2026-10-17：「拖累」类因子按幅度写，空方（拖累
+    大）数值更大，辩论② 连挂三次作废。因子往哪个方向算悲观，代码判断不了；符号
+    与分解式是否对得上，交判断项审核者的 [平衡点]、[取值] 判断。
     """
     out: list[str] = []
     for b in balances:
         if b.mid is None:
             continue
-        if b.bear > b.bull:
-            out.append(f"「{b.subject}」两侧值倒挂：空方 {b.bear} 高于多方 "
-                       f"{b.bull} —— 两侧搞反了，不是一个区间")
-            continue
-        if not (b.bear <= b.mid <= b.bull):
+        lo, hi = sorted((b.bear, b.bull))
+        if not (lo <= b.mid <= hi):
             out.append(f"「{b.subject}」的平衡值 {b.mid} 落在两侧区间 "
                        f"[{b.bear}, {b.bull}] 之外 —— 裁决者只能在两侧给出的"
                        f"区间里选，不能自己造一个数")

@@ -135,11 +135,20 @@ class TestCheckInterval:
         probs = check_interval(parse_balance("平衡｜销量｜-2%｜-5%｜18%｜理由"))
         assert probs
 
-    def test_两侧值本身倒挂也被拦(self):
-        """空方给的比多方还高 —— 那不是区间，是两侧搞反了。"""
+    def test_空方值高于多方也通过_方向由审核者判(self):
+        """贵州茅台 2026-10-17：「拖累」类因子，裁决者按拖累幅度写，空方（拖累大）
+        数值更大 —— 代码默认「越大越利好」，判「两侧倒挂、搞反了」，辩论② 连挂三次
+        作废。因子往哪个方向算悲观，代码判断不了（与判断项环节删掉逐因子三档方向
+        闸门同理）；只留与方向无关的约束：平衡值落在两侧之间。"""
         from ir_agent.stance import check_interval
-        probs = check_interval(parse_balance("平衡｜销量｜20%｜10%｜5%｜理由"))
-        assert probs and "倒挂" in probs[0]
+        assert check_interval(parse_balance(
+            "平衡｜系列酒占比上升对毛利率的拖累｜0.50pp｜0.10pp｜-0.30pp｜理由\n"
+            "平衡｜材料成本上升对毛利率的拖累｜2.50pp｜2.00pp｜1.00pp｜理由")) == []
+
+    def test_空方值高于多方时_平衡值越界照样拦(self):
+        from ir_agent.stance import check_interval
+        probs = check_interval(parse_balance("平衡｜拖累｜2.50pp｜3.00pp｜1.00pp｜理由"))
+        assert probs and "之外" in probs[0] and "倒挂" not in probs[0]
 
     def test_边界值算通过(self):
         """平衡点取在端点上是合法的结论（一侧完全说服了裁决者）。"""
