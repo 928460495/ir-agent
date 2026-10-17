@@ -11,6 +11,7 @@ from ir_agent import strategy
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.sources.annual_sections import Section, SectionSet
 from ir_agent.strategy import Force, MoatKind, StrategyFailed
+from judge_stub import Judge
 
 D = Decimal
 AS_OF = date(2026, 9, 7)
@@ -59,34 +60,42 @@ def test_解析三部分():
                                                    "gross_margin"}
 
 
-def test_未知的护城河类型被驳回():
-    with pytest.raises(StrategyFailed, match="未知的护城河类型"):
-        strategy.parse(f"护城河: 品牌溢价 | 宽 | 「{QUOTE}」")
+def test_未知的护城河类型_记进读数事实():
+    v = strategy.parse(f"护城河: 品牌溢价 | 宽 | 「{QUOTE}」")
+    assert v.moats == [] and "不是规定的类型" in "\n".join(v.read_notes)
 
 
-def test_强度取值受限():
-    with pytest.raises(StrategyFailed, match="宽/窄/无"):
-        strategy.parse(f"护城河: 无形资产 | 很强 | 「{QUOTE}」")
-    with pytest.raises(StrategyFailed, match="高/中/低"):
-        strategy.parse(f"五力: 现有竞争强度 | 很激烈 | 中性 | 「{QUOTE}」")
+def test_强度不是规定的词_照读并记事实():
+    v = strategy.parse(f"护城河: 无形资产 | 很强 | 「{QUOTE}」")
+    assert v.moats and "宽/窄/无" in "\n".join(v.read_notes)
+    v = strategy.parse(f"五力: 现有竞争强度 | 很激烈 | 中性 | 「{QUOTE}」")
+    assert v.forces and "高/中/低" in "\n".join(v.read_notes)
 
 
-def test_字段不足直接驳回():
-    with pytest.raises(StrategyFailed, match="字段不足"):
-        strategy.parse("护城河: 无形资产 | 宽")
+def test_字段不足_记进读数事实():
+    v = strategy.parse("护城河: 无形资产 | 宽")
+    assert v.moats == [] and "字段不足" in "\n".join(v.read_notes)
 
 
-def test_缺依据驳回():
-    with pytest.raises(StrategyFailed, match="缺少可核验的依据"):
-        strategy.parse("护城河: 无形资产 | 宽 | 这是我的判断")
+def test_缺依据_记进读数事实():
+    v = strategy.parse("护城河: 无形资产 | 宽 | 这是我的判断")
+    assert v.moats and "没有给出依据" in "\n".join(v.read_notes)
+
+
+def test_引研报或转述也读得进():
+    """中国巨石 2026-10-17：五力引了研报，被判「需年报原文或占位符」连挂三次。"""
+    v = strategy.parse("五力: 现有竞争强度 | 高 | 对本司不利 | 转述：综合 东莞证券《玻纤行业深度报告》")
+    assert v.forces and v.forces[0].cites == ["玻纤行业深度报告"]
+    v = strategy.parse("五力: 供应商议价能力 | 中 | 中性 | 「玻纤价格企稳回升」——东莞证券《玻纤行业深度报告》")
+    assert v.forces and v.forces[0].bases and v.forces[0].bases[0].quote == "玻纤价格企稳回升"
 
 
 # ── 桥：不确定性必须映射到可调参数 ───────────────────────────
 
-def test_驱动因子必须在可调参数之列():
+def test_驱动因子不在可调参数之列_记事实():
     """「宏观需求波动」映射不到任何参数，在情景分析里没有出口。"""
-    with pytest.raises(StrategyFailed, match="不在可调参数之列"):
-        strategy.parse(f"不确定性: 需求波动 | 宏观环境 | 下调 | 「{QUOTE}」")
+    v = strategy.parse(f"不确定性: 需求波动 | 宏观环境 | 下调 | 「{QUOTE}」")
+    assert v.uncertainties and "不在可调参数之列" in "\n".join(v.read_notes)
 
 
 def test_可调参数与建模假设对齐():
@@ -94,41 +103,38 @@ def test_可调参数与建模假设对齐():
             "terminal_growth"} <= set(strategy.MAPPABLE_DRIVERS)
 
 
-def test_不确定性少于两条驳回():
+def test_不确定性少于两条记进事实():
     """少于两条，Bear/Base/Bull 就没有定性依据，只能靠调参数。"""
     v = strategy.parse(_out(uncerts=[
         f"不确定性: 渠道去库存 | revenue_growth | 下调 | 「{QUOTE}」"]))
-    with pytest.raises(StrategyFailed, match="至少两条"):
-        strategy.check(v, _led(), EVIDENCE, AS_OF)
+    assert any("至少两条" in x for x in strategy.facts(v, _led(), EVIDENCE, AS_OF))
 
 
 # ── 校验 ─────────────────────────────────────────────────────
 
 def test_引文必须逐字出自年报摘录():
     v = strategy.parse(_out(moats=["护城河: 无形资产 | 宽 | 「公司品牌力极强」"]))
-    with pytest.raises(StrategyFailed, match="不可核验"):
-        strategy.check(v, _led(), EVIDENCE, AS_OF)
+    assert any("核验不过" in x for x in strategy.facts(v, _led(), EVIDENCE, AS_OF))
 
 
 def test_五力必须五条都给():
     v = strategy.parse(_out(forces=[
         f"五力: {f.value} | 中 | 中性 | 「{QUOTE}」"
         for f in list(Force)[:3]]))
-    with pytest.raises(StrategyFailed, match="五力须五条都给"):
-        strategy.check(v, _led(), EVIDENCE, AS_OF)
+    assert any("五力缺" in x for x in strategy.facts(v, _led(), EVIDENCE, AS_OF))
 
 
 def test_无护城河也要显式说出():
     """「无明显护城河」是结论，不是省略的理由。"""
     v = strategy.parse(_out(moats=[]))
-    with pytest.raises(StrategyFailed, match="也是结论"):
-        strategy.check(v, _led(), EVIDENCE, AS_OF)
+    assert any("也是结论" in x for x in strategy.facts(v, _led(), EVIDENCE, AS_OF))
     ok = strategy.parse(_out(moats=[f"护城河: 无明显护城河 | 无 | 「{QUOTE}」"]))
-    strategy.check(ok, _led(), EVIDENCE, AS_OF)
+    assert strategy.facts(ok, _led(), EVIDENCE, AS_OF) == []
+    assert ("护城河", "护城河（未给出）") in strategy.checklist(v)
 
 
 def test_合法输入通过():
-    strategy.check(strategy.parse(_out()), _led(), EVIDENCE, AS_OF)
+    assert strategy.facts(strategy.parse(_out()), _led(), EVIDENCE, AS_OF) == []
 
 
 def test_占位符依据也可核验():
@@ -137,7 +143,7 @@ def test_占位符依据也可核验():
         "五力: 现有竞争强度 | 高 | 对本司不利 | [[industry.hhi@2024FY]]",
         *[f"五力: {f.value} | 中 | 中性 | 「{QUOTE}」"
           for f in list(Force)[1:]]]))
-    strategy.check(v, led, EVIDENCE, AS_OF)
+    assert strategy.facts(v, led, EVIDENCE, AS_OF) == []
 
 
 def _sections():
@@ -165,7 +171,7 @@ def test_替代品威胁没有锚点():
 
 def test_无锚点的力被标注为纯定性():
     c = _Client(_out())
-    v, _ = strategy.assess(c, _led("industry.hhi"), P, AS_OF, _sections())
+    v, _ = strategy.assess(c, _led("industry.hhi"), P, AS_OF, _sections(), judge=Judge())
     assert Force.SUBSTITUTES in v.unquantified
     assert "纯定性判断" in v.summary()
 
@@ -184,43 +190,54 @@ def test_提示词含年报摘录与缺失说明():
 
 def test_提示词点明矛盾要写出来():
     c = _Client(_out())
-    strategy.assess(c, _led("industry.hhi"), P, AS_OF, _sections())
+    strategy.assess(c, _led("industry.hhi"), P, AS_OF, _sections(), judge=Judge())
     assert "把矛盾写出来" in c.prompts[0]
 
 
 def test_提示词列出可调参数():
     c = _Client(_out())
-    strategy.assess(c, _led(), P, AS_OF, _sections())
+    strategy.assess(c, _led(), P, AS_OF, _sections(), judge=Judge())
     assert "revenue_growth" in c.prompts[0] and "gross_margin" in c.prompts[0]
 
 
-def test_无年报摘录时引文无处可核验():
-    """没有年报就没有可引用的原文 —— 此时应当失败，而不是放行一段
-    无从核验的「战略分析」。"""
-    with pytest.raises(StrategyFailed):
-        strategy.assess(_Client(_out(), _out(), _out()),
-                        _led(), P, AS_OF, None)
+def test_无年报摘录时引文核验不过_记进事实():
+    """年报摘录缺失时，年报引文无处可核验 —— 现在作为事实交审核者。"""
+    j = Judge()
+    strategy.assess(_Client(_out()), _led(), P, AS_OF, None, judge=j)
+    assert "核验不过" in j.prompts[0]
 
 
 # ── 端到端 ───────────────────────────────────────────────────
 
-def test_驳回后重试并带回原因():
-    bad = _out(uncerts=[f"不确定性: 需求波动 | 宏观环境 | 下调 | 「{QUOTE}」",
-                        f"不确定性: 提价 | gross_margin | 下调 | 「{QUOTE}」"])
-    c = _Client(bad, _out())
-    strategy.assess(c, _led(), P, AS_OF, _sections())
-    assert len(c.prompts) == 2 and "被驳回" in c.prompts[1]
+def test_审核致命则带建议重写():
+    c = _Client(_out(), _out())
+    strategy.assess(c, _led(), P, AS_OF, _sections(),
+                    judge=Judge({("自洽", "护城河、五力与不确定性"): "致命"}, {}))
+    assert len(c.prompts) == 2 and "上一轮审核驳回" in c.prompts[1]
 
 
-def test_连续失败则拒绝出结论():
-    """没有依据的战略判断在研报里比空白更危险。"""
-    bad = _out(moats=["护城河: 无形资产 | 宽 | 「查无此句」"])
-    with pytest.raises(StrategyFailed, match="连续"):
-        strategy.assess(_Client(bad, bad, bad), _led(), P, AS_OF, _sections())
+def test_三轮审核不过则停下():
+    from ir_agent.qual_review import ReviewStop
+    with pytest.raises(ReviewStop, match="战略分析审核 3 轮未通过"):
+        strategy.assess(_Client(_out(), _out(), _out()), _led(), P, AS_OF, _sections(),
+                        judge=Judge({"五力": "致命"}))
+
+
+def test_审核清单按方法论生成():
+    """用户决定 5：五力固定 5 条；不确定性不足 2 条补到 2 条。"""
+    items = strategy.checklist(strategy.parse(_out(uncerts=[])))
+    assert [s for k, s in items if k == "五力"] == [f.value for f in Force]
+    assert [s for k, s in items if k == "不确定性"] == ["第1条（未给出）", "第2条（未给出）"]
+    assert items[-1] == ("自洽", "护城河、五力与不确定性")
+
+
+def test_规则写明应付天数短是议价弱():
+    """生益、茅台两次成稿辩论都抓到「应付账款周转天数短 = 议价强」这一误读。"""
+    assert "应付账款周转天数短" in strategy.RULES and "**弱**" in strategy.RULES
 
 
 def test_摘要含三部分():
-    v, _ = strategy.assess(_Client(_out()), _led(), P, AS_OF, _sections())
+    v, _ = strategy.assess(_Client(_out()), _led(), P, AS_OF, _sections(), judge=Judge())
     txt = v.summary()
     assert "护城河" in txt and "现有竞争强度" in txt
     assert "关键不确定性 → 情景驱动因子" in txt
@@ -246,7 +263,7 @@ def test_可引用年报之外的资料():
     """只看年报，战略判断的全部依据是公司对自己的描述 —— 相当于让
     被评价方写自己的评价。"""
     v = strategy.parse(_out(moats=[f"护城河: 无形资产 | 宽 | 「{EXT}」"]))
-    strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+    strategy.facts(v, _led(), QUOTE, AS_OF, corpus=_corpus())
 
 
 def test_出处由代码判定而非模型声明():
@@ -255,7 +272,7 @@ def test_出处由代码判定而非模型声明():
     from ir_agent.basis import BasisKind
 
     v = strategy.parse(_out(moats=[f"护城河: 无形资产 | 宽 | 「{EXT}」"]))
-    strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+    strategy.facts(v, _led(), QUOTE, AS_OF, corpus=_corpus())
     b = v.moats[0].bases[0]
     assert b.kind is BasisKind.EXTERNAL
     assert b.ref.endswith("A1.html") and b.retrieved == AS_OF
@@ -265,14 +282,13 @@ def test_年报引文不会被改标为外部():
     from ir_agent.basis import BasisKind
 
     v = strategy.parse(_out())
-    strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+    strategy.facts(v, _led(), QUOTE, AS_OF, corpus=_corpus())
     assert v.moats[0].bases[0].kind is BasisKind.REPORT
 
 
-def test_两处都找不到仍然驳回():
+def test_两处都找不到记进事实():
     v = strategy.parse(_out(moats=["护城河: 无形资产 | 宽 | 「行业景气显著回升」"]))
-    with pytest.raises(StrategyFailed, match="不可核验|找不到"):
-        strategy.check(v, _led(), QUOTE, AS_OF, corpus=_corpus())
+    assert any("核验不过" in x for x in strategy.facts(v, _led(), QUOTE, AS_OF, corpus=_corpus()))
 
 
 def test_提示词带上外部资料与其可引用范围():
@@ -342,38 +358,31 @@ def test_年报正文与外部资料严格分开():
     assert QUOTE in strategy.annual_text(_sections())
 
 
-def test_力名称写错时列出合法取值():
-    """**长电实测: 战略分析因此整个没能产出。** 模型写「现有竞争者的竞争
-    强度」，与枚举值「现有竞争强度」只差两个字，而驳回信息只说「未知的力」，
-    不给对照表 —— 连挂三次。护城河那一行的提示词列了取值，五力这一行没列，
-    是纯粹的疏漏。"""
-    with pytest.raises(StrategyFailed) as e:
-        strategy.parse(f"五力: 现有竞争者的竞争强度 | 高 | 中性 | 「{QUOTE}」")
+def test_力名称写错时_事实里列出合法取值():
+    """长电实测：「现有竞争者的竞争强度」与枚举只差两个字。"""
+    v = strategy.parse(f"五力: 现有竞争者的竞争强度 | 高 | 中性 | 「{QUOTE}」")
     for f in Force:
-        assert f.value in str(e.value)
+        assert f.value in "\n".join(v.read_notes)
 
 
-def test_护城河类型写错时也列出合法取值():
-    with pytest.raises(StrategyFailed) as e:
-        strategy.parse(f"护城河: 品牌溢价 | 宽 | 「{QUOTE}」")
-    assert "无形资产" in str(e.value) and "成本优势" in str(e.value)
+def test_护城河类型写错时_事实里也列出合法取值():
+    v = strategy.parse(f"护城河: 品牌溢价 | 宽 | 「{QUOTE}」")
+    notes = "\n".join(v.read_notes)
+    assert "无形资产" in notes and "成本优势" in notes
 
 
 def test_提示词逐字列出五力名称():
     c = _Client(_out())
-    strategy.assess(c, _led(), P, AS_OF, _sections())
+    strategy.assess(c, _led(), P, AS_OF, _sections(), judge=Judge())
     for f in Force:
         assert f.value in c.prompts[0]
     assert "逐字照抄" in c.prompts[0]
 
 
-def test_失败信息带上模型最后写了什么():
-    """**只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。**
-    前几轮排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的
-    根因（列表前缀、括号补注）看一眼原文就清楚了。"""
+def test_停下时带上最后一稿():
+    from ir_agent.qual_review import ReviewStop
     bad = "五力: 替代品威胁 | 低 | 中性 | 年报未提及替代品，属定性判断"
-    with pytest.raises(StrategyFailed) as e:
-        strategy.assess(_Client(bad, bad, bad), _led(), P, AS_OF, _sections())
-    msg = str(e.value)
-    assert "最后一次的原始输出" in msg
-    assert "年报未提及替代品" in msg
+    with pytest.raises(ReviewStop) as e:
+        strategy.assess(_Client(bad, bad, bad), _led(), P, AS_OF, _sections(),
+                        judge=Judge({"五力": "致命"}))
+    assert "年报未提及替代品" in e.value.last

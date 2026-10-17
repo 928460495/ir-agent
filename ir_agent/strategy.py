@@ -31,7 +31,8 @@ from enum import Enum
 from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.sources.external import attribute
-from ir_agent.basis import Basis, InvalidBasis, validate
+from ir_agent.basis import Basis, validate
+from ir_agent import qual_review as Q
 
 
 class MoatKind(str, Enum):
@@ -80,21 +81,13 @@ STRENGTH = ("宽", "窄", "无")
 
 
 
-def _tail(raw: str, n: int = 400) -> str:
-    """失败信息里带上模型最后写了什么。
-
-    **只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。** 前几轮
-    排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的根因
-    （列表前缀、括号补注、写「无据」）看一眼原文就清楚了。
-    """
-    raw = (raw or "").strip()
-    return raw[-n:] if len(raw) > n else raw
 
 @dataclass(frozen=True)
 class MoatView:
     kind: MoatKind
     strength: str                       # 宽 / 窄 / 无
     bases: list[Basis] = field(default_factory=list)
+    cites: list = field(default_factory=list)       # 转述指向的文章标题
 
     def describe(self) -> str:
         if self.kind is MoatKind.NONE:
@@ -108,6 +101,7 @@ class ForceView:
     intensity: str                      # 高 / 中 / 低
     verdict: str                        # 对本司有利 / 中性 / 不利
     bases: list[Basis] = field(default_factory=list)
+    cites: list = field(default_factory=list)
 
     def describe(self) -> str:
         return f"{self.force.value} {self.intensity}　→ {self.verdict}"
@@ -125,6 +119,7 @@ class Uncertainty:
     driver: str                         # 对应的建模驱动因子
     direction: str                      # 恶化时该因子往哪个方向走
     bases: list[Basis] = field(default_factory=list)
+    cites: list = field(default_factory=list)
 
     def describe(self) -> str:
         return f"{self.what} → {self.driver}（不利时{self.direction}）"
@@ -149,6 +144,10 @@ class StrategyView:
     forces: list[ForceView] = field(default_factory=list)
     uncertainties: list[Uncertainty] = field(default_factory=list)
     unquantified: list[Force] = field(default_factory=list)
+    # 子项目四：代码读数时的事实、审核结论、各轮记录。
+    read_notes: list[str] = field(default_factory=list)
+    review: object = None
+    rounds: list = field(default_factory=list)
 
     def summary(self) -> str:
         lines = ["战略分析"]
@@ -163,12 +162,13 @@ class StrategyView:
             lines.append("  关键不确定性 → 情景驱动因子")
             for u in self.uncertainties:
                 lines.append(f"    {u.describe()}")
+        lines += Q.review_tail(self.review)
         return "\n".join(lines)
 
 
 class StrategyFailed(Exception):
-    """模型给不出可核验的战略判断。不退回一段「看起来像分析」的文字 ——
-    没有依据的战略判断在研报里比空白更危险。"""
+    """战略分析无从进行（没有任何定性证据等）。**内容是否成立不再由代码驳回**
+    （子项目四，spec 2026-10-17）：交给审核者，审核不过抛 `qual_review.ReviewStop`。"""
 
 
 # ── 量化锚点 ──────────────────────────────────────────────────
@@ -240,7 +240,7 @@ def for_prompt(ledger: FactLedger, period: str, as_of: date,
 
     if corpus is not None and corpus.docs:
         from ir_agent.sources.external import TIER_LABEL, TIER_RULE, Tier
-        lines.append("\n  公司之外的资料（引用时同样须逐字照抄）：")
+        lines.append("\n  公司之外的资料（可引用原文，也可转述 —— 转述要写明采纳了哪几篇）：")
         seen_tiers = {d.tier for d in corpus.docs}
         # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
         # 放在资料读完之后才说，等于让它先斩后奏。
@@ -282,24 +282,27 @@ PROMPT = """基于下面的年报原文与账本事实，做战略分析。
 后续的估值练习提供输入**。因此本节的产出不是几段文字，而是三样东西。
 
 **一、护城河**（至多两条，宁缺毋滥）
-格式：`护城河: <成本优势|网络效应|无形资产|转换成本|有效规模|无明显护城河> | <宽|窄|无> | 「年报原文逐字引用」`
+格式：`护城河: <成本优势|网络效应|无形资产|转换成本|有效规模|无明显护城河> | <宽|窄|无> | <依据>`
 
 **二、波特五力**（五条都要给，名称必须逐字照抄，不要改写）
-格式：`五力: <{forces}> | <高|中|低> | <对本司有利|中性|对本司不利> | 「年报原文」或 [[占位符]]`
+格式：`五力: <{forces}> | <高|中|低> | <对本司有利|中性|对本司不利> | <依据>`
 
 **三、关键不确定性 → 情景驱动因子**（两到三条）
 这一条是战略分析与估值之间的桥。每条不确定性必须映射到一个**可调的
 建模参数**，否则它在情景分析里没有出口。
 可选驱动因子：{drivers}
-格式：`不确定性: <描述> | <驱动因子> | <不利时该因子如何变化> | 「年报原文」或 [[占位符]]`
+格式：`不确定性: <描述> | <驱动因子> | <不利时该因子如何变化> | <依据>`
 
-**硬性要求**
-- 引年报时必须**逐字照抄**，一个字都不能改，否则核验通不过。
-- 占位符只能用上面列出的那些。
+{basis_rules}
+
+**要求**
+- 占位符只能用下面列出的那些。
 - 年报未设的章节，相关判断**明说无据**，不要凭印象补足。
-- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本 —— 一个无处可查的数字会让整篇报告卡在无法修复的驳回上。需要数字时用给你的占位符，否则改成不带数字的说法。
+- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本。需要数字时用给你的占位符，否则改成不带数字的说法。
 - 判断与数字打架时（例如年报自述成本优势、而毛利率处于同业低分位），
   **把矛盾写出来**，那正是研报该说的东西。
+
+{review_note}
 
 {evidence}
 """
@@ -311,141 +314,145 @@ _QUOTE = re.compile(r"[「\"'“](.+?)[」\"'”]", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 
 
-def _basis(raw: str, what: str) -> list[Basis]:
-    raw = raw.strip()
-    ref = _REF.search(raw)
-    if ref:
-        try:
-            return [Basis.fact(ref.group(0))]
-        except InvalidBasis as e:
-            raise StrategyFailed(f"{what} 的占位符不合法: {e}") from e
-    q = _QUOTE.search(raw)
-    if not q:
-        raise StrategyFailed(f"{what} 缺少可核验的依据（需年报原文或占位符）")
-    try:
-        return [Basis.report(q.group(1))]
-    except InvalidBasis as e:
-        raise StrategyFailed(f"{what} 的依据不合法: {e}") from e
 
 
-def _split(line: str, n: int, what: str) -> list[str]:
-    parts = [p.strip() for p in line.split("|")]
-    if len(parts) < n:
-        raise StrategyFailed(f"{what} 字段不足（需 {n} 段，得到 {len(parts)}）：{line}")
-    return parts
 
 
-def parse(text: str) -> StrategyView:
+def _cells(line: str) -> list[str]:
+    return [p.strip() for p in line.split("|")]
+
+
+def parse(text: str, corpus=None) -> StrategyView:
+    """读数。**只读，不驳回**（子项目四）：段数不够、护城河类型/力的名称不是规定的词
+    的行跳过；强弱等级不是规定的词、驱动因子不在可调参数之列的照读 —— 都记进
+    `read_notes`，作为事实交给审核者。"""
     view = StrategyView()
+    note = view.read_notes.append
+
+    def _b(parts, what):
+        bases, prob, cites = Q.basis(" | ".join(parts), corpus)
+        if prob:
+            note(f"{what}的依据：{prob}")
+        return bases, cites
 
     for m in _MOAT.finditer(text):
-        p = _split(m.group(1), 3, "护城河")
+        p = _cells(m.group(1))
+        if len(p) < 3:
+            note(f"护城河一行字段不足（需 3 段），没读进来：{m.group(1)}")
+            continue
         try:
             kind = MoatKind(p[0])
-        except ValueError as e:
-            raise StrategyFailed(
-                f"未知的护城河类型 {p[0]!r}，必须逐字使用以下之一："
-                + "、".join(k.value for k in MoatKind)) from e
+        except ValueError:
+            note(f"护城河类型「{p[0]}」不是规定的类型（"
+                 + "、".join(k.value for k in MoatKind) + "），没读进来")
+            continue
         strength = pick(p[1], STRENGTH)
         if kind is not MoatKind.NONE and strength is None:
-            raise StrategyFailed(
-                f"护城河强度须为 {'/'.join(STRENGTH)}，得到 {p[1]!r}")
-        view.moats.append(MoatView(kind, strength or p[1],
-                                   _basis(p[2], "护城河")))
+            note(f"护城河「{kind.value}」的宽度「{p[1]}」不是 {'/'.join(STRENGTH)} 之一")
+        bases, cites = _b(p[2:], f"护城河「{kind.value}」")
+        view.moats.append(MoatView(kind, strength or p[1], bases, cites))
 
     for m in _FORCE.finditer(text):
-        p = _split(m.group(1), 4, "五力")
+        p = _cells(m.group(1))
+        if len(p) < 4:
+            note(f"五力一行字段不足（需 4 段），没读进来：{m.group(1)}")
+            continue
         try:
             force = Force(p[0])
-        except ValueError as e:
-            # **驳回信息必须列出合法取值。** 长电实测: 模型写
-            # 「现有竞争者的竞争强度」，与枚举值「现有竞争强度」只差两个字，
-            # 而原信息只说「未知的力」，不给对照表 —— 模型连挂三次，
-            # 整个战略分析没能产出。护城河那一行的提示词列了取值，
-            # 五力这一行没列，是纯粹的疏漏。
-            raise StrategyFailed(
-                f"未知的力 {p[0]!r}，必须逐字使用以下五个名称之一："
-                + "、".join(f.value for f in Force)) from e
+        except ValueError:
+            # 长电实测：模型写「现有竞争者的竞争强度」，与「现有竞争强度」只差两字。
+            note(f"五力名称「{p[0]}」不是规定的五个名称之一（"
+                 + "、".join(f.value for f in Force) + "），没读进来")
+            continue
         intensity = pick(p[1], INTENSITY)
         if intensity is None:
-            raise StrategyFailed(
-                f"五力强度须为 {'/'.join(INTENSITY)}，得到 {p[1]!r}")
-        view.forces.append(ForceView(force, intensity, p[2],
-                                     _basis(p[3], "五力")))
+            note(f"五力「{force.value}」的强度「{p[1]}」不是 {'/'.join(INTENSITY)} 之一")
+        bases, cites = _b(p[3:], f"五力「{force.value}」")
+        view.forces.append(ForceView(force, intensity or p[1], p[2], bases, cites))
 
     for m in _UNCERT.finditer(text):
-        p = _split(m.group(1), 4, "不确定性")
+        p = _cells(m.group(1))
+        if len(p) < 4:
+            note(f"不确定性一行字段不足（需 4 段），没读进来：{m.group(1)}")
+            continue
         if p[1] not in MAPPABLE_DRIVERS:
-            raise StrategyFailed(
-                f"驱动因子 {p[1]!r} 不在可调参数之列 —— "
-                f"映射不到参数的不确定性在情景分析里没有出口。"
-                f"可选：{'、'.join(MAPPABLE_DRIVERS)}")
-        view.uncertainties.append(
-            Uncertainty(p[0], p[1], p[2], _basis(p[3], "不确定性")))
-
+            note(f"不确定性「{p[0]}」的驱动因子「{p[1]}」不在可调参数之列（可选："
+                 + "、".join(MAPPABLE_DRIVERS) + "）")
+        bases, cites = _b(p[3:], f"不确定性「{p[0]}」")
+        view.uncertainties.append(Uncertainty(p[0], p[1], p[2], bases, cites))
     return view
 
 
-def check(view: StrategyView, ledger: FactLedger, evidence: str,
-          as_of: date, corpus=None) -> None:
-    """依据必须可核验。REPORT 引文要逐字出现在年报摘录里，
-    EXTERNAL 引文要逐字出现在语料库里。"""
+def facts(view: StrategyView, ledger: FactLedger, evidence: str, as_of: date,
+          corpus=None) -> list[str]:
+    """代码核对出的事实，交审核者（子项目四：此前这些是驳回理由）。`evidence` 是
+    年报摘录原文 —— REPORT 引文对着它核验，外部引文对着语料库。"""
+    out: list[str] = []
     if not view.moats:
-        raise StrategyFailed("未给出护城河判断 —— 「无明显护城河」也是结论，"
-                             "但必须显式说出并给出依据")
+        out.append("没有给出护城河判断（「无明显护城河」也是结论，方法论要求显式说出）")
     got = {f.force for f in view.forces}
     if got != set(Force):
-        raise StrategyFailed("五力须五条都给，缺：" +
-                             "、".join(f.value for f in set(Force) - got))
+        out.append("五力缺：" + "、".join(f.value for f in Force if f not in got))
     if len(view.uncertainties) < 2:
-        raise StrategyFailed(
-            "关键不确定性至少两条 —— 少于两条，Bear/Base/Bull 三情景就没有"
-            "定性依据，只能靠调参数")
-
+        out.append(f"关键不确定性只读到 {len(view.uncertainties)} 条（方法论要求至少两条 —— "
+                   "少于两条，三情景就没有定性依据）")
     from ir_agent.citation import audit_prose
 
     bad = audit_prose({f"不确定性「{u.what[:12]}」": u.what + u.direction
                        for u in view.uncertainties})
     if bad:
-        raise StrategyFailed(
-            "描述里出现了账本外的数字：" + "、".join(bad) +
-            " —— 这些描述会原样进入研报撰写环节，而那里的数字必须可溯源；"
-            "请改成不带具体数字的说法")
+        out.append("描述里有账本外的数字：" + "、".join(bad))
+    items = (*view.moats, *view.forces, *view.uncertainties)
+    attribute(items, evidence, corpus)
+    flat = [b for x in items for b in x.bases]
+    out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body=evidence,
+                                                  as_of=as_of, corpus=corpus)]
+    return out
 
-    attribute((*view.moats, *view.forces, *view.uncertainties),
-              evidence, corpus)
-    flat = [b for x in (*view.moats, *view.forces, *view.uncertainties)
-            for b in x.bases]
-    problems = validate(flat, ledger=ledger, body=evidence, as_of=as_of,
-                        corpus=corpus)
-    if problems:
-        raise StrategyFailed("依据不可核验：" + "；".join(problems))
+
+KINDS = ("护城河", "五力", "不确定性", "自洽")
+
+
+def checklist(view: StrategyView) -> list[tuple[str, str]]:
+    """按方法论生成（用户决定 5）：护城河每条（一条都没有列「未给出」）、五力固定 5 条、
+    不确定性每条（不足 2 条补「未给出」到 2 条）、自洽一条。"""
+    items = [("护城河", f"第{i}条 {m.kind.value}") for i, m in enumerate(view.moats, 1)] \
+        or [("护城河", "护城河（未给出）")]
+    items += [("五力", f.value) for f in Force]
+    unc = [("不确定性", f"第{i}条 {u.what[:16]}")
+           for i, u in enumerate(view.uncertainties, 1)]
+    unc += [("不确定性", f"第{i}条（未给出）") for i in range(len(unc) + 1, 3)]
+    return items + unc + [("自洽", "护城河、五力与不确定性")]
+
+
+RULES = Q.make_rules("战略分析", """\
+- 护城河：类型与宽度有没有证据支撑；「无明显护城河」也判是否成立。一条都没给也在这里判。
+- 五力：高/中/低与「对本司有利/中性/不利」是否一致；依据能否支撑；**与账本数据是否
+  矛盾** —— 应付账款周转天数短，常规理解是对上游议价**弱**（无力占用供应商资金），
+  不是强势；应收天数短、合同负债多才是对下游强势；毛利率分位也要对照。没给出的力判「未给出」。
+- 不确定性：是不是真正的关键变量；映射的驱动因子对不对（要能在情景分析里调）；「不利时
+  如何变化」方向对不对。
+- 自洽：护城河、五力、不确定性三部分是否彼此矛盾（例如宽护城河却五力全不利）。""")
 
 
 def assess(client, ledger: FactLedger, period: str, as_of: date,
-           sections, spot: str | None = None,
-           max_attempts: int = 3, corpus=None) -> tuple[StrategyView, str]:
-    """让模型做战略分析，逐轮校验。返回 (结论, 证据文本)。"""
+           sections, spot: str | None = None, *, judge, catalog: str = "",
+           corpus=None, max_rounds: int = Q.MAX_ROUNDS) -> tuple[StrategyView, str]:
+    """撰写者写、审核者审（子项目四）。返回 (结论, 证据文本)；审核不过抛
+    `qual_review.ReviewStop`，模型接口错误原样抛出。"""
     evidence = for_prompt(ledger, period, as_of, sections, spot, corpus)
     annual = annual_text(sections)
     prompt = PROMPT.format(drivers="、".join(MAPPABLE_DRIVERS),
                            forces="|".join(f.value for f in Force),
-                           evidence=evidence)
-    last, raw = "", ""
-    for attempt in range(1, max_attempts + 1):
-        out = raw = client(prompt)
-        try:
-            view = parse(out)
-            check(view, ledger, annual, as_of, corpus)
-        except StrategyFailed as e:
-            last = str(e)
-            prompt = (f"{prompt}\n\n---\n"
-                      f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
-                      "请修正后按格式重新输出全部三部分。\n")
-            continue
-        view.unquantified = [f for f in Force
-                             if f not in anchors(ledger, period, as_of, spot)]
-        return view, evidence
-    raise StrategyFailed(
-            f"连续 {max_attempts} 次给不出可核验的战略判断：{last}"
-            f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")
+                           evidence=evidence, basis_rules=Q.BASIS_RULES,
+                           review_note=Q.REVIEW_NOTE)
+    view, res, rounds = Q.run(
+        client, judge, name="战略分析", prompt=prompt, materials=evidence,
+        read=lambda raw: parse(raw, corpus),
+        facts=lambda v: facts(v, ledger, annual, as_of, corpus),
+        checklist=checklist, kinds=KINDS, rules=RULES, catalog=catalog,
+        hay=evidence, ledger=ledger, as_of=as_of, max_rounds=max_rounds)
+    view.unquantified = [f for f in Force
+                         if f not in anchors(ledger, period, as_of, spot)]
+    view.review, view.rounds = res, rounds
+    return view, evidence

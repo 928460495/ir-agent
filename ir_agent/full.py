@@ -583,7 +583,7 @@ def _load_strategy(r, as_of: date, client, spot=None) -> tuple[str, str, str]:
         return "", "", sec_err or "战略分析（无任何定性证据）"
     try:
         view, _ = strategy.assess(client, r.ledger, r.period, as_of,
-                                  sections, spot, corpus=r.corpus)
+                                  sections, spot, judge=client, corpus=r.corpus)
     except Exception as e:                                  # noqa: BLE001
         return "", "", f"战略分析（{e.__class__.__name__}: {str(e)[:120]}）"
     r.sections = sections
