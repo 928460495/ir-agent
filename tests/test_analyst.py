@@ -55,6 +55,12 @@ class TestFactCatalog:
         """不给数值，模型说不出「毛利率高于同业」这类话，只能堆砌占位符。"""
         assert "35.00%" in catalog.render_for_prompt()
 
+    def test_比率事实同时给出账本原值(self, catalog):
+        """中国巨石 2026-10-18 试跑：ratio 单位显示成 35.00%，账本原值是 0.35，代码
+        取基期值时用的是原值 —— 只看显示值，撰写者会把单位声明成 pp/% 并多除一次 100。"""
+        line = next(l for l in catalog.render_for_prompt().splitlines() if "35.00%" in l)
+        assert "0.35" in line and "账本原值" in line
+
     def test_carries_human_labels_not_just_keys(self, catalog):
         assert "营业收入" in catalog.render_for_prompt()
 

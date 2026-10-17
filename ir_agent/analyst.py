@@ -126,6 +126,13 @@ class AnalystRefused(Exception):
         self.raw = raw
 
 
+def _trim(raw: str) -> str:
+    """账本原值去掉尾随的零：Decimal 的 -0.0139443030747600673040791714 写满一行，
+    对「这个数是小数还是百分数」这件事毫无帮助。"""
+    s = raw.rstrip("0").rstrip(".") if "." in raw else raw
+    return s or "0"
+
+
 @dataclass
 class CatalogEntry:
     key: str
@@ -133,6 +140,11 @@ class CatalogEntry:
     token: str
     label: str
     display: str
+    # 账本原值与单位：ratio 显示成百分数（`citation.format_value`），而代码取基期
+    # 值用的是原值 —— 两个数差 100 倍，提示词里要把原值一并写出（见
+    # `render_for_prompt`）。
+    unit: str = ""
+    raw: str = ""
 
 
 @dataclass
@@ -166,7 +178,7 @@ class FactCatalog:
                 # 三段式的 source_id 含时间戳，既冗长又跨运行失效。
                 key=key, period=per, token=f"[[{canonical}@{per}]]",
                 label=LABELS.get(key, key),
-                display=format_value(f)))
+                display=format_value(f), unit=f.unit, raw=f"{f.value:f}"))
         return cls(entries=entries, ledger=ledger, as_of=as_of)
 
     @property
@@ -174,9 +186,15 @@ class FactCatalog:
         return [e.token for e in self.entries]
 
     def render_for_prompt(self) -> str:
+        """每条：标签、显示值、占位符。**ratio 单位额外写出账本原值** —— 显示值是
+        原值 ×100 的百分数，而方法论预研据以声明因子单位、代码取基期值时用原值；
+        只看到百分数会把单位声明成 pp/% 再除一次 100（中国巨石 2026-10-18 试跑）。
+        """
         w = max((len(e.label) for e in self.entries), default=8)
         return "\n".join(
-            f"  {e.label:<{w}}  {e.display:>14}   写作 {e.token}"
+            f"  {e.label:<{w}}  {e.display:>14}"
+            + (f"（账本原值 {_trim(e.raw)}）" if e.unit == "ratio" else "")
+            + f"   写作 {e.token}"
             for e in self.entries)
 
 

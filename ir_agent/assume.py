@@ -167,6 +167,22 @@ class Row:
     raw: tuple = ()
 
 
+_PP_UNITS = frozenset({"pp", "%", "百分比"})
+
+
+def _as_unit(fact, unit: str) -> Decimal:
+    """账本原值换算成因子声明的单位。
+
+    账本的 ratio 存小数（稼动率 0.85、份额变化 -0.0139），因子声明 % 或 pp 时填的
+    是百分数（85、-1.39）—— 不换算，基期值与 AI 逐年填的值差 100 倍，同一条序列
+    从第 0 年到第 1 年凭空跳 100 倍（中国巨石 2026-10-18 试跑）。声明「变化率」的
+    因子本身就是小数口径，原样取。
+    """
+    if fact.unit == "ratio" and unit in _PP_UNITS:
+        return fact.value * 100
+    return fact.value
+
+
 @dataclass
 class BaseValue:
     """一个因子第 0 年的取值。`source`：「账本」（数据线索里 `[[key]]` 声明且
@@ -1614,8 +1630,9 @@ def _fill_from_ledger(a: AssumptionSet, ledger: FactLedger, as_of: date) -> None
         if not have:
             continue
         key, per = have[0].rsplit("@", 1)
+        fact = ledger.get(key, per, as_of=as_of)
         a.base_values[f.short] = BaseValue(
-            value=ledger.get(key, per, as_of=as_of).value,
+            value=_as_unit(fact, f.unit),
             bases=[Basis.fact(f"[[{key}@{per}]]")], source="账本")
     if a.base_revenue is None:
         pers = annual_periods(ledger, as_of, years=1)

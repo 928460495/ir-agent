@@ -104,6 +104,54 @@ class TestParse:
         assert re.search("单位是「|bp", _notes(a)), _notes(a)
 
 
+PCT_LEVEL = parse_meth("""模式: 水平
+因子: 稼动 | 产能利用率 | % | [[utilization]] | 稼动率
+因子: 价 | 平均单价 | 元 | 年报 | 单价
+公式: 营收 = 稼动 × 价
+公式: 毛利率 = (价 − 稼动) ÷ 价
+""").model
+
+RATIO_LEVEL = parse_meth("""模式: 水平
+因子: 稼动 | 产能利用率 | 变化率 | [[utilization]] | 稼动率
+因子: 价 | 平均单价 | 元 | 年报 | 单价
+公式: 营收 = 稼动 × 价
+公式: 毛利率 = (价 − 稼动) ÷ 价
+""").model
+
+
+def _pct_ledger():
+    led = _ledger()
+    led.put(Fact(key="utilization", value=D("0.85"), unit="ratio", period="2025FY",
+                 as_of=date(2026, 4, 1), source_id="t", method=Method.REPORTED))
+    return led
+
+
+def _pct_lines():
+    return "\n".join([f"假设: 稼动 | 第1年 | 85 | 80 | 90 | 产能 {Q}",
+                       f"假设: 价 | 第1年 | 9.5 | 9 | 10 | 单价 {Q}"])
+
+
+class TestRatioUnitBase:
+    """中国巨石 2026-10-18 试跑：账本 ratio 原值与因子声明的单位差 100 倍。"""
+
+    def test_因子声明百分数_账本比率按声明换算(self):
+        a = assume.parse(_pct_lines(), 1, decomps=PCT_LEVEL)
+        _check(a, 1, PCT_LEVEL, ledger=_pct_ledger())
+        bv = a.base_values["稼动"]
+        assert bv.source == "账本" and bv.value == D(85), bv.value
+
+    def test_因子声明变化率_账本比率原样取(self):
+        txt = _pct_lines().replace("| 85 | 80 | 90 |", "| 0.85 | 0.8 | 0.9 |")
+        a = assume.parse(txt, 1, decomps=RATIO_LEVEL)
+        _check(a, 1, RATIO_LEVEL, ledger=_pct_ledger())
+        assert a.base_values["稼动"].value == D("0.85")
+
+    def test_账本不是比率单位_原样取(self):
+        a = assume.parse(_level_lines(), 1, decomps=LEVEL)
+        _check(a, 1, LEVEL)
+        assert a.base_values["价"].value == D("9.5"), "ccl.asp 单位是 x，不该被换算"
+
+
 class TestLevelMode:
     def test_账本有的基期由代码取_其余AI补(self):
         a = assume.parse(_level_lines(), 1, decomps=LEVEL)
