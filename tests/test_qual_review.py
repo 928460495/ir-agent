@@ -50,6 +50,23 @@ class TestBasis:
         _, prob, _ = Q.basis("我的判断", CORPUS)
         assert "没有给出依据" in prob
 
+    def test_转述标题与语料库标题差几个虚词_仍算在语料库(self):
+        """中国巨石 2026-10-17 试跑：公告原标题「…共同关于对…增资80,000万元的公告」，撰写者
+        写成「关于…共同对…」，差一个「关于」就被报成「不在语料库」—— 假事实。"""
+        ann = _Corpus("中国巨石关于巨石集团有限公司与巨石集团香港有限公司共同关于对"
+                      "巨石集团淮安有限公司增资80,000万元的公告")
+        _, prob, docs = Q.basis("转述：综合 中国巨石《关于巨石集团有限公司与巨石集团香港有限公司"
+                                "共同对巨石集团淮安有限公司增资80,000万元的公告》", ann)
+        assert prob == "" and docs
+
+    def test_转述文章确实不在_写出语料库里最接近的标题(self):
+        _, prob, _ = Q.basis("转述：综合 东莞证券《玻纤行业深度研究报告》", CORPUS)
+        assert "不在语料库" in prob and "最接近" in prob and "玻纤行业深度报告" in prob
+
+    def test_转述文章确实不在_没有相近的就不写最接近(self):
+        _, prob, _ = Q.basis("转述：综合 中信证券《半导体设备月报》", CORPUS)
+        assert "不在语料库" in prob and "最接近" not in prob
+
     def test_引文里出现综合_仍是原文引用(self):
         """「综合毛利率」「综合成本」是年报常见词，不是转述标记（最终审查 Important 3）。"""
         bases, prob, docs = Q.basis("「公司综合毛利率同比提升」——《2025年年度报告》", CORPUS)
@@ -113,6 +130,13 @@ class TestRun:
     def test_审核者答不全停下(self):
         with pytest.raises(Q.ReviewStop, match="战略分析审核未完成"):
             _run(_Writer("项: a"), Judge(skip={("自洽", "三部分")}))
+
+    def test_撰写者与审核者看到同一份账本事实目录(self):
+        """中国巨石 2026-10-17 试跑：审核者有完整账本目录、撰写者只有五力锚点，审核者以
+        「明明有 [[company.market_share]] 却说无数据」判致命 —— 撰写者从没见过它。"""
+        w = _Writer("项: a", "项: b")
+        _run(w, Judge({("五力", "现有竞争强度"): "致命"}, {}))
+        assert all("账本目录" in p and "[[key@期间]]" in p for p in w.prompts)
 
     def test_补答不消耗撰写者轮数(self):
         class Once(Judge):

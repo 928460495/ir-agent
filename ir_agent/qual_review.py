@@ -100,10 +100,32 @@ def review_tail(res) -> list[str]:
                                                      for v in res.flagged()]
 
 
+_NOISE = re.compile(r"[\s\W_]|关于|的")
+_NEAR = 0.6       # 相似度达到它才写「最接近的是」；再低就是不相干的文章，写了反而误导
+
+
+def _norm(title: str) -> str:
+    """去掉标点、空白与「关于」「的」：公告原标题常带重复的「关于」、千分位逗号，撰写者
+    转述时照抄不全（中国巨石 2026-10-17 试跑：差一个「关于」就被报成不在语料库）。"""
+    return _NOISE.sub("", title or "")
+
+
+def _titles(corpus) -> list[str]:
+    return [d.title or "" for d in (getattr(corpus, "docs", None) or [])]
+
+
 def _in_corpus(title: str, corpus) -> bool:
-    t = title.strip()
-    return any(t and (t == (d.title or "").strip() or t in (d.title or ""))
-               for d in (getattr(corpus, "docs", None) or []))
+    t = _norm(title)
+    return len(t) >= 4 and any(t in _norm(d) for d in _titles(corpus))
+
+
+def _nearest(title: str, corpus) -> str:
+    """语料库里与之最接近的标题（相似度不足 `_NEAR` 给空串），交审核者判断是不是同一篇。"""
+    from difflib import SequenceMatcher
+    t = _norm(title)
+    best = max(((SequenceMatcher(None, t, _norm(d)).ratio(), d) for d in _titles(corpus)),
+               default=(0.0, ""))
+    return best[1] if best[0] >= _NEAR else ""
 
 
 def basis(raw: str, corpus=None) -> tuple[list[Basis], str, list[str]]:
@@ -129,8 +151,9 @@ def basis(raw: str, corpus=None) -> tuple[list[Basis], str, list[str]]:
         if not titles:
             return [], "写了转述/综合，但没有写明采纳了哪几篇文章（《标题》）", []
         miss = [t for t in titles if not _in_corpus(t, corpus)]
-        prob = ("转述指向的文章不在语料库里：" + "、".join(f"《{t}》" for t in miss)
-                if miss else "")
+        prob = ("转述指向的文章不在语料库里：" + "、".join(
+            f"《{t}》" + (f"（语料库里最接近的是《{n}》）" if (n := _nearest(t, corpus)) else "")
+            for t in miss) if miss else "")
         return [], prob, titles
     if quote is not None:
         try:
@@ -199,6 +222,11 @@ def run(writer, judge, *, name: str, prompt: str, materials: str, read, facts,
     """
     rounds: list = []
     raw = ""
+    if catalog:
+        # 撰写者与审核者看同一份账本目录（中国巨石 2026-10-17 试跑：审核者以撰写者从没
+        # 见过的 [[company.market_share]] 判致命，三轮都卡在这里）。
+        prompt = (f"{prompt}\n\n**账本事实目录**（可引用的占位符 [[key@期间]]，与审核者"
+                  f"看到的是同一份；用得上的就引用）\n{catalog}\n")
     for n in range(1, max_rounds + 1):
         raw = writer(prompt)
         view = read(raw)
