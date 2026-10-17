@@ -230,3 +230,25 @@ def test_审核清单按方法论生成():
         ("取向", "政策取向"), ("传导", "第1条 政策利率下调"), ("传导", "第2条 流动性宽松"),
         ("遗漏", "宏观因素")]
     assert ("传导", "传导路径（未给出）") in MV.checklist(MV.parse(f"政策取向: 宽松 | 「{Q}」"))
+
+
+def test_全部用转述_不报未提供依据():
+    """转述是合法依据（用户决定 3）。整稿都用转述时没有可核对的引文，不能交给审核者
+    「依据核验不过：未提供任何依据」（最终审查 Important 1）。"""
+    from datetime import date
+
+    from ir_agent.ledger import FactLedger
+
+    class _Doc:
+        title, doc_id, text = "东莞证券：玻纤行业深度报告", "d1", ""
+
+    class _Corpus:
+        docs = [_Doc()]
+    P = "转述：综合 东莞证券《玻纤行业深度报告》"
+    raw = "\n".join([f"政策取向: 中性 | {P}",
+                     f"传导: 政策利率下调 | 融资成本下行→扩产意愿回升 | 利好 | {P}",
+                     f"传导: 地产链走弱 | 建材需求下滑→玻纤需求放缓 | 利空 | {P}"])
+    v = MV.parse(raw, _Corpus)
+    assert v.stance is not None and len(v.channels) == 2
+    facts = MV.facts(v, FactLedger(), date(2026, 10, 17), _Corpus)
+    assert not [x for x in facts if x.startswith("依据核验不过")], facts

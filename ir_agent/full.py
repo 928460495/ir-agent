@@ -1294,7 +1294,8 @@ def _qual_module(out: Path, *, prefix: str, label: str, corpus, parse, facts, ru
             status.update(state="沿用审核结论", rounds=view.review.rounds,
                           flagged=[v.line() for v in view.review.flagged()])
             if rec.get("corpus", "") != Q.corpus_fingerprint(corpus):
-                n = sum(1 for x in facts(view)
+                # 转述文章不在语料库由读数记在 read_notes（parse 已按本轮语料库重读），一并计入。
+                n = sum(1 for x in [*(view.read_notes or []), *facts(view)]
                         if x.startswith("依据核验不过") or "不在语料库" in x)
                 if n:
                     status["note"] = f"本轮语料库与审核时不同，{n} 处依据本轮核对不过"
@@ -2173,6 +2174,9 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
     if stops:
         # **任一定性模块审核没通过 → 第一次调用停下交人工**（子项目四决定 9）：
         # 三个模块都已跑完（通过的已落盘，重跑沿用）；不写来源清单、不进门①。
+        # 上一轮（或改动前的版本）留下的来源清单一并删掉，免得 `--brief` 拿旧清单绕过这次停下。
+        for stale in (SOURCES_MD, SOURCES_JSON):
+            (out / stale).unlink(missing_ok=True)
         skipped += stops
         _save_state(out, code, r, as_of, md, pr, qual_unreviewed=unreviewed)
         return ResearchOutcome(

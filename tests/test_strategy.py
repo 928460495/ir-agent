@@ -395,3 +395,23 @@ def test_五力只写了三条_清单仍列满五条():
                                     for f in list(Force)[:3]]))
     assert len(v.forces) == 3
     assert [s for k, s in strategy.checklist(v) if k == "五力"] == [f.value for f in Force]
+
+
+def test_全部用转述_不报未提供依据():
+    """转述是合法依据（用户决定 3）。整稿都用转述时没有可核对的引文，不能交给审核者
+    「依据核验不过：未提供任何依据」（最终审查 Important 1）。"""
+    from datetime import date
+
+    from ir_agent.ledger import FactLedger
+
+    class _Doc:
+        title, doc_id, text = "东莞证券：玻纤行业深度报告", "d1", ""
+
+    class _Corpus:
+        docs = [_Doc()]
+    P = "转述：综合 东莞证券《玻纤行业深度报告》"
+    raw = "\n".join(f"五力: {f.value} | 中 | 中性 | {P}" for f in strategy.Force)
+    v = strategy.parse(raw, _Corpus)
+    assert len(v.forces) == 5
+    facts = strategy.facts(v, FactLedger(), "", date(2026, 10, 17), _Corpus)
+    assert not [x for x in facts if x.startswith("依据核验不过")], facts

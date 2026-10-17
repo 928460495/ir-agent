@@ -250,8 +250,10 @@ def facts(view: ChainView, ledger: FactLedger, evidence: str, as_of: date,
     items = list(view.links) + ([view.size] if view.size else [])
     attribute(items, evidence, corpus)
     flat = [b for x in items for b in x.bases]
-    out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body=evidence,
-                                                  as_of=as_of, corpus=corpus)]
+    # 整稿都用转述时没有可核对的引文 —— validate([]) 会报「未提供任何依据」，对转述是假事实。
+    if flat:
+        out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body=evidence,
+                                                      as_of=as_of, corpus=corpus)]
     if period:
         out += [f"与账本交叉核对：{x}" for x in cross_check(view, ledger, period, as_of)]
     return out

@@ -162,3 +162,31 @@ def test_第二阶段读回未经审核的定性模块():
     src = inspect.getsource(full.run_valuation)
     assert 'state.get("qual_unreviewed")' in src
     assert "qual_unreviewed=qual_unreviewed" in src
+
+
+def test_沿用时语料库变了_转述文章不在也计入_不计假事实(tmp_path):
+    """最终审查 Important 2：用真实的战略读数与核对。转述文章不在语料库记在读数事实里，
+    也要计入；文章仍在时不能凭空报出「核对不过」。"""
+    from datetime import date
+
+    from ir_agent import strategy
+    from ir_agent.ledger import FactLedger
+    P = "转述：综合 东莞证券《玻纤行业深度报告》"
+    raw = (f"五力: 现有竞争强度 | 高 | 对本司不利 | {P}\n"
+           f"五力: 供应商议价能力 | 中 | 中性 | {P}")
+    had = _Corpus("东莞证券：玻纤行业深度报告")
+    (tmp_path / "strategy.md").write_text(raw, encoding="utf-8")
+    (tmp_path / "strategy_review.json").write_text(Q.dump(
+        ReviewResult(verdicts=[], rounds=1, fingerprint=Q.fingerprint(raw)),
+        passed=True, corpus_fp=Q.corpus_fingerprint(had)), encoding="utf-8")
+
+    def call(corpus):
+        return full._qual_module(
+            tmp_path, prefix="strategy", label="战略分析", corpus=corpus,
+            parse=lambda r: strategy.parse(r, corpus),
+            facts=lambda v: strategy.facts(v, FactLedger(), "", date(2026, 10, 17), corpus),
+            run=lambda: pytest.fail("沿用不应调模型"))
+    _, st = call(_Corpus("别的文章"))
+    assert st["state"] == "沿用审核结论" and "2 处" in st["note"], st
+    _, st = call(_Corpus("东莞证券：玻纤行业深度报告", "新增文章"))
+    assert st["note"] == "", st

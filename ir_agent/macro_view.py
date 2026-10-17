@@ -176,8 +176,10 @@ def facts(view: MacroView, ledger: FactLedger, as_of: date, corpus=None) -> list
     holder = [view] + view.channels
     attribute(holder, "", corpus)
     flat = [b for x in holder for b in x.bases]
-    out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body="",
-                                                  as_of=as_of, corpus=corpus)]
+    # 整稿都用转述时没有可核对的引文 —— validate([]) 会报「未提供任何依据」，对转述是假事实。
+    if flat:
+        out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body="",
+                                                      as_of=as_of, corpus=corpus)]
     out += [f"与期限利差交叉核对：{x}" for x in cross_check(view, ledger, as_of)]
     return out
 

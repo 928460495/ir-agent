@@ -4407,6 +4407,26 @@ def test_定性模块审核停下_第一次调用停在这里_不出来源清单
     assert "--analyse" in acts and "strategy_failed_raw.md" in acts and "strategy.md" in acts
 
 
+def test_定性模块审核停下_删掉上一轮留下的门一文件(tmp_path, monkeypatch):
+    """最终审查（Minor 2 升为 Important）：目录里有旧版本跑出的 sources.md/json 时，
+    停下后若不删，`--brief` 会拿旧清单绕过这次停下（违背用户决定 9）。"""
+    from ir_agent import full
+
+    _offline(monkeypatch, full)
+    (tmp_path / full.SOURCES_MD).write_text("旧的门① 清单", encoding="utf-8")
+    (tmp_path / full.SOURCES_JSON).write_text("[]", encoding="utf-8")
+
+    def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
+             statuses=None):
+        stops.append("战略分析审核 3 轮未通过（最后一轮致命 1 条）")
+        return _PhaseClient()
+    monkeypatch.setattr(full, "_analyse_qualitative", qual)
+    o = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
+    assert o.stage is full.Stage.INCOMPLETE
+    assert not (tmp_path / full.SOURCES_MD).exists()
+    assert not (tmp_path / full.SOURCES_JSON).exists()
+
+
 def test_定性模块人工修改过_门一清单与终端标注_记进state(tmp_path, monkeypatch):
     from ir_agent import full
 

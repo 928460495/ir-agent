@@ -261,3 +261,23 @@ def test_端到端带出矛盾():
     v, _ = VC.analyse(_Client(_out()), _corpus(),
                       _led(payable_days__percentile="0.17"), P, AS_OF, judge=Judge())
     assert v.conflicts and "⚠" in v.summary()
+
+
+def test_全部用转述_不报未提供依据():
+    """转述是合法依据（用户决定 3）。整稿都用转述时没有可核对的引文，不能交给审核者
+    「依据核验不过：未提供任何依据」（最终审查 Important 1）。"""
+    from datetime import date
+
+    from ir_agent.ledger import FactLedger
+
+    class _Doc:
+        title, doc_id, text = "东莞证券：玻纤行业深度报告", "d1", ""
+
+    class _Corpus:
+        docs = [_Doc()]
+    P = "转述：综合 东莞证券《玻纤行业深度报告》"
+    raw = "\n".join(f"环节: {r} | 玻纤 | 说明 | {P}" for r in ("上游", "本环节", "下游"))
+    v = VC.parse(raw, _Corpus)
+    assert len(v.links) == 3 and v.read_notes == []
+    facts = VC.facts(v, FactLedger(), "", date(2026, 10, 17), _Corpus)
+    assert not [x for x in facts if x.startswith("依据核验不过")], facts

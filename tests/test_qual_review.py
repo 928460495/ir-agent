@@ -50,6 +50,12 @@ class TestBasis:
         _, prob, _ = Q.basis("我的判断", CORPUS)
         assert "没有给出依据" in prob
 
+    def test_引文里出现综合_仍是原文引用(self):
+        """「综合毛利率」「综合成本」是年报常见词，不是转述标记（最终审查 Important 3）。"""
+        bases, prob, docs = Q.basis("「公司综合毛利率同比提升」——《2025年年度报告》", CORPUS)
+        assert bases and bases[0].quote == "公司综合毛利率同比提升"
+        assert prob == "" and docs == []
+
 
 @dataclass
 class _View:

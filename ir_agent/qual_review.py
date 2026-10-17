@@ -122,8 +122,10 @@ def basis(raw: str, corpus=None) -> tuple[list[Basis], str, list[str]]:
         except InvalidBasis as e:
             return [], f"占位符不合法：{e}", []
     quote = _QUOTE.search(raw)
-    if _PARAPHRASE.search(raw) or (quote is None and _TITLE.search(raw)):
-        titles = _TITLE.findall(raw)
+    # 转述标记与文章标题只在引号之外找：「综合毛利率」等年报常见词出现在引文里不算转述。
+    outside = _QUOTE.sub("", raw)
+    if _PARAPHRASE.search(outside) or (quote is None and _TITLE.search(outside)):
+        titles = _TITLE.findall(outside)
         if not titles:
             return [], "写了转述/综合，但没有写明采纳了哪几篇文章（《标题》）", []
         miss = [t for t in titles if not _in_corpus(t, corpus)]
