@@ -28,17 +28,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import Enum
 
 from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import Fact, FactLedger, LookAheadError, Method
 from ir_agent.sources.external import attribute
-from ir_agent.basis import Basis, InvalidBasis, validate
+from ir_agent.basis import Basis, validate
+from ir_agent import qual_review as Q
 
 
 class ChainFailed(Exception):
-    """产业链分析不可核验 —— 拒绝出结论。"""
+    """产业链分析无从进行（没有任何资料等）。**内容是否成立不再由代码驳回**
+    （子项目四，spec 2026-10-17）：交给审核者，审核不过抛 `qual_review.ReviewStop`。"""
 
 
 class Role(str, Enum):
@@ -75,15 +77,6 @@ _NUM = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 
-def _tail(raw: str, n: int = 400) -> str:
-    """失败信息里带上模型最后写了什么。
-
-    **只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。** 前几轮
-    排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的根因
-    （列表前缀、括号补注、写「无据」）看一眼原文就清楚了。
-    """
-    raw = (raw or "").strip()
-    return raw[-n:] if len(raw) > n else raw
 
 @dataclass
 class Link:
@@ -91,6 +84,7 @@ class Link:
     name: str
     note: str
     bases: list[Basis] = field(default_factory=list)
+    cites: list = field(default_factory=list)       # 转述指向的文章标题
 
 
 @dataclass
@@ -103,6 +97,7 @@ class SizeClaim:
     unit: str
     period: str
     bases: list[Basis] = field(default_factory=list)
+    cites: list = field(default_factory=list)
 
     def to_fact(self, source_id: str, as_of: date) -> Fact:
         """落账本。由 LLM 从文本抽取，因此 method=EXTRACTED、confidence<1，
@@ -119,6 +114,10 @@ class ChainView:
     power: dict[Role, Power] = field(default_factory=dict)
     size: SizeClaim | None = None
     conflicts: list[str] = field(default_factory=list)
+    # 子项目四：代码读数时的事实、审核结论、各轮记录。
+    read_notes: list[str] = field(default_factory=list)
+    review: object = None
+    rounds: list = field(default_factory=list)
 
     def of(self, role: Role) -> list[Link]:
         return [x for x in self.links if x.role is role]
@@ -143,71 +142,63 @@ class ChainView:
                          "非上市企业未计入，据此算出的市占率系高估")
         for c in self.conflicts:
             lines.append(f"  ⚠ {c}")
+        lines += Q.review_tail(self.review)
         return "\n".join(lines)
 
 
-def _basis(raw: str, what: str) -> list[Basis]:
-    raw = raw.strip()
-    ref = _REF.search(raw)
-    if ref:
-        try:
-            return [Basis.fact(ref.group(0))]
-        except InvalidBasis as e:
-            raise ChainFailed(f"{what} 的占位符不合法: {e}") from e
-    q = _QUOTE.search(raw)
-    if not q:
-        raise ChainFailed(f"{what} 缺少可核验的依据（需原文引用或占位符）")
-    try:
-        return [Basis.report(q.group(1))]
-    except InvalidBasis as e:
-        raise ChainFailed(f"{what} 的依据不合法: {e}") from e
 
 
-def _split(line: str, n: int, what: str) -> list[str]:
-    parts = [p.strip() for p in line.split("|")]
-    if len(parts) < n:
-        raise ChainFailed(f"{what} 字段不足（需 {n} 段，得到 {len(parts)}）：{line}")
-    return parts
 
 
-def parse(text: str) -> ChainView:
+def _cells(line: str) -> list[str]:
+    return [p.strip() for p in line.split("|")]
+
+
+def parse(text: str, corpus=None) -> ChainView:
+    """读数。**只读，不驳回**（子项目四）：段数不够、环节位置/议价强弱不是规定的词、
+    对本环节给议价、行业规模读不出数的行跳过；依据问题照读 —— 都记进 `read_notes`，
+    作为事实交给审核者。"""
     view = ChainView()
-
+    note = view.read_notes.append
     for m in _LINK.finditer(text):
-        p = _split(m.group(1), 4, "环节")
+        p = _cells(m.group(1))
+        if len(p) < 4:
+            note(f"环节一行字段不足（需 4 段），没读进来：{m.group(1)}")
+            continue
         got = pick(p[0], [x.value for x in Role])
         if got is None:
-            raise ChainFailed(
-                f"未知的环节位置 {p[0]!r}（须为 "
-                + "/".join(x.value for x in Role) + "）")
-        view.links.append(Link(Role(got), p[1], p[2], _basis(p[3], "环节")))
-
+            note(f"环节位置「{p[0]}」不是 " + "/".join(x.value for x in Role) + " 之一，没读进来")
+            continue
+        bases, prob, cites = Q.basis(" | ".join(p[3:]), corpus)
+        if prob:
+            note(f"环节「{p[1]}」的依据：{prob}")
+        view.links.append(Link(Role(got), p[1], p[2], bases, cites))
     for m in _POWER.finditer(text):
-        p = _split(m.group(1), 2, "议价")
-        r_, p_ = (pick(p[0], [x.value for x in Role]),
-                  pick(p[1], [x.value for x in Power]))
+        p = _cells(m.group(1))
+        r_ = pick(p[0], [x.value for x in Role]) if p else None
+        p_ = pick(p[1], [x.value for x in Power]) if len(p) > 1 else None
         if r_ is None or p_ is None:
-            raise ChainFailed(
-                f"议价一行取值不合法：{m.group(1)} —— 位置须为 "
-                + "/".join(x.value for x in Role) + "，强弱须为 "
-                + "/".join(x.value for x in Power))
-        role, power = Role(r_), Power(p_)
-        if role is Role.FOCAL:
-            raise ChainFailed("议价只对上游与下游而言，本环节无议价对象")
-        view.power[role] = power
-
+            note(f"议价一行读不出：{m.group(1)}（位置须为 " + "/".join(x.value for x in Role)
+                 + "，强弱须为 " + "/".join(x.value for x in Power) + "）")
+            continue
+        if Role(r_) is Role.FOCAL:
+            note("议价给了「本环节」—— 议价只对上游与下游而言，这一行没读进来")
+            continue
+        view.power[Role(r_)] = Power(p_)
     m = _SIZE.search(text)
     if m:
-        p = _split(m.group(1), 5, "行业规模")
-        num = _NUM.search(p[1].replace(",", ""))
-        if not num:
-            raise ChainFailed(f"行业规模缺少数值：{p[1]!r}")
-        try:
-            val = Decimal(num.group(0))
-        except InvalidOperation as e:
-            raise ChainFailed(f"行业规模数值不可解析：{p[1]!r}") from e
-        view.size = SizeClaim(label=p[0], value=val, unit=p[2], period=p[3],
-                              bases=_basis(p[4], "行业规模"))
+        p = _cells(m.group(1))
+        num = _NUM.search(p[1].replace(",", "")) if len(p) > 1 else None
+        if len(p) < 5:
+            note(f"行业规模一行字段不足（需 5 段），没读进来：{m.group(1)}")
+        elif not num:
+            note(f"行业规模「{p[1]}」读不出数值，没读进来")
+        else:
+            bases, prob, cites = Q.basis(" | ".join(p[4:]), corpus)
+            if prob:
+                note(f"行业规模的依据：{prob}")
+            view.size = SizeClaim(label=p[0], value=Decimal(num.group(0)), unit=p[2],
+                                  period=p[3], bases=bases, cites=cites)
     return view
 
 
@@ -238,16 +229,16 @@ def cross_check(view: ChainView, ledger: FactLedger, period: str,
     return out
 
 
-def check(view: ChainView, ledger: FactLedger, evidence: str, as_of: date,
-          corpus=None) -> None:
+def facts(view: ChainView, ledger: FactLedger, evidence: str, as_of: date,
+          corpus=None, period: str = "") -> list[str]:
+    """代码核对出的事实，交审核者（子项目四：此前这些是驳回理由）。"""
+    out: list[str] = []
     for role in Role:
         if not view.of(role):
-            raise ChainFailed(
-                f"产业链缺少「{role.value}」环节 —— 链条断了就谈不上"
-                f"「完整产业链」，也无从判断公司的议价能力从何而来")
-    if Role.UPSTREAM not in view.power or Role.DOWNSTREAM not in view.power:
-        raise ChainFailed("须同时给出对上游与对下游的议价判断")
-
+            out.append(f"产业链缺少「{role.value}」环节")
+    for role in (Role.UPSTREAM, Role.DOWNSTREAM):
+        if role not in view.power:
+            out.append(f"没有给出对{role.value}的议价判断")
     from ir_agent.citation import audit_prose
 
     prose = {f"环节「{x.name[:12]}」": x.name + x.note for x in view.links}
@@ -255,41 +246,58 @@ def check(view: ChainView, ledger: FactLedger, evidence: str, as_of: date,
         prose["行业规模口径"] = view.size.label
     bad = audit_prose(prose)
     if bad:
-        raise ChainFailed(
-            "描述里出现了账本外的数字：" + "、".join(bad) +
-            " —— 这些描述会原样进入研报撰写环节，而那里的数字必须可溯源；"
-            "请改成不带具体数字的说法")
-
+        out.append("描述里有账本外的数字：" + "、".join(bad))
     items = list(view.links) + ([view.size] if view.size else [])
     attribute(items, evidence, corpus)
-    flat = [b for x in view.links for b in x.bases]
-    if view.size:
-        flat += view.size.bases
-    problems = validate(flat, ledger=ledger, body=evidence, as_of=as_of,
-                        corpus=corpus)
-    if problems:
-        raise ChainFailed("依据不可核验：" + "；".join(problems))
+    flat = [b for x in items for b in x.bases]
+    out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body=evidence,
+                                                  as_of=as_of, corpus=corpus)]
+    if period:
+        out += [f"与账本交叉核对：{x}" for x in cross_check(view, ledger, period, as_of)]
+    return out
+
+
+KINDS = ("环节", "议价", "规模")
+
+
+def checklist(view: ChainView) -> list[tuple[str, str]]:
+    """按方法论生成（用户决定 5）：环节固定 3 条、议价固定 2 条、行业规模给了才列。"""
+    items = [("环节", r.value) for r in Role]
+    items += [("议价", "对上游"), ("议价", "对下游")]
+    return items + ([("规模", "行业规模")] if view.size else [])
+
+
+RULES = Q.make_rules("产业链", """\
+- 环节：上游/本环节/下游的识别是否正确；对本公司意味着什么是否说清；有没有凭常识补出来
+  的环节（看起来完整、其中一环是编的，比缺一环更糟）。没给出的环节判「未给出」。
+- 议价：强/均衡/弱与证据是否一致；与账本周转天数是否一致 —— 对上游议价强应体现为
+  应付天数高于同业中位（占用供应商资金），对下游议价强应体现为应收天数低于同业中位
+  （先款后货）；代码给了交叉核对结果。没给出的判「未给出」。
+- 规模：口径、数值、单位、期间是否对得上原文；口径不明的规模不能用。""")
 
 
 PROMPT = """基于下面的资料，梳理本公司所处的产业链。
 
 **一、完整产业链**（上游、本环节、下游都要有，各一到三条）
-格式：`环节: <上游|本环节|下游> | <环节名> | <该环节对本公司意味着什么> | 「原文逐字引用」`
+格式：`环节: <上游|本环节|下游> | <环节名> | <该环节对本公司意味着什么> | <依据>`
 
 **二、议价能力**（对上游、对下游各一条）
 格式：`议价: <上游|下游> | <强|均衡|弱>`
 
 **三、行业真实规模**（资料里有明确口径的才写，没有就整行不要）
 口径必须写清楚——「规模以上企业营业收入」和「终端零售额」差得很远。
-格式：`行业规模: <口径描述> | <数值> | <单位> | <期间如2025FY> | 「原文逐字引用」`
+格式：`行业规模: <口径描述> | <数值> | <单位> | <期间如2025FY> | <依据>`
 
-**硬性要求**
-- 引用必须**逐字照抄**下面的资料，一个字都不能改，否则核验通不过。
+{basis_rules}
+
+**要求**
 - 资料里没讲到的环节，**不要凭常识补全**。产业链看起来完整但其中一环
   是编的，比缺一环更糟。
-- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本 —— 一个无处可查的数字会让整篇报告卡在无法修复的驳回上。需要数字时用给你的占位符，否则改成不带数字的说法。
+- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本。需要数字时用给你的占位符，否则改成不带数字的说法。
 - 议价判断会与账本里的应付/应收天数同业分位交叉核对，方向相反时你需要
-  在正文里说明缘由。
+  说明缘由。
+
+{review_note}
 
 {evidence}
 """
@@ -348,25 +356,21 @@ def for_prompt(corpus, ledger: FactLedger, period: str, as_of: date,
 
 
 def analyse(client, corpus, ledger: FactLedger, period: str, as_of: date,
-            sections=None, max_attempts: int = 3) -> tuple[ChainView, str]:
+            sections=None, *, judge, catalog: str = "",
+            max_rounds: int = Q.MAX_ROUNDS) -> tuple[ChainView, str]:
+    """撰写者写、审核者审（子项目四）。返回 (结论, 证据文本)；审核不过抛
+    `qual_review.ReviewStop`，模型接口错误原样抛出。"""
     evidence = for_prompt(corpus, ledger, period, as_of, sections)
     body = "\n".join(
         [s.text for s in (sections.sections.values() if sections else [])])
-    prompt = PROMPT.format(evidence=evidence)
-    last, raw = "", ""
-    for attempt in range(1, max_attempts + 1):
-        out = raw = client(prompt)
-        try:
-            view = parse(out)
-            check(view, ledger, body, as_of, corpus)
-        except ChainFailed as e:
-            last = str(e)
-            prompt = (f"{prompt}\n\n---\n"
-                      f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
-                      "请修正后按格式重新输出。\n")
-            continue
-        view.conflicts = cross_check(view, ledger, period, as_of)
-        return view, evidence
-    raise ChainFailed(
-            f"连续 {max_attempts} 次给不出可核验的产业链分析：{last}"
-            f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")
+    prompt = PROMPT.format(evidence=evidence, basis_rules=Q.BASIS_RULES,
+                           review_note=Q.REVIEW_NOTE)
+    view, res, rounds = Q.run(
+        client, judge, name="产业链", prompt=prompt, materials=evidence,
+        read=lambda raw: parse(raw, corpus),
+        facts=lambda v: facts(v, ledger, body, as_of, corpus, period),
+        checklist=checklist, kinds=KINDS, rules=RULES, catalog=catalog,
+        hay=evidence, ledger=ledger, as_of=as_of, max_rounds=max_rounds)
+    view.conflicts = cross_check(view, ledger, period, as_of)
+    view.review, view.rounds = res, rounds
+    return view, evidence

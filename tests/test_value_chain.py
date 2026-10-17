@@ -11,6 +11,7 @@ from ir_agent import value_chain as VC
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.sources.external import Corpus, Document, Tier
 from ir_agent.value_chain import ChainFailed, Power, Role
+from judge_stub import Judge
 
 D = Decimal
 AS_OF = date(2026, 9, 7)
@@ -67,41 +68,39 @@ def test_解析三部分():
     assert v.size.value == D("7803") and v.size.period == "2025FY"
 
 
-def test_未知环节位置被驳回():
-    with pytest.raises(ChainFailed, match="未知的环节位置"):
-        VC.parse(f"环节: 中游 | x | y | 「{Q_UP}」")
+def test_未知环节位置_记进读数事实():
+    v = VC.parse(f"环节: 中游 | x | y | 「{Q_UP}」")
+    assert "上游/本环节/下游" in "\n".join(v.read_notes)
 
 
-def test_本环节没有议价对象():
-    with pytest.raises(ChainFailed, match="无议价对象"):
-        VC.parse("议价: 本环节 | 强")
+def test_本环节给了议价_记进读数事实():
+    v = VC.parse("议价: 本环节 | 强")
+    assert "议价只对上游与下游" in "\n".join(v.read_notes)
 
 
-def test_行业规模无数值被驳回():
-    with pytest.raises(ChainFailed, match="缺少数值"):
-        VC.parse(f"行业规模: 口径 | 若干 | 亿元 | 2025FY | 「{Q_SIZE}」")
+def test_行业规模无数值_记进读数事实():
+    v = VC.parse(f"行业规模: 口径 | 若干 | 亿元 | 2025FY | 「{Q_SIZE}」")
+    assert "读不出数值" in "\n".join(v.read_notes)
 
 
-def test_环节缺依据被驳回():
-    with pytest.raises(ChainFailed, match="缺少可核验的依据"):
-        VC.parse("环节: 上游 | 种植 | 分散 | 我的判断")
+def test_环节缺依据_记进读数事实():
+    v = VC.parse("环节: 上游 | 种植 | 分散 | 我的判断")
+    assert "没有给出依据" in "\n".join(v.read_notes)
 
 
 # ── 链条必须连起来 ───────────────────────────────────────────
 
 @pytest.mark.parametrize("drop", list(Role))
-def test_缺任一环即驳回(drop):
+def test_缺任一环_记进事实(drop):
     """链条断了就谈不上「完整产业链」，也无从判断议价能力从何而来。"""
     keep = [f"环节: {r.value} | n | note | 「{Q_UP}」" for r in Role if r is not drop]
     v = VC.parse(_out(links=keep, size=False))
-    with pytest.raises(ChainFailed, match=drop.value):
-        VC.check(v, _led(), DOC, AS_OF, corpus=_corpus())
+    assert any(drop.value in x for x in VC.facts(v, _led(), DOC, AS_OF, corpus=_corpus()))
 
 
 def test_议价须对上下游都给():
     v = VC.parse(_out(powers=["议价: 上游 | 强"], size=False))
-    with pytest.raises(ChainFailed, match="上游与对下游"):
-        VC.check(v, _led(), DOC, AS_OF, corpus=_corpus())
+    assert any("对下游的议价" in x for x in VC.facts(v, _led(), DOC, AS_OF, corpus=_corpus()))
 
 
 # ── 依据核验与出处判定 ───────────────────────────────────────
@@ -110,7 +109,7 @@ def test_引文出自外部资料时自动标为外部():
     from ir_agent.basis import BasisKind
 
     v = VC.parse(_out())
-    VC.check(v, _led(), "", AS_OF, corpus=_corpus())
+    VC.facts(v, _led(), "", AS_OF, corpus=_corpus())
     b = v.links[0].bases[0]
     assert b.kind is BasisKind.EXTERNAL and b.ref.endswith("R1.html")
 
@@ -121,8 +120,7 @@ def test_编造的环节被驳回():
            f"环节: 本环节 | 酿造 | x | 「{Q_UP}」",
            f"环节: 下游 | 经销 | y | 「{Q_DOWN}」"]
     v = VC.parse(_out(links=bad, size=False))
-    with pytest.raises(ChainFailed, match="不可核验|找不到"):
-        VC.check(v, _led(), "", AS_OF, corpus=_corpus())
+    assert any("核验不过" in x for x in VC.facts(v, _led(), "", AS_OF, corpus=_corpus()))
 
 
 def test_发布日晚于as_of的研报进不了语料库():
@@ -184,7 +182,7 @@ def test_没有外部规模时明说上市公司口径高估市占率():
 
 def test_提示词禁止凭常识补全():
     c = _Client(_out())
-    VC.analyse(c, _corpus(), _led(), P, AS_OF)
+    VC.analyse(c, _corpus(), _led(), P, AS_OF, judge=Judge())
     assert "不要凭常识补全" in c.prompts[0] and "比缺一环更糟" in c.prompts[0]
 
 
@@ -238,20 +236,28 @@ def test_多档来源同时出现时可引用范围按Tier声明顺序排列():
     assert txt.index(sellside_rule) < txt.index(media_rule)
 
 
-def test_驳回后重试并带回原因():
-    bad = _out(powers=["议价: 上游 | 强"], size=False)
-    c = _Client(bad, _out())
-    VC.analyse(c, _corpus(), _led(), P, AS_OF)
-    assert len(c.prompts) == 2 and "被驳回" in c.prompts[1]
+def test_审核致命则带建议重写():
+    c = _Client(_out(), _out())
+    VC.analyse(c, _corpus(), _led(), P, AS_OF, judge=Judge({("议价", "对上游"): "致命"}, {}))
+    assert len(c.prompts) == 2 and "上一轮审核驳回" in c.prompts[1]
 
 
-def test_连续失败则拒绝出结论():
-    bad = _out(links=[f"环节: 上游 | x | y | 「查无此句」"], size=False)
-    with pytest.raises(ChainFailed, match="连续"):
-        VC.analyse(_Client(bad, bad, bad), _corpus(), _led(), P, AS_OF)
+def test_三轮审核不过则停下():
+    from ir_agent.qual_review import ReviewStop
+    with pytest.raises(ReviewStop, match="产业链审核 3 轮未通过"):
+        VC.analyse(_Client(_out(), _out(), _out()), _corpus(), _led(), P, AS_OF,
+                   judge=Judge({"环节": "致命"}))
+
+
+def test_审核清单按方法论生成():
+    """用户决定 5：环节固定 3 条、议价固定 2 条、行业规模给了才列。"""
+    assert VC.checklist(VC.parse(_out(size=False))) == [
+        ("环节", "上游"), ("环节", "本环节"), ("环节", "下游"),
+        ("议价", "对上游"), ("议价", "对下游")]
+    assert ("规模", "行业规模") in VC.checklist(VC.parse(_out()))
 
 
 def test_端到端带出矛盾():
     v, _ = VC.analyse(_Client(_out()), _corpus(),
-                      _led(payable_days__percentile="0.17"), P, AS_OF)
+                      _led(payable_days__percentile="0.17"), P, AS_OF, judge=Judge())
     assert v.conflicts and "⚠" in v.summary()

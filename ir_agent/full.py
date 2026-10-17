@@ -600,7 +600,7 @@ def _load_value_chain(r, as_of: date, client) -> tuple[str, str, str]:
         return "", "", "产业链分析（无任何资料）"
     try:
         view, _ = VC.analyse(client, r.corpus, r.ledger, r.period, as_of,
-                             sections)
+                             sections, judge=client)
     except Exception as e:                                  # noqa: BLE001
         return "", "", f"产业链分析（{e.__class__.__name__}: {str(e)[:120]}）"
     if view.size:
