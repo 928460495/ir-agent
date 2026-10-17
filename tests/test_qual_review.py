@@ -108,6 +108,16 @@ class TestRun:
         with pytest.raises(Q.ReviewStop, match="战略分析审核未完成"):
             _run(_Writer("项: a"), Judge(skip={("自洽", "三部分")}))
 
+    def test_补答不消耗撰写者轮数(self):
+        class Once(Judge):
+            def __call__(self, prompt):
+                self.skip = {("自洽", "三部分")} if not self.prompts else set()
+                return super().__call__(prompt)
+        w, j = _Writer("项: a"), Once()
+        _, res, rounds = _run(w, j)
+        assert len(j.prompts) == 2 and len(w.prompts) == 1 and res.rounds == 1
+        assert "上一次回答不完整" in j.prompts[1] and len(rounds) == 1
+
 
 def test_指纹不计空白_语料库指纹按文档集合():
     assert Q.fingerprint("项: a\n\n") == Q.fingerprint("  项: a")

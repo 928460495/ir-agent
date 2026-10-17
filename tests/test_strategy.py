@@ -386,3 +386,12 @@ def test_停下时带上最后一稿():
         strategy.assess(_Client(bad, bad, bad), _led(), P, AS_OF, _sections(),
                         judge=Judge({"五力": "致命"}))
     assert "年报未提及替代品" in e.value.last
+
+
+def test_五力只写了三条_清单仍列满五条():
+    """变异验证补的：清单按方法论（固定 5 力）而不是按稿子生成 —— 漏写的力要出现在
+    清单里，让审核者判「未给出」（用户决定 5）。"""
+    v = strategy.parse(_out(forces=[f"五力: {f.value} | 中 | 中性 | 「{QUOTE}」"
+                                    for f in list(Force)[:3]]))
+    assert len(v.forces) == 3
+    assert [s for k, s in strategy.checklist(v) if k == "五力"] == [f.value for f in Force]

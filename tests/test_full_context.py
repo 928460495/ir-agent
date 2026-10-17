@@ -4428,3 +4428,77 @@ def test_定性模块人工修改过_门一清单与终端标注_记进state(tmp
     assert any(s.startswith("定性分析沿用：产业链") for s in o.skipped)
     st = json.loads((tmp_path / full.STATE).read_text(encoding="utf-8"))
     assert st["qual_unreviewed"] == ["战略分析"]
+
+
+# 中国巨石 600176 2026-10-17：五力引了研报，被代码判「需年报原文或占位符」连挂三次，
+# 战略分析整节缺失。下面的战略稿子按同样的写法引研报。
+_QUAL_STRATEGY = "\n".join([
+    "护城河: 成本优势 | 宽 | 转述：综合 东莞证券《玻纤行业深度报告》",
+    *[f"五力: {f} | 中 | 中性 | 「产品价格回升低于预期」——东莞证券《玻纤行业深度报告》"
+      for f in ("现有竞争强度", "新进入者威胁", "供应商议价能力", "买方议价能力", "替代品威胁")],
+    "不确定性: 玻纤价格回落 | revenue_growth | 下调 | 转述：综合 东莞证券《玻纤行业深度报告》",
+    "不确定性: 能源成本上行 | gross_margin | 下调 | 转述：综合 东莞证券《玻纤行业深度报告》"])
+_QUAL_CHAIN = "\n".join([
+    "环节: 上游 | 叶腊石与能源 | 成本端 | 转述：综合 东莞证券《玻纤行业深度报告》",
+    "环节: 本环节 | 玻纤纱与制品 | 本公司所处环节 | 转述：综合 东莞证券《玻纤行业深度报告》",
+    "环节: 下游 | 风电与电子布 | 需求端 | 转述：综合 东莞证券《玻纤行业深度报告》",
+    "议价: 上游 | 均衡", "议价: 下游 | 均衡"])
+
+
+def _qual_e2e(monkeypatch, full, tmp_path, judge):
+    """第一次调用**不打桩 `_analyse_qualitative`**，只把模型换成按提示词分派的假模型。"""
+    real = full._analyse_qualitative
+    _offline(monkeypatch, full)
+    monkeypatch.setattr(full, "_analyse_qualitative", real)
+    calls = {"战略": 0, "产业链": 0}
+
+    class _C:
+        total_cost_usd = 0.0
+
+        def __call__(self, p):
+            if "**必须逐条作答的条目**" in p:
+                return judge(p)
+            if "做战略分析" in p:
+                calls["战略"] += 1
+                return _QUAL_STRATEGY
+            if "梳理本公司所处的产业链" in p:
+                calls["产业链"] += 1
+                return _QUAL_CHAIN
+            raise AssertionError("不该有别的模型调用")
+    monkeypatch.setattr(full, "make_client", lambda **k: _C())
+    return calls
+
+
+def test_定性审核_端到端_都通过_进门一(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    calls = _qual_e2e(monkeypatch, full, tmp_path, Judge())
+    o = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
+    assert o.stage is full.Stage.AWAITING_SOURCES, o.skipped
+    assert calls == {"战略": 1, "产业链": 1}
+    for f in ("strategy.md", "strategy_review.json", "strategy_rounds.md", "value_chain.md"):
+        assert (tmp_path / f).exists(), f
+    assert "## 定性分析审核" in (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
+    st = json.loads((tmp_path / full.STATE).read_text(encoding="utf-8"))
+    assert "现有竞争强度" in st["md"]["战略"], "引研报的战略分析不再缺失"
+
+
+def test_定性审核_端到端_战略三轮不过停下_产业链照常落盘_人工接手后沿用(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    calls = _qual_e2e(monkeypatch, full, tmp_path, Judge({"自洽": "致命"}))
+    o = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
+    assert o.stage is full.Stage.INCOMPLETE and calls["战略"] == 3
+    assert (tmp_path / "value_chain.md").exists() and not (tmp_path / "strategy.md").exists()
+    assert (tmp_path / "strategy_failed_raw.md").exists()
+    assert not (tmp_path / full.SOURCES_MD).exists()
+
+    # 人工以底稿改好存成 strategy.md，重跑：战略不调模型、产业链沿用，标未经审核。
+    (tmp_path / "strategy.md").write_text(
+        (tmp_path / "strategy_failed_raw.md").read_text(encoding="utf-8"), encoding="utf-8")
+    calls.update(战略=0, 产业链=0)
+    o2 = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
+    assert calls == {"战略": 0, "产业链": 0}, "通过的与人工接手的都不该再调模型"
+    assert o2.stage is full.Stage.AWAITING_SOURCES, o2.skipped
+    assert any(s.startswith("定性分析未经审核：战略分析") for s in o2.skipped)
+    assert "战略分析：⚠ 人工修改后未经审核" in (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
