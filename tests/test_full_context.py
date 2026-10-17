@@ -4380,3 +4380,51 @@ def test_判断项审核三轮不过_停在第三次调用_给两条做法(tmp_p
     acts = "\n".join(next_actions(o.stage, "600183", out_dir=str(tmp_path),
                                   year=2025, phase="assume"))
     assert "--assume" in acts and full.ASSUMPTIONS_FAILED_JSON in acts
+
+
+# ══ 子项目四：第一次调用的三个定性模块 = 撰写者 + 审核者 ══════════════════
+
+def test_定性模块审核停下_第一次调用停在这里_不出来源清单(tmp_path, monkeypatch):
+    """用户决定 9：任一模块审核没通过 → 整个第一次调用停下交人工；不写 sources.md、
+    不进门①；终端写明哪个模块、各轮记录在哪；「下一步」给两条做法。"""
+    from ir_agent import full
+    from ir_agent.research import next_actions
+
+    _offline(monkeypatch, full)
+
+    def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
+             statuses=None):
+        (out / "strategy_failed_raw.md").write_text("最后一稿", encoding="utf-8")
+        stops.append("战略分析审核 3 轮未通过（最后一轮致命 2 条） —— 各轮记录：x")
+        return _PhaseClient()
+    monkeypatch.setattr(full, "_analyse_qualitative", qual)
+    o = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
+    assert o.stage is full.Stage.INCOMPLETE
+    assert not (tmp_path / full.SOURCES_MD).exists()
+    assert any(s.startswith("战略分析审核 3 轮未通过") for s in o.skipped)
+    acts = "\n".join(next_actions(o.stage, "600176", out_dir=str(tmp_path),
+                                  year=2025, phase="analyse"))
+    assert "--analyse" in acts and "strategy_failed_raw.md" in acts and "strategy.md" in acts
+
+
+def test_定性模块人工修改过_门一清单与终端标注_记进state(tmp_path, monkeypatch):
+    from ir_agent import full
+
+    _offline(monkeypatch, full)
+
+    def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
+             statuses=None):
+        statuses += [{"label": "战略分析", "state": "人工修改后未经审核", "rounds": 0,
+                      "flagged": [], "note": ""},
+                     {"label": "产业链", "state": "沿用审核结论", "rounds": 1,
+                      "flagged": [], "note": "本轮语料库与审核时不同，2 处依据本轮核对不过"}]
+        return _PhaseClient()
+    monkeypatch.setattr(full, "_analyse_qualitative", qual)
+    o = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
+    assert o.stage is full.Stage.AWAITING_SOURCES
+    src = (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
+    assert "## 定性分析审核" in src and "战略分析：⚠ 人工修改后未经审核" in src
+    assert any(s.startswith("定性分析未经审核：战略分析") for s in o.skipped)
+    assert any(s.startswith("定性分析沿用：产业链") for s in o.skipped)
+    st = json.loads((tmp_path / full.STATE).read_text(encoding="utf-8"))
+    assert st["qual_unreviewed"] == ["战略分析"]

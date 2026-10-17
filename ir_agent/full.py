@@ -561,48 +561,84 @@ def _load_sections(r):
         return None, f"年报叙述章节（{e.__class__.__name__}: {e}）"
 
 
-def _load_macro_view(r, as_of: date, client, macro_pr: str):
-    """宏观定性: 政策取向与传导路径。补的是读数之外的那一半。"""
+def _load_macro_view(r, as_of: date, client, macro_pr: str, *, out: Path | None = None,
+                     sink: list | None = None, catalog: str = ""):
+    """宏观定性: 政策取向与传导路径。补的是读数之外的那一半。撰写者 + 审核者（子项目四）。"""
     from ir_agent import macro_view as MV
 
     if r.corpus is None or not r.corpus.docs:
         return "", "", "宏观定性（无外部宏观资料，政策取向缺文字依据）"
-    try:
-        view, _ = MV.assess(client, r.corpus, r.ledger, as_of, macro_pr, judge=client)
-    except Exception as e:                                  # noqa: BLE001
-        return "", "", f"宏观定性（{e.__class__.__name__}: {str(e)[:120]}）"
+
+    def run():
+        return MV.assess(client, r.corpus, r.ledger, as_of, macro_pr,
+                         judge=client, catalog=catalog)[0]
+    if out is None:
+        view = run()
+    else:
+        view, st = _qual_module(
+            out, prefix="macro_view", label="宏观定性", corpus=r.corpus,
+            parse=lambda raw: MV.parse(raw, r.corpus),
+            facts=lambda v: MV.facts(v, r.ledger, as_of, r.corpus), run=run)
+        if sink is not None:
+            sink.append(st)
+    view.conflicts = MV.cross_check(view, r.ledger, as_of)
     return view.summary(), view.summary(), ""
 
 
-def _load_strategy(r, as_of: date, client, spot=None) -> tuple[str, str, str]:
-    """战略分析: 护城河、五力、关键不确定性 → 情景驱动因子。"""
+def _load_strategy(r, as_of: date, client, spot=None, *, out: Path | None = None,
+                   sink: list | None = None, catalog: str = "") -> tuple[str, str, str]:
+    """战略分析: 护城河、五力、关键不确定性 → 情景驱动因子。撰写者 + 审核者（子项目四）。"""
     from ir_agent import strategy
 
     sections, sec_err = _load_sections(r)
     if sections is None and r.corpus is None:
         return "", "", sec_err or "战略分析（无任何定性证据）"
-    try:
-        view, _ = strategy.assess(client, r.ledger, r.period, as_of,
-                                  sections, spot, judge=client, corpus=r.corpus)
-    except Exception as e:                                  # noqa: BLE001
-        return "", "", f"战略分析（{e.__class__.__name__}: {str(e)[:120]}）"
+
+    def run():
+        return strategy.assess(client, r.ledger, r.period, as_of, sections, spot,
+                               judge=client, catalog=catalog, corpus=r.corpus)[0]
+    if out is None:
+        view = run()
+    else:
+        view, st = _qual_module(
+            out, prefix="strategy", label="战略分析", corpus=r.corpus,
+            parse=lambda raw: strategy.parse(raw, r.corpus),
+            facts=lambda v: strategy.facts(v, r.ledger, strategy.annual_text(sections),
+                                           as_of, r.corpus),
+            run=run)
+        if sink is not None:
+            sink.append(st)
+    view.unquantified = [f for f in strategy.Force
+                         if f not in strategy.anchors(r.ledger, r.period, as_of, spot)]
     r.sections = sections
     r.strategy_view = view          # 情景分析要用它识别出的关键不确定性
     return view.summary(), view.summary(), sec_err
 
 
-def _load_value_chain(r, as_of: date, client) -> tuple[str, str, str]:
-    """产业链与行业真实规模。"""
+def _load_value_chain(r, as_of: date, client, *, out: Path | None = None,
+                      sink: list | None = None, catalog: str = "") -> tuple[str, str, str]:
+    """产业链与行业真实规模。撰写者 + 审核者（子项目四）。"""
     from ir_agent import value_chain as VC
 
     sections = getattr(r, "sections", None)
     if r.corpus is None and sections is None:
         return "", "", "产业链分析（无任何资料）"
-    try:
-        view, _ = VC.analyse(client, r.corpus, r.ledger, r.period, as_of,
-                             sections, judge=client)
-    except Exception as e:                                  # noqa: BLE001
-        return "", "", f"产业链分析（{e.__class__.__name__}: {str(e)[:120]}）"
+    body = "\n".join(s.text for s in (sections.sections.values() if sections else []))
+
+    def run():
+        return VC.analyse(client, r.corpus, r.ledger, r.period, as_of, sections,
+                          judge=client, catalog=catalog)[0]
+    if out is None:
+        view = run()
+    else:
+        view, st = _qual_module(
+            out, prefix="value_chain", label="产业链", corpus=r.corpus,
+            parse=lambda raw: VC.parse(raw, r.corpus),
+            facts=lambda v: VC.facts(v, r.ledger, body, as_of, r.corpus, r.period),
+            run=run)
+        if sink is not None:
+            sink.append(st)
+    view.conflicts = VC.cross_check(view, r.ledger, r.period, as_of)
     if view.size:
         r.ledger.put(view.size.to_fact(
             r.corpus.docs[0].doc_id if r.corpus and r.corpus.docs else "ext",
@@ -1176,17 +1212,30 @@ def _analyse_facts(code: str, r, as_of: date, snapshot_dir):
 
 
 def _analyse_qualitative(code: str, r, as_of: date, model,
-                         md: dict, pr: dict, skipped: list[str]):
+                         md: dict, pr: dict, skipped: list[str], *,
+                         out: Path | None = None, stops: list | None = None,
+                         statuses: list | None = None):
     """需要模型的定性层（宏观定性 / 战略 / 产业链）。**就地**写入调用方的
     md/pr/skipped，只返回本层用的 client —— 开销要累计到总开销里。
 
     独立于 `_analyse_facts` 拆开（此前两者合在一个 `_analyse` 里）：确定性层
     两阶段都要重跑，定性层要调模型、只在第一阶段之一（`run_analyse`）跑一次，
     结果落进 state.json 供后两次调用读回。
+
+    **子项目四（spec 2026-10-17）**：三个模块各自「撰写者 + 审核者」。审核没通过或
+    模型接口失败 → `QualStop`，记进 `stops`（调用方据此停下第一次调用），其余模块
+    照常跑完（用户决定 9）。`statuses` 收集各模块的审核状态，供门① 清单。
     """
+    stops = stops if stops is not None else []
+    statuses = statuses if statuses is not None else []
+
     def take(name, fn):
         try:
             a, b, err = fn()
+        except QualStop as e:
+            md[name] = pr[name] = ""
+            stops.append(str(e))
+            return
         except Exception as e:                              # noqa: BLE001
             md[name] = pr[name] = ""
             skipped.append(f"{name}（{e.__class__.__name__}: {str(e)[:120]}）")
@@ -1198,10 +1247,98 @@ def _analyse_qualitative(code: str, r, as_of: date, model,
     qual_client = make_client(model=model)
     spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
                  if f.key == "market_cap"), None)
-    take("宏观定性", lambda: _load_macro_view(r, as_of, qual_client, pr["宏观"]))
-    take("战略", lambda: _load_strategy(r, as_of, qual_client, spot))
-    take("产业链", lambda: _load_value_chain(r, as_of, qual_client))
+    catalog = _qual_catalog(r, as_of)
+    kw = dict(out=out, sink=statuses, catalog=catalog)
+    take("宏观定性", lambda: _load_macro_view(r, as_of, qual_client, pr["宏观"], **kw))
+    take("战略", lambda: _load_strategy(r, as_of, qual_client, spot, **kw))
+    take("产业链", lambda: _load_value_chain(r, as_of, qual_client, **kw))
     return qual_client
+
+
+class QualStop(Exception):
+    """定性模块审核没通过（或模型接口失败）—— 第一次调用停下交人工（子项目四决定 9）。
+    消息里带各轮记录与最后一稿的路径。"""
+
+
+def _qual_catalog(r, as_of: date) -> str:
+    """审核者的账本事实目录（用户决定 6）。取不到时给空串，不拦审核。"""
+    try:
+        return FactCatalog.from_ledger(r.ledger, period=r.period, as_of=as_of,
+                                       extra_periods=_catalog_periods(r)
+                                       ).render_for_prompt()
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _qual_module(out: Path, *, prefix: str, label: str, corpus, parse, facts, run):
+    """一个定性模块的落盘、沿用与停下（spec 五）。返回 (结论, 审核状态)。
+
+    - `<prefix>.md` 已在 → 读回、**不调模型**：指纹与审核记录一致则沿用审核结论（语料库
+      若已变，重核依据并标出核对不过的处数）；不一致或没有审核记录 → 「人工修改后未经
+      审核」（用户决定 11、12）。
+    - 否则调 `run()`（撰写 + 审核）：通过 → 写结果、审核结论、各轮记录；审核没通过 →
+      写各轮记录与最后一稿，抛 `QualStop`；模型接口失败 → 抛 `QualStop`，写明重跑即可。
+    """
+    from ir_agent import qual_review as Q
+    from ir_agent.methodology_review import ReviewResult
+
+    res_f, rounds_f = out / f"{prefix}.md", out / f"{prefix}_rounds.md"
+    review_f, failed_f = out / f"{prefix}_review.json", out / f"{prefix}_failed_raw.md"
+    status = {"label": label, "state": "", "rounds": 0, "flagged": [], "note": ""}
+    if res_f.exists():
+        raw = res_f.read_text(encoding="utf-8")
+        view = parse(raw)
+        rec = json.loads(review_f.read_text(encoding="utf-8")) if review_f.exists() else {}
+        if rec.get("passed") and rec.get("fingerprint") == Q.fingerprint(raw):
+            view.review = ReviewResult.from_json(rec)
+            status.update(state="沿用审核结论", rounds=view.review.rounds,
+                          flagged=[v.line() for v in view.review.flagged()])
+            if rec.get("corpus", "") != Q.corpus_fingerprint(corpus):
+                n = sum(1 for x in facts(view)
+                        if x.startswith("依据核验不过") or "不在语料库" in x)
+                if n:
+                    status["note"] = f"本轮语料库与审核时不同，{n} 处依据本轮核对不过"
+        else:
+            status["state"] = "人工修改后未经审核"
+        return view, status
+    try:
+        view = run()
+    except Q.ReviewStop as e:
+        rounds_f.write_text(Q.AR.rounds_markdown(e.rounds, title=f"{label}审核",
+                                                 author="撰写者"), encoding="utf-8")
+        failed_f.write_text(e.last or "", encoding="utf-8")
+        raise QualStop(f"{e} —— 各轮记录：{rounds_f}；最后一稿：{failed_f}") from e
+    except ClaudeCliError as e:
+        raise QualStop(f"{label}审核停下：模型接口问题（{e.__class__.__name__}: "
+                       f"{str(e)[:120]}）—— 原样重跑 --analyse 即可") from e
+    raw = view.rounds[-1].raw
+    res_f.write_text(raw, encoding="utf-8")
+    failed_f.unlink(missing_ok=True)       # 上一轮停下留的底稿已过时
+    review_f.write_text(Q.dump(view.review, passed=True,
+                               corpus_fp=Q.corpus_fingerprint(corpus)), encoding="utf-8")
+    rounds_f.write_text(Q.AR.rounds_markdown(view.rounds, title=f"{label}审核",
+                                             author="撰写者"), encoding="utf-8")
+    status.update(state="审核通过", rounds=view.review.rounds,
+                  flagged=[v.line() for v in view.review.flagged()])
+    return view, status
+
+
+def _qual_section(statuses: list) -> str:
+    """门① `sources.md` 的「定性分析审核」一节（spec 六）。"""
+    if not statuses:
+        return ""
+    lines = ["", "## 定性分析审核", ""]
+    for s in statuses:
+        if s["state"] == "人工修改后未经审核":
+            lines.append(f"- {s['label']}：⚠ 人工修改后未经审核")
+        else:
+            head = "沿用上轮审核结论（" if s["state"] == "沿用审核结论" else ""
+            lines.append(f"- {s['label']}：{head}第 {s['rounds']} 轮审核通过"
+                         + ("）" if head else ""))
+        lines += [f"  - {x}" for x in s.get("flagged") or []]
+        if s.get("note"):
+            lines.append(f"  - ⚠ {s['note']}")
+    return "\n".join(lines) + "\n"
 
 
 def _restore_state(out: Path) -> tuple[dict, dict]:
@@ -1220,7 +1357,8 @@ def _restore_state(out: Path) -> tuple[dict, dict]:
 
 
 def _save_state(out: Path, code: str, r, as_of: date, md: dict, pr: dict,
-                *, upheld: int | None = None, **signoff: str) -> None:
+                *, upheld: int | None = None, qual_unreviewed: list | None = None,
+                **signoff: str) -> None:
     """落盘 `state.json`。三次调用都写它，每次把自己那道门的签名补进去。
 
     **先读旧的再 update，不能整份覆盖。** `upheld` 只有跑过辩论的那次调用
@@ -1234,6 +1372,9 @@ def _save_state(out: Path, code: str, r, as_of: date, md: dict, pr: dict,
                 "md": md, "pr": pr})
     if upheld is not None:
         old["upheld"] = upheld
+    # 子项目四：人工修改后未经审核的定性模块，第二阶段写进研报附录。
+    if qual_unreviewed is not None:
+        old["qual_unreviewed"] = list(qual_unreviewed)
     old.update({k: v for k, v in signoff.items() if v})
     f.write_text(json.dumps(old, ensure_ascii=False, indent=2),
                  encoding="utf-8")
@@ -2010,7 +2151,26 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
     skipped += _load_announce(code, r, as_of, out, md)
     _refresh_external_md(r, md)
 
-    qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped)
+    stops: list[str] = []
+    statuses: list[dict] = []
+    qual_client = _analyse_qualitative(code, r, as_of, model, md, pr, skipped,
+                                       out=out, stops=stops, statuses=statuses)
+    cost = Decimal(str(research_client.total_cost_usd + qual_client.total_cost_usd))
+    for st in statuses:
+        if st["state"] == "人工修改后未经审核":
+            skipped.append(f"定性分析未经审核：{st['label']}（人工修改后未经审核）")
+        if st.get("note"):
+            skipped.append(f"定性分析沿用：{st['label']} {st['note']}")
+    unreviewed = [st["label"] for st in statuses if st["state"] == "人工修改后未经审核"]
+    if stops:
+        # **任一定性模块审核没通过 → 第一次调用停下交人工**（子项目四决定 9）：
+        # 三个模块都已跑完（通过的已落盘，重跑沿用）；不写来源清单、不进门①。
+        skipped += stops
+        _save_state(out, code, r, as_of, md, pr, qual_unreviewed=unreviewed)
+        return ResearchOutcome(
+            code=code, period=r.period, as_of=as_of, stage=Stage.INCOMPLETE,
+            artifacts=arts, skipped=skipped, cost_usd=cost, phase="analyse",
+            route_reason="定性分析审核没通过，第一次调用停下（原因见上方清单）")
 
     # ── 门①：来源清单 ───────────────────────────────────────────
     # `peers` 不在 `r` 上 —— `peer_set(code)` 的结果是 `_load_industry` 的
@@ -2023,8 +2183,8 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
         peers=_peer_names(code),
         annual=(annual_url, (_annual_cache_dir() / annual_url.rsplit("/", 1)[-1])
                 if annual_url else None))
-    (out / SOURCES_MD).write_text(render(rows, _snapshot_gaps(r)),
-                                  encoding="utf-8")
+    (out / SOURCES_MD).write_text(render(rows, _snapshot_gaps(r))
+                                  + _qual_section(statuses), encoding="utf-8")
     (out / SOURCES_JSON).write_text(
         json.dumps({"rows": [vars(x) for x in rows], "verified_by": ""},
                    ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2034,13 +2194,10 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
 
     _write_dashboard(r, out, md, code, arts)
     skipped += _media_tier_note(getattr(r, "corpus", None))
-    _save_state(out, code, r, as_of, md, pr)
+    _save_state(out, code, r, as_of, md, pr, qual_unreviewed=unreviewed)
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=Stage.AWAITING_SOURCES,
-        artifacts=arts, skipped=skipped,
-        cost_usd=Decimal(str(research_client.total_cost_usd
-                             + qual_client.total_cost_usd)),
-        phase="analyse")
+        artifacts=arts, skipped=skipped, cost_usd=cost, phase="analyse")
 
 
 def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,

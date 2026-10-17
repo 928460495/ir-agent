@@ -370,3 +370,10 @@ def test_门三指引不再说改完会重新校验():
                                  out_dir="out/x", year=2025))
     assert "重新校验" not in txt and "三档须严格拉开" not in txt
     assert "未经审核" in txt
+
+
+def test_定性分析审核的新措辞都登记了():
+    from ir_agent.research import _mark
+    for s in ("宏观定性审核 3 轮未通过（…）", "战略分析审核未完成：…", "产业链审核停下：模型接口问题",
+              "定性分析未经审核：战略分析（人工修改后未经审核）", "定性分析沿用：产业链 本轮语料库…"):
+        assert _mark(s).strip() == "⚠", s
