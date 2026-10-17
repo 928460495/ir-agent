@@ -11,6 +11,7 @@ from ir_agent import macro_view as MV
 from ir_agent.ledger import Fact, FactLedger, Method
 from ir_agent.macro_view import Impact, MacroViewFailed, Stance
 from ir_agent.sources.external import Corpus, Document, Tier
+from judge_stub import Judge
 
 D = Decimal
 AS_OF = date(2026, 9, 7)
@@ -61,55 +62,54 @@ def test_解析取向与传导():
     assert v.channels[0].impact is Impact.POSITIVE
 
 
-def test_取向取值受限():
-    with pytest.raises(MacroViewFailed, match="宽松/中性/收紧"):
-        MV.parse(f"政策取向: 偏松 | 「{Q}」")
+def test_取向不是规定的词_记进读数事实():
+    v = MV.parse(f"政策取向: 偏松 | 「{Q}」")
+    assert v.stance is None and "宽松/中性/收紧" in "\n".join(v.read_notes)
 
 
-def test_影响取值受限():
-    with pytest.raises(MacroViewFailed, match="利好/中性/利空"):
-        MV.parse(f"传导: a | b | 略有帮助 | 「{Q}」")
+def test_影响不是规定的词_记进读数事实():
+    v = MV.parse(f"传导: a | b | 略有帮助 | 「{Q}」")
+    assert v.channels == [] and "利好/中性/利空" in "\n".join(v.read_notes)
 
 
-def test_缺依据被驳回():
-    with pytest.raises(MacroViewFailed, match="缺少可核验的依据"):
-        MV.parse("政策取向: 宽松 | 我的判断")
+def test_缺依据_记进读数事实():
+    v = MV.parse("政策取向: 宽松 | 我的判断")
+    assert v.stance is Stance.EASING and "没有给出依据" in "\n".join(v.read_notes)
 
 
 # ── 传导路径是重点 ───────────────────────────────────────────
 
-def test_未给取向被驳回():
-    """「中性」也是判断，须显式说出。"""
+def test_未给取向_记进事实():
+    """「中性」也是判断，须显式说出 —— 现在交审核者 [取向] 判。"""
     v = MV.parse(_out(stance=None))
-    with pytest.raises(MacroViewFailed, match="中性.*也是判断"):
-        MV.check(v, FactLedger(), DOC, AS_OF, corpus=_corpus())
+    assert any("中性" in x and "也是判断" in x
+               for x in MV.facts(v, FactLedger(), AS_OF, corpus=_corpus()))
 
 
-def test_传导少于两条被驳回():
+def test_传导少于两条_记进事实():
     """「政策转向宽松」写在哪篇研报里都成立，对判断本标的没有帮助 ——
-    有帮助的是那条链。"""
+    有帮助的是那条链。现在交审核者 [传导] 判。"""
     v = MV.parse(_out(channels=[f"传导: a | b | 利好 | 「{Q}」"]))
-    with pytest.raises(MacroViewFailed, match="至少 2 条|等于没写"):
-        MV.check(v, FactLedger(), DOC, AS_OF, corpus=_corpus())
+    assert any("至少 2 条" in x for x in MV.facts(v, FactLedger(), AS_OF, corpus=_corpus()))
 
 
-def test_合法输入通过():
-    MV.check(MV.parse(_out()), FactLedger(), DOC, AS_OF, corpus=_corpus())
+def test_合法输入没有事实():
+    v = MV.parse(_out())
+    assert v.read_notes == [] and MV.facts(v, FactLedger(), AS_OF, corpus=_corpus()) == []
 
 
-def test_引文必须出自资料():
+def test_引文找不到_记进事实():
     v = MV.parse(_out(stance="宽松", channels=[
         "传导: a | b | 利好 | 「央行大幅加息」",
         f"传导: c | d | 利好 | 「{Q}」"]))
-    with pytest.raises(MacroViewFailed, match="不可核验|找不到"):
-        MV.check(v, FactLedger(), "", AS_OF, corpus=_corpus())
+    assert any("核验不过" in x for x in MV.facts(v, FactLedger(), AS_OF, corpus=_corpus()))
 
 
 def test_出处由代码判定():
     from ir_agent.basis import BasisKind
 
     v = MV.parse(_out())
-    MV.check(v, FactLedger(), "", AS_OF, corpus=_corpus())
+    MV.facts(v, FactLedger(), AS_OF, corpus=_corpus())
     assert v.stance_bases[0].kind is BasisKind.EXTERNAL
 
 
@@ -147,8 +147,9 @@ def test_形态判定与cycle共用一份实现():
 
 def test_提示词强调链条():
     c = _Client(_out())
-    MV.assess(c, _corpus(), FactLedger(), AS_OF)
+    MV.assess(c, _corpus(), FactLedger(), AS_OF, judge=Judge())
     assert "写不出链条的政策判断等于没写" in c.prompts[0]
+    assert "转述" in c.prompts[0] and "审核者逐项审核" in c.prompts[0]
 
 
 def test_无外部宏观资料时明说只能由读数推断():
@@ -202,19 +203,30 @@ def test_多档来源同时出现时可引用范围按Tier声明顺序排列():
 
 def test_摘要安全无裸数字():
     from ir_agent.citation import audit_bare_numbers
-    v, _ = MV.assess(_Client(_out()), _corpus(), _rates("0.020", "0.026"), AS_OF)
+    v, _ = MV.assess(_Client(_out()), _corpus(), _rates("0.020", "0.026"), AS_OF,
+                     judge=Judge())
     assert v.conflicts
     assert audit_bare_numbers(v.summary()) == []
 
 
-def test_驳回后重试():
-    bad = _out(channels=[f"传导: a | b | 利好 | 「{Q}」"])
-    c = _Client(bad, _out())
-    MV.assess(c, _corpus(), FactLedger(), AS_OF)
-    assert len(c.prompts) == 2 and "被驳回" in c.prompts[1]
+def test_审核致命则带建议重写():
+    c = _Client(_out(), _out())
+    MV.assess(c, _corpus(), FactLedger(), AS_OF,
+              judge=Judge({("遗漏", "宏观因素"): "致命"}, {}))
+    assert len(c.prompts) == 2 and "上一轮审核驳回" in c.prompts[1]
+    assert "建议：" in c.prompts[1]
 
 
-def test_连续失败则拒绝出结论():
-    bad = _out(stance=None)
-    with pytest.raises(MacroViewFailed, match="连续"):
-        MV.assess(_Client(bad, bad, bad), _corpus(), FactLedger(), AS_OF)
+def test_三轮审核不过则停下():
+    from ir_agent.qual_review import ReviewStop
+    with pytest.raises(ReviewStop, match="宏观定性审核 3 轮未通过"):
+        MV.assess(_Client(_out(), _out(), _out()), _corpus(), FactLedger(), AS_OF,
+                  judge=Judge({"取向": "致命"}))
+
+
+def test_审核清单按方法论生成():
+    """用户决定 5：取向一条、每条传导一条、遗漏一条；一条传导都没读进来时也列。"""
+    assert MV.checklist(MV.parse(_out())) == [
+        ("取向", "政策取向"), ("传导", "第1条 政策利率下调"), ("传导", "第2条 流动性宽松"),
+        ("遗漏", "宏观因素")]
+    assert ("传导", "传导路径（未给出）") in MV.checklist(MV.parse(f"政策取向: 宽松 | 「{Q}」"))

@@ -27,11 +27,13 @@ from enum import Enum
 from ir_agent.lineparse import keyed, pick
 from ir_agent.ledger import FactLedger
 from ir_agent.sources.external import attribute
-from ir_agent.basis import Basis, InvalidBasis, validate
+from ir_agent.basis import Basis, validate
+from ir_agent import qual_review as Q
 
 
 class MacroViewFailed(Exception):
-    """宏观定性判断不可核验 —— 拒绝出结论。"""
+    """宏观定性没有可用资料等无从进行的情形。**内容是否成立不再由代码驳回**
+    （子项目四，spec 2026-10-17）：交给审核者，审核不过抛 `qual_review.ReviewStop`。"""
 
 
 class Stance(str, Enum):
@@ -55,15 +57,6 @@ _REF = re.compile(r"\[\[[^\]]+\]\]")
 
 
 
-def _tail(raw: str, n: int = 400) -> str:
-    """失败信息里带上模型最后写了什么。
-
-    **只说「格式不对」而不说「你写的是什么」，诊断就只能靠猜。** 前几轮
-    排查全跑失败时，每次都要单独再跑一次去抓原始输出 —— 而那几次的根因
-    （列表前缀、括号补注、写「无据」）看一眼原文就清楚了。
-    """
-    raw = (raw or "").strip()
-    return raw[-n:] if len(raw) > n else raw
 
 @dataclass
 class Channel:
@@ -71,6 +64,7 @@ class Channel:
     path: str            # 传导路径
     impact: Impact
     bases: list[Basis] = field(default_factory=list)
+    cites: list[str] = field(default_factory=list)    # 转述指向的文章标题
 
 
 @dataclass
@@ -79,6 +73,11 @@ class MacroView:
     stance_bases: list[Basis] = field(default_factory=list)
     channels: list[Channel] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
+    # 子项目四：代码读数时的事实（读不出的行……）、审核结论、各轮记录。不进 summary
+    # 以外的地方，读回时由 full 重建。
+    read_notes: list[str] = field(default_factory=list)
+    review: object = None
+    rounds: list = field(default_factory=list)
 
     @property
     def bases(self) -> list[Basis]:
@@ -93,57 +92,53 @@ class MacroView:
             lines.append(f"    · {c.driver} → {c.path} → {c.impact.value}")
         for x in self.conflicts:
             lines.append(f"  ⚠ {x}")
+        lines += Q.review_tail(self.review)
         return "\n".join(lines)
 
 
-def _basis(raw: str, what: str) -> list[Basis]:
-    raw = raw.strip()
-    ref = _REF.search(raw)
-    if ref:
-        try:
-            return [Basis.fact(ref.group(0))]
-        except InvalidBasis as e:
-            raise MacroViewFailed(f"{what} 的占位符不合法: {e}") from e
-    q = _QUOTE.search(raw)
-    if not q:
-        raise MacroViewFailed(f"{what} 缺少可核验的依据（需原文引用或占位符）")
-    try:
-        return [Basis.report(q.group(1))]
-    except InvalidBasis as e:
-        raise MacroViewFailed(f"{what} 的依据不合法: {e}") from e
 
 
-def _split(line: str, n: int, what: str) -> list[str]:
-    parts = [p.strip() for p in line.split("|")]
-    if len(parts) < n:
-        raise MacroViewFailed(
-            f"{what} 字段不足（需 {n} 段，得到 {len(parts)}）：{line}")
-    return parts
 
 
-def parse(text: str) -> MacroView:
+def _cells(line: str) -> list[str]:
+    return [p.strip() for p in line.split("|")]
+
+
+def parse(text: str, corpus=None) -> MacroView:
+    """读数。**只读，不驳回**（子项目四）：段数不够、取向/影响不是规定的词的行跳过，
+    依据的问题照读 —— 都记进 `read_notes`，作为事实交给审核者。"""
     view = MacroView()
-
     m = _STANCE.search(text)
     if m:
-        p = _split(m.group(1), 2, "政策取向")
+        p = _cells(m.group(1))
         got = pick(p[0], [x.value for x in Stance])
-        if got is None:
-            raise MacroViewFailed(
-                "政策取向须为 " + "/".join(x.value for x in Stance)
-                + f"，得到 {p[0]!r}")
-        view.stance = Stance(got)
-        view.stance_bases = _basis(p[1], "政策取向")
-
+        if len(p) < 2:
+            view.read_notes.append(f"政策取向一行字段不足（需 2 段），没读进来：{m.group(1)}")
+        elif got is None:
+            view.read_notes.append(
+                f"政策取向「{p[0]}」不是 " + "/".join(x.value for x in Stance)
+                + " 之一，没读进来")
+        else:
+            view.stance = Stance(got)
+            bases, prob, cites = Q.basis(" | ".join(p[1:]), corpus)
+            view.stance_bases = bases
+            if prob:
+                view.read_notes.append(f"政策取向的依据：{prob}")
     for m in _CHANNEL.finditer(text):
-        p = _split(m.group(1), 4, "传导")
+        p = _cells(m.group(1))
+        if len(p) < 4:
+            view.read_notes.append(f"传导一行字段不足（需 4 段），没读进来：{m.group(1)}")
+            continue
         got = pick(p[2], [x.value for x in Impact])
         if got is None:
-            raise MacroViewFailed(
-                "传导影响须为 " + "/".join(x.value for x in Impact)
-                + f"，得到 {p[2]!r}")
-        impact = Impact(got)
-        view.channels.append(Channel(p[0], p[1], impact, _basis(p[3], "传导")))
+            view.read_notes.append(
+                f"传导「{p[0]}」的影响「{p[2]}」不是 " + "/".join(x.value for x in Impact)
+                + " 之一，没读进来")
+            continue
+        bases, prob, cites = Q.basis(" | ".join(p[3:]), corpus)
+        if prob:
+            view.read_notes.append(f"传导「{p[0]}」的依据：{prob}")
+        view.channels.append(Channel(p[0], p[1], Impact(got), bases, cites))
     return view
 
 
@@ -164,51 +159,68 @@ def cross_check(view: MacroView, ledger: FactLedger, as_of: date) -> list[str]:
             f"要么判断有误，要么利差被别的因素主导，正文需说明是哪一种"]
 
 
-def check(view: MacroView, ledger: FactLedger, evidence: str, as_of: date,
-          corpus=None) -> None:
+def facts(view: MacroView, ledger: FactLedger, as_of: date, corpus=None) -> list[str]:
+    """代码核对出的事实，交审核者（子项目四：此前这些是驳回理由）。"""
+    out: list[str] = []
     if view.stance is None:
-        raise MacroViewFailed("未给出政策取向 —— 「中性」也是判断，须显式说出")
+        out.append("没有给出政策取向（「中性」也是判断，方法论要求显式说出）")
     if len(view.channels) < MIN_CHANNELS:
-        raise MacroViewFailed(
-            f"传导路径至少 {MIN_CHANNELS} 条 —— 「政策转向宽松」写在哪篇研报里"
-            "都成立，对判断本标的没有帮助；有帮助的是那条链")
-
+        out.append(f"传导路径只读到 {len(view.channels)} 条（方法论要求至少 "
+                   f"{MIN_CHANNELS} 条：写不出链条的政策判断等于没写）")
     from ir_agent.citation import audit_prose
 
-    prose = {"政策取向描述": "", **{f"传导「{c.driver[:12]}」": c.driver + c.path
-                                    for c in view.channels}}
-    bad = audit_prose(prose)
+    bad = audit_prose({f"传导「{c.driver[:12]}」": c.driver + c.path
+                       for c in view.channels})
     if bad:
-        raise MacroViewFailed(
-            "描述里出现了账本外的数字：" + "、".join(bad) +
-            " —— 这些描述会原样进入研报撰写环节，而那里的数字必须可溯源；"
-            "请改成不带具体数字的说法，或改用占位符")
-
+        out.append("描述里有账本外的数字：" + "、".join(bad))
     holder = [view] + view.channels
-    attribute(holder, evidence, corpus)
+    attribute(holder, "", corpus)
     flat = [b for x in holder for b in x.bases]
-    problems = validate(flat, ledger=ledger, body=evidence, as_of=as_of,
-                        corpus=corpus)
-    if problems:
-        raise MacroViewFailed("依据不可核验：" + "；".join(problems))
+    out += [f"依据核验不过：{p}" for p in validate(flat, ledger=ledger, body="",
+                                                  as_of=as_of, corpus=corpus)]
+    out += [f"与期限利差交叉核对：{x}" for x in cross_check(view, ledger, as_of)]
+    return out
+
+
+KINDS = ("取向", "传导", "遗漏")
+
+
+def checklist(view: MacroView) -> list[tuple[str, str]]:
+    """按方法论生成（用户决定 5）：取向一条、每条传导一条（一条没读进来时列「传导路径
+    （未给出）」）、遗漏一条。"""
+    items = [("取向", "政策取向")]
+    items += [("传导", f"第{i}条 {c.driver}") for i, c in enumerate(view.channels, 1)] \
+        or [("传导", "传导路径（未给出）")]
+    return items + [("遗漏", "宏观因素")]
+
+
+RULES = Q.make_rules("宏观定性", """\
+- 取向：宽松/中性/收紧与证据是否一致；与账本里的利率、信用数据（如期限利差形态，代码
+  给了交叉核对结果）是否矛盾。没给出政策取向也在这条判。
+- 传导：链条每一环是否成立、是否真的传到本行业；利好/中性/利空与链条方向是否一致；
+  依据能否支撑。读到的传导少于两条时，在「传导路径（未给出）」或任一条里指出。
+- 遗漏：有没有漏掉对本行业最要紧的宏观因素。""")
 
 
 PROMPT = """基于下面的宏观资料，给出政策取向与它到本行业的传导路径。
 
 **一、政策取向**（一条）
-格式：`政策取向: <宽松|中性|收紧> | 「原文逐字引用」或 [[占位符]]`
+格式：`政策取向: <宽松|中性|收紧> | <依据>`
 
 **二、传导路径**（至少两条）
 「货币政策转向宽松」写在任何一篇研报里都成立，对判断本标的没有帮助。
 有帮助的是那条链：宽松 → 居民收入预期改善 → 商务宴请场景恢复 →
 高端白酒动销回升。**写不出链条的政策判断等于没写。**
-格式：`传导: <政策或宏观事件> | <传导到本行业的路径> | <利好|中性|利空> | 「原文」或 [[占位符]]`
+格式：`传导: <政策或宏观事件> | <传导到本行业的路径> | <利好|中性|利空> | <依据>`
 
-**硬性要求**
-- 引用必须**逐字照抄**下面的资料，一个字都不能改。
+{basis_rules}
+
+**要求**
 - 资料里没讲到的，不要凭印象补。
-- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本 —— 一个无处可查的数字会让整篇报告卡在无法修复的驳回上。需要数字时用给你的占位符，否则改成不带数字的说法。
-- 你的政策取向会与期限利差形态交叉核对，方向相反时需在正文说明缘由。
+- 描述性文字里**不要写具体数字**（如「处于 91% 历史分位」）。这些描述会原样进入研报撰写环节，而那里的数字一律要求可溯源到账本。需要数字时用给你的占位符，否则改成不带数字的说法。
+- 你的政策取向会与期限利差形态交叉核对，方向相反时需说明缘由。
+
+{review_note}
 
 {evidence}
 """
@@ -255,23 +267,19 @@ def for_prompt(corpus, macro_prompt: str = "") -> str:
 
 
 def assess(client, corpus, ledger: FactLedger, as_of: date,
-           macro_prompt: str = "", max_attempts: int = 3):
+           macro_prompt: str = "", *, judge, catalog: str = "",
+           max_rounds: int = Q.MAX_ROUNDS):
+    """撰写者写、审核者审（子项目四）。返回 (结论, 证据文本)；审核不过抛
+    `qual_review.ReviewStop`，模型接口错误原样抛出。"""
     evidence = for_prompt(corpus, macro_prompt)
-    prompt = PROMPT.format(evidence=evidence)
-    last, raw = "", ""
-    for attempt in range(1, max_attempts + 1):
-        out = raw = client(prompt)
-        try:
-            view = parse(out)
-            check(view, ledger, "", as_of, corpus)
-        except MacroViewFailed as e:
-            last = str(e)
-            prompt = (f"{prompt}\n\n---\n"
-                      f"**上一次被驳回（第 {attempt} 次）**：{last}\n"
-                      "请修正后按格式重新输出。\n")
-            continue
-        view.conflicts = cross_check(view, ledger, as_of)
-        return view, evidence
-    raise MacroViewFailed(
-            f"连续 {max_attempts} 次给不出可核验的宏观定性判断：{last}"
-            f"\n最后一次的原始输出（末 400 字）：\n{_tail(raw)}")
+    prompt = PROMPT.format(evidence=evidence, basis_rules=Q.BASIS_RULES,
+                           review_note=Q.REVIEW_NOTE)
+    view, res, rounds = Q.run(
+        client, judge, name="宏观定性", prompt=prompt, materials=evidence,
+        read=lambda raw: parse(raw, corpus),
+        facts=lambda v: facts(v, ledger, as_of, corpus),
+        checklist=checklist, kinds=KINDS, rules=RULES, catalog=catalog,
+        hay=evidence, ledger=ledger, as_of=as_of, max_rounds=max_rounds)
+    view.conflicts = cross_check(view, ledger, as_of)
+    view.review, view.rounds = res, rounds
+    return view, evidence

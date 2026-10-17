@@ -322,8 +322,10 @@ def test_三个定性模块都装了这道闸(mod, exc, mk):
     import importlib
     import inspect
     m = importlib.import_module(f"ir_agent.{mod}")
-    src = inspect.getsource(m.check)
-    assert "audit_prose" in src, f"{mod}.check 没有核验描述字段"
+    # 子项目四起账本外数字只作事实（`facts()`），不再在 `check()` 里驳回。
+    fn = getattr(m, "facts", None) or m.check
+    src = inspect.getsource(fn)
+    assert "audit_prose" in src, f"{mod} 没有核对描述字段里的账本外数字"
     assert "不要写具体数字" in m.PROMPT, f"{mod} 的提示词没有讲清这条"
 
 

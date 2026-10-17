@@ -568,7 +568,7 @@ def _load_macro_view(r, as_of: date, client, macro_pr: str):
     if r.corpus is None or not r.corpus.docs:
         return "", "", "宏观定性（无外部宏观资料，政策取向缺文字依据）"
     try:
-        view, _ = MV.assess(client, r.corpus, r.ledger, as_of, macro_pr)
+        view, _ = MV.assess(client, r.corpus, r.ledger, as_of, macro_pr, judge=client)
     except Exception as e:                                  # noqa: BLE001
         return "", "", f"宏观定性（{e.__class__.__name__}: {str(e)[:120]}）"
     return view.summary(), view.summary(), ""
