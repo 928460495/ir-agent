@@ -76,7 +76,8 @@ def checklist(a, balances=()) -> list[tuple[str, str]]:
     return items
 
 
-def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
+def parse(raw: str, expected: list[tuple[str, str]],
+          kinds: tuple = KINDS) -> list[Verdict]:
     """解析审核者的回答：清单条目（复用 `methodology_review.parse`）+ 选填的「补充」。
 
     补充行先从原文里摘掉再解析清单 —— 否则它会被并进上一条条目的理由里。补充判
@@ -84,7 +85,7 @@ def parse(raw: str, expected: list[tuple[str, str]]) -> list[Verdict]:
     lines = raw.splitlines()
     supp = [_SUPP.match(x) for x in lines]
     body = "\n".join(x for x, m in zip(lines, supp) if not m)
-    verdicts = MR.parse(body, expected, kinds=KINDS)
+    verdicts = MR.parse(body, expected, kinds=kinds)
     extras: list[Verdict] = []
     for i, m in enumerate((m for m in supp if m), 1):
         tail = m.group(1).strip().lstrip("*")
@@ -276,11 +277,12 @@ def review_markdown(res: ReviewResult) -> list[str]:
     return lines
 
 
-def rounds_markdown(rounds: list[Round]) -> str:
+def rounds_markdown(rounds: list[Round], *, title: str = "判断项审核",
+                    author: str = "填写者") -> str:
     """`assumptions_rounds.md`：每一轮的完整记录。"""
-    lines = ["# 判断项审核：各轮记录", ""]
+    lines = [f"# {title}：各轮记录", ""]
     for r in rounds:
-        lines += [f"## 第 {r.n} 轮", "", "### 填写者原文", "", *MR._fenced(r.raw), ""]
+        lines += [f"## 第 {r.n} 轮", "", f"### {author}原文", "", *MR._fenced(r.raw), ""]
         if r.facts:
             lines += ["### 代码事实（只是事实，不驳回）", "", r.facts, ""]
         if r.incomplete:

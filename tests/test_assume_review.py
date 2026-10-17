@@ -340,3 +340,12 @@ class TestBalanceIsFixedInput:
         txt = assume.build_prompt(JUDG, LABELS, "上下文", decomps=MODEL, factor_data={})
         assert "平衡点由辩论② 给出，你改不了" in txt
         assert "不要另写平衡点行" in txt
+
+
+def test_作答解析与各轮记录可换类别与称呼():
+    """子项目四（三个定性模块）复用判断项审核的作答解析与各轮记录。"""
+    got = AR.parse("[五力] 现有竞争强度：通过\n补充：提醒　x　建议：y",
+                   [("五力", "现有竞争强度")], kinds=("护城河", "五力"))
+    assert [v.kind for v in got] == ["五力", "补充"]
+    md = AR.rounds_markdown([AR.Round(1, "原文")], title="战略分析审核", author="撰写者")
+    assert md.startswith("# 战略分析审核：各轮记录") and "### 撰写者原文" in md
