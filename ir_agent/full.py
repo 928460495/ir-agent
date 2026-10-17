@@ -1888,8 +1888,8 @@ def _unreviewed_assumptions(out: Path, a, edits: list[str]) -> str:
     return ""
 
 
-def _assumption_caveats(a, anchor_note: str = "",
-                        unreviewed: str = "") -> tuple[str, str]:
+def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
+                        qual_unreviewed: list | None = None) -> tuple[str, str]:
     """判断项的软处要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
 
     两件事，分别说：
@@ -1925,14 +1925,19 @@ def _assumption_caveats(a, anchor_note: str = "",
     unverified = assume.unverified_labels(a)
     estimated = assume.estimated_labels(a)
     rebased = bool(a.margin_bases)
+    qual_unreviewed = list(qual_unreviewed or [])
     if (not unverified and not estimated and not anchor_note and not rebased
-            and not unreviewed):
+            and not unreviewed and not qual_unreviewed):
         return "", ""
 
     says: list[str] = []
     # 人改过、未经 AI 审核：读者必须知道这份判断项没有审核者背书（子项目三）。
     if unreviewed:
         says.append("**判断项经人工修改或补写，修改后未经 AI 审核**")
+    # 子项目四：第一次调用的定性模块人工修改后未经审核 —— 研报引用它们的结论时要说明。
+    if qual_unreviewed:
+        says.append("**定性分析中的" + "、".join(qual_unreviewed)
+                    + "经人工修改，修改后未经 AI 审核**")
     # 锚定影响最大，先说：首年批准值整个没进模型，研报正文却一直按它讲。
     if anchor_note:
         says.append("**首个预测年由已披露中期锚定**，批准清单上该年的营收增速"
@@ -1958,6 +1963,9 @@ def _assumption_caveats(a, anchor_note: str = "",
     body: list[str] = ["", "---", "", "## ⚠ 判断项依据核验", ""]
     if unreviewed:
         body += [f"**{unreviewed}。**", ""]
+    if qual_unreviewed:
+        body += ["**第一次调用的定性分析中，" + "、".join(qual_unreviewed)
+                 + " 经人工修改，人工修改后未经审核。**", ""]
     if anchor_note:
         body += [f"**{anchor_note}**", "",
                  "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
@@ -2826,6 +2834,10 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     unreviewed = _unreviewed_assumptions(out, a, edits)
     if unreviewed:
         skipped.append(f"判断项未经审核：{unreviewed}")
+    # 子项目四：第一次调用里人工修改后未经审核的定性模块，研报附录与终端都要写明。
+    qual_unreviewed = list(state.get("qual_unreviewed") or [])
+    for x in qual_unreviewed:
+        skipped.append(f"定性分析未经审核：{x}（人工修改后未经审核）")
 
     # **重建派生事实必须排在校验之前。** industry.* / comps.* / macro.*
     # 这些 key 只存在于内存账本，由 _analyse_facts 算出来；第一阶段的
@@ -2936,7 +2948,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # 判断项的软处（依据未逐字核验 / 取值是估计）要跟着交付物走，见 `_assumption_caveats`。
     caveat, caveats_md = _assumption_caveats(
         a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""),
-        unreviewed=unreviewed)
+        unreviewed=unreviewed, qual_unreviewed=qual_unreviewed)
     if dcf_res is not None:
         full, cost, ferr, debate_md, dnote = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), out,

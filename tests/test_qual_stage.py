@@ -142,3 +142,23 @@ def test_重跑通过后删掉上一轮停下留的最后一稿(tmp_path):
     (tmp_path / "strategy_failed_raw.md").write_text("上一轮的最后一稿", encoding="utf-8")
     _call(tmp_path, _passed)
     assert not (tmp_path / "strategy_failed_raw.md").exists()
+
+
+def test_研报附录写明人工修改后未经审核的定性模块():
+    """spec 六：第一次调用把「人工修改后未经审核」的模块名记进 state.json，第二阶段写进
+    研报末尾「⚠ 判断项依据核验」附录；进提示词那句不带数字。"""
+    import re
+
+    from ir_agent import assume
+    a = assume.AssumptionSet(code="600176", labels=["2026E"])
+    line, md = full._assumption_caveats(a, qual_unreviewed=["战略分析", "产业链"])
+    assert "战略分析" in line and "产业链" in line and "未经" in line
+    assert not re.search(r"\d", line)
+    assert "战略分析、产业链" in md and "人工修改后未经审核" in md
+
+
+def test_第二阶段读回未经审核的定性模块():
+    import inspect
+    src = inspect.getsource(full.run_valuation)
+    assert 'state.get("qual_unreviewed")' in src
+    assert "qual_unreviewed=qual_unreviewed" in src
