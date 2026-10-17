@@ -310,7 +310,7 @@ def test_研究方法论产出落盘为drivers_md(tmp_path, monkeypatch):
     assert "封测" in (tmp_path / full.DRIVERS_MD).read_text(encoding="utf-8")
 
 
-def test_研究方法论三轮都过不了代码检查时停下交人工(tmp_path, monkeypatch):
+def test_研究方法论每轮都过不了代码检查时停下交人工(tmp_path, monkeypatch):
     """**子项目二决定 2：不再退回两标量模式**（那条路让因子采集、辩论② 的逐因子
     取值整套悄悄消失）。代码检查不过也算一轮，3 轮后停下：各轮记录与最后一稿
     落盘，drivers.md 不生成。"""
@@ -325,13 +325,14 @@ def test_研究方法论三轮都过不了代码检查时停下交人工(tmp_pat
         code = "600584"
 
     import pytest
-    with pytest.raises(full.MethodologyStop, match="3 轮未通过"):
+    from ir_agent import methodology_review as MR
+    with pytest.raises(full.MethodologyStop, match=f"{MR.MAX_ROUNDS} 轮未通过"):
         full._research_methodology(
             "600584", _R(), tmp_path, lambda prompt: "胡言乱语，没有任何分解行",
             judge=Judge())
     assert not (tmp_path / full.DRIVERS_MD).exists()
     assert (tmp_path / full.DRIVERS_ROUNDS_MD).read_text(
-        encoding="utf-8").count("## 第 ") == 3
+        encoding="utf-8").count("## 第 ") == MR.MAX_ROUNDS
     assert (tmp_path / full.DRIVERS_FAILED_RAW).exists()
 
 
@@ -4245,7 +4246,7 @@ def test_公式化分解式从第二次调用一路传到判断项(tmp_path, mon
 
 # ══ 子项目二：方法论预研 = 提出者 + 审核者（端到端）════════════════
 
-def test_审核三轮不过就停在预研_不往下走(tmp_path, monkeypatch):
+def test_审核到上限仍不过就停在预研_不往下走(tmp_path, monkeypatch):
     from ir_agent import full
     from ir_agent.research import next_actions
 
@@ -4259,7 +4260,9 @@ def test_审核三轮不过就停在预研_不往下走(tmp_path, monkeypatch):
     assert not (tmp_path / "stance_b.json").exists(), "停下后不该跑辩论②"
     assert not (tmp_path / full.BRIEF).exists(), "停下后不该写简报"
     assert (tmp_path / full.DRIVERS_ROUNDS_MD).exists()
-    assert any(x.startswith("方法论审核 3 轮未通过") for x in o.skipped)
+    from ir_agent import methodology_review as MR
+    assert any(x.startswith(f"方法论审核 {MR.MAX_ROUNDS} 轮未通过")
+               for x in o.skipped)
     assert "  ⚠ 方法论审核" in o.summary()
     acts = "\n".join(next_actions(o.stage, "600183", out_dir=str(tmp_path),
                                   year=2025, phase=o.phase))

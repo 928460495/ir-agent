@@ -169,10 +169,25 @@ class TestRounds:
         assert res.rounds == 2 and rounds[0].code_error
         assert "代码检查不过" in p.prompts[1]
 
-    def test_三轮仍有致命停下(self):
-        with pytest.raises(R.ReviewStop, match="3 轮未通过.*致命 1 条") as e:
+    def test_上限轮数仍有致命才停下(self):
+        with pytest.raises(R.ReviewStop,
+                           match=f"{R.MAX_ROUNDS} 轮未通过.*致命 1 条") as e:
             _run(_Proposer(CHANGE), Judge({"模式": "致命"}))
-        assert len(e.value.rounds) == 3
+        assert len(e.value.rounds) == R.MAX_ROUNDS
+
+    def test_分解式比别的环节多给几轮(self):
+        """中国巨石 2026-10-18：三次试跑都停在方法论，每轮都在收敛（致命 1、提醒
+        5→5→2）却差一轮。分解式是最大的一份稿子（因子 + 公式 + 陷阱），给它比
+        判断项、定性模块更多轮。"""
+        from ir_agent import assume_review, qual_review
+        assert R.MAX_ROUNDS > assume_review.MAX_ROUNDS
+        assert R.MAX_ROUNDS > qual_review.MAX_ROUNDS
+
+    def test_第四轮改好也算通过(self):
+        """上限 3 轮时，第 4 轮才改好的稿子直接被丢掉。"""
+        F = {"模式": "致命"}
+        _, res, rounds = _run(_Proposer(CHANGE), Judge(F, F, F, {}))
+        assert res.rounds == 4 and not res.fatal() and len(rounds) == 4
 
     def test_审核者漏答先补答_不消耗提出者轮数(self):
         class Once(Judge):
@@ -198,7 +213,7 @@ class TestRounds:
         with pytest.raises(R.ReviewStop) as e:
             _run(_Proposer("胡言乱语", CHANGE), Judge({"模式": "致命"}))
         md = R.rounds_markdown(e.value.rounds)
-        assert md.count("## 第 ") == 3 and "代码检查：不过" in md
+        assert md.count("## 第 ") == R.MAX_ROUNDS and "代码检查：不过" in md
         assert "审核：驳回" in md and "[模式] 模式：致命" in md
 
 
