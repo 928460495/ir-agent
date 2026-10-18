@@ -2049,11 +2049,15 @@ def test_读回的判断项要重过分解式闸门():
 
 # ── 锚定开启时，毛利率第 2 年起从各档锚定水平接着走 ─────────────────────
 
+_GM1_600183 = 1 - 293.2044922458345 / 426.596379280956    # 首年锚定毛利率 31.27%
+
+
 def _anchor_600183():
-    """生益科技 2026H1 实跑的锚定输入；三档与 ashare_calibrate.anchor_three 同口径。"""
-    return {"rev": 190.2561, "cogs": 131.8622,
-            "share3": (0.446, 0.4785, 0.5204), "gm_rest3": (0.3369, 0.3069, 0.2769),
-            "base_rev": 284.3113845944}
+    """生益科技 2026H1 实跑的锚定输入（assume.anchor_from_cal 的返回形状）：首年按
+    季度估算，三档相同（ashare_calibrate.anchor_quarterly，2026-10-18 起）。"""
+    return {"label": "半年报", "k": 2, "fy_rev": 426.596379280956,
+            "fy_cogs": 293.2044922458345, "base_rev": 284.3113845944,
+            "g_rev": 0.50045479145881, "g_cogs": 0.40258038341900093}
 
 
 def _two_year_set(bull_gm=((1.0, 0.5), (1.2, 0.7)), base_gm=((0.5, 0.2), (0.9, 0.4)),
@@ -2085,9 +2089,10 @@ def _cal_600183():
             "periods": {"annual": ["20241231", "20251231"], "proj": ["2026E", "2027E"]},
             "rev": {"20241231": 200.0, "20251231": 284.3113845944},
             "cogs": {"20241231": 150.0, "20251231": 284.3113845944 * (1 - 0.2647)},
-            "interim": {"rev": 190.2561, "cogs": 131.8622,
-                        "share3": [0.446, 0.4785, 0.5204],
-                        "gm_rest3": [0.3369, 0.3069, 0.2769]}}
+            "interim": {"period": "20260630", "label": "半年报", "k": 2,
+                        "rev": 190.2561, "cogs": 131.8622,
+                        "g_rev": 0.50045479145881, "g_cogs": 0.40258038341900093,
+                        "fy_rev": 426.596379280956, "fy_cogs": 293.2044922458345}}
 
 
 def test_锚定时毛利率第二年起从各档锚定水平接着走():
@@ -2100,7 +2105,7 @@ def test_锚定时毛利率第二年起从各档锚定水平接着走():
     a, _ = _two_year_set()
     bases = assume.margin_bases(a, D("0.2647"), _anchor_600183())
     _, gm = assume.synthesize(a, assume.Case.BASE, D("0.2647"), bases)
-    assert float(gm[1]) == pytest.approx(0.3069 + 0.006, abs=5e-4)
+    assert float(gm[1]) == pytest.approx(_GM1_600183 + 0.006, abs=5e-4)
     # 第 1 年仍是年报基期 + 首年累计：该年由锚定覆盖，清单横幅已说明
     assert float(gm[0]) == pytest.approx(0.2647 + 0.007, abs=1e-9)
 
@@ -2129,7 +2134,8 @@ def test_清单上的合成结果与建模同一套基期():
     assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds,
                  base_margin=D("0.2647"), anchor=_anchor_600183())
     a.base_margin = D("0.2647")
-    assert "31.29%" in a.describe(), "清单展示的第 2 年毛利率要与建模时平移后的一致"
+    assert f"{_GM1_600183 + 0.006:.2%}" == "31.87%"
+    assert "31.87%" in a.describe(), "清单展示的第 2 年毛利率要与建模时平移后的一致"
 
 
 def test_工作簿三档列与1b表用同一套按年基期():
@@ -2596,3 +2602,30 @@ def test_提示词讲清pp填百分点数字本身():
               "公式: 毛利率 = 基期(毛利率) + (提价 + 原料) / 100\n").model
     head = assume._formula_head(m, {})
     assert "写 5.47，不写 0.0547" in head
+
+
+# ── 2026-10-18：首年按季度估算，三档相同 ──────────────────────────────────
+
+def test_anchor_from_cal读季度估算_三档首年相同():
+    anchor = assume.anchor_from_cal(_cal_600183())
+    assert anchor["fy_rev"] == pytest.approx(426.596379280956)
+    assert anchor["base_rev"] == pytest.approx(284.3113845944)
+    assert anchor["k"] == 2 and anchor["g_rev"] == pytest.approx(0.50045479145881)
+    v = assume._anchor_values(anchor)
+    assert v["bull"] == v["base"] == v["bear"] == pytest.approx(D(str(round(_GM1_600183, 6))))
+    y1 = assume.anchor_year1(anchor)
+    assert y1["bull"] == y1["base"] == y1["bear"]
+    assert y1["base"][0] == pytest.approx(0.50045479145881, abs=1e-9), "首年营收增速 = 年初至今同比"
+    assert y1["base"][1] == pytest.approx(_GM1_600183, abs=1e-9)
+
+
+@pytest.mark.parametrize("interim", [
+    None,
+    {"rev": 190.2561, "cogs": 131.8622, "share3": [0.446, 0.4785, 0.5204],
+     "gm_rest3": [0.3369, 0.3069, 0.2769]},          # 旧格式：没有季度估算
+])
+def test_没有季度估算的中期块不锚定(interim):
+    cal = _cal_600183()
+    cal["interim"] = interim
+    assert assume.anchor_from_cal(cal) is None
+

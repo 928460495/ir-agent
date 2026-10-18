@@ -293,9 +293,9 @@ class TestShengyiReplay:
 
 # ══ 生益科技 2026-10-17 试跑后：审核者判得对、填写者却改不了的两类致命 ═══════
 
-ANCHOR = {"rev": 190.2561, "cogs": 131.8622,
-          "share3": (0.446, 0.4785, 0.5204), "gm_rest3": (0.3369, 0.3069, 0.2769),
-          "base_rev": 284.3113845944}
+ANCHOR = {"label": "半年报", "k": 2, "fy_rev": 426.596379280956,
+          "fy_cogs": 293.2044922458345, "base_rev": 284.3113845944,
+          "g_rev": 0.50045479145881, "g_cogs": 0.40258038341900093}
 
 
 class TestAnchorFacts:
@@ -306,22 +306,21 @@ class TestAnchorFacts:
         j = Judge()
         _run(_Filler(_draft()), j, anchor=ANCHOR)
         p = j.prompts[0].split("**只给你的、代码算出的事实**")[1].split("**账本事实目录**")[0]
-        assert "【半年报锚定】" in p
-        assert "中性 30.69%" in p, "首年锚定后的毛利率（Base 档）"
-        v = assume._anchor_values(ANCHOR)          # 工作簿用的同一份三档
-        assert f"毛利率 悲观 {v['bear']:.2%} / 中性 {v['base']:.2%} / 乐观 {v['bull']:.2%}" in p
+        assert "【首年锚定】" in p
+        assert "三档相同" in p and "营收增速 50.05%" in p and "毛利率 31.27%" in p
+        assert "Q1–Q2" in p and "+50.05%" in p and "+40.26%" in p, "规则与两个同比要写给审核者"
         assert re.search(r"第 2 年起.*基期平移.*中性 \+\d+\.\d+pp", p, re.S)
 
     def test_没有锚定就不写(self):
         j = Judge()
         _run(_Filler(_draft()), j)
         facts = j.prompts[0].split("**只给你的、代码算出的事实**")[1].split("**账本事实目录**")[0]
-        assert "【半年报锚定】" not in facts
+        assert "【首年锚定】" not in facts
 
     def test_规则让审核者手算时加上平移量(self):
         rule = [l for l in AR.RULES.splitlines() if l.startswith("- 合成：")][0]
         block = rule + AR.RULES.split(rule)[1].split("\n- 后果：")[0]
-        assert "半年报锚定" in block and "不要当成引擎" in block
+        assert "首年锚定" in block and "不要当成引擎" in block
 
 
 class TestBalanceIsFixedInput:

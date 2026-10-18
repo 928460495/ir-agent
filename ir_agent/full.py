@@ -1969,8 +1969,8 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
                  + " 经人工修改，人工修改后未经审核。**", ""]
     if anchor_note:
         body += [f"**{anchor_note}**", "",
-                 "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
-                 "第三小节。", ""]
+                 "季度估算的明细（去年各季、本年已公布各季、年初至今同比）见工作簿"
+                 "「1_假设」第三小节。", ""]
     if rebased:
         body += ["**第 2 年起毛利率的加法链基期已改为各档锚定后的首年水平**"
                  "（不是年报基期），因此合成结果无法用「年报基期 + 累计 pp」"
@@ -2600,9 +2600,9 @@ def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
 
     人在第一阶段批准首年的营收增速与毛利率，要到第二阶段建模时才会被
     锚定覆盖——那时已经批完了。生益科技实跑正是如此：批准 22.31% /
-    27.77%，生效 39.85% / 30.69%，清单上一个字没提。横幅给 Base 档的
-    生效值（占比取历史均值、剩余期毛利率沿用已披露期），Bull/Bear 两档
-    见工作簿。反推公式用 `dcf.anchored_year1`，与回读校验、研报附录同源。
+    27.77%，生效 39.85% / 30.69%，清单上一个字没提。横幅给首年生效值：
+    2026-10-18 起按季度估算（已公布季度用实际，其余季度按年初至今同比外推），
+    三档相同。换算用 `dcf.anchored_year1`，与回读校验、研报附录同源。
 
     `rebased`（I3，final-fix-D 终审）：因子分解模式下锚定开启时，毛利率
     加法链第 2 年起的基期也已从年报基期换成各档锚定后的首年水平
@@ -2614,26 +2614,28 @@ def _anchor_banner(cal: dict, labels: list[str], rebased: bool = False) -> str:
     从 `a.margin_bases` 是否非空得到这个信号，传进来决定要不要多说这句。
     """
     it = cal.get("interim")
-    if not it or not it.get("share") or not it.get("rev") or not it.get("cogs"):
+    if not it or not it.get("fy_rev") or it.get("fy_cogs") is None:
         return ""
     annual = (cal.get("periods") or {}).get("annual") or []
     base_rev = (cal.get("rev") or {}).get(annual[-1]) if annual else None
     if not base_rev:
         return ""
-    g1, m1 = dcf.anchored_year1(rev_h=float(it["rev"]), cogs_h=float(it["cogs"]),
-                                share=float(it["share"]), gm_rest=float(it["gm"]),
+    g1, m1 = dcf.anchored_year1(fy_rev=float(it["fy_rev"]), fy_cogs=float(it["fy_cogs"]),
                                 base_rev=float(base_rev))
     first = labels[0] if labels else "首个预测年"
+    k = int(it.get("k") or 0)
+    qs = "Q1" + (f"–Q{k}" if k > 1 else "")
     rebase_note = (
-        "**第 2 年起毛利率的加法链基期也已从年报基期改为各档锚定后的首年"
+        "**第 2 年起毛利率的加法链基期也已从年报基期改为锚定后的首年"
         "水平**，因此这些年份同样不能用「年报基期 + 累计 pp」手算复现——"
         "批准时请核对下表显示的合成结果本身，而不是自己重新加总；"
         if rebased else "批准时请把注意力放在后续年份；")
-    return (f"> ⚠ **{first} 将由{it.get('label') or '已披露中期'}锚定**：按已披露"
-            f"实际反推，Base 档生效营收增速约 {g1:.2%}、毛利率约 {m1:.2%}。"
+    return (f"> ⚠ **{first} 将由{it.get('label') or '已披露中期'}锚定**：按季度估算——"
+            f"{qs} 已公布、用实际，其余季度按年初至今同比外推（营收 "
+            f"{float(it.get('g_rev') or 0):+.2%}、营业成本 {float(it.get('g_cogs') or 0):+.2%}），"
+            f"三档相同：生效营收增速约 {g1:.2%}、毛利率约 {m1:.2%}。"
             f"下表 {first} 的取值**不进模型**，{rebase_note}"
-            "锚定的三档（占全年营收比重、剩余期毛利率）见工作簿「1_假设」"
-            "第三小节。\n\n")
+            "季度明细见工作簿「1_假设」第三小节。\n\n")
 
 
 def _propose_assumptions(code, r, body, md, as_of, out, client, arts,

@@ -1322,9 +1322,13 @@ def test_第二阶段基期替换也要进终端清单():
 
 
 def _cal_with_interim():
-    """生益科技 calibrate 返回值里与锚定有关的几项（2026H1 实跑数据）。"""
-    return {"interim": {"period": "20260630", "label": "半年报", "rev": 190.2561,
-                        "cogs": 131.8622, "share": 0.4785, "gm": 0.3069},
+    """生益科技 calibrate 返回值里与锚定有关的几项（2026H1 实跑数据；首年按季度
+    估算，2026-10-18 起）。"""
+    return {"interim": {"period": "20260630", "label": "半年报", "k": 2, "rev": 190.2561,
+                        "cogs": 131.8622, "gm": 0.3069,
+                        "g_rev": 0.50045479145881, "g_cogs": 0.40258038341900093,
+                        "fy_rev": 426.596379280956, "fy_cogs": 293.2044922458345,
+                        "share": 190.2561 / 426.596379280956},
             "rev": {"20251231": 284.3113845944},
             "periods": {"annual": ["20251231"], "proj": ["2026E", "2027E"]}}
 
@@ -1336,8 +1340,18 @@ def test_批准前就要告诉人首年会被锚定():
     from ir_agent import full
     txt = full._anchor_banner(_cal_with_interim(), ["2026E", "2027E"])
     assert "2026E" in txt and "半年报" in txt
-    assert "39.85%" in txt and "30.69%" in txt
+    assert "50.05%" in txt and "31.27%" in txt
     assert "不进模型" in txt
+
+
+def test_横幅讲清季度估算规则_三档相同():
+    """2026-10-18 起首年按季度估算：已公布季度用实际，其余按年初至今同比外推，
+    三档相同。横幅要把规则和两个同比写出来，不再提「占全年营收比重」。"""
+    from ir_agent import full
+    txt = full._anchor_banner(_cal_with_interim(), ["2026E", "2027E"])
+    assert "Q1–Q2" in txt and "年初至今同比" in txt and "三档相同" in txt
+    assert "+50.05%" in txt and "+40.26%" in txt, "营收与营业成本的同比都要写出来"
+    assert "占全年营收比重" not in txt and "Base 档" not in txt
 
 
 def test_横幅不该说后续年份不受影响():

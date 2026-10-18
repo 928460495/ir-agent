@@ -337,44 +337,37 @@ def _close(a: list[float], b: list[float], tol: float) -> bool:
     return len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
 
 
-def anchored_year1(*, rev_h: float, cogs_h: float, share: float,
-                   gm_rest: float, base_rev: float) -> tuple[float, float]:
-    """锚定反推：由已披露中期算出首个预测年的 (营收增速, 毛利率)。
+def anchored_year1(*, fy_rev: float, fy_cogs: float,
+                   base_rev: float) -> tuple[float, float]:
+    """首年锚定：由季度估算的全年营收与营业成本，算出首个预测年的 (营收增速, 毛利率)。
 
-    与 `1_假设` 的 E 列、`ashare_verify.recompute` 同一套算法——全年营收 =
-    已披露营收 ÷ 占全年比重；全年成本 = 已披露成本 + 剩余期营收 ×
-    (1 − 剩余期毛利率)。
+    全年营收 / 营业成本的估算规则（已公布季度用实际，其余季度按年初至今同比外推，
+    营收与成本各用各的同比，三档相同）只在 `ashare_calibrate.anchor_quarterly`
+    定义一份；`1_假设` 第三小节用活公式实现，`ashare_verify.read_inputs` 独立重算。
+    这里只做最后一步换算。
 
     **只能有这一份。** 回读校验、研报附录、第一阶段批准清单横幅都要说
     「首年实际用的是多少」，三处各算一遍，早晚算出三个不同的数。
     """
-    rev = rev_h / share
-    cogs = cogs_h + (rev - rev_h) * (1 - gm_rest)
-    return rev / base_rev - 1, 1 - cogs / rev
+    return fy_rev / base_rev - 1, 1 - fy_cogs / fy_rev
 
 
 def _effective_first_year(inp: dict) -> tuple[float, float] | None:
     """锚定开启时，首年**实际生效**的 (营收增速, 毛利率)。None = 没锚定。
 
-    `1_假设` 的生效值 E 列是
-
-        E11 = IF($B$30=1, B35/$B$81-1, CHOOSE($B$6,B11,C11,D11)+$B$26)
-        E16 = IF($B$30=1, 1-B36/B35,  CHOOSE($B$6,B16,C16,D16)+$B$27)
-
-    锚定开关一开，首年就完全不看情景列——也就是完全不看人批准的那个数。
-    这里按同一套算法重算一遍（`read_inputs` 的 `it` 字典里几个输入都在），
+    `1_假设` 的生效值 E 列在锚定开关 = 1 时取第三小节的「→ 隐含全年营业总收入 /
+    营业成本」，完全不看情景列——也就是完全不看人批准的那个数。`read_inputs`
+    的 `it` 字典里有独立重算的全年估算（`fy_rev` / `fy_cogs`），这里换算出来，
     好把"实际用的"与"人批准的"摆在一起给人看。
     """
     it = inp.get("it")
     if not it or not float(it.get("sw") or 0):
         return None
-    share = float(it.get("share") or 0)
+    fy_rev = float(it.get("fy_rev") or 0)
     base_rev = float((inp.get("o") or {}).get("基期营业总收入") or 0)
-    if not share or not base_rev:
+    if not fy_rev or it.get("fy_cogs") is None or not base_rev:
         return None
-    return anchored_year1(rev_h=float(it["rev"]), cogs_h=float(it["cogs"]),
-                          share=share, gm_rest=float(it["gm_rest"]),
-                          base_rev=base_rev)
+    return anchored_year1(fy_rev=fy_rev, fy_cogs=float(it["fy_cogs"]), base_rev=base_rev)
 
 
 def _anchor_note(judg: dict, inp: dict) -> str:
@@ -396,11 +389,11 @@ def _anchor_note(judg: dict, inp: dict) -> str:
             for cn, app, act in pairs if abs(app - act) > 5e-5]
     if not diff:
         return ""
-    return ("首年被「锚定已披露中期实际」覆盖，人批准的值未参与建模："
+    return ("首年被「锚定」覆盖（已公布季度用实际，其余季度按年初至今同比外推），"
+            "人批准的值未参与建模："
             + "；".join(diff)
-            + "。锚定用的是已披露中报的真实营收与成本，通常比判断"
-              "可靠，因此不算错——但待核实清单、终端与研报都是按"
-              "批准值讲的，这个差异必须让人看见")
+            + "。锚定以已披露的季度实际为主，通常比判断可靠，因此不算错"
+              "——但待核实清单、终端与研报都是按批准值讲的，这个差异必须让人看见")
 
 
 def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:

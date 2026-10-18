@@ -435,10 +435,11 @@ class Test锚定会覆盖人批准的首年假设:
                             "bear": [0.25, 0.24]}}
 
     def _inp(self, **kw):
-        # 生益实测的真实数：H1 营收 190.2561、成本 131.8622、占全年 47.85%、
-        # 剩余期毛利率 30.69%、基期营收 284.3114
-        it = {"sw": 1.0, "share": 0.4785, "gm_rest": 0.3069,
-              "rev": 190.2561, "cogs": 131.8622}
+        # 生益实测的真实数（ashare_verify.read_inputs 的 it 形状）：H1 营收 190.2561、
+        # 成本 131.8622；按季度估算（2026-10-18 起）全年营收 426.5964、成本 293.2045
+        # ——首年营收增速 = 年初至今同比 +50.05%，毛利率 31.27%；基期营收 284.3114
+        it = {"sw": 1.0, "k": 2, "rev": 190.2561, "cogs": 131.8622,
+              "fy_rev": 426.596379280956, "fy_cogs": 293.2044922458345}
         it.update(kw.pop("it", {}))
         d = {"growth": [0.2231, 0.1782], "gm": [0.2777, 0.2917],
              "dg": 0.0, "dm": 0.0, "it": it,
@@ -452,8 +453,8 @@ class Test锚定会覆盖人批准的首年假设:
         joined = "".join(problems)
         assert problems, "首年被锚定换掉却一声不吭，等于人工批准被架空"
         assert "锚定" in joined
-        assert "22.31%" in joined and "39.85%" in joined, "两个数都要摆出来"
-        assert "27.77%" in joined and "30.69%" in joined
+        assert "22.31%" in joined and "50.05%" in joined, "两个数都要摆出来"
+        assert "27.77%" in joined and "31.27%" in joined
 
     def test_锚定不是错_不该说不可采信(self):
         """锚定用的是已披露的中报实际，比判断可靠。要报的是「被换掉了」，
@@ -490,14 +491,14 @@ class Test锚定说明要能单独取出来:
     _inp = Test锚定会覆盖人批准的首年假设._inp
 
     def test_反推公式是一个纯函数(self):
-        g, m = dcf.anchored_year1(rev_h=190.2561, cogs_h=131.8622, share=0.4785,
-                                  gm_rest=0.3069, base_rev=284.3113845944)
-        assert g == pytest.approx(0.3985, abs=5e-4)
-        assert m == pytest.approx(0.3069, abs=5e-4)
+        g, m = dcf.anchored_year1(fy_rev=426.596379280956, fy_cogs=293.2044922458345,
+                                  base_rev=284.3113845944)
+        assert g == pytest.approx(0.5005, abs=5e-4)
+        assert m == pytest.approx(0.3127, abs=5e-4)
 
     def test_锚定说明单独可取且与回读校验说的是同一句(self):
         note = dcf._anchor_note(self._judg(), self._inp())
-        assert "39.85%" in note and "30.69%" in note
+        assert "50.05%" in note and "31.27%" in note
         assert "22.31%" in note and "27.77%" in note
         assert "不可采信" not in note
         assert note in dcf._readback_check(self._judg(), self._inp())

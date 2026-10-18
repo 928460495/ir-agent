@@ -942,48 +942,46 @@ def _parse_factors(text: str, years: int,
 
 
 def anchor_from_cal(cal: dict) -> dict | None:
-    """锚定反推各档首年毛利率所需的输入；没有中期、或 calibrate 没给三档时返回 None。
+    """首年锚定的输入：calibrate 中期块里的季度估算（`ashare_calibrate.interim_block`）。
+    没有已披露中期、或中期块没有季度估算（缺去年同季数据）时返回 None —— 首年回到
+    判断项，不拿别的规则凑一个数。
 
-    三档（`share3` / `gm_rest3`）由 `ashare_calibrate.anchor_three` 定义，只在
-    那里算一份——工作簿第三小节填的也是它，两边不会各算各的。
+    估算规则只在 `ashare_calibrate.anchor_quarterly` 定义一份（已公布季度用实际，其余
+    季度按年初至今同比外推，三档相同）；工作簿第三小节与这里读的是同一份结果。
     """
     it = cal.get("interim") or {}
     annual = (cal.get("periods") or {}).get("annual") or []
     base_rev = (cal.get("rev") or {}).get(annual[-1]) if annual else None
-    if not (it.get("rev") and it.get("cogs") and it.get("share3")
-            and it.get("gm_rest3") and base_rev):
+    if not (it.get("fy_rev") and it.get("fy_cogs") is not None and base_rev):
         return None
-    return {"rev": float(it["rev"]), "cogs": float(it["cogs"]),
-            "share3": tuple(it["share3"]), "gm_rest3": tuple(it["gm_rest3"]),
-            "base_rev": float(base_rev)}
+    return {"label": it.get("label") or "已披露中期", "k": int(it.get("k") or 0),
+            "fy_rev": float(it["fy_rev"]), "fy_cogs": float(it["fy_cogs"]),
+            "base_rev": float(base_rev),
+            "g_rev": float(it.get("g_rev") or 0), "g_cogs": float(it.get("g_cogs") or 0)}
+
+
+_CASES3 = ("bull", "base", "bear")
 
 
 def _anchor_values(anchor: dict) -> dict[str, Decimal]:
-    """半年报锚定后三档各自的第 1 年毛利率。四舍五入到 6 位，与旧 `margin_bases`
-    逐位一致（工作簿用的也是这一份）。"""
+    """锚定后三档各自的第 1 年毛利率 —— 季度估算下三档相同。四舍五入到 6 位，与
+    `margin_bases` 及工作簿同口径。"""
     from ir_agent.dcf import anchored_year1
 
-    out: dict[str, Decimal] = {}
-    for i, name in enumerate(("bull", "base", "bear")):
-        _, gm1 = anchored_year1(rev_h=anchor["rev"], cogs_h=anchor["cogs"],
-                                share=float(anchor["share3"][i]),
-                                gm_rest=float(anchor["gm_rest3"][i]),
-                                base_rev=anchor["base_rev"])
-        out[name] = Decimal(str(round(gm1, 6)))
-    return out
+    _, gm1 = anchored_year1(fy_rev=anchor["fy_rev"], fy_cogs=anchor["fy_cogs"],
+                            base_rev=anchor["base_rev"])
+    v = Decimal(str(round(gm1, 6)))
+    return {name: v for name in _CASES3}
 
 
 def anchor_year1(anchor: dict) -> dict[str, tuple[float, float]]:
-    """半年报锚定后三档各自首年的 (营收增速, 毛利率)。给判断项审核者看的事实
-    （子项目三：审核者不知道锚定，把第 2 年起的基期平移当成了引擎错误）。三档的
-    排列与 `_anchor_values` 一致。"""
+    """锚定后三档各自首年的 (营收增速, 毛利率)，季度估算下三档相同。给判断项审核者
+    看的事实（子项目三：审核者不知道锚定，把第 2 年起的基期平移当成了引擎错误）。"""
     from ir_agent.dcf import anchored_year1
 
-    return {name: anchored_year1(rev_h=anchor["rev"], cogs_h=anchor["cogs"],
-                                 share=float(anchor["share3"][i]),
-                                 gm_rest=float(anchor["gm_rest3"][i]),
-                                 base_rev=anchor["base_rev"])
-            for i, name in enumerate(("bull", "base", "bear"))}
+    y1 = anchored_year1(fy_rev=anchor["fy_rev"], fy_cogs=anchor["fy_cogs"],
+                        base_rev=anchor["base_rev"])
+    return {name: y1 for name in _CASES3}
 
 
 def margin_bases(a: AssumptionSet, base_margin: Decimal,
