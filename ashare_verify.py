@@ -153,16 +153,35 @@ def read_inputs(path):
            "非经营资产（加回）","少数股东扣除方式","少数股东利润占比"]}
     it=None
     try:
-        def g3(p):
-            """三档行按当前情景取列（1→B 2→C 3→D）。旧工作簿这两行只有
-            B 列，C/D 为空时回落 B，已有工作簿不因此失效。"""
-            rr=_find(am,p); v=_cell_value(wb,a,f"{chr(ord('A')+scen)}{rr}")
-            return v if v not in (None,"") else _cell_value(wb,a,f"B{rr}")
-        it=dict(sw=float(g("锚定开关")), share=float(g3("已披露期占全年营收比重")),
-                gm_rest=float(g3("剩余期毛利率")), rev=float(g("已披露期营业总收入（实际）")),
-                cogs=float(g("已披露期营业成本（实际）")))
+        # 首个预测年按季度估算（2026-10-18 起）：读季度表的原始输入，用同一个
+        # 规则函数（ashare_calibrate.anchor_quarterly）重算，不读工作簿的公式结果。
+        import ashare_calibrate as _C
+        k=int(float(g("季度估算：已公布季度数")))
+        def qs(p, n=4):
+            """季度行的前 n 格（本年只读已公布的 k 格实际值，不碰外推公式格）。"""
+            rr=_find(am,p)
+            return [float(_cell_value(wb,a,f"{c}{rr}")) for c in "BCDE"[:n]]
+        pr=qs("季度估算：去年营业总收入（单季）"); pc=qs("季度估算：去年营业成本（单季）")
+        cr=qs("季度估算：本年营业总收入（单季）",k); cc=qs("季度估算：本年营业成本（单季）",k)
+        q=_C.anchor_quarterly(pr,pc,cr,cc)
+        if q:
+            it=dict(sw=float(g("锚定开关")), k=k, rev=sum(cr), cogs=sum(cc),
+                    fy_rev=q["fy_rev"], fy_cogs=q["fy_cogs"])
     except KeyError:
-        pass
+        # 2026-10-18 之前生成的工作簿：第三小节是「占比 + 剩余期毛利率」两格，按当时的
+        # 规则重算，好让磁盘上已有的旧工作簿仍能校验。
+        try:
+            def g3(p):
+                """三档行按当前情景取列（1→B 2→C 3→D）；C/D 为空时回落 B。"""
+                rr=_find(am,p); v=_cell_value(wb,a,f"{chr(ord('A')+scen)}{rr}")
+                return v if v not in (None,"") else _cell_value(wb,a,f"B{rr}")
+            share=float(g3("已披露期占全年营收比重")); gm_rest=float(g3("剩余期毛利率"))
+            rev_h=float(g("已披露期营业总收入（实际）")); cogs_h=float(g("已披露期营业成本（实际）"))
+            fy_rev=rev_h/share
+            it=dict(sw=float(g("锚定开关")), rev=rev_h, cogs=cogs_h, fy_rev=fy_rev,
+                    fy_cogs=cogs_h+(fy_rev-rev_h)*(1-gm_rest))
+        except KeyError:
+            pass
     dg=float(g("营收增速 Δ")); dm_=float(g("毛利率 Δ"))
     try:
         fin=dict(ns=float(g("增发股数（亿股）")), px=float(g("发行价（元/股）")), fee=float(g("发行费用率")),
@@ -190,11 +209,9 @@ def recompute(inp):
     IT=inp.get("it")
     growth=list(inp["growth"]); gmp=list(inp["gm"])
     if IT and IT["sw"]==1:
-        # 锚定：首年生效增速/毛利率由已披露中期反推（与「1_假设」生效值列一致）
-        fy_rev=IT["rev"]/IT["share"]
-        fy_cogs=IT["cogs"]+(fy_rev-IT["rev"])*(1-IT["gm_rest"])
-        growth[0]=fy_rev/src["基期营业总收入"]-1
-        gmp[0]=1-fy_cogs/fy_rev
+        # 锚定：首年生效增速/毛利率取季度估算（与「1_假设」生效值列一致）
+        growth[0]=IT["fy_rev"]/src["基期营业总收入"]-1
+        gmp[0]=1-IT["fy_cogs"]/IT["fy_rev"]
     for i in range(ny):
         rev=rev*(1+growth[i]); cogs=rev*(1-gmp[i])
         fin=(o["st"]+o["cur"]+o["lt"])*G["有息负债利率"]-o["cash"]*G["现金收益率"]

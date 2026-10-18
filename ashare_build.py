@@ -115,34 +115,18 @@ def build(cal: dict, path: str) -> dict:
     # 不另算一份——那一节此时还没写到工作表，OR_ 字典要等到那里才建好。
     OR_base_rev = cal["rev"][PR["annual"][-1]]
     # C2（final-review-plan2a 终审）：锚定开启（默认开关=1）时，首个预测年的
-    # 营收由已披露中期反推，上方该年的营收增速判断项被完全覆盖、涂灰并标注
-    # 「本行输入不生效」——但资本开支此前仍然用这个被忽略的判断项去算，两层
-    # 错误：(1) 数值错，用了不生效的增速；(2) 三档 fallback 到同一个单序列
-    # 时，capex 也就三档同值，而三档真正生效的增速其实因 share3 不同而分叉
-    # （600183 实跑：三档都按 13.74% 算 capex，真正生效的是 Bull 50.04% /
-    # Base 39.85% / Bear 28.59%）。
-    # 追加修复（final-review-plan2a 收尾）：share3/gm_rest3 在这里算一次，
-    # 存进 _it_share3/_it_gm_rest3，供本节（资本开支）与下方「三、锚定已披露
-    # 中期」共用——不再各自重算一遍。两处各自现算一份、只靠"同一套输入、同
-    # 一条规则"保证数值一致，这件事本身就是分叉风险的自白：Plan 1（commit
-    # 4049205「锚定三档规则只留一份，挪到 calibrate」）整整一个任务就是为了
-    # 消灭这种重复，理由写在 anchor_three 的 docstring 里——两边各写一遍规则，
-    # 早晚分叉成工作簿一个数、批准清单另一个数。
+    # 营收由已披露季度估算，上方该年的营收增速判断项被完全覆盖——资本开支必须
+    # 用真正生效的首年增速去算，不能用那个不生效的判断项。
     IT = cal.get("interim")
-    _it_share3 = _it_gm_rest3 = None
-    if IT and IT.get("share"):
-        if IT.get("share3") and IT.get("gm_rest3"):
-            _it_share3, _it_gm_rest3 = tuple(IT["share3"]), tuple(IT["gm_rest3"])
-        else:
-            # 旧版 calibrate 的产出（含各处缓存的 pickle）没有这两项：调用同一个
-            # 规则函数现算，不在这里另写一份规则。σ 与 calibrate 同源（gm_stats）。
-            _it_share3, _it_gm_rest3 = _CAL.anchor_three(
-                IT["share_hist"], IT["gm"], JU["gm_stats"][1], share_mean=IT["share"])
+    # 首个预测年按季度估算（ashare_calibrate.interim_block）：三档相同。旧版 calibrate
+    # 的中期块（缓存的 pickle）没有季度明细，_it_fy 为 None，不做首年估算。
+    _it_fy = IT.get("fy_rev") if IT else None
     _growth3_for_cx = {k: [_scen("growth_scen", i, JU["growth"][i])[j] for i in range(len(YE))]
                         for j, k in enumerate(("bull", "base", "bear"))}
-    if _it_share3 and IT.get("rev"):
-        for j, k in enumerate(("bull", "base", "bear")):
-            _growth3_for_cx[k][0] = float(IT["rev"]) / float(_it_share3[j]) / float(OR_base_rev) - 1.0
+    if _it_fy:
+        _g1 = float(IT["fy_rev"]) / float(OR_base_rev) - 1.0
+        for k in ("bull", "base", "bear"):
+            _growth3_for_cx[k][0] = _g1
     _cx3 = _CAL._capex_from_growth(
         growth3=_growth3_for_cx, fa_turnover=JU.get("fa_turn", 2.0),
         maint_rate=JU.get("maint_rate", 0.05))
@@ -154,9 +138,9 @@ def build(cal: dict, path: str) -> dict:
         if i==0:
             _cx_note = ("自动：Δ营收÷目标固定资产周转率＋维持性投资（≈折旧），按本档营收增速反推"
                         "——三档因此自动一致，增速越高、所需投入越大，不再沿时间线性衰减")
-            if _it_share3:
-                _cx_note += ("｜锚定开启（默认）时，本年已改按各档锚定后真正生效的增速反推，"
-                             "不是上方被忽略的判断项——本格为静态值，之后若手改上方增速假设或"
+            if _it_fy:
+                _cx_note += ("｜锚定开启（默认）时，本年已改按季度估算的首年增速反推（三档相同），"
+                             "不是上方被忽略的判断项——本格为静态值，之后若手改季度数据或"
                              "锚定开关，需重新生成工作簿本格才会跟着变")
             ws.cell(r,6,_cx_note).font=Font(size=9,color="808080")
         r+=1
@@ -172,61 +156,63 @@ def build(cal: dict, path: str) -> dict:
         ws.cell(G_ROW+i,5).value=f"=CHOOSE($B${SCEN},B{G_ROW+i},C{G_ROW+i},D{G_ROW+i})+$B${DG_ROW}"
         ws.cell(M_ROW+i,5).value=f"=CHOOSE($B${SCEN},B{M_ROW+i},C{M_ROW+i},D{M_ROW+i})+$B${DM_ROW}"
     IT_ROWS={}
-    if IT and IT.get("share"):
-        r=sec(r,f"三、锚定已披露中期（{IT['period'][:4]}年{IT['label']}实际已确定，首个预测年不再靠增速假设外推）")
-        hs="｜".join(f"{x*100:.1f}%" for x in IT["share_hist"])
-        rows_spec=[("锚定开关（1=锚定 0=按增速外推）",1,"0",
-                    "1 时首个预测年营收 = 已披露实际 ÷ 占比，忽略上方该年的营收增速假设"),
-                   ("已披露期占全年营收比重",IT["share"],PCT2,
-                    f"三档＝近{len(IT['share_hist'])}年同期占比 最小/均值/最大：{hs}"
-                    f"（占比越低→隐含全年越高→Bull）｜标准差 {IT['share_std']*100:.2f}pp"),
-                   ("剩余期毛利率",round(IT["gm"],4),PCT2,
-                    f"Base＝已披露期毛利率 {IT['gm']*100:.2f}%；Bull/Bear＝±1 个历史年度毛利率标准差")]
-        # 锚定开启后，首个预测年的营收与毛利率由这两格反推，上方该年的三档
-        # 判断项被完全覆盖——Bull/Bear 在首年根本不分叉，而首年是整条路径的
-        # 基数（生益科技实跑：批准 22.31%/27.77%，生效 39.85%/30.69%）。三档
-        # 必须挂到真正起作用的格子上。
-        #   占比：取近几年同期占比的最小/均值/最大。占比越低 → 隐含全年越高
-        #         → 属于 Bull，所以 Bull 列放最小值。
-        #   剩余期毛利率：Base 沿用已披露期毛利率，Bull/Bear 各偏离一个历史
-        #         年度毛利率标准差（下限 0.5pp，防止历史过于平稳时三档重合）。
-        #   规则本身在 ashare_calibrate.anchor_three，这里只读结果——ir-agent 也
-        #   读同一份，算各档锚定后的首年毛利率。
-        # 追加修复（final-review-plan2a 收尾）：不在这里重算第二遍——share3/
-        # gm_rest3 已经在上方「资本开支」小节按同一条件算过一次，存进
-        # _it_share3/_it_gm_rest3，这里直接复用同一个值。
-        _s3, _g3 = _it_share3, _it_gm_rest3
-        three = {
-            "已披露期占全年营收比重": _s3,
-            "剩余期毛利率": _g3,
-        }
-        base_r=r
-        for lbl,v,f,note in rows_spec:
+    if _it_fy:
+        # 首个预测年按季度估算（规则见 ashare_calibrate.anchor_quarterly，这里用活公式
+        # 实现同一规则，ashare_verify 独立重算）：已公布季度用实际；未公布季度 =
+        # 去年同季 × (1 + 年初至今同比)，营收与营业成本各用各的同比。首年三档相同。
+        k = int(IT["k"]); lastc = "BCDE"[k - 1]
+        yr = IT["period"][:4]
+        qs = "Q1" + (f"–Q{k}" if k > 1 else "")
+        r=sec(r,f"三、首个预测年按季度估算（{yr}年{qs}已公布，用实际；其余季度按年初至今同比外推）")
+        def _row(lbl, note=None, color="808080"):
             ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
-            if lbl in three:
-                for j,x in enumerate(three[lbl]):
-                    cc=ws.cell(r,2+j,round(float(x),4)); cc.font=F_IN; cc.number_format=f; cc.fill=P_Y
-                cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=f
-            else:
-                cc=ws.cell(r,2,v); cc.font=F_IN; cc.number_format=f
-                cc.fill=P_O if "开关" in lbl else P_Y
-            ws.cell(r,6,note).font=Font(size=9,color="808080" if "开关" in lbl else "C00000"); r+=1
-        IT_ROWS={sp[0]:base_r+i for i,sp in enumerate(rows_spec)}
+            if note: ws.cell(r,6,note).font=Font(size=9,color=color)
+        SW_LBL='锚定开关（1=锚定 0=按增速外推）'
+        _row(SW_LBL, "1 时首个预测年的营收与毛利率取下方季度合计（三档相同），"
+                     "忽略上方该年的增速与毛利率判断项；0 时回到判断项")
+        cc=ws.cell(r,2,1); cc.font=F_IN; cc.number_format="0"; cc.fill=P_O
+        IT_ROWS[SW_LBL]=r; r+=1
+        _row("季度估算：已公布季度数", "本年已公布的季度数；其后各季按年初至今同比外推")
+        cc=ws.cell(r,2,k); cc.font=F_IN; cc.number_format="0"; r+=1
+        _row("季度估算：季度")
+        for j in range(4):
+            ws.cell(r,2+j,f"Q{j+1}").font=Font(bold=True,size=10)
+        r+=1
+        def _quarter_block(item, prev, cur, g_lbl):
+            nonlocal r
+            pr=r
+            _row(f"季度估算：去年{item}（单季）", f"{int(yr)-1} 年各季实际（累计数相减）")
+            for j in range(4):
+                cc=ws.cell(r,2+j,round(float(prev[j]),4)); cc.font=F_LNK; cc.number_format=NUM
+            r+=1
+            cr=r; gr=r+1
+            _row(f"季度估算：本年{item}（单季）",
+                 f"{qs} 为实际；其余 = 去年同季 × (1 + 年初至今同比)", color="C00000")
+            for j in range(4):
+                if j < k:
+                    cc=ws.cell(r,2+j,round(float(cur[j]),4)); cc.font=F_LNK
+                else:
+                    cc=ws.cell(r,2+j,f"={'BCDE'[j]}{pr}*(1+$B${gr})"); cc.font=F_FX; cc.fill=P_Y
+                cc.number_format=NUM
+            r+=1
+            _row(g_lbl, f"本年已公布季度合计 ÷ 去年同期合计 − 1")
+            cc=ws.cell(r,2,f"=SUM(B{cr}:{lastc}{cr})/SUM(B{pr}:{lastc}{pr})-1")
+            cc.font=F_FX; cc.number_format=PCT2; r+=1
+            return cr
+        cur_r=_quarter_block("营业总收入", IT["q_prev_rev"], IT["q_cur_rev"], "季度估算：营收年初至今同比")
+        cur_c=_quarter_block("营业成本", IT["q_prev_cogs"], IT["q_cur_cogs"], "季度估算：营业成本年初至今同比")
         ws.cell(r,1,"已披露期营业总收入（实际）").font=Font(size=10); ws.cell(r,1).border=BX
         cc=ws.cell(r,2,round(IT["rev"],4)); cc.font=F_LNK; cc.number_format=NUM
-        IT_ROWS["rev"]=r; ws.cell(r,6,f"{IT['period']} 实际值").font=Font(size=9,color="808080"); r+=1
+        IT_ROWS["rev"]=r; ws.cell(r,6,f"{IT['period']} 累计实际值").font=Font(size=9,color="808080"); r+=1
         ws.cell(r,1,"已披露期营业成本（实际）").font=Font(size=10); ws.cell(r,1).border=BX
         cc=ws.cell(r,2,round(IT["cogs"],4)); cc.font=F_LNK; cc.number_format=NUM
         IT_ROWS["cogs"]=r; r+=1
         ws.cell(r,1,"→ 隐含全年营业总收入").font=Font(bold=True,size=10)
-        cc=ws.cell(r,2,f"=B{IT_ROWS['rev']}/E{IT_ROWS['已披露期占全年营收比重']}")
-        cc.font=Font(bold=True,size=10); cc.number_format=NUM
+        cc=ws.cell(r,2,f"=SUM(B{cur_r}:E{cur_r})"); cc.font=Font(bold=True,size=10); cc.number_format=NUM
         IT_ROWS["fy_rev"]=r
         ws.cell(r,6,"锚定开关=1 时，首个预测年营收即取此值").font=Font(size=9,color="006400"); r+=1
         ws.cell(r,1,"→ 隐含全年营业成本").font=Font(bold=True,size=10)
-        cc=ws.cell(r,2,(f"=B{IT_ROWS['cogs']}+(B{IT_ROWS['fy_rev']}-B{IT_ROWS['rev']})"
-                        f"*(1-E{IT_ROWS['剩余期毛利率']})"))
-        cc.font=Font(bold=True,size=10); cc.number_format=NUM
+        cc=ws.cell(r,2,f"=SUM(B{cur_c}:E{cur_c})"); cc.font=Font(bold=True,size=10); cc.number_format=NUM
         IT_ROWS["fy_cogs"]=r; r+=2
 
     r=sec(r,"四、自动校准假设（从历史推导；可覆盖）")
@@ -1110,9 +1096,9 @@ def _engine(wb, cal, D_):
     ws_=[-.02,-.01,0.0,.012,.022]          # WACC：相对生效 WACC 的偏移（轴格为公式，避免四舍五入）
     _g=list(cal["judg"]["growth"]); _m=list(cal["judg"]["gm"])
     _IT=cal.get("interim")
-    if _IT and _IT.get("share"):        # 锚定开启时首年生效值由中期反推
-        _fy_r=_IT["rev"]/_IT["share"]
-        _fy_c=_IT["cogs"]+(_fy_r-_IT["rev"])*(1-_IT["gm"])
+    if _IT and _IT.get("fy_rev"):       # 锚定开启时首年生效值取季度估算
+        _fy_r=_IT["fy_rev"]
+        _fy_c=_IT["fy_cogs"]
         _g[0]=_fy_r/cal["rev"][cal["periods"]["annual"][-1]]-1
         _m[0]=1-_fy_c/_fy_r
     gp="｜".join(f"{x*100:.1f}%" for x in _g)

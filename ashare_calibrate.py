@@ -179,28 +179,89 @@ def _capex_from_growth(growth3, fa_turnover, maint_rate):
     return out
 
 
-def anchor_three(share_hist, gm, gm_std, share_mean=None):
-    """锚定两格的三档 (Bull, Base, Bear)：已披露期占全年营收比重、剩余期毛利率。
+QUARTER_ENDS = ("0331", "0630", "0930", "1231")
+_INTERIM_LABEL = {"0331": "一季报", "0630": "半年报", "0930": "三季报"}
 
-    **规则只在这里定义一份。** 工作簿按它填 1_假设 第三小节；ir-agent 按它算
-    「各档锚定后的首年毛利率」，好让第 2 年起的毛利率路径从各档实际起点接着
-    走。两边各写一遍规则，早晚分叉成工作簿一个数、批准清单另一个数。
 
-    - 占比：近几年同期占比的最小/均值/最大。占比越低 → 隐含全年营收越高 →
-      Bull，所以 Bull 取最小值。
-    - 剩余期毛利率：Base 沿用已披露期毛利率，Bull/Bear 各偏离一个历史年度
-      毛利率标准差（下限 0.5pp，防历史过于平稳时三档重合）。
+def single_quarters(cum: list) -> list:
+    """累计口径（Q1、H1、Q1–Q3、全年）→ 单季。A 股财报一律是累计数。
+
+    任一累计值缺失，该季**及之后**都算不出（Q3 单季要 Q1–Q3 减 H1，H1 缺了就
+    无从减起），记 None —— 不拿 0 顶替，顶替会把「缺数据」伪装成「这季为零」。
     """
-    sd = max(float(gm_std), 0.005)
-    # share_mean：调用方手里只有**已取整**的历史序列时（build 读旧形状的中期块），
-    # 直接传 calibrate 当初用原始序列算好的均值——在取整后的数据上重新求均值会差
-    # 一位小数（生益：0.47845→0.4784，而原值是 0.4785），工作簿与清单就不是同一个数。
-    mean = float(share_mean) if share_mean is not None else float(np.mean(share_hist))
-    share3 = (round(min(share_hist), 4), round(mean, 4), round(max(share_hist), 4))
-    # 下限 -0.95 与上限 0.95 对称。原先是 0：牧原股份 2026 中报毛利率 -1.58%，
-    # 悲观档 gm - σ 被截到 0，反而高于中性档，三档顺序颠倒（强周期低谷期常见）。
-    gm3 = (min(round(gm + sd, 4), 0.95), round(gm, 4), max(round(gm - sd, 4), -0.95))
-    return share3, gm3
+    out, prev = [], 0.0
+    for i, c in enumerate(cum):
+        if c is None or (i and out[-1] is None):
+            out.append(None)
+            continue
+        out.append(c - prev)
+        prev = c
+    return out
+
+
+def anchor_quarterly(prev_rev, prev_cogs, cur_rev, cur_cogs) -> dict | None:
+    """首个预测年按季度估算。**规则只在这里定义一份**：工作簿第三小节用活公式
+    实现同一规则，ashare_verify 独立重算，ir-agent 只读本函数写进中期块的结果。
+
+    - 已公布的季度用实际；
+    - 未公布的季度 = 去年同季 × (1 + 本年已公布季度的年初至今同比)，营收与营业
+      成本**各用各的同比**（保留各自的季节性）；
+    - 首年三档相同：它是实际 + 机械外推，不是判断，情景分化从第 2 年开始。
+
+    取代此前的「已披露 ÷ 近几年同期占比（最小/均值/最大）」三档锚定（2026-10-18，
+    用户决定）。旧规则对周期股失灵：牧原股份近 4 年上半年占比 0.355～0.530，用
+    均值 0.44 反推全年营收约 1346 亿元，按三季度销售简报推算只有约 1185 亿元，
+    高估 13.6%，且首年是后续年份复合的基数。
+
+    `prev_*`：去年四个单季；`cur_*`：本年已公布的 k 个单季（1 ≤ k ≤ 3）。
+    缺去年任一季度、本年没有已公布季度或其中有缺失、去年同期合计不为正 → None
+    （不锚定，首年回到增速判断项）。
+    """
+    k = len(cur_rev)
+    if not 1 <= k <= 3 or len(cur_cogs) != k:
+        return None
+    seqs = (prev_rev, prev_cogs, cur_rev, cur_cogs)
+    if any(x is None for seq in seqs for x in seq) or len(prev_rev) != 4 or len(prev_cogs) != 4:
+        return None
+    base_rev, base_cogs = sum(prev_rev[:k]), sum(prev_cogs[:k])
+    if base_rev <= 0 or base_cogs <= 0:
+        return None
+    g_rev = sum(cur_rev) / base_rev - 1
+    g_cogs = sum(cur_cogs) / base_cogs - 1
+    est_rev = list(cur_rev) + [x * (1 + g_rev) for x in prev_rev[k:]]
+    est_cogs = list(cur_cogs) + [x * (1 + g_cogs) for x in prev_cogs[k:]]
+    return dict(k=k, g_rev=g_rev, g_cogs=g_cogs, est_rev=est_rev, est_cogs=est_cogs,
+                fy_rev=sum(est_rev), fy_cogs=sum(est_cogs))
+
+
+def interim_block(inc, interim: str) -> dict | None:
+    """已披露中期 → 中期块（以亿元计，与 calibrate 其余各项同口径）。
+
+    除季度明细与首年估算外保留 `share` = 已披露营收 ÷ 首年估算营收：比率表的
+    中期列按它的倒数年化（流量 ÷ 平均存量类比率），口径与锚定的首年一致。
+    """
+    year, mmdd = interim[:4], interim[4:]
+    if mmdd not in _INTERIM_LABEL:
+        return None
+    k = QUARTER_ENDS.index(mmdd) + 1
+    py = str(int(year) - 1)
+    R = lambda p: _v(inc, "营业总收入", p) or _v(inc, "营业收入", p)
+    Cg = lambda p: _v(inc, "营业成本", p)
+    prev_r = single_quarters([R(py + e) for e in QUARTER_ENDS])
+    prev_c = single_quarters([Cg(py + e) for e in QUARTER_ENDS])
+    cur_r = single_quarters([R(year + e) for e in QUARTER_ENDS[:k]])
+    cur_c = single_quarters([Cg(year + e) for e in QUARTER_ENDS[:k]])
+    q = anchor_quarterly(prev_r, prev_c, cur_r, cur_c)
+    if q is None:
+        return None
+    rev, cogs = sum(cur_r), sum(cur_c)
+    return dict(period=interim, label=_INTERIM_LABEL[mmdd], k=k,
+                rev=rev, cogs=cogs, gm=1 - cogs / rev if rev else None,
+                q_prev_rev=prev_r, q_prev_cogs=prev_c, q_cur_rev=cur_r, q_cur_cogs=cur_c,
+                g_rev=q["g_rev"], g_cogs=q["g_cogs"],
+                est_rev=q["est_rev"], est_cogs=q["est_cogs"],
+                fy_rev=q["fy_rev"], fy_cogs=q["fy_cogs"],
+                share=rev / q["fy_rev"])
 
 
 def beta_blume(code: str, years: int = 5) -> tuple[float, float, int]:
@@ -424,29 +485,10 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                     lo=0.3, hi=10.0, default=2.0, what="固定资产周转率")
     maint_rate = round(dep_over_rev, 5)
 
-    # 已披露中期：占全年比重（用于锁定首个预测年）
-    itm_block = None
-    if interim:
-        mmdd = interim[4:]
-        sh_hist = []
-        for a in ann[-4:]:
-            pr = _v(inc, "营业总收入", a[:4]+mmdd) or _v(inc, "营业收入", a[:4]+mmdd)
-            fy = rev.get(a)
-            if pr and fy: sh_hist.append(pr/fy)
-        if sh_hist:
-            itm_rev = rev.get(interim); itm_cogs = cogs.get(interim)
-            itm_block = dict(period=interim, rev=itm_rev, cogs=itm_cogs,
-                             gm=(1-itm_cogs/itm_rev) if itm_rev and itm_cogs else None,
-                             share=round(float(np.mean(sh_hist)), 4),
-                             share_hist=[round(x,4) for x in sh_hist],
-                             share_std=round(float(np.std(sh_hist)), 4),
-                             label="半年报" if mmdd=="0630" else ("一季报" if mmdd=="0331" else "三季报"))
-            if itm_block["gm"] is not None:
-                # σ 与 gm_stats 同源（_gm_std_annual，只算年度不含中报），
-                # 不另起口径——I2 之前这里直接 np.std(gm_hist)，把中报也
-                # 算了进去，与 gm_stats[1] 的口径分叉过。
-                itm_block["share3"], itm_block["gm_rest3"] = anchor_three(
-                    sh_hist, itm_block["gm"], round(gm_std_ann, 4))
+    # 已披露中期：首个预测年按季度估算（已公布季度用实际，未公布季度按年初至今
+    # 同比外推，见 interim_block / anchor_quarterly）。缺去年同季数据时为 None，
+    # 首年回到增速判断项。
+    itm_block = interim_block(inc, interim) if interim else None
     # 债务权重按公司【实际】资本结构算，不能硬编码。
     # 原来固定 1%：生益碰巧接近真值(1.01%)，长电实际 7.23% → WACC 被高估 0.43pp。
     _debt = o["st"] + o["cur"] + o["lt"]

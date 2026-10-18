@@ -234,7 +234,9 @@ def test_EBIT为负时保留负值不显示利润不足(tmp_path):
     a = wb["1_假设"]
     m = {a.cell(rr, 1).value: rr for rr in range(1, a.max_row + 1)
          if isinstance(a.cell(rr, 1).value, str)}
-    a.cell(m["锚定开关（1=锚定 0=按增速外推）"], 2).value = 0
+    # 旧格式夹具没有季度明细、不建锚定小节，判断项首年本就生效；有开关时才关。
+    if "锚定开关（1=锚定 0=按增速外推）" in m:
+        a.cell(m["锚定开关（1=锚定 0=按增速外推）"], 2).value = 0
     wb.save(out)
     ws = load_workbook(out)["7_财务比率与杜邦"]
     r_idx = _row_of(ws, "EBIT 利息保障倍数")
@@ -304,8 +306,10 @@ def test_有息负债EBITDA中期列已年化(tmp_path):
     assert isinstance(f, str) and (str(factor) in f or f"{factor:.6f}" in f), (
         f"有息负债/EBITDA 中期列未按 1/share={factor} 年化分母，公式为：{f}")
     val = _eval_cell(out, "7_财务比率与杜邦", f"{itm_col}{r_idx}")
-    assert val == pytest.approx(0.49, abs=0.02), (
-        f"年化后应约为 0.49x（2025A 为 0.80x），实际算出 {val}")
+    # 年化系数 = 1/share。2026-10-18 起 share 是「已披露营收 ÷ 季度估算的首年营收」
+    # （0.446，与模型首年同口径），此前是近 4 年同期占比均值（0.4785，当时约 0.49x）。
+    assert val == pytest.approx(0.457, abs=0.02), (
+        f"年化后应约为 0.46x（2025A 为 0.80x，未年化 1.03x），实际算出 {val}")
 
 
 # ── I7（final-review-plan2a 终审）：itm_block 为 None 但中期列存在时表头不能说假话 ──

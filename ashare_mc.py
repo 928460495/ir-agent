@@ -99,10 +99,8 @@ def simulate(inp: dict, P: dict) -> dict:
     cx_live=np.array(inp["capex"],dtype=float)
     anchored = bool(IT and IT["sw"]==1)
     if anchored:                       # 首年被已披露中期锁定（与 verify.recompute 一致）
-        fy_rev=IT["rev"]/IT["share"]
-        fy_cogs=IT["cogs"]+(fy_rev-IT["rev"])*(1-IT["gm_rest"])
-        g_live[0]=fy_rev/o["基期营业总收入"]-1
-        m_live[0]=1-fy_cogs/fy_rev
+        g_live[0]=IT["fy_rev"]/o["基期营业总收入"]-1
+        m_live[0]=1-IT["fy_cogs"]/IT["fy_rev"]
 
     # --- 相关抽样：Cholesky 注入 ρ（增速平移 与 毛利率平移）---
     rho=float(np.clip(P["rho"],-0.999,0.999))

@@ -129,6 +129,10 @@ def test_夹具与当前calibrate代码同步(cal_dict, monkeypatch):
     ge_extra = set(cal_dict["gen"]) - set(fresh["gen"])
     assert not ge_missing and not ge_extra, (
         f"gen 键集合不一致：当前代码多出 {ge_missing}，夹具多出 {ge_extra}——{stale_msg}")
+    it_fresh, it_fix = fresh.get("interim") or {}, cal_dict.get("interim") or {}
+    assert set(it_fresh) == set(it_fix), (
+        f"interim 键集合不一致：当前代码 {sorted(set(it_fresh) - set(it_fix))}，"
+        f"夹具 {sorted(set(it_fix) - set(it_fresh))}——{stale_msg}")
 
 
 @pytest.fixture(scope="module")
@@ -155,134 +159,57 @@ def _with_growth_scen(cal, bull, base, bear):
     return c
 
 
-def _anchored_share3(cal):
-    it = cal["interim"]
-    if it.get("share3"):
-        return tuple(it["share3"])
-    return C.anchor_three(it["share_hist"], it["gm"], cal["judg"]["gm_stats"][1],
-                           share_mean=it["share"])[0]
+def _anchored_g1(cal):
+    """首个预测年按季度估算后的生效增速（三档相同）。"""
+    return cal["interim"]["fy_rev"] / cal["rev"][cal["periods"]["annual"][-1]] - 1.0
 
 
 def test_工作簿里三档资本开支真的拉开(cal_dict, tmp_path):
     """本任务要断言的是工作簿里真正生效的那几格，不是中间变量——
     上一个任务的教训：只断言留痕字典，测不出函数是否真的把值写回。
 
-    C2（final-review-plan2a 终审）之后：夹具（600183）锚定默认开启，首个
-    预测年的三档 growth 已不是这里注入的 0.45/0.20/0.05，而是各档锚定后
-    真正生效的增速（由 share3 反推）——直接拿注入值去核对会算错，必须
-    复算同一份锚定覆盖再喂给 _capex_from_growth。
+    夹具（600183）有已披露中期，锚定默认开启：首个预测年的增速已不是这里注入
+    的 0.45/0.20/0.05，而是季度估算的生效增速（三档相同）——第 2 年起三档才按
+    注入值拉开。逐位复算必须先做同一份首年覆盖再喂给 _capex_from_growth。
     """
     n = len(cal_dict["periods"]["proj"])
     bull = [0.45] * n; base = [0.20] * n; bear = [0.05] * n
     cal = _with_growth_scen(cal_dict, bull, base, bear)
-    assert cal["interim"] and cal["interim"].get("share"), "前提：夹具确有已披露中期"
-    p = tmp_path / "w.xlsx"
-    B.build(cal, str(p))
-    ws = load_workbook(p)["1_假设"]
-    m = _rowmap(ws)
-    r = m[f"{cal['periods']['proj'][0]} 资本开支 / 营收"]
-    bull_v, base_v, bear_v = (ws.cell(r, c).value for c in (2, 3, 4))
-    assert bull_v > base_v > bear_v, (bull_v, base_v, bear_v)
-    # 逐位核算：首年 growth 换成各档锚定后生效的增速，其余年份维持注入值
-    share3 = _anchored_share3(cal)
-    base_rev = cal["rev"][cal["periods"]["annual"][-1]]
-    it = cal["interim"]
-    growth3 = {"bull": list(bull), "base": list(base), "bear": list(bear)}
-    for j, k in enumerate(("bull", "base", "bear")):
-        growth3[k][0] = it["rev"] / share3[j] / base_rev - 1.0
-    expect = C._capex_from_growth(
-        growth3=growth3, fa_turnover=cal["judg"]["fa_turn"],
-        maint_rate=cal["judg"]["maint_rate"])
-    assert bull_v == pytest.approx(expect["bull"][0], abs=1e-4)
-    assert base_v == pytest.approx(expect["base"][0], abs=1e-4)
-    assert bear_v == pytest.approx(expect["bear"][0], abs=1e-4)
-    # 生效增速本身必须确实拉开——不是巧合地相等（C2 病根之一）
-    eff = [it["rev"] / share3[j] / base_rev - 1.0 for j in range(3)]
-    assert eff[0] > eff[1] > eff[2], eff
-
-
-def test_没有三档增速时首年仍按锚定生效增速拉开_其余年同值(cal_dict, tmp_path):
-    """上游没给 growth_scen 时，_scen 的 fallback 是 JU['growth']（单序列），
-    第2年起三档营收增速同值，资本开支也同值——**但首个预测年不是这样**：
-    锚定默认开启（开关=1），首年真正生效的增速由各档 share3 反推，三档
-    本就不同，capex 必须跟着拉开。C2 之前的假设"三档 fallback 到同一路径
-    时 capex 也必须同值"，在锚定生效的年份从一开始就是错的——这正是终审
-    实测复现的场景（600183：三档都按 13.74% 算 capex，真正生效的是 Bull
-    50.04% / Base 39.85% / Bear 28.59%）。
-    """
-    cal = copy.deepcopy(cal_dict)
-    assert "growth_scen" not in cal["judg"]
-    assert cal["interim"] and cal["interim"].get("share"), "前提：夹具确有已披露中期"
+    assert cal["interim"] and cal["interim"].get("fy_rev"), "前提：夹具确有已披露中期"
     p = tmp_path / "w.xlsx"
     B.build(cal, str(p))
     ws = load_workbook(p)["1_假设"]
     m = _rowmap(ws)
     proj = cal["periods"]["proj"]
-    r0 = m[f"{proj[0]} 资本开支 / 营收"]
-    bull0, base0, bear0 = (ws.cell(r0, c).value for c in (2, 3, 4))
-    assert bull0 > base0 > bear0, (bull0, base0, bear0)
-    if len(proj) > 1:
-        r1 = m[f"{proj[1]} 资本开支 / 营收"]
-        bull1, base1, bear1 = (ws.cell(r1, c).value for c in (2, 3, 4))
-        assert bull1 == pytest.approx(base1, abs=1e-6)
-        assert base1 == pytest.approx(bear1, abs=1e-6)
+    g1 = _anchored_g1(cal)
+    growth3 = {"bull": [g1] + bull[1:], "base": [g1] + base[1:], "bear": [g1] + bear[1:]}
+    expect = C._capex_from_growth(
+        growth3=growth3, fa_turnover=cal["judg"]["fa_turn"],
+        maint_rate=cal["judg"]["maint_rate"])
+    for i, y in enumerate(proj):
+        r = m[f"{y} 资本开支 / 营收"]
+        got = [ws.cell(r, c).value for c in (2, 3, 4)]
+        assert got == pytest.approx([expect[k][i] for k in ("bull", "base", "bear")], abs=1e-4), y
+    r1 = m[f"{proj[1]} 资本开支 / 营收"]
+    bull1, base1, bear1 = (ws.cell(r1, c).value for c in (2, 3, 4))
+    assert bull1 > base1 > bear1, "第 2 年起三档按注入的增速拉开"
 
 
-def test_C2实测复现_600183锚定生效增速对应的资本开支(cal_dict, tmp_path):
-    """终审实跑复现（final-review-plan2a.md C2）：600183 锚定开启、未注入
-    growth_scen 时，首年真正生效的增速是 Bull +50.04% / Base +39.85% /
-    Bear +28.59%（由 share3=(0.446, 0.4785, 0.5204) 与已披露中期营收
-    190.2561176613 反推），对应资本开支应为 Bull 16.43% / Base 14.55% /
-    Bear 12.13%——修复前，三档都按被标注"不生效"的 13.74% 算，Base 档少计
-    约 25.2 亿资本开支，单向利好估值。这里同时给出硬编码字面值（防止
-    _capex_from_growth 本身被改坏）和用当前夹具动态复算的版本（防止两边
-    对同一个 bug 各自维护一份、悄悄分叉）。
-    """
-    cal = cal_dict
-    it = cal["interim"]
-    base_rev = cal["rev"][cal["periods"]["annual"][-1]]
-    share3 = _anchored_share3(cal)
-    eff = [it["rev"] / share3[j] / base_rev - 1.0 for j in range(3)]
-    assert eff == pytest.approx([0.5004, 0.3985, 0.2859], abs=1e-3), eff
-    out = C._capex_from_growth(
-        growth3={"bull": [eff[0]], "base": [eff[1]], "bear": [eff[2]]},
-        fa_turnover=cal["judg"]["fa_turn"], maint_rate=cal["judg"]["maint_rate"])
-    assert out["bull"][0] == pytest.approx(0.1643, abs=1e-3)
-    assert out["base"][0] == pytest.approx(0.1455, abs=1e-3)
-    assert out["bear"][0] == pytest.approx(0.1213, abs=1e-3)
-    # 端到端：工作簿里首年那一格必须等于这份复算值，不是中间变量
-    p = tmp_path / "w.xlsx"
-    B.build(copy.deepcopy(cal), str(p))
-    ws = load_workbook(p)["1_假设"]
-    m = _rowmap(ws)
-    r = m[f"{cal['periods']['proj'][0]} 资本开支 / 营收"]
-    bull_v, base_v, bear_v = (ws.cell(r, c).value for c in (2, 3, 4))
-    assert bull_v == pytest.approx(out["bull"][0], abs=1e-4)
-    assert base_v == pytest.approx(out["base"][0], abs=1e-4)
-    assert bear_v == pytest.approx(out["bear"][0], abs=1e-4)
-
-
-def test_share3只算一次两处用同一个值(cal_dict, tmp_path, monkeypatch):
-    """C2 追加修复：build() 里「资本开支」小节与「三、锚定已披露中期」小节
-    此前各自调用 anchor_three 现算一份 share3/gm_rest3——同一套输入、同一条
-    规则，数值上恰好一致，但两处独立计算这件事本身就是分叉风险的自白（Plan 1
-    commit 4049205「锚定三档规则只留一份，挪到 calibrate」整整一个任务就是
-    为了消灭这种重复：两边各写一遍规则，早晚分叉成工作簿一个数、批准清单
-    另一个数）。修复后两节共用同一个局部变量，anchor_three 在这条强制走
-    "现算"分支（share3/gm_rest3 从夹具里剥掉，模拟旧版 calibrate 产出）的
-    路径上，一次 build() 调用只应该被调用一次。"""
+def test_首年资本开支用季度估算的生效增速_三档相同(cal_dict, tmp_path):
+    """C2（final-review-plan2a 终审）的教训仍然成立：锚定开启时首年的增速判断项
+    被完全覆盖，资本开支必须按真正生效的增速算，不能用那个不生效的判断项。
+    2026-10-18 起首年改为季度估算，三档相同——首年资本开支也三档相同。"""
     cal = copy.deepcopy(cal_dict)
-    assert cal["interim"] and cal["interim"].get("share"), "前提：夹具确有已披露中期"
-    cal["interim"].pop("share3", None)
-    cal["interim"].pop("gm_rest3", None)
-    calls = []
-    real = C.anchor_three
-    def _counting(*a, **kw):
-        calls.append(1)
-        return real(*a, **kw)
-    monkeypatch.setattr(B._CAL, "anchor_three", _counting)
     p = tmp_path / "w.xlsx"
     B.build(cal, str(p))
-    assert len(calls) == 1, (
-        f"anchor_three 被调用 {len(calls)} 次——资本开支小节与锚定小节应共用"
-        "同一份 share3/gm_rest3，只应现算一次")
+    ws = load_workbook(p)["1_假设"]
+    m = _rowmap(ws)
+    r0 = m[f"{cal['periods']['proj'][0]} 资本开支 / 营收"]
+    got = [ws.cell(r0, c).value for c in (2, 3, 4)]
+    g1 = _anchored_g1(cal)
+    expect = C._capex_from_growth(
+        growth3={k: [g1] for k in ("bull", "base", "bear")},
+        fa_turnover=cal["judg"]["fa_turn"], maint_rate=cal["judg"]["maint_rate"])
+    assert got == pytest.approx([expect["base"][0]] * 3, abs=1e-4), got
+    judged = cal["judg"]["growth"][0]
+    assert abs(g1 - judged) > 1e-3, "前提：生效增速与被覆盖的判断项确实不同，否则测不出区别"
