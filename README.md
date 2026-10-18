@@ -210,6 +210,10 @@ python -m ir_agent 600176 --year 2025 --value   out/600176 --approved-by <你的
 - [`docs/superpowers/specs/`](docs/superpowers/specs/)：各子项目的设计文档
 - [`docs/superpowers/plans/`](docs/superpowers/plans/)：对应的实现计划
 
+## 许可证
+
+[MIT](LICENSE)
+
 ---
 
 **免责声明**：本项目及其产出仅用于研究与学习，不构成任何投资建议。数据来自公开渠道，可能存在错误或延迟；模型生成的分析可能有误。据此做出的任何投资决策，风险自负。
