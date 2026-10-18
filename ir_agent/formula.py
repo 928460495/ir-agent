@@ -333,7 +333,7 @@ def simulate(model: FormulaModel, values: dict[str, list], *,
     第 0 年：变化模式取 `base_revenue`/`base_margin`（账本）；水平模式用
     `base_factors` 代入公式算出（口径不混用）。
 
-    `anchor_y1`（半年报锚定后该档第 1 年毛利率）给定时，第 2 年起：`上期(毛利率)`
+    `anchor_y1`（首年锚定后的第 1 年毛利率，三档相同）给定时，第 2 年起：`上期(毛利率)`
     取锚定值；`基期(毛利率)` 平移为 `基期 + (锚定值 − 第 1 年公式值)` —— 与旧
     `assume.margin_bases` 的平移逐位一致（spec「写计划时的补充」2）。第 1 年的
     合成值本身不被锚定替换（工作簿另行锚定覆盖）。

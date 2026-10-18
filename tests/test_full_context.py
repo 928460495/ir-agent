@@ -1275,8 +1275,16 @@ def test_年份二起基期被替换要进研报附录与提示词():
     import re
     from decimal import Decimal
     from ir_agent import full
+    from ir_agent.drivers import Decomposition, Factor, Op
     a = _plain_set()
+    # 平移只在毛利率公式读 基期(毛利率) 时生效（`margin_rebased`，牧原股份 2026-10-18）：
+    # 补一条旧式毛利率加法分解，翻译后即 基期(毛利率) + (价差)/100。
+    a.decomps = list(a.decomps) + [Decomposition(
+        target="gross_margin", op=Op.ADD_PP,
+        factors=[Factor(key="spread", label="价差", unit="pp")])]
+    a.model = None
     a.margin_bases = {"base": [Decimal("0.2647"), Decimal("0.3069")]}
+    assert a.margin_rebased()
     prompt_line, appendix = full._assumption_caveats(a)
     assert prompt_line, "只要 margin_bases 非空就该有话要说，不能仍是空串"
     assert "年报基期" in prompt_line
@@ -1314,8 +1322,9 @@ def test_第二阶段基期替换也要进终端清单():
     import inspect
     from ir_agent import full
     src = inspect.getsource(full.run_valuation)
-    assert "a.margin_bases" in src
-    i_margin = src.index("a.margin_bases")
+    # 判据是「平移真的生效」（`margin_rebased`），不是 margin_bases 非空（牧原 2026-10-18）。
+    assert "a.margin_rebased()" in src
+    i_margin = src.index("a.margin_rebased()")
     # 必须真的写进 skipped，不能只是算出来没处使用
     tail = src[i_margin:i_margin + 400]
     assert "skipped.append(" in tail
@@ -1395,7 +1404,7 @@ def test_横幅真的写进批准清单顶部():
     # I3：横幅需要知道毛利率加法链是否被按档按年基期替换过（`a.margin_bases`），
     # 才能决定要不要多说「第 2 年起基期已换」那句话——不能凭 cal/labels 自己
     # 判断（那是 a.decomps 与 anchor 一起解出来的派生量）。
-    assert "a.margin_bases" in src
+    assert "a.margin_rebased()" in src
 
 
 def test_第一阶段未跑完时目录里残留的旧判断项不能当成本轮的(tmp_path):
@@ -4539,3 +4548,15 @@ def test_定性审核_端到端_战略三轮不过停下_产业链照常落盘_�
     assert o2.stage is full.Stage.AWAITING_SOURCES, o2.skipped
     assert any(s.startswith("定性分析未经审核：战略分析") for s in o2.skipped)
     assert "战略分析：⚠ 人工修改后未经审核" in (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
+
+
+def test_有中期却未锚定时横幅写明原因():
+    """终审（2026-10-19）：新规则要去年完整四季、且季度为正、同比在合理范围内，
+    不锚定的公司会更多。此前是静默的——人以为首年被实际数锁定，其实用的是判断项。"""
+    from ir_agent import full
+    cal = _cal_with_interim()
+    cal["interim"] = None
+    cal["interim_skip"] = "营收年初至今同比 +9900.0% 超出 -75%～+200% 的合理范围"
+    txt = full._anchor_banner(cal, ["2026E", "2027E"])
+    assert "2026E" in txt and "未锚定" in txt and "+9900.0%" in txt
+    assert "判断项" in txt and "不进模型" not in txt

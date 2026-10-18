@@ -377,6 +377,17 @@ class AssumptionSet:
             self.model = from_decomps(list(self.decomps))
         return self.model
 
+    def margin_rebased(self) -> bool:
+        """第 2 年起毛利率的基期是否**真的**被锚定平移：`margin_bases` 非空，且毛利率
+        公式读 上期/基期(毛利率)。水平模式的毛利率公式不读它，平移不起作用——此时
+        不能对人说「第 2 年起基期已换成锚定后的首年水平」（牧原股份 2026-10-18）。"""
+        if not self.margin_bases:
+            return False
+        m = self._m()
+        if m is None or "gross_margin" not in m.formulas:
+            return False
+        return "毛利率" in {n for _, n in m.formulas["gross_margin"].lagged()}
+
     def path(self, driver: str, case: Case) -> list[Decimal]:
         got = sorted((r for r in self.rows if r.driver == driver),
                      key=lambda r: r.year)
@@ -578,7 +589,7 @@ class AssumptionSet:
         lines.append("")
         lagged = {n for _, n in m.formulas["gross_margin"].lagged()}
         if self.margin_bases and "毛利率" not in lagged:
-            lines += ["⚠ 半年报锚定只影响第 1 年：毛利率公式不读 上期/基期(毛利率)，"
+            lines += ["⚠ 首年锚定只影响第 1 年：毛利率公式不读 上期/基期(毛利率)，"
                       "第 2 年起承接不上锚定值。", ""]
         return lines
 

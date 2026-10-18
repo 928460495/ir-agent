@@ -307,3 +307,23 @@ def test_旧写法翻译成的FormulaModel也能出提示词():
     txt = assume.build_prompt({"g_stats": (), "gm_stats": ()}, ["2026E"], "上下文",
                               decomps=m, factor_data={})
     assert "出货量" in txt and "公式" in txt
+
+
+class TestMarginRebased:
+    """牧原股份 2026-10-18：水平模式下毛利率公式不读 上期/基期(毛利率)，锚定的基期
+    平移对它不起作用；可批准清单横幅、终端与研报附录都按 `margin_bases` 非空说
+    「第 2 年起毛利率的基期已换成锚定后的首年水平」——对人说了一句假话。"""
+
+    def test_水平模式毛利率不读上期基期_平移不生效(self):
+        a = assume.parse(_level_lines(), 1, decomps=LEVEL)
+        a.margin_bases = {c: [D("0.30"), D("0.31")] for c in ("bull", "base", "bear")}
+        assert not a.margin_rebased()
+
+    def test_变化模式读基期毛利率_平移生效(self):
+        a = assume.parse(_change_lines(1), 1, decomps=CHANGE)
+        a.margin_bases = {c: [D("0.30"), D("0.31")] for c in ("bull", "base", "bear")}
+        assert a.margin_rebased()
+
+    def test_没锚定就谈不上平移(self):
+        a = assume.parse(_change_lines(1), 1, decomps=CHANGE)
+        assert not a.margin_rebased()
