@@ -294,3 +294,42 @@ def test_水平模式公式引擎验算全过(cal, tmp_path):
     B.build(_level_block(cal), str(p))
     fails, _ = V.verify(str(p), quiet=True)
     assert not fails
+
+
+def test_未锚定时第三小节与比率表都写明原因(cal, tmp_path):
+    """终审（2026-10-19）：首年不锚定此前是静默的，比率表还会写错原因
+    （「缺去年同期数据」）。calibrate 把原因记进 interim_skip，工作簿照写。"""
+    c = copy.deepcopy(cal)
+    c["interim"] = None
+    c["interim_skip"] = "去年 2025 Q3 营业成本缺失"
+    wb = load_workbook(_build(c, tmp_path, "skip.xlsx"))
+    a = wb["1_假设"]
+    sec = [v for v in (a.cell(r, 1).value for r in range(1, a.max_row + 1))
+           if isinstance(v, str) and v.startswith("三、首个预测年未锚定")]
+    assert sec and "去年 2025 Q3 营业成本缺失" in sec[0], sec
+    ws = wb["7_财务比率与杜邦"]
+    texts = " ".join(str(ws.cell(r, c_).value) for r in range(1, 6) for c_ in range(1, 4))
+    assert "去年 2025 Q3 营业成本缺失" in texts and "缺去年同期数据" not in texts
+
+
+def test_季度表数据损坏时校验明确报错(cal, tmp_path):
+    """季度表在、却算不出首年：静默放过会让校验悄悄不锚定，与工作簿对不上。"""
+    p = _build(cal, tmp_path, "bad.xlsx")
+    wb = load_workbook(p)
+    a = wb["1_假设"]
+    a.cell(_rowmap(a)[PFX + "去年营业成本（单季）"], 3).value = None
+    wb.save(p)
+    with pytest.raises(ValueError, match="季度估算"):
+        V.read_inputs(str(p))
+
+
+def test_季度表数值齐全但算不出首年时校验明确报错(cal, tmp_path):
+    """格子都是数，但按规则不能估算（去年某季营业成本被改成负数）：同样不能静默
+    不锚定——工作簿开关 = 1 时照样锚定，校验必须对得上或明确报错。"""
+    p = _build(cal, tmp_path, "neg.xlsx")
+    wb = load_workbook(p)
+    a = wb["1_假设"]
+    a.cell(_rowmap(a)[PFX + "去年营业成本（单季）"], 3).value = -1.0
+    wb.save(p)
+    with pytest.raises(ValueError, match="算不出首年.*不为正"):
+        V.read_inputs(str(p))

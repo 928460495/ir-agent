@@ -160,13 +160,20 @@ def read_inputs(path):
         def qs(p, n=4):
             """季度行的前 n 格（本年只读已公布的 k 格实际值，不碰外推公式格）。"""
             rr=_find(am,p)
-            return [float(_cell_value(wb,a,f"{c}{rr}")) for c in "BCDE"[:n]]
+            vals=[_cell_value(wb,a,f"{c}{rr}") for c in "BCDE"[:n]]
+            try:
+                return [float(v) for v in vals]
+            except (TypeError, ValueError):
+                raise ValueError(f"「1_假设」季度估算表「{p}」有空格或非数值：{vals}") from None
         pr=qs("季度估算：去年营业总收入（单季）"); pc=qs("季度估算：去年营业成本（单季）")
         cr=qs("季度估算：本年营业总收入（单季）",k); cc=qs("季度估算：本年营业成本（单季）",k)
-        q=_C.anchor_quarterly(pr,pc,cr,cc)
-        if q:
-            it=dict(sw=float(g("锚定开关")), k=k, rev=sum(cr), cogs=sum(cc),
-                    fy_rev=q["fy_rev"], fy_cogs=q["fy_cogs"])
+        q,why=_C.quarterly_estimate(pr,pc,cr,cc)
+        if q is None:
+            # 季度表在、却算不出首年：静默放过会让校验悄悄不锚定，与工作簿（开关=1
+            # 时照样锚定）对不上——明确报错（终审 2026-10-19）。
+            raise ValueError(f"「1_假设」季度估算表算不出首年：{why}")
+        it=dict(sw=float(g("锚定开关")), k=k, rev=sum(cr), cogs=sum(cc),
+                fy_rev=q["fy_rev"], fy_cogs=q["fy_cogs"])
     except KeyError:
         # 2026-10-18 之前生成的工作簿：第三小节是「占比 + 剩余期毛利率」两格，按当时的
         # 规则重算，好让磁盘上已有的旧工作簿仍能校验。

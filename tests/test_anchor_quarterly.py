@@ -109,3 +109,46 @@ class TestInterimBlock:
     def test_缺去年同季_中期块为空(self):
         inc = self._inc_my().drop(index="20250930")
         assert C.interim_block(inc, "20260630") is None
+
+
+class TestGuards:
+    """终审（2026-10-19）：防护太薄时会静默锚定出荒谬的首年——去年某季为负（报表
+    追溯重述后「全年 − 前三季」可能为负）、本年已公布季度为负、去年同季基数极小。
+    参与计算的季度一律须为正；年初至今同比须在 -75%～+200% 之内（用户决定）。"""
+
+    def test_去年某季为负_不锚定_写明哪一季(self):
+        q, why = C.quarterly_estimate([10, -50, 60, 70], [5] * 4, [20], [6])
+        assert q is None and "去年 Q2" in why and "不为正" in why
+
+    def test_本年已公布季度为负_不锚定(self):
+        q, why = C.quarterly_estimate([10, 20, 30, 40], [5] * 4, [-5], [6])
+        assert q is None and "本年 Q1" in why
+
+    def test_营收同比超出上限_不锚定(self):
+        q, why = C.quarterly_estimate([0.1, 20, 30, 40], [5] * 4, [10], [6])
+        assert q is None and "营收年初至今同比" in why and "+200%" in why
+
+    def test_营业成本同比低于下限_不锚定(self):
+        q, why = C.quarterly_estimate(MY_PREV_REV, [100, 300, 300, 300], [300.0], [20.0])
+        assert q is None and "营业成本年初至今同比" in why and "-75%" in why
+
+    @pytest.mark.parametrize("cur", [[29.0], [3.0]])        # +190%、-70%：边界之内
+    def test_同比在范围内照常锚定(self, cur):
+        q, why = C.quarterly_estimate([10, 20, 30, 40], [5] * 4, cur, [5.0])
+        assert q is not None and why == ""
+
+    def test_anchor_quarterly与带原因的版本一致(self):
+        a = C.anchor_quarterly(MY_PREV_REV, MY_PREV_COGS, MY_CUR_REV, MY_CUR_COGS)
+        b, why = C.quarterly_estimate(MY_PREV_REV, MY_PREV_COGS, MY_CUR_REV, MY_CUR_COGS)
+        assert a == b and why == ""
+
+
+class TestInterimBlockWhy:
+    def test_缺去年同季_写明年份与季度(self):
+        inc = TestInterimBlock()._inc_my().drop(index="20250930")
+        it, why = C.interim_block_why(inc, "20260630")
+        assert it is None and "2025" in why and "Q3" in why
+
+    def test_正常时原因为空(self):
+        it, why = C.interim_block_why(TestInterimBlock()._inc_my(), "20260630")
+        assert it is not None and why == ""

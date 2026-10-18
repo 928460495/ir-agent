@@ -214,6 +214,10 @@ def build(cal: dict, path: str) -> dict:
         ws.cell(r,1,"→ 隐含全年营业成本").font=Font(bold=True,size=10)
         cc=ws.cell(r,2,f"=SUM(B{cur_c}:E{cur_c})"); cc.font=Font(bold=True,size=10); cc.number_format=NUM
         IT_ROWS["fy_cogs"]=r; r+=2
+    elif cal.get("interim_skip"):
+        # 有已披露中期却没锚定：如实写原因（终审 2026-10-19：此前是静默的）。
+        r=sec(r,f"三、首个预测年未锚定（{cal['interim_skip']}），首年取上方增速与毛利率判断项")
+        r+=1
 
     r=sec(r,"四、自动校准假设（从历史推导；可覆盖）")
     # C1：三项费用率的单元格值可能是「近3年年报均值」，也可能是季节性对冲后的
@@ -1187,7 +1191,8 @@ def _ratios(wb, cal, D_):
         # 才会被 calibrate 构造出来；periods.interim 只要有已披露中期就无条件非空。
         # 次新股（或缺去年同期）时中期列照样存在于表里，若沿用"本报表无已披露中期"
         # 这句话，读者会被明确告知一件假的事——遗漏必须可见，不能含糊带过。
-        _hdr3 = "本报表有已披露中期，但缺去年同期数据，中期列未年化，与年报列不可比。"
+        _why = cal.get("interim_skip") or "缺季度数据"
+        _hdr3 = f"本报表有已披露中期，但首年未按季度估算（{_why}），中期列未年化，与年报列不可比。"
     else:
         _hdr3 = "本报表无已披露中期，全部历史列均为整年数据。"
     w.cell(3,1,_hdr3).font=Font(size=9,color="C00000")
