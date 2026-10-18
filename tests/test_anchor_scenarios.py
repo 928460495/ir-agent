@@ -112,6 +112,22 @@ def test_毛利率历史过于平稳时三档仍然拉开():
     assert gm3[0] > gm3[1] > gm3[2]
 
 
+def test_已披露期毛利率为负时三档仍是乐观高于中性高于悲观():
+    """牧原股份 2026-10-18：中报毛利率 -1.58%，悲观档 gm - σ 被下限截到 0，
+    反而比中性档 -1.58% 还高，三档顺序颠倒。强周期行业低谷期毛利率为负是常态，
+    下限不能是 0。"""
+    import ashare_calibrate as C
+    _, gm3 = C.anchor_three([0.355, 0.468, 0.412, 0.53], gm=-0.0158, gm_std=0.06)
+    assert gm3[0] > gm3[1] > gm3[2], gm3
+    assert gm3[1] == -0.0158 and gm3[2] == round(-0.0158 - 0.06, 4)
+
+
+def test_悲观档毛利率下限与乐观档上限对称():
+    import ashare_calibrate as C
+    _, gm3 = C.anchor_three([0.47, 0.47], gm=-0.90, gm_std=0.20)
+    assert gm3[2] == -0.95
+
+
 # ── I2（final-fix-D 终审）：Bull/Bear 用的 σ 不该混进中报 ────────────────
 #
 # ashare_build.py 写进 F 列给人看的是「Bull/Bear＝±1 个历史年度毛利率

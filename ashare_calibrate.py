@@ -197,7 +197,9 @@ def anchor_three(share_hist, gm, gm_std, share_mean=None):
     # 一位小数（生益：0.47845→0.4784，而原值是 0.4785），工作簿与清单就不是同一个数。
     mean = float(share_mean) if share_mean is not None else float(np.mean(share_hist))
     share3 = (round(min(share_hist), 4), round(mean, 4), round(max(share_hist), 4))
-    gm3 = (min(round(gm + sd, 4), 0.95), round(gm, 4), max(round(gm - sd, 4), 0.0))
+    # 下限 -0.95 与上限 0.95 对称。原先是 0：牧原股份 2026 中报毛利率 -1.58%，
+    # 悲观档 gm - σ 被截到 0，反而高于中性档，三档顺序颠倒（强周期低谷期常见）。
+    gm3 = (min(round(gm + sd, 4), 0.95), round(gm, 4), max(round(gm - sd, 4), -0.95))
     return share3, gm3
 
 
