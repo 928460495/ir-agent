@@ -9,7 +9,7 @@
 ![Tests](https://img.shields.io/badge/tests-2%2C500%2B%20passing-brightgreen)
 ![LLM](https://img.shields.io/badge/LLM-Claude-D97757)
 
-[简体中文](README.md) · **English**
+[简体中文](README.md) · [繁體中文](README.zh-TW.md) · **English**
 
 </div>
 
