@@ -175,7 +175,7 @@ flowchart LR
 **依赖**
 
 - Python 3.13
-- `requests` `openpyxl` `PyMuPDF` `pandas` `numpy` `akshare` `formulas`
+- 依赖：`pip install -r requirements.txt`（跑测试用 `requirements-dev.txt`，多一个 `pytest`）
 - 已登录的 [Claude Code](https://claude.com/claude-code) CLI —— 模型通过 `claude -p` 调用，**不需要 API key**
 
 **只跑确定性层**（不调用模型）：事实账本、三表勾稽、可溯源审计、看板与工作簿。

@@ -203,7 +203,7 @@ def pdf_text(data: bytes) -> str:
     `fitz` 在函数内惰性 import，与 `annual_pdf.py`/`annual_sections.py`
     的既有写法一致。
     """
-    import fitz                                   # PyMuPDF
+    import pymupdf as fitz                       # PyMuPDF（新版弃用 fitz 这个导入名）
 
     doc = fitz.open(stream=data, filetype="pdf")
     try:

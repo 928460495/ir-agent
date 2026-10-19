@@ -1,0 +1,3 @@
+# 开发与测试：运行依赖 + pytest
+-r requirements.txt
+pytest>=8,<9

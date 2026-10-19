@@ -1,0 +1,10 @@
+# ir-agent 与 ashare-dcf 的运行依赖。
+# 版本范围按实测：开发环境（pandas 2.3 / numpy 2.1 / PyMuPDF 1.27）与全新安装的
+# 最新版（pandas 3.0 / numpy 2.5 / PyMuPDF 1.28）两套环境下全部测试均通过。
+requests>=2.31,<3
+openpyxl>=3.1,<4
+PyMuPDF>=1.24.3,<2      # 代码用 `import pymupdf`，1.24.3 起提供
+pandas>=2.2,<4
+numpy>=2.1,<3
+akshare>=1.18
+formulas>=1.2,<2

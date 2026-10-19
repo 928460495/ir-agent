@@ -226,7 +226,7 @@ def fetch_and_extract(
 
     只返回结构化结果 —— PDF 全文不离开本函数。
     """
-    import fitz                                   # PyMuPDF
+    import pymupdf as fitz                       # PyMuPDF（新版弃用 fitz 这个导入名）
 
     data = _download(url, cache_dir)
     doc = fitz.open(stream=data, filetype="pdf")

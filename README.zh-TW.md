@@ -39,7 +39,7 @@ flowchart TB
     subgraph S["資料層"]
         S1["巨潮：披露日 · 公告 · 年報 PDF"]
         S2["東方財富：三表 · 行業 · 研報 · 宏觀 · 利率"]
-        S3["新浪 / 騰訊（資料來源可插拔擴充套件）：三表交叉驗證 · 行情"]
+        S3["資料來源可插拔擴充：三表交叉驗證 · 行情"]
         S4["開放網路：按需定向採集"]
     end
     SNAP[("原始響應快照<br/>內容定址")]
@@ -175,7 +175,7 @@ flowchart LR
 **依賴**
 
 - Python 3.13
-- `requests` `openpyxl` `PyMuPDF` `pandas` `numpy` `akshare` `formulas`
+- 相依套件：`pip install -r requirements.txt`（跑測試用 `requirements-dev.txt`，多一個 `pytest`）
 - 已登入的 [Claude Code](https://claude.com/claude-code) CLI —— 模型透過 `claude -p` 呼叫，**不需要 API key**
 
 **只跑確定性層**（不呼叫模型）：事實賬本、三表勾稽、可溯源審計、看板與工作簿。

@@ -211,9 +211,9 @@ def test_pdf取文按页数上限截断():
 
     import sys
     import types
-    fake = types.ModuleType("fitz")
+    fake = types.ModuleType("pymupdf")
     fake.open = lambda **k: _FakeDoc()
-    sys.modules["fitz"] = fake
+    sys.modules["pymupdf"] = fake
     try:
         got = A.pdf_text(b"%PDF-1.4 fake")
         assert "第0页" in got
@@ -224,7 +224,7 @@ def test_pdf取文按页数上限截断():
             "get_text() 必须只在页数上限之前被调用——调用到了上限之后，"
             "说明实现先读完了全部页面，只是事后把拼好的文本切短")
     finally:
-        del sys.modules["fitz"]
+        del sys.modules["pymupdf"]
 
 
 def _long_ann(ann_id: str, url: str) -> Announcement:

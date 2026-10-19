@@ -39,7 +39,7 @@ flowchart TB
     subgraph S["Data"]
         S1["CNINFO: disclosure dates · filings · annual-report PDFs"]
         S2["East Money: statements · industry · research · macro · rates"]
-        S3["Sina / Tencent (pluggable sources): cross-checks · quotes"]
+        S3["Pluggable sources: cross-checks · quotes"]
         S4["Open web: targeted collection on demand"]
     end
     SNAP[("Raw-response snapshots<br/>content-addressed")]
@@ -183,7 +183,7 @@ The engine also works on its own: give it an A-share code and it produces a **fu
 **Requirements**
 
 - Python 3.13
-- `requests` `openpyxl` `PyMuPDF` `pandas` `numpy` `akshare` `formulas`
+- Dependencies: `pip install -r requirements.txt` (use `requirements-dev.txt` for the tests; it adds `pytest`)
 - A signed-in [Claude Code](https://claude.com/claude-code) CLI. Models are called through `claude -p`, so **no API key is needed**.
 
 **Deterministic layer only** (no model calls): fact ledger, statement reconciliation, traceability audit, dashboard and workbook.

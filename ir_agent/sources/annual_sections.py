@@ -110,7 +110,7 @@ class SectionSet:
 def _page_texts(pdf: Path | str | bytes) -> list[str]:
     """接受路径或已下载的字节。走管线时 PDF 已由 annual_pdf 下载并缓存，
     再落一次盘既慢又多一份副本。"""
-    import fitz
+    import pymupdf as fitz                       # PyMuPDF（新版弃用 fitz 这个导入名）
 
     doc = (fitz.open(stream=pdf, filetype="pdf") if isinstance(pdf, bytes)
            else fitz.open(str(pdf)))
