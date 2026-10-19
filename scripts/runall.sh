@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # 批量跑 V0，输出一张对照表。
 #
-#   ./runall.sh                     # 跑 universe.txt，年度 2025
-#   ./runall.sh 2024                # 换年度
-#   ./runall.sh 2025 my_list.txt    # 换样本文件
+#   scripts/runall.sh                     # 跑 scripts/universe.txt，年度 2025
+#   scripts/runall.sh 2024                # 换年度
+#   scripts/runall.sh 2025 my_list.txt    # 换样本文件
 #
 # 样本文件每行三列（空格分隔）: 代码 行业 名称
 # 单份完整输出落在 runs/<year>/<code>.txt，便于事后翻查告警细节。
 #
 # 注意: 不要去掉 ir_agent 内部的限流 sleep —— 东财有 IP 频控。
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."      # 回到仓库根目录，python -m ir_agent 才找得到包
 
 YEAR="${1:-2025}"
-UNIVERSE="${2:-universe.txt}"
+UNIVERSE="${2:-scripts/universe.txt}"
 OUT="runs/${YEAR}"
 
 [ -f "$UNIVERSE" ] || { echo "找不到样本文件: $UNIVERSE" >&2; exit 2; }

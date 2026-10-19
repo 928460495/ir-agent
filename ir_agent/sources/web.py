@@ -27,7 +27,7 @@ from ir_agent.sources.external import Tier
 #   make_client(tools=["WebSearch", "WebFetch"])
 # 默认调用 `claude -p --output-format json` 不启用任何工具 —— 第一次探测
 # 正因为只测了默认调用，误判成「不可联网」。**测的是默认行为，不是能力。**
-# 详见 docs/superpowers/notes/2026-09-12-web-capability.md。
+# 详见 docs/design/2026-09-12-web-capability-notes.md。
 WEB_CAPABLE = True
 
 _LINE = keyed("发现")
@@ -458,8 +458,8 @@ def require_web() -> None:
         raise WebUnavailable(
             "开放网络采集当前被禁用（WEB_CAPABLE=False）—— 请检查是谁、"
             "为什么关闭了这个开关；claude -p 本身的联网能力已经验证过，"
-            "不必重新怀疑（见 docs/superpowers/notes/"
-            "2026-09-12-web-capability.md）")
+            "不必重新怀疑（见 docs/design/"
+            "2026-09-12-web-capability-notes.md）")
 
 
 def search(client, factor_label: str, factor_key: str, industry: str,

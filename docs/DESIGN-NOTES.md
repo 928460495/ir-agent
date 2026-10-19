@@ -1,6 +1,6 @@
 > **关于本文**：这是 ir-agent 开发过程中的工程笔记 —— 数据源取舍、踩过的坑、每条设计约束的来由。
 > 它按时间累积，部分章节描述的是早期状态（例如「DCF 算子未接入流水线」「347 个测试」），
-> 现状以仓库根目录的 [README](../README.md) 与 [`docs/superpowers/specs/`](superpowers/specs/) 下的设计文档为准。
+> 现状以仓库根目录的 [README](../README.md) 与 [`docs/design/`](design/) 下的设计文档为准。
 
 # ir-agent — A 股个股投研 Agent
 
@@ -26,12 +26,12 @@ python -m pytest -q                  # 含真实网络请求，约 25s
 批量跑一组标的：
 
 ```bash
-./runall.sh                     # 跑 universe.txt，年度 2025
-./runall.sh 2024                # 换年度
-./runall.sh 2025 my_list.txt    # 换样本文件
+scripts/runall.sh                     # 跑 scripts/universe.txt，年度 2025
+scripts/runall.sh 2024                # 换年度
+scripts/runall.sh 2025 my_list.txt    # 换样本文件
 ```
 
-`universe.txt` 每行三列（代码 行业 名称），`#` 开头为注释。单份完整输出落在
+`scripts/universe.txt` 每行三列（代码 行业 名称），`#` 开头为注释。单份完整输出落在
 `runs/<年度>/<代码>.txt`，便于事后翻查告警细节。30 家约 3–4 分钟。
 
 **不要去掉 `ir_agent` 内部的限流 sleep** —— 东财有 IP 频控。
@@ -209,7 +209,7 @@ Tier 顺序解决「默认信谁」，裁决解决「这一次谁对」—— �
 一律返回空 —— 是数据侧被拒，不是网络不通。测试在周六进行，休市因素
 无法完全排除。
 
-复检脚本: `python tools/check_mootdx.py`（交易日跑，退出码 0 表示可用）。
+（当时的复检脚本 `tools/check_mootdx.py` 已于 2026-10 清理出仓库，见 git 历史。）
 即便将来可用，接入前仍须先决定市值怎么取。
 
 ## 端到端：四次调用、三道人工门
@@ -265,7 +265,7 @@ python -m ir_agent 600183 --year 2025 --value out/600183 --approved-by 你的名
 `state.json`、`assumptions.json`，`brief.md` 与 `assumptions.md` 顶部各自印出
 上游经谁核过。已知限制：最终研报的附录只有门③ 的签名。
 
-设计见 `docs/superpowers/specs/2026-10-12-phase1-restructure-design.md`。
+设计见 `docs/design/2026-10-12-phase1-restructure-design.md`。
 
 ### 历史：单次调用与 YAML 审核（参数已移除）
 
@@ -276,7 +276,7 @@ python -m ir_agent 600183 --year 2025 --value out/600183 --approved-by 你的名
 #### 人工审核：交互式录入
 
     python -m ir_agent 600519 --year 2025 --full out/600519 \
-        --review --reviewer 谢海量
+        --review --reviewer <你的名字>
 
 逐项问答，填完自动写 yaml 并直接建模 —— 不必手写 YAML：
 
@@ -308,9 +308,9 @@ python -m ir_agent 600183 --year 2025 --value out/600183 --approved-by 你的名
 填好 `assumptions.yaml` 之后：
 
     python -m ir_agent 600519 --year 2025 --full out/600519 \
-        --assumptions out/600519/assumptions.yaml --reviewer 谢海量
+        --assumptions out/600519/assumptions.yaml --reviewer <你的名字>
 
-    · 估值方法：每股价值 805.01 元（终值占比 74.1%，审核 谢海量）
+    · 估值方法：每股价值 805.01 元（终值占比 74.1%，审核 <审核人>）
 
 看板与工作簿就地重建，补入假设表、估值结论与敏感性矩阵。
 

@@ -5,7 +5,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from openpyxl import load_workbook
 import ashare_verify as V
 
-SRC=os.environ.get("DCF_TEST_XLSX") or sys.argv[1]   # 传入一个已生成的工作簿
+# 传入一个已生成的工作簿：环境变量 DCF_TEST_XLSX，或单独当脚本跑时的第一个参数。
+# 在 pytest 下没设环境变量就跳过（此前读 sys.argv[1] 拿到的是 pytest 自己的参数，
+# 导致整个测试目录收集失败）。
+SRC=os.environ.get("DCF_TEST_XLSX") or (sys.argv[1] if __name__ == "__main__" and len(sys.argv) > 1 else None)
+if not SRC:
+    if "pytest" in sys.modules:
+        import pytest
+        pytest.skip("需要已生成的工作簿：DCF_TEST_XLSX=<xlsx>", allow_module_level=True)
+    sys.exit("用法：python tests/%s <已生成的工作簿.xlsx>" % os.path.basename(__file__))
 
 def rowmap(ws):
     m={}

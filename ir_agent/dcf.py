@@ -35,9 +35,10 @@ from pathlib import Path
 
 from ir_agent.ledger import Fact, FactLedger, LookAheadError, Method
 
-# ashare-dcf 的位置。默认取本仓库的同级目录，可用环境变量覆盖。
+# ashare-dcf 的位置。默认取本仓库内的 ashare-dcf/（2026-10 并入，此前是同级目录），
+# 可用环境变量覆盖。
 ENV_DIR = "ASHARE_DCF_DIR"
-DEFAULT_DIR = Path(__file__).resolve().parent.parent.parent / "ashare-dcf"
+DEFAULT_DIR = Path(__file__).resolve().parent.parent / "ashare-dcf"
 
 YI = Decimal("100000000")          # ashare-dcf 以亿元计，账本以元计
 

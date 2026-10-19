@@ -11,7 +11,9 @@ import sys
 import pytest
 from openpyxl import Workbook
 
-sys.path.insert(0, "/Users/ariasleo/Desktop/谢海量作品集/ashare-dcf")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ashare-dcf"))
 
 
 def _wb(tmp_path, value_cell, ref):
