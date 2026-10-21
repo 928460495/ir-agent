@@ -124,3 +124,60 @@ def test_口径说明写明EV含少数股东权益(wb):
     from ir_agent.relval_sheet import write_sheet
     write_sheet(wb, _res(), DCF_OK)
     assert "少数股东权益" in _text(wb)
+
+
+# ── 审查意见 1、4 与测试缺口：公式算得对、图引用对、负下端不画、退路口径可见 ──
+
+import re  # noqa: E402
+
+
+def test_可比法公式算出的就是区间值(wb):
+    """只数「=」开头的格子不够：要确认公式引用的是本司指标格，算出来等于区间值。"""
+    from ir_agent.relval_sheet import write_sheet
+    res = _res()
+    write_sheet(wb, res, DCF_OK)
+    ws = load_workbook(wb)["9_相对估值"]
+    row = next(r for r in ws.iter_rows()
+               if r[0].value == "PE(TTM)" and isinstance(r[4].value, str))
+    refs = re.findall(r"([A-Z])(\d+)", row[4].value[1:])
+    m, np_, sh = (ws[f"{c}{n}"].value for c, n in refs)
+    assert m * np_ / sh == pytest.approx(float(res.comps["pe"].lo))
+
+
+def test_散点图引用的正是样本行(wb):
+    from ir_agent.relval_sheet import write_sheet
+    res = _res()
+    write_sheet(wb, res, DCF_OK)
+    ws = load_workbook(wb)["9_相对估值"]
+    sc = next(c for c in ws._charts if c.tagname == "scatterChart")
+    a, b = map(int, re.findall(r"\$(\d+)", sc.series[0].yVal.numRef.f))
+    sample = res.regs["pb_roe"].sample
+    assert b - a + 1 == len(sample)
+    assert ws[f"A{a}"].value == sample[0][0] and ws[f"A{b}"].value == sample[-1][0]
+
+
+def test_下端为负的区间不画并说明(wb):
+    from ir_agent.relval_sheet import write_sheet
+    neg = SimpleNamespace(scenario_ps={"bear": D("-5"), "base": D("10"), "bull": D("30")},
+                          mc={"p5": D("21.92"), "p95": D("137.37")})
+    write_sheet(wb, _res(), neg)
+    ws = load_workbook(wb)["9_相对估值"]
+    drawn = [r[0].value for r in ws.iter_rows()
+             if isinstance(r[0].value, str) and r[0].value.startswith("DCF 三档")
+             and isinstance(r[1].value, (int, float))]
+    assert not drawn and "下端为负" in _text(wb)
+
+
+def test_一年增速的样本在页面标出(wb):
+    from ir_agent.relval_sheet import write_sheet
+    from tests.test_relval import make_result
+    res = make_result()
+    res.regs["pe_growth"].flags = {res.regs["pe_growth"].sample[0][0]: "一年增速"}
+    write_sheet(wb, res, DCF_OK)
+    assert "一年增速" in _text(wb)
+
+
+def test_写明基本面取最近完整财年(wb):
+    from ir_agent.relval_sheet import write_sheet
+    write_sheet(wb, _res(), DCF_OK)
+    assert "最近完整财年" in _text(wb)

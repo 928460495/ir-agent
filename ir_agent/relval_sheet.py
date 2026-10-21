@@ -70,6 +70,8 @@ def _header(res: RelvalResult, w: _W) -> None:
     w.row("行业（回归样本）", f"{res.industry}，样本 {res.sample_size} 家（不含本司）")
     w.row("口径", "PE = 市值 ÷ 归母净利润（优先 TTM）；PB = 市值 ÷ 归母净资产；"
                   "EV = 市值 + 有息负债 − 现金 + 少数股东权益（与可比坐标表同一口径）")
+    w.row("期间", "利润、EBITDA、净资产等取最近完整财年（报告期为中报时取上一年年报），"
+                  "本司与同业同一期间；市值取同一报价日")
     w.row("剔除规则", "本司、净资产为负、亏损、缺数，以及倍数落在样本 P5–P95 之外的两端")
     w.row("区间", "可比法取同业 P25／中位数／P75；回归取 P10–P90 预测区间（与蒙特卡洛龙卷风同口径）")
     for n in res.sample_notes:
@@ -142,10 +144,12 @@ def _regression(res: RelvalResult, w: _W, kind: str) -> tuple | None:
         w.row("外推", "本司落在行业样本主体（P5–P95）之外，预测区间因此变宽")
     w.gap()
 
-    w.row("代码", "公司", "ROE" if xf == "roe" else "营收增速", LABEL[yk], bold=True, fill=P_B)
+    w.row("代码", "公司", "ROE" if xf == "roe" else "营收增速", LABEL[yk], "口径",
+          bold=True, fill=P_B)
     r0 = w.r
     for code, nm, x, y in r.sample:
-        w.row(code, nm, x, y, fmt=NUM)
+        row = w.row(code, nm, x, y, r.flags.get(code, ""), fmt=NUM)
+        w.ws.cell(row, 3).number_format = PCT
     r1 = w.r - 1
     # 拟合线两端（散点图的折线系列）与本司点
     xs = [v[2] for v in r.sample] or [0.0]
@@ -211,7 +215,14 @@ def _football(res: RelvalResult, dcf_res, w: _W) -> None:
     bars.append(("现价", p * 0.995, p * 1.005))
 
     hdr = w.row("方法", "下端", "宽度", "上端", bold=True, fill=P_B)
+    drawn = []
     for label, lo, hi in bars:
+        if lo < 0:
+            # 堆叠条形图里负值会画到零的另一侧，条的位置就错了 —— 不画，写明原因
+            missing.append(f"{label}：下端为负，未画入")
+            continue
+        drawn.append((label, lo, hi))
+    for label, lo, hi in drawn:
         w.row(label, lo, hi - lo, hi, fmt=NUM)
     last = w.r - 1
     for m in missing:
