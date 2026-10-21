@@ -87,6 +87,40 @@ def fetch_quote(symbol: str, session: requests.Session | None = None) -> dict:
     return parse_tencent_quote(resp.text)
 
 
+def parse_tencent_quotes(text: str) -> dict[str, dict]:
+    """批量响应（多条 `v_xxx="…";` 拼接）→ {6 位代码: 行情 dict}。
+
+    单条解析失败（停牌、退市、字段错位）只丢那一条 —— 相对估值的样本里
+    缺一家要记原因剔除，而不是让整批行情作废。
+    """
+    out: dict[str, dict] = {}
+    for seg in text.split(";"):
+        if "=" not in seg:
+            continue
+        try:
+            q = parse_tencent_quote(seg)
+        except ParseError:
+            continue
+        out[q["code"]] = q
+    return out
+
+
+def fetch_quotes(symbols: list[str], session: requests.Session | None = None,
+                 chunk: int = 30) -> tuple[dict[str, dict], list[str]]:
+    """批量取行情。返回 (按代码的行情, 每批原始响应文本) —— 原始文本由调用方落快照。"""
+    s = session or requests
+    got: dict[str, dict] = {}
+    raws: list[str] = []
+    for i in range(0, len(symbols), chunk):
+        resp = s.get(URL.format(symbol=",".join(symbols[i:i + chunk])),
+                     timeout=TIMEOUT)
+        resp.raise_for_status()
+        resp.encoding = "gbk"
+        raws.append(resp.text)
+        got.update(parse_tencent_quotes(resp.text))
+    return got, raws
+
+
 # ─────────────────────────────────────────────────────────────
 # Tier-2: 新浪 hq.sinajs.cn
 # 覆盖是子集 —— 只有价格，没有市值 / PE / PB。降级后估值章节会缺失，
