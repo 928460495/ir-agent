@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 import numpy as np
@@ -124,8 +125,8 @@ def comps_bands(peers: list[PeerObs], target: PeerObs,
         q = _quartiles(vals)
         if q is None:
             bands[kind] = None
-            why.append(f"{LABEL[kind]}：同业有效值不足 {MIN_BAND} 家"
-                       f"（仅 {len(vals)} 家），不适用")
+            # 原因会进研报摘要 —— 不写数字（裸数字审计），具体家数在页面上
+            why.append(f"{LABEL[kind]}：同业有效值不足四家，不适用")
             continue
         lo, hi = q
         mid = _median(vals)
@@ -255,3 +256,83 @@ def regress(kind: str, sample: list[PeerObs], target: PeerObs,
             r.fit, r.lo, r.hi = prices
             r.usable = True
     return r
+
+
+# ── 结果：摘要（只用占位符）与落账本 ──────────────────────────────
+
+_REG_KEY = {"pb_roe": "pb", "pe_growth": "pe"}
+
+
+@dataclass
+class RelvalResult:
+    as_of: date
+    price: Decimal
+    shares: Decimal
+    target: PeerObs
+    comps: dict[str, Band | None]
+    comps_notes: list[str]
+    regs: dict[str, Regression]
+    sample_size: int                # 行业样本家数（回归前，不含本司）
+    industry: str
+    warnings: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """进撰写提示词。**只用占位符**，原因文字不含数字 —— 与估值摘要同一契约。"""
+        at = f"@{self.as_of.isoformat()}"
+        lines = [f"相对估值（可比沿用原名单；回归样本为{self.industry}行业全体）",
+                 "  可比法（同业 P25／中位数／P75 的倍数 → 本司每股价值）："]
+        for kind in KINDS:
+            if self.comps.get(kind) is None:
+                continue
+            k = f"valuation.rel_{kind}"
+            lines.append(
+                f"    {LABEL[kind]}：倍数 [[{k}_mult_lo{at}]]／[[{k}_mult_mid{at}]]／"
+                f"[[{k}_mult_hi{at}]] → 每股 [[{k}_lo{at}]]／[[{k}_mid{at}]]／[[{k}_hi{at}]]")
+        for note in self.comps_notes:
+            lines.append(f"    {note}")
+        lines.append("  回归调整（全行业横截面，P10–P90 预测区间）：")
+        for kind, (xf, _, name) in REG_SPEC.items():
+            r = self.regs.get(kind)
+            if r is None:
+                continue
+            if not r.usable:
+                lines.append(f"    {name}：不可用 —— {r.why}")
+                continue
+            k = f"valuation.rel_reg_{_REG_KEY[kind]}"
+            ext = (f"（外推：本司{_X_CN[xf]}落在行业样本主体之外，区间因此变宽）"
+                   if r.extrapolated else "")
+            lines.append(
+                f"    {name}：R² [[{k}_r2{at}]]，样本 [[{k}_n{at}]]，应得倍数 "
+                f"[[{k}_mult{at}]] → 每股 [[{k}_lo{at}]]～[[{k}_hi{at}]]，"
+                f"中枢 [[{k}_fit{at}]]{ext}")
+        for w in self.warnings:
+            lines.append(f"  ⚠ {w}")
+        return "\n".join(lines)
+
+
+def to_facts(res: RelvalResult, as_of: date,
+             source_id: str = "relval") -> list:
+    """结果落账本。键一律 `valuation.` 开头 —— 辩论裁判的可引用清单按此前缀收录。"""
+    from ir_agent.ledger import Fact, Method
+
+    def f(key: str, value: Decimal, unit: str) -> Fact:
+        return Fact(key=key, value=value, unit=unit, period=as_of.isoformat(),
+                    as_of=as_of, source_id=source_id, method=Method.COMPUTED)
+
+    out = []
+    for kind, b in res.comps.items():
+        if b is None:
+            continue
+        k = f"valuation.rel_{kind}"
+        out += [f(f"{k}_lo", b.lo, "元"), f(f"{k}_mid", b.mid, "元"), f(f"{k}_hi", b.hi, "元"),
+                f(f"{k}_mult_lo", b.mult_lo, "x"), f(f"{k}_mult_mid", b.mult_mid, "x"),
+                f(f"{k}_mult_hi", b.mult_hi, "x")]
+    for kind, r in res.regs.items():
+        if not r.usable:
+            continue
+        k = f"valuation.rel_reg_{_REG_KEY[kind]}"
+        out += [f(f"{k}_fit", r.fit, "元"), f(f"{k}_lo", r.lo, "元"), f(f"{k}_hi", r.hi, "元"),
+                f(f"{k}_mult", Decimal(str(r.fit_mult)), "x"),
+                f(f"{k}_r2", Decimal(str(r.r2)), "ratio"),
+                f(f"{k}_n", Decimal(r.n), "家")]
+    return out

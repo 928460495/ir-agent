@@ -225,3 +225,73 @@ def test_PE回归用增速():
              net_profit=D(1), growth=D(str(0.01 * i))) for i in range(40)]
     r = regress("pe_growth", s, _tgt(growth=D("0.2"), net_profit=D(1)), D(1))
     assert r.b > 0 and r.kind == "pe_growth"
+
+
+# ── 结果对象：摘要只用占位符，且每个都落了账本 ─────────────────────
+
+from datetime import date  # noqa: E402
+
+from ir_agent.citation import REF_RE, audit_bare_numbers  # noqa: E402
+from ir_agent.relval import Regression, RelvalResult, to_facts  # noqa: E402
+
+AS_OF = date(2026, 10, 21)
+
+
+def make_result(pe_unusable=False, comps_missing=False) -> RelvalResult:
+    tgt = _tgt(roe=D("0.2"), growth=D("0.2"), net_profit=D("0.2"))
+    bands, notes = comps_bands(_peers_pe(10, 20, 30, 40, 50, 60), tgt, D(1))
+    if comps_missing:
+        bands["ev_ebitda"] = None
+        notes.append("EV/EBITDA：同业有效值不足四家，不适用")
+    pe_s = [obs(code=f"{i:06d}", market_cap=D(str(10 + 50 * 0.01 * i + (i % 3))),
+                net_profit=D(1), growth=D(str(0.01 * i))) for i in range(40)]
+    regs = {"pb_roe": regress("pb_roe", _pb_sample(), tgt, D(1)),
+            "pe_growth": (Regression(kind="pe_growth", why="斜率不显著") if pe_unusable
+                          else regress("pe_growth", pe_s, tgt, D(1)))}
+    return RelvalResult(as_of=AS_OF, price=D(100), shares=D(1), target=tgt,
+                        comps=bands, comps_notes=notes, regs=regs,
+                        sample_size=46, industry="电子-元件-印制电路板")
+
+
+def test_摘要每个占位符都落了账本():
+    res = make_result()
+    refs = {(k, p) for _, k, p in REF_RE.findall(res.summary())}
+    assert refs and refs <= {(f.key, f.period) for f in to_facts(res, AS_OF)}
+
+
+def test_摘要过裸数字审计():
+    for res in (make_result(), make_result(pe_unusable=True, comps_missing=True)):
+        assert audit_bare_numbers(res.summary()) == []
+
+
+def test_键都以valuation开头且期间为估值时点():
+    fs = to_facts(make_result(), AS_OF)
+    assert fs and all(f.key.startswith("valuation.") for f in fs)
+    assert {f.period for f in fs} == {AS_OF.isoformat()}
+
+
+def test_可比与回归的关键数都落账本():
+    fs = {f.key: f for f in to_facts(make_result(), AS_OF)}
+    assert fs["valuation.rel_pe_mid"].unit == "元"
+    assert fs["valuation.rel_pe_mult_mid"].value == D(35)
+    assert {"valuation.rel_reg_pb_fit", "valuation.rel_reg_pb_lo",
+            "valuation.rel_reg_pb_hi", "valuation.rel_reg_pb_mult",
+            "valuation.rel_reg_pb_r2", "valuation.rel_reg_pb_n"} <= set(fs)
+
+
+def test_不可用回归只写原因不落数():
+    res = make_result(pe_unusable=True)
+    assert not [f for f in to_facts(res, AS_OF) if f.key.startswith("valuation.rel_reg_pe")]
+    assert "斜率不显著" in res.summary()
+
+
+def test_不适用的可比倍数写原因不落数():
+    res = make_result(comps_missing=True)
+    assert not [f for f in to_facts(res, AS_OF) if f.key.startswith("valuation.rel_ev_ebitda")]
+    assert "不足四家" in res.summary()
+
+
+def test_外推要在摘要里说出来():
+    res = make_result()
+    res.regs["pb_roe"].extrapolated = True
+    assert "外推" in res.summary()
