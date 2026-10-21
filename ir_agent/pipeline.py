@@ -400,6 +400,16 @@ def run(
                      derived_from=f.derived_from, basis="parent"))
     except (KeyError, LookAheadError):
         pass
+    # 最新 TTM：截至 as_of 已披露的最近四个季度，挂在它真实的截止期上（如 2026H1）。
+    # 用年报期跑时，报告期 TTM 就是年报利润；中报出来后 PE 不该还停在年报上。
+    lq = ttm.latest_quarter(led, "net_profit_attr_parent", as_of)
+    if lq is not None and lq > (year, quarter):
+        f = ttm.ttm_at(led, "net_profit_attr_parent", lq[0], lq[1], as_of=as_of)
+        if f is not None:
+            led.put(Fact(key="net_profit_ttm", value=f.value, unit=f.unit,
+                         currency=f.currency, period=f.period, as_of=f.as_of,
+                         source_id=f.source_id, method=f.method,
+                         derived_from=f.derived_from, basis="parent"))
 
     if spot is None:
         skips.add("估值倍数", SkipReason.DATA_NOT_DISCLOSED, "行情源未提供市值")

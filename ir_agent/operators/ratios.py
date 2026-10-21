@@ -54,6 +54,12 @@ class Undefined:
 def _get(ledger: FactLedger, key: str, period: str, as_of: date,
          spot: str | None) -> Fact | None:
     per = spot if (key in _SPOT_KEYS and spot) else period
+    if key == "net_profit_ttm" and spot:
+        # PE 的分母：即期市值配当天已知的最新 TTM，与 multiples.compute 同一规则
+        from ir_agent.operators.ttm import latest_visible
+        latest = latest_visible(ledger, key, as_of)
+        if latest is not None:
+            return latest
     try:
         return ledger.get(key, per, as_of=as_of)
     except (KeyError, LookAheadError):

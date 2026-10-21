@@ -35,7 +35,12 @@ def compute(
 
     for name, primary, fallback in _SPECS:
         denom, basis = None, None
-        for key, b in ((primary, "parent"), (fallback, "total")):
+        if primary == "net_profit_ttm" and spot_period:
+            # 即期市值配当天已知的最新利润（如 net_profit_ttm@2026H1），不停在报告期
+            from ir_agent.operators.ttm import latest_visible
+            denom = latest_visible(ledger, primary, as_of)
+            basis = "parent" if denom is not None else None
+        for key, b in (() if denom is not None else ((primary, "parent"), (fallback, "total"))):
             if key is None:
                 continue
             try:
