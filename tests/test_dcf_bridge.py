@@ -632,3 +632,173 @@ class TestTerminalShareBlocks:
         assert "_terminal_warnings(" in src
         assert src.index("_terminal_warnings(") < \
             src.index('res.warnings.insert(0, f"公式引擎验算失败')
+
+
+# ── 蒙特卡洛：dcf.py 声称选用 ashare-dcf 的理由之一，却从未接上 ──────────
+#
+# ashare-dcf 命令行在验算通过后、带 --mc 时追加「8_蒙特卡洛」页；`dcf.run` 照抄了
+# 前三步（建表、验算、健全性），漏了这一段 —— git 历史里 ir_agent 从未引用过
+# ashare_mc。生益科技 600183 实测：工作簿 8 张表，没有蒙特卡洛页。
+
+def _mc_cal():
+    return {"judg": {"g_stats": (0.1082, 0.2121, -0.1115, 0.3945),
+                     "gm_stats": (0.2331, 0.0292, 0.1919, 0.3069)},
+            "_rho": 0.385, "_rho_n": 30,
+            "gen": {"tax": 0.104}, "dcf": {"beta": 1.3735}}
+
+
+def _mc_out(**kw):
+    """ashare_mc.run 的返回形状（键名照抄其源码）。"""
+    base = dict(n=50000, seed=42, base=56.56, mean=61.92, p50=55.54, sd=29.89,
+                p5=28.71, p95=115.59, p_above=0.0445, clipped=0.044, se=0.134,
+                degraded=0.0, neg_ebit=0.0, price=118.77, src="首次生成，使用默认参数",
+                tornado=[{"name": "Beta → WACC", "low": 40.0, "high": 76.2, "swing": 36.2},
+                         {"name": "营收增速（路径平移）", "low": 41.0, "high": 75.2, "swing": 34.2},
+                         {"name": "永续增长率 g", "low": 50.0, "high": 62.2, "swing": 12.2},
+                         {"name": "毛利率（路径平移）", "low": 53.0, "high": 59.0, "swing": 6.0}])
+    base.update(kw)
+    return base
+
+
+class _FakeMC:
+    def __init__(self, out=None, exc=None):
+        self.out, self.exc, self.calls = out, exc, []
+
+    def run(self, path, hist=None, n=None, seed=None, quiet=False):
+        self.calls.append(dict(path=path, hist=hist, quiet=quiet))
+        if self.exc:
+            raise self.exc
+        return self.out
+
+
+def _mc_res(**kw):
+    return _res(as_of=AS_OF, mc=dcf._monte_carlo(_FakeMC(_mc_out()), "/tmp/x.xlsx",
+                                                 _mc_cal())[0], **kw)
+
+
+class Test蒙特卡洛:
+    def test_历史波动的取法与命令行一致(self):
+        """命令行 `ashare_dcf.py --mc` 怎么从 cal 取，这里就怎么取 —— 不另发明一套。"""
+        assert dcf._mc_hist(_mc_cal()) == dict(
+            sd_growth=0.2121, sd_margin=0.0292, rho=0.385, rho_n=30,
+            tax_mean=0.104, beta_mean=1.3735)
+
+    def test_用公司历史波动静默运行(self):
+        mc = _FakeMC(_mc_out())
+        dcf._monte_carlo(mc, "/tmp/x.xlsx", _mc_cal())
+        assert mc.calls[0]["hist"] == dcf._mc_hist(_mc_cal())
+        assert mc.calls[0]["quiet"] is True
+
+    def test_取出分布与龙卷风前三(self):
+        got, warns = dcf._monte_carlo(_FakeMC(_mc_out()), "/tmp/x.xlsx", _mc_cal())
+        assert warns == []
+        assert got["p5"] == D("28.71") and got["p50"] == D("55.54")
+        assert got["p95"] == D("115.59") and got["mean"] == D("61.92")
+        assert got["p_above"] == D("0.0445") and got["n"] == D(50000)
+        # 摆幅取一半，与命令行打印的「±」一致；只要前三
+        assert got["tornado"] == [("Beta → WACC", D("18.1")),
+                                  ("营收增速（路径平移）", D("17.1")),
+                                  ("永续增长率 g", D("6.1"))]
+
+    def test_失败不拖垮估值但要说出来(self):
+        """蒙特卡洛是附加层：引擎自检不一致或依赖缺失时，点估值照常交付，
+        但不能静默 —— 第 8 节要知道没有模拟结果，不能编一个。"""
+        got, warns = dcf._monte_carlo(
+            _FakeMC(exc=AssertionError("蒙特卡洛引擎与确定性模型不一致")),
+            "/tmp/x.xlsx", _mc_cal())
+        assert got == {}
+        assert warns and "蒙特卡洛未生成" in warns[0] and "AssertionError" in warns[0]
+
+    def test_缺历史波动就不跑而不是退回默认值(self):
+        """默认 σ（增速 15%、毛利率 3%）不是这家公司的分布 —— 用它跑出来的
+        P5/P95 读起来像结论，实际是模板参数。"""
+        mc = _FakeMC(_mc_out())
+        got, warns = dcf._monte_carlo(mc, "/tmp/x.xlsx", {"judg": {}})
+        assert got == {} and mc.calls == []
+        assert "蒙特卡洛未生成" in warns[0]
+
+    def test_摘要里的模拟数字全是可识别的占位符(self):
+        from ir_agent.citation import REF_RE, audit_bare_numbers
+        txt = _mc_res().summary()
+        assert "蒙特卡洛" in txt
+        assert audit_bare_numbers(txt) == []
+        keys = {k for _, k, _ in REF_RE.findall(txt)}
+        assert {"valuation.mc_p5", "valuation.mc_p50", "valuation.mc_p95",
+                "valuation.mc_p_above"} <= keys
+
+    def test_摘要里每个占位符都落了账本(self):
+        """产出端写什么，账本就得有什么 —— 600584 那次整段估值漏成未替换占位符
+        的同一类问题，这里对蒙特卡洛新增的每个键再钉一次。"""
+        from ir_agent.citation import REF_RE
+        res = _mc_res()
+        refs = {(k, p) for _, k, p in REF_RE.findall(res.summary())}
+        facts = {(f.key, f.period) for f in dcf.to_facts(res, AS_OF)}
+        assert refs <= facts, f"摘要引用了账本里没有的事实：{refs - facts}"
+
+    def test_模拟结果落账本(self):
+        fs = {f.key: f for f in dcf.to_facts(_mc_res(), AS_OF)}
+        assert fs["valuation.mc_p5"].value == D("28.71")
+        assert fs["valuation.mc_p5"].unit == "元"
+        assert fs["valuation.mc_p_above"].unit == "ratio"
+        assert fs["valuation.mc_swing_1"].value == D("18.1")
+
+    def test_路径数渲染后自带完整量词(self):
+        """生益科技试跑：摘要写「[[mc_paths]]路径」，单位是「条」，模型照抄时在
+        占位符后补了空格，研报成了「50000 条 路径」。单位整体定成「条路径」、
+        摘要里占位符后不再跟名词，就没有可补空格的位置。"""
+        from ir_agent.citation import format_value
+        fs = {f.key: f for f in dcf.to_facts(_mc_res(), AS_OF)}
+        assert format_value(fs["valuation.mc_paths"]) == "50000 条路径"
+        assert "]]路径" not in _mc_res().summary()
+
+    def test_没有模拟结果时不落账本也不进摘要(self):
+        assert not [f for f in dcf.to_facts(_res(), AS_OF)
+                    if f.key.startswith("valuation.mc_")]
+        assert "valuation.mc_" not in _res(as_of=AS_OF).summary()
+
+    def test_接在验算通过之后(self):
+        """命令行在验算未通过时直接返回、不跑蒙特卡洛；这里同一顺序。"""
+        import inspect
+        src = inspect.getsource(dcf.run)
+        assert "import ashare_mc" in src and "_monte_carlo(" in src
+        assert src.index("V.verify(") < src.index("_monte_carlo(")
+        assert "if not fails" in src
+
+    @needs_ashare
+    def test_真实引擎把蒙特卡洛页写进工作簿(self, tmp_path):
+        """用 ashare-dcf 自带的生益科技校准固件建一份真工作簿，跑真引擎。"""
+        import copy
+        import pickle
+
+        import ashare_build as B
+        import ashare_mc as MC
+        from openpyxl import load_workbook
+
+        fix = dcf.DEFAULT_DIR / "tests" / "fixtures" / "cal_600183.pkl"
+        with open(fix, "rb") as f:
+            cal = pickle.load(f)
+        wb = tmp_path / "w.xlsx"
+        B.build(copy.deepcopy(cal), str(wb))
+
+        got, warns = dcf._monte_carlo(MC, str(wb), cal)
+        assert warns == []
+        book = load_workbook(wb)
+        assert MC.SHEET in book.sheetnames
+        assert got["p5"] < got["p50"] < got["p95"]
+        # 参数区用的是公司历史波动，不是模板默认值
+        sd_g = MC.read_params(book[MC.SHEET])["sd_g"]
+        assert sd_g == MC.defaults(dcf._mc_hist(cal))["sd_g"]
+        assert sd_g != MC.defaults({})["sd_g"]
+
+
+def test_第八节要求解读蒙特卡洛分布():
+    from ir_agent.analyst import FactCatalog, _RULES, build_prompt
+    from ir_agent.ledger import FactLedger
+
+    assert "蒙特卡洛" in _RULES and "高于现价的概率" in _RULES
+    # 模拟的波动取自历史，不是人批准的三档 —— 两者回答的问题不同，必须点明
+    assert "历史波动" in _RULES
+    cat = FactCatalog(ledger=FactLedger(), as_of=AS_OF)
+    txt = build_prompt(cat, code="600584", period="2025FY",
+                       valuation_summary="DCF 估值（ashare-dcf 三表模型）")
+    assert "蒙特卡洛" in txt.split("**估值结果**")[1]

@@ -158,6 +158,9 @@ class DcfResult:
     # 研报谈 WACC 时必须引用它，而不是账本里另一个口径的 `beta`——生益科技
     # 研报曾写「WACC 9.84% 依赖的 β 为 1.84」，而 9.84% 是用 1.3717 算的。
     beta: Decimal = Decimal(0)
+    # 蒙特卡洛分布摘要（`_monte_carlo`）。空 = 没跑或没跑成 —— 此时不落账本、
+    # 不进摘要，原因在 warnings 里。
+    mc: dict = field(default_factory=dict)
 
     @property
     def upside(self) -> Decimal | None:
@@ -182,6 +185,19 @@ class DcfResult:
                      f"终值占企业价值 [[valuation.terminal_share{at}]]")
         # 期限写中文数字：这一行进研报提示词，照抄阿拉伯数字会被裸数字审计判掉。
         lines.append(f"  WACC 所用 β [[valuation.beta{at}]]（五年对上证综指回归，Blume 调整）")
+        if self.mc:
+            # 波动取公司历史，不是门③ 批准的三档 —— 两者回答的问题不同，摘要里就要说开。
+            lines.append(
+                f"  蒙特卡洛（模拟 [[valuation.mc_paths{at}]]；波动取公司历史"
+                f"波动，不是人批准的悲观／乐观三档）：P50 [[valuation.mc_p50{at}]]　"
+                f"均值 [[valuation.mc_mean{at}]]　P5 [[valuation.mc_p5{at}]]　"
+                f"P95 [[valuation.mc_p95{at}]]　内在价值高于现价的概率 "
+                f"[[valuation.mc_p_above{at}]]")
+            if self.mc.get("tornado"):
+                lines.append(
+                    "  龙卷风（各变量 P10–P90 摆幅的一半，影响最大的前三项）："
+                    + "、".join(f"{name} ±[[valuation.mc_swing_{i}{at}]]"
+                               for i, (name, _) in enumerate(self.mc["tornado"], 1)))
         for x in self.notes:
             lines.append(f"  · {x}")
         for x in self.crosscheck:
@@ -282,7 +298,7 @@ def to_facts(res: DcfResult, as_of: date,
         return Fact(key=key, value=value, unit=unit, period=as_of.isoformat(),
                     as_of=as_of, source_id=source_id, method=Method.COMPUTED)
 
-    return [
+    out = [
         f("valuation.value_per_share", res.value_per_share, "元"),
         f("valuation.price", res.price, "元"),
         f("valuation.wacc", res.wacc, "ratio"),
@@ -294,6 +310,62 @@ def to_facts(res: DcfResult, as_of: date,
         # 归因到了一个根本没参与计算的数上。
         f("valuation.beta", res.beta, "x"),
     ]
+    # 蒙特卡洛：键都以 `valuation.` 开头 —— 辩论裁判的可引用清单按这个前缀收
+    # （`full._catalog_periods` 的 PROMPT_SIDE），换前缀就会被判成伪造、回写删光。
+    m = res.mc
+    if m:
+        # 单位整体是「条路径」：摘要里占位符后不跟名词，模型就没处补空格
+        #（生益科技试跑曾渲染成「50000 条 路径」）。
+        out += [f("valuation.mc_paths", m["n"], "条路径"),
+                f("valuation.mc_p5", m["p5"], "元"),
+                f("valuation.mc_p50", m["p50"], "元"),
+                f("valuation.mc_p95", m["p95"], "元"),
+                f("valuation.mc_mean", m["mean"], "元"),
+                f("valuation.mc_p_above", m["p_above"], "ratio")]
+        out += [f(f"valuation.mc_swing_{i}", s, "元")
+                for i, (_, s) in enumerate(m.get("tornado") or [], 1)]
+    return out
+
+
+def _mc_hist(cal: dict) -> dict:
+    """蒙特卡洛的历史波动参数 —— 取法照抄 ashare_dcf.py 的 --mc 分支，不另发明一套。"""
+    j = cal["judg"]
+    return dict(sd_growth=j["g_stats"][1], sd_margin=j["gm_stats"][1],
+                rho=cal.get("_rho", 0.0), rho_n=cal.get("_rho_n", 0),
+                tax_mean=cal["gen"]["tax"], beta_mean=cal["dcf"]["beta"])
+
+
+def _mc_skipped(e: Exception) -> str:
+    return (f"蒙特卡洛未生成（{e.__class__.__name__}: {str(e)[:120]}）—— 工作簿没有"
+            "蒙特卡洛页，研报第 8 节不得引用模拟结果")
+
+
+def _monte_carlo(MC, path: str, cal: dict) -> tuple[dict, list[str]]:
+    """追加「8_蒙特卡洛」页并取回分布摘要。返回 (结果, 告警)，失败时结果为空。
+
+    **ashare-dcf 命令行一直有这一步，ir-agent 接入时漏了。** dcf.py 的模块说明
+    把蒙特卡洛列为选用 ashare-dcf 的理由之一，`run()` 却只照抄了建表、验算、
+    健全性三步 —— 生益科技 600183 的工作簿 8 张表，没有蒙特卡洛页。
+
+    **它是附加层，失败不拖垮点估值，但不能静默。** 引擎自检（关掉随机后必须
+    复现确定性模型）不过、或依赖缺失时，点估值照常交付，告警写明没有模拟结果，
+    第 8 节才不会去编一个。缺历史波动时同样不跑：退回模板默认 σ 跑出来的
+    P5/P95 读起来像结论，实际是模板参数。
+    """
+    try:
+        out = MC.run(path, hist=_mc_hist(cal), quiet=True)
+    except Exception as e:                                  # noqa: BLE001
+        return {}, [_mc_skipped(e)]
+
+    def d(x) -> Decimal:
+        return Decimal(str(x))
+
+    # 摆幅取一半，与命令行打印的「±」一致
+    return {"n": Decimal(out["n"]), "p5": d(out["p5"]), "p50": d(out["p50"]),
+            "p95": d(out["p95"]), "mean": d(out["mean"]),
+            "p_above": d(out["p_above"]),
+            "tornado": [(t["name"], d(t["swing"] / 2))
+                        for t in (out.get("tornado") or [])[:3]]}, []
 
 
 def _calibrate(D, C, code: str, as_of: date, ledger, years: int):
@@ -516,6 +588,19 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         # 错的模型体检。
         warns = _readback_check(cal["judg"], inp) + list(warns)
 
+    # 与命令行 --mc 同一顺序：验算通过之后才追加「8_蒙特卡洛」页（见 `_monte_carlo`）。
+    mc: dict = {}
+    if not fails:
+        try:
+            import ashare_mc as MC
+        except ImportError as e:
+            warns = list(warns) + [_mc_skipped(e)]
+        else:
+            mc, mc_warns = _monte_carlo(MC, str(wb), cal)
+            warns = list(warns) + mc_warns
+    else:
+        warns = list(warns) + ["公式引擎验算未通过，蒙特卡洛未运行"]
+
     ev0 = Decimal(str(dv["ev0"]))
     res = DcfResult(
         code=code, workbook=str(wb),
@@ -529,6 +614,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         as_of=as_of,
         anchor_note=(_anchor_note(cal["judg"], inp) if assumptions is not None else ""),
         beta=Decimal(str(inp["dcf"]["Beta（5年"])),
+        mc=mc,
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"

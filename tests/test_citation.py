@@ -330,6 +330,15 @@ class Test期间标签白名单的实测缺口:
         assert audit_bare_numbers("M1−M2 剪刀差走阔，M2 同比回落") == []
         assert audit_bare_numbers("M0 与 M3 口径") == []
 
+    def test_分位数名称不是数值(self):
+        """P5 / P50 / P95 是「第 5 百分位」这个统计量的名字，与 CR5 同理。
+        研报第 8 节要解读蒙特卡洛分布，不放行就只能写「第九十五百分位数」。"""
+        assert audit_bare_numbers("P5 与 P95 之间，中位数（P50）偏低") == []
+        assert audit_bare_numbers("龙卷风取 P10/P90 摆幅") == []
+
+    def test_分位数豁免不放过紧跟的真实数值(self):
+        assert "28.71 元" in " ".join(audit_bare_numbers("P5 为 28.71 元"))
+
     def test_顿号序号豁免(self):
         """中文写作里"1、2、3……"比括号序号"（1）（2）"更常见——同一条
         理由：顿号是列举标点，不是小数分隔符，真实数值必带单位。
