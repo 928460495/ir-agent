@@ -275,6 +275,8 @@ class RelvalResult:
     sample_size: int                # 行业样本家数（回归前，不含本司）
     industry: str
     warnings: list[str] = field(default_factory=list)
+    # 样本剔除说明（含代码与期间）。**只上页面、不进摘要** —— 摘要不许有数字。
+    sample_notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         """进撰写提示词。**只用占位符**，原因文字不含数字 —— 与估值摘要同一契约。"""

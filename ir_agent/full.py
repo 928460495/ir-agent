@@ -747,6 +747,9 @@ def _load_industry(code: str, r, as_of: date) -> tuple[str, str, str]:
     agg = aggregate(peers, r.period, prior, as_of, fetch)
     for f in industry_facts(agg):
         r.ledger.put(f)
+    # 相对估值（第二阶段）的回归样本就是这批同业 —— 交出去复用，不再重取。
+    r.peer_statements = cache
+    r.peer_set = peers
 
     # ── 行业画像 ──────────────────────────────────────────
     # 逐家同业的完整报表在上面已经取过一次，cache 里躺着全部字段而只用了
@@ -917,6 +920,8 @@ def _load_comps(code: str, r, as_of: date, snapshot_dir) -> tuple[str, str, str]
         sel = select(peer_set(code))
     except (IndustryUnavailable, NoComparables) as e:
         return "", "", f"可比分析（{e}）"
+    # 相对估值的可比法沿用这份名单（用户决定 2）。
+    r.comps_codes = [p.code for p in sel.chosen]
 
     from ir_agent.sources.eastmoney import detect_company_type
 
