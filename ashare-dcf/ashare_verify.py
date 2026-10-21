@@ -285,8 +285,11 @@ def recompute(inp):
     return rows, dict(wacc=w,ke=ke,ic=ic,roic=roic,rr=rr,tf=tf,tv=tv,pv=pv,pvtv=pvtv,
                       ev0=ev0,ev=ev,nd=nd,gx=gx,mi=mi_ded,eq=eqv,ps=ps,fin_pv=fin_pv)
 
-def verify_all_scenarios(path, quiet=False):
-    """三档情景全部验算——read_inputs 只读 B6 指向的那一档，Bull/Bear 原本从未被覆盖。"""
+def verify_all_scenarios(path, quiet=False, values=None):
+    """三档情景全部验算——read_inputs 只读 B6 指向的那一档，Bull/Bear 原本从未被覆盖。
+
+    values 给一个 dict 时，顺带写入 {"Bull"/"Base"/"Bear": 每股价值}——
+    验算本来就把三档各算了一遍，丢掉结果再让调用方重算一遍没有道理。"""
     import shutil, tempfile
     from openpyxl import load_workbook as _lw
     allf=[]
@@ -298,7 +301,9 @@ def verify_all_scenarios(path, quiet=False):
         else:
             f=os.path.join(tempfile.gettempdir(), f"_sc{sc}_"+os.path.basename(path))
             shutil.copy(path,f); w=_lw(f); w["1_假设"].cell(sr,2,sc); w.save(f)
-        fails,_=verify(f, quiet=True)
+        fails,dv=verify(f, quiet=True)
+        if values is not None and dv and dv.get("ps") is not None:
+            values[nm]=dv["ps"]
         if sc!=cur:
             try: os.remove(f)
             except OSError: pass

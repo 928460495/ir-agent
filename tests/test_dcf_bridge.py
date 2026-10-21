@@ -802,3 +802,33 @@ def test_第八节要求解读蒙特卡洛分布():
     txt = build_prompt(cat, code="600584", period="2025FY",
                        valuation_summary="DCF 估值（ashare-dcf 三表模型）")
     assert "蒙特卡洛" in txt.split("**估值结果**")[1]
+
+
+# ── DCF 三档每股价值：相对估值页的足球场图要画三档 ────────────────────
+
+def _scen_res():
+    return _res(as_of=AS_OF, scenario_ps={"bear": D("40"), "base": D("56.55"),
+                                          "bull": D("80")})
+
+
+def test_三档落账本且进摘要():
+    from ir_agent.citation import REF_RE, audit_bare_numbers
+    res = _scen_res()
+    facts = {(f.key, f.period) for f in dcf.to_facts(res, AS_OF)}
+    assert {("valuation.dcf_bear", AS_OF.isoformat()),
+            ("valuation.dcf_base", AS_OF.isoformat()),
+            ("valuation.dcf_bull", AS_OF.isoformat())} <= facts
+    refs = {(k, p) for _, k, p in REF_RE.findall(res.summary())}
+    assert refs <= facts
+    assert audit_bare_numbers(res.summary()) == []
+
+
+def test_没有三档时不落账本():
+    assert not [f for f in dcf.to_facts(_res(), AS_OF)
+                if f.key.startswith("valuation.dcf_")]
+
+
+def test_run把三档从验算带回():
+    import inspect
+    src = inspect.getsource(dcf.run)
+    assert "values=" in src and "scenario_ps=" in src

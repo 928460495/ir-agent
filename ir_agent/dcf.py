@@ -161,6 +161,9 @@ class DcfResult:
     # 蒙特卡洛分布摘要（`_monte_carlo`）。空 = 没跑或没跑成 —— 此时不落账本、
     # 不进摘要，原因在 warnings 里。
     mc: dict = field(default_factory=dict)
+    # DCF 三档每股价值（键 bear / base / bull）。验算未全部通过时为空 —— 相对估值页的
+    # 足球场图要画三档，不能拿一个没验算过的数去画。
+    scenario_ps: dict = field(default_factory=dict)
 
     @property
     def upside(self) -> Decimal | None:
@@ -185,6 +188,9 @@ class DcfResult:
                      f"终值占企业价值 [[valuation.terminal_share{at}]]")
         # 期限写中文数字：这一行进研报提示词，照抄阿拉伯数字会被裸数字审计判掉。
         lines.append(f"  WACC 所用 β [[valuation.beta{at}]]（五年对上证综指回归，Blume 调整）")
+        if self.scenario_ps:
+            lines.append(f"  DCF 三档（人批准的悲观／中性／乐观）：悲观 [[valuation.dcf_bear{at}]]　"
+                         f"中性 [[valuation.dcf_base{at}]]　乐观 [[valuation.dcf_bull{at}]]")
         if self.mc:
             # 波动取公司历史，不是门③ 批准的三档 —— 两者回答的问题不同，摘要里就要说开。
             lines.append(
@@ -310,6 +316,8 @@ def to_facts(res: DcfResult, as_of: date,
         # 归因到了一个根本没参与计算的数上。
         f("valuation.beta", res.beta, "x"),
     ]
+    out += [f(f"valuation.dcf_{k}", res.scenario_ps[k], "元")
+            for k in ("bear", "base", "bull") if k in res.scenario_ps]
     # 蒙特卡洛：键都以 `valuation.` 开头 —— 辩论裁判的可引用清单按这个前缀收
     # （`full._catalog_periods` 的 PROMPT_SIDE），换前缀就会被判成伪造、回写删光。
     m = res.mc
@@ -575,8 +583,11 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     B.build(cal, str(wb))
 
     fails, dv = V.verify(str(wb))
-    fails += [x[1:] for x in V.verify_all_scenarios(str(wb), quiet=True)
+    sc: dict = {}
+    fails += [x[1:] for x in V.verify_all_scenarios(str(wb), quiet=True, values=sc)
               if x[0] != "Base"]
+    scenario_ps = ({k.lower(): Decimal(str(v)) for k, v in sc.items()}
+                   if not fails and set(sc) == {"Bull", "Base", "Bear"} else {})
 
     inp = V.read_inputs(str(wb))
     rows, _ = V.recompute(inp)
@@ -615,6 +626,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         anchor_note=(_anchor_note(cal["judg"], inp) if assumptions is not None else ""),
         beta=Decimal(str(inp["dcf"]["Beta（5年"])),
         mc=mc,
+        scenario_ps=scenario_ps,
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"
