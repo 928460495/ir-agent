@@ -62,6 +62,8 @@ def format_value(fact: Fact) -> str:
         return f"{v:.0f} 分位"
     if fact.unit == "家":
         return f"{v:.0f} 家"
+    if fact.unit == "num":                  # 无量纲统计量（回归斜率、t 值）
+        return f"{v:.2f}"
     # 兜底也要限精度 —— 未知单位不该把 Decimal 原始精度打进研报
     return f"{v:.2f} {fact.unit}".replace(".00 ", " ")
 

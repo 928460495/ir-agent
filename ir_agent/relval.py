@@ -312,14 +312,18 @@ class RelvalResult:
             r = self.regs.get(kind)
             if r is None:
                 continue
-            if not r.usable:
-                lines.append(f"    {name}：不可用 —— {r.why}")
-                continue
             k = f"valuation.rel_reg_{_REG_KEY[kind]}"
+            # 统计量要用占位符写出来：辩论裁判只认账本事实，「不显著」若只是一句
+            # 文字，会被判无据断言、回写删光（生益科技第三次试跑踩到）。
+            stats = (f"（斜率 [[{k}_slope{at}]]，斜率 t 值 [[{k}_t{at}]]，"
+                     f"R² [[{k}_r2{at}]]，样本 [[{k}_n{at}]]）" if _has_stats(r) else "")
+            if not r.usable:
+                lines.append(f"    {name}：不可用 —— {r.why}{stats}")
+                continue
             ext = (f"（外推：本司{_X_CN[xf]}落在行业样本主体之外，区间因此变宽）"
                    if r.extrapolated else "")
             lines.append(
-                f"    {name}：R² [[{k}_r2{at}]]，样本 [[{k}_n{at}]]，应得倍数 "
+                f"    {name}：斜率 t 值 [[{k}_t{at}]]，R² [[{k}_r2{at}]]，样本 [[{k}_n{at}]]，应得倍数 "
                 f"[[{k}_mult{at}]] → 每股 [[{k}_lo{at}]]～[[{k}_hi{at}]]，"
                 f"中枢 [[{k}_fit{at}]]{ext}")
         for w in self.warnings:
@@ -345,11 +349,20 @@ def to_facts(res: RelvalResult, as_of: date,
                 f(f"{k}_mult_lo", b.mult_lo, "x"), f(f"{k}_mult_mid", b.mult_mid, "x"),
                 f(f"{k}_mult_hi", b.mult_hi, "x")]
     for kind, r in res.regs.items():
-        if not r.usable:
-            continue
         k = f"valuation.rel_reg_{_REG_KEY[kind]}"
-        out += [f(f"{k}_fit", r.fit, "元"), f(f"{k}_lo", r.lo, "元"), f(f"{k}_hi", r.hi, "元"),
-                f(f"{k}_mult", Decimal(str(r.fit_mult)), "x"),
-                f(f"{k}_r2", Decimal(str(r.r2)), "ratio"),
-                f(f"{k}_n", Decimal(r.n), "家")]
+        # 统计量不论可不可用都落账本 —— 「为什么不可用」也要能被核验
+        if _has_stats(r):
+            out += [f(f"{k}_slope", Decimal(str(r.b)), "num"),
+                    f(f"{k}_t", Decimal(str(r.t)), "num"),
+                    f(f"{k}_r2", Decimal(str(r.r2)), "ratio"),
+                    f(f"{k}_n", Decimal(r.n), "家")]
+        if r.usable:
+            out += [f(f"{k}_fit", r.fit, "元"), f(f"{k}_lo", r.lo, "元"),
+                    f(f"{k}_hi", r.hi, "元"),
+                    f(f"{k}_mult", Decimal(str(r.fit_mult)), "x")]
     return out
+
+
+def _has_stats(r: Regression) -> bool:
+    """回归真正算过（样本够、统计量有限）才有可落账本的统计量。"""
+    return r.n >= 3 and all(math.isfinite(v) for v in (r.b, r.t, r.r2))

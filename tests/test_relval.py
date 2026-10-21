@@ -321,3 +321,35 @@ def test_可比名单为空时原因不说成不足四家():
     bands, why = comps_bands([], obs(), shares=D(1))
     assert all(b is None for b in bands.values())
     assert all("可比名单未取到" in w for w in why) and len(why) == 3
+
+
+# ── 试跑暴露：不可用回归的统计量也要落账本 ────────────────────────
+# 生益科技第三次试跑：摘要写「PE 对增速：不可用 —— 斜率不显著」，但 t 值不在账本里，
+# 辩论裁判判「无据断言」成立，回写把 PE 回归的话全删了、综合区间的取法也跟着改了。
+
+def _t_low():
+    return _search(lambda r: r.b > 0 and r.t < 2, b=0.5, noise=3.0)
+
+
+def test_不可用回归的统计量也落账本():
+    res = make_result()
+    res.regs["pe_growth"] = _t_low()
+    keys = {f.key for f in to_facts(res, AS_OF)}
+    assert {"valuation.rel_reg_pe_t", "valuation.rel_reg_pe_slope",
+            "valuation.rel_reg_pe_n", "valuation.rel_reg_pe_r2"} <= keys
+    assert "valuation.rel_reg_pe_fit" not in keys
+
+
+def test_不可用回归在摘要里给出可核验的t值():
+    res = make_result()
+    res.regs["pe_growth"] = _t_low()
+    line = next(x for x in res.summary().splitlines() if "PE 对增速" in x)
+    assert "不可用" in line and "valuation.rel_reg_pe_t" in line
+    refs = {(k, p) for _, k, p in REF_RE.findall(res.summary())}
+    assert refs <= {(f.key, f.period) for f in to_facts(res, AS_OF)}
+    assert audit_bare_numbers(res.summary()) == []
+
+
+def test_可用回归也给出斜率与t值():
+    keys = {f.key for f in to_facts(make_result(), AS_OF)}
+    assert {"valuation.rel_reg_pb_t", "valuation.rel_reg_pb_slope"} <= keys

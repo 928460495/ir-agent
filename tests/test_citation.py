@@ -438,3 +438,15 @@ def test_缺快照的来源在研报附录里也要去重():
     line = [x for x in txt.splitlines() if "缺少原始接口快照" in x][0]
     assert line.count("em_macro") == 1, "来源要去重"
     assert "20" in line, "要给出总条数"
+
+
+def test_纯数字单位只显示数值():
+    """回归的斜率与 t 值没有量纲 —— 写成「4.15x」或「4.15 count」都是错的单位。"""
+    from datetime import date as _d
+    from decimal import Decimal as _D
+
+    from ir_agent.citation import format_value
+    from ir_agent.ledger import Fact, Method
+    f = Fact(key="valuation.rel_reg_pb_t", value=_D("4.1534"), unit="num", period="2026-10-21",
+             as_of=_d(2026, 10, 21), source_id="relval", method=Method.COMPUTED)
+    assert format_value(f) == "4.15"
