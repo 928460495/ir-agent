@@ -42,7 +42,7 @@ class _W:
     def title(self, text: str) -> None:
         c = self.ws.cell(self.r, 1, text)
         c.font, c.fill = F_HDR, P_N
-        for col in range(2, 10):
+        for col in range(2, 11):
             self.ws.cell(self.r, col).fill = P_N
         self.r += 1
 
@@ -82,12 +82,12 @@ def _header(res: RelvalResult, w: _W) -> None:
 def _comps(res: RelvalResult, w: _W) -> None:
     w.title("一、可比法（沿用原 6 家可比）")
     w.row("公司", "代码", "市值（亿元）", "归母净利润（亿元）", "归母净资产（亿元）",
-          "EBITDA（亿元）", "PE", "PB", "EV/EBITDA", bold=True, fill=P_B)
+          "EBITDA（亿元）", "PE", "PB", "EV/EBITDA", "利润口径", bold=True, fill=P_B)
     for p in res.comps_peers:
         m = multiples(p)
         w.row(p.name, p.code, _yi(p.market_cap), _yi(p.net_profit), _yi(p.equity_parent),
               _yi(p.ebitda), *(float(m[k]) if m[k] is not None else "—" for k in KINDS),
-              fmt=NUM)
+              p.np_basis, fmt=NUM)
     w.gap()
 
     t = res.target
@@ -250,7 +250,7 @@ def write_sheet(path: str, res: RelvalResult, dcf_res) -> None:
     ws = wb.create_sheet(SHEET)
     ws.sheet_properties.tabColor = "548235"
     ws.column_dimensions["A"].width = 30
-    for col in "BCDEFGHI":
+    for col in "BCDEFGHIJ":
         ws.column_dimensions[col].width = 16
     w = _W(ws)
     _header(res, w)

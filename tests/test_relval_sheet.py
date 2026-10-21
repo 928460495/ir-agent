@@ -181,3 +181,11 @@ def test_写明基本面取最近完整财年(wb):
     from ir_agent.relval_sheet import write_sheet
     write_sheet(wb, _res(), DCF_OK)
     assert "最近完整财年" in _text(wb)
+
+
+def test_可比表列出每家的利润口径(wb):
+    from ir_agent.relval_sheet import write_sheet
+    res = _res()
+    res.comps_peers[0].np_basis = "TTM 截至 2026Q1"
+    write_sheet(wb, res, DCF_OK)
+    assert "利润口径" in _text(wb) and "TTM 截至 2026Q1" in _text(wb)

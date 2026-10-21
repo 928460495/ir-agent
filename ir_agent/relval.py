@@ -190,8 +190,14 @@ def _screen(kind: str, peers: list[PeerObs], target: PeerObs):
             excluded.append((p.code, p.name, f"缺{_X_CN[xf]}或{LABEL[yk]}"))
         else:
             rows.append((p.code, p.name, float(getattr(p, xf)), float(y)))
+            marks = []
             if xf == "growth" and p.growth_basis == "1y":
-                flags[p.code] = "一年增速"
+                marks.append("一年增速")
+            if yk == "pe" and p.np_basis != target.np_basis:
+                # 同业还没出本司最新那一季，用了上一季 TTM 或年报（用户决定）—— 逐家标出
+                marks.append(f"利润 {p.np_basis}")
+            if marks:
+                flags[p.code] = "；".join(marks)
     if len(rows) >= 3:
         lo, hi = np.percentile([r[3] for r in rows], TRIM)
         keep = []

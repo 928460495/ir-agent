@@ -353,3 +353,11 @@ def test_不可用回归在摘要里给出可核验的t值():
 def test_可用回归也给出斜率与t值():
     keys = {f.key for f in to_facts(make_result(), AS_OF)}
     assert {"valuation.rel_reg_pb_t", "valuation.rel_reg_pb_slope"} <= keys
+
+
+def test_利润口径与本司不同的同业在PE回归里标出():
+    s = _growth_sample()
+    s[3].np_basis = "TTM 截至 2026Q1"
+    r = regress("pe_growth", s, _tgt(growth=D("0.2"), net_profit=D(1),
+                                    np_basis="TTM 截至 2026H1"), D(1))
+    assert "TTM 截至 2026Q1" in r.flags.get("000003", "")

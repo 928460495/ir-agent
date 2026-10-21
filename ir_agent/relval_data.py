@@ -20,7 +20,6 @@ from ir_agent.market import quote_symbol
 from ir_agent.relval import PeerObs
 from ir_agent.sources.quotes import fetch_quotes
 
-_QUARTER = {"FY": 4, "Q1-Q3": 3, "H1": 2, "Q1": 1}
 
 
 class RelvalUnavailable(Exception):
@@ -36,28 +35,33 @@ def _v(led: FactLedger, key: str, period: str, as_of: date) -> Decimal | None:
 
 def _prepare(led: FactLedger, period: str, as_of: date) -> None:
     """同业账本补齐派生事实 —— 与 pipeline.py 的算子顺序一致。算不出的跳过。"""
-    from ir_agent.operators import aggregates, dupont, margins, ttm
-    from ir_agent.operators import periods as P
+    from ir_agent.operators import aggregates, dupont, margins
 
     for fn in (margins.compute, dupont.compute, aggregates.compute):
         try:
             fn(led, period, as_of)
         except Exception:                                   # noqa: BLE001
             pass
-    quarter = _QUARTER.get(period[4:])
-    if quarter is None:
-        return
-    year = int(period[:4])
-    for y in (year, year - 1):
-        try:
-            P.decumulate(led, "net_profit_attr_parent", y, as_of=as_of)
-        except Exception:                                   # noqa: BLE001
-            pass
-    try:
-        ttm.compute(led, "net_profit_attr_parent", year, quarter, as_of=as_of,
-                    target_period=period)
-    except Exception:                                       # noqa: BLE001
-        pass
+
+
+def _prev_quarter(q: tuple[int, int]) -> tuple[int, int]:
+    y, n = q
+    return (y, n - 1) if n > 1 else (y - 1, 4)
+
+
+def _peer_ttm(led: FactLedger, end: tuple[int, int] | None,
+              as_of: date) -> tuple[Decimal, str] | None:
+    """同业 PE 分母：对齐本司的截止季度；该季没出就用上一季的 TTM（用户决定）。
+    都算不出返回 None，由调用方退回年报。"""
+    from ir_agent.operators import ttm
+
+    if end is None:
+        return None
+    for q in (end, _prev_quarter(end)):
+        f = ttm.ttm_at(led, "net_profit_attr_parent", q[0], q[1], as_of=as_of)
+        if f is not None:
+            return f.value, f"TTM 截至 {f.period}"
+    return None
 
 
 def _growth(led: FactLedger, period: str, as_of: date) -> tuple[Decimal | None, str]:
@@ -75,14 +79,20 @@ def _growth(led: FactLedger, period: str, as_of: date) -> tuple[Decimal | None, 
 
 
 def obs_from_ledger(code: str, name: str, led: FactLedger, period: str,
-                    as_of: date, market_cap: Decimal) -> PeerObs:
-    """账本 → 观测。口径见 Global Constraints：基本面取报告期，利润优先 TTM。"""
-    from ir_agent.operators.aggregates import DEBT_PARTS
+                    as_of: date, market_cap: Decimal,
+                    np_ttm: tuple[Decimal, str] | None = None) -> PeerObs:
+    """账本 → 观测。基本面取 period（最近完整财年）；PE 分母取最新 TTM。
 
-    np_ttm = (_v(led, "net_profit_ttm", period, as_of)
-              or _v(led, "net_profit_attr_parent_ttm", period, as_of))
+    np_ttm 给定时直接用（同业：已对齐本司截止季度）；否则取账本里最新一期的
+    net_profit_ttm（本司：pipeline 已算好，如 net_profit_ttm@2026H1）；都没有退回年报。
+    """
+    from ir_agent.operators.aggregates import DEBT_PARTS
+    from ir_agent.operators.ttm import latest_visible
+
+    if np_ttm is None and (f := latest_visible(led, "net_profit_ttm", as_of)) is not None:
+        np_ttm = (f.value, f"TTM 截至 {f.period}")
     if np_ttm is not None:
-        net_profit, basis = np_ttm, "TTM"
+        net_profit, basis = np_ttm
     else:
         net_profit, basis = _v(led, "net_profit_attr_parent", period, as_of), "FY"
     op = _v(led, "operating_profit", period, as_of)
@@ -103,13 +113,15 @@ def obs_from_ledger(code: str, name: str, led: FactLedger, period: str,
 
 
 def obs_from_facts(code: str, name: str, facts: dict, period: str,
-                   market_cap: Decimal, as_of: date) -> PeerObs:
-    """同业：报表事实 → 账本 → 补派生事实 → 观测。"""
+                   market_cap: Decimal, as_of: date,
+                   ttm_end: tuple[int, int] | None = None) -> PeerObs:
+    """同业：报表事实 → 账本 → 补派生事实 → 观测。ttm_end 是本司 TTM 的截止季度。"""
     led = FactLedger()
     for f in facts.values():
         led.put(f)
     _prepare(led, period, as_of)
-    return obs_from_ledger(code, name, led, period, as_of, market_cap)
+    return obs_from_ledger(code, name, led, period, as_of, market_cap,
+                           np_ttm=_peer_ttm(led, ttm_end, as_of))
 
 
 def fund_period(period: str) -> str:
@@ -157,6 +169,9 @@ def gather(r, as_of: date, snapshot_dir):
     if mc_fact is None or not mc_fact.value or not price:
         raise RelvalUnavailable("本司市值或现价缺失")
     quote_day = mc_fact.as_of
+    # 本司 PE 分母的截止季度 —— 同业对齐它（没出就退上一季）
+    from ir_agent.operators.ttm import latest_quarter
+    ttm_end = latest_quarter(r.ledger, "net_profit_attr_parent", as_of)
 
     symbols = [quote_symbol(c) for c in codes]
     try:
@@ -182,7 +197,8 @@ def gather(r, as_of: date, snapshot_dir):
         if not _disclosed(cache[c], fp, as_of):
             notes.append(f"{c} {name}：截至估值时点未披露 {fp} 财报，剔除（不用上期凑）")
             continue
-        sample.append(obs_from_facts(c, name, cache[c], fp, q["market_cap"], as_of))
+        sample.append(obs_from_facts(c, name, cache[c], fp, q["market_cap"], as_of,
+                                     ttm_end=ttm_end))
 
     try:
         aggregates.compute(r.ledger, fp, as_of)

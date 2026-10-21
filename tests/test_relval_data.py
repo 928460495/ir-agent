@@ -218,3 +218,55 @@ def test_中报期的基本面取最近完整财年(monkeypatch, tmp_path):
     assert o.net_profit == D(10) and o.ebitda == D(15 + 7 + 1)   # 2025 年报，不是半年数
     assert o.growth_basis == "3y" and float(o.growth) == pytest.approx(0.1, rel=1e-4)
     assert tgt.net_profit == D(10)
+
+
+# ── PE 分母改用最新 TTM：同业对齐本司截止季度，没出就退上一季，再退年报 ──────
+
+def _with_quarters(facts, upto=("2025Q1", "2025H1", "2025Q1-Q3", "2026Q1", "2026H1")):
+    """补归母净利润累计季度数：2025 单季 2/3/2/3（全年 10），2026 单季 4/4。"""
+    cum = {"2025Q1": 2, "2025H1": 5, "2025Q1-Q3": 7, "2026Q1": 4, "2026H1": 8}
+    disc = {"2025Q1": date(2025, 4, 28), "2025H1": date(2025, 8, 20),
+            "2025Q1-Q3": date(2025, 10, 28), "2026Q1": date(2026, 4, 28),
+            "2026H1": date(2026, 8, 20)}
+    out = dict(facts)
+    for per in upto:
+        out[("net_profit_attr_parent", per)] = F("net_profit_attr_parent", per, cum[per], disc[per])
+    return out
+
+
+def _target_with_h1(r):
+    for f in _with_quarters({}).values():
+        r.ledger.put(f)
+    r.ledger.put(F("net_profit_ttm", "2026H1", 13, date(2026, 8, 20)))
+    return r
+
+
+def test_本司PE分母取最新TTM(monkeypatch, tmp_path):
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    r = _target_with_h1(fake_r({"002384": _with_quarters(facts_years())}))
+    tgt, _, _, _, _, _ = gather(r, AS_OF, tmp_path)
+    assert tgt.net_profit == D(13) and tgt.np_basis == "TTM 截至 2026H1"
+
+
+def test_同业对齐本司截止季度(monkeypatch, tmp_path):
+    """2025 下半年（2+3）+ 2026 上半年（4+4）= 13。"""
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    r = _target_with_h1(fake_r({"002384": _with_quarters(facts_years())}))
+    _, sample, _, _, _, _ = gather(r, AS_OF, tmp_path)
+    assert sample[0].net_profit == D(13) and sample[0].np_basis == "TTM 截至 2026H1"
+
+
+def test_同业还没出本季就用上一季TTM(monkeypatch, tmp_path):
+    """用户决定：最新一季没出，拿上个季度的 TTM 算。2025Q2–Q4（3+2+3）+ 2026Q1（4）= 12。"""
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    peer = _with_quarters(facts_years(), upto=("2025Q1", "2025H1", "2025Q1-Q3", "2026Q1"))
+    r = _target_with_h1(fake_r({"002384": peer}))
+    _, sample, _, _, _, _ = gather(r, AS_OF, tmp_path)
+    assert sample[0].net_profit == D(12) and sample[0].np_basis == "TTM 截至 2026Q1"
+
+
+def test_季度数据都没有就退回年报(monkeypatch, tmp_path):
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    r = _target_with_h1(fake_r({"002384": facts_years()}))
+    _, sample, _, _, _, _ = gather(r, AS_OF, tmp_path)
+    assert sample[0].net_profit == D(10) and sample[0].np_basis == "FY"
