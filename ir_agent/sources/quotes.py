@@ -99,24 +99,25 @@ def parse_tencent_quotes(text: str) -> dict[str, dict]:
             continue
         try:
             q = parse_tencent_quote(seg)
-        except ParseError:
+        except (ParseError, ValueError):     # 时间字段坏了是 strptime 的 ValueError
             continue
         out[q["code"]] = q
     return out
 
 
 def fetch_quotes(symbols: list[str], session: requests.Session | None = None,
-                 chunk: int = 30) -> tuple[dict[str, dict], list[str]]:
-    """批量取行情。返回 (按代码的行情, 每批原始响应文本) —— 原始文本由调用方落快照。"""
+                 chunk: int = 30) -> tuple[dict[str, dict], list[tuple[str, str]]]:
+    """批量取行情。返回 (按代码的行情, 每批的 (请求地址, 原始响应文本))
+    —— 由调用方落快照，地址记的是这一批真正请求的代码。"""
     s = session or requests
     got: dict[str, dict] = {}
-    raws: list[str] = []
+    raws: list[tuple[str, str]] = []
     for i in range(0, len(symbols), chunk):
-        resp = s.get(URL.format(symbol=",".join(symbols[i:i + chunk])),
-                     timeout=TIMEOUT)
+        url = URL.format(symbol=",".join(symbols[i:i + chunk]))
+        resp = s.get(url, timeout=TIMEOUT)
         resp.raise_for_status()
         resp.encoding = "gbk"
-        raws.append(resp.text)
+        raws.append((url, resp.text))
         got.update(parse_tencent_quotes(resp.text))
     return got, raws
 

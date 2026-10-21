@@ -18,7 +18,7 @@ from decimal import Decimal
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.market import quote_symbol
 from ir_agent.relval import PeerObs
-from ir_agent.sources.quotes import URL, fetch_quotes
+from ir_agent.sources.quotes import fetch_quotes
 
 _QUARTER = {"FY": 4, "Q1-Q3": 3, "H1": 2, "Q1": 1}
 
@@ -141,10 +141,9 @@ def gather(r, as_of: date, snapshot_dir):
     except Exception as e:                                  # noqa: BLE001
         raise RelvalUnavailable(f"行业样本的批量行情取不到（{e.__class__.__name__}）") from e
     store, now = SnapshotStore(snapshot_dir), datetime.now()
-    for raw in raws:
-        store.save(source="tencent_batch", payload={"raw": raw},
-                   url=URL.format(symbol=",".join(symbols)), fetched_at=now,
-                   params={"symbols": symbols})
+    for url, raw in raws:
+        store.save(source="tencent_batch", payload={"raw": raw}, url=url,
+                   fetched_at=now, params={"url": url})
 
     notes: list[str] = []
     sample: list[PeerObs] = []

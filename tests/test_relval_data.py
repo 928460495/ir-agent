@@ -97,7 +97,7 @@ def fake_r(peers: dict[str, dict], comps=("002384",)):
 def _patch_quotes(monkeypatch, codes):
     def fake(symbols, **kw):
         got = {c: _quote(1000) for c in codes}
-        return got, ["RAW"]
+        return got, [("URL", "RAW")]
     monkeypatch.setattr(relval_data, "fetch_quotes", fake)
 
 
