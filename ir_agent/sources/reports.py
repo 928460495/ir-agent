@@ -368,10 +368,12 @@ def consensus_facts(c: Consensus, source_id: str = "eastmoney_report"):
 
     for y, e in c.eps.items():
         p = f"{y}FY"
-        put("consensus.eps", e.median, "currency", p)
-        put("consensus.eps_low", e.low, "currency", p)
-        put("consensus.eps_high", e.high, "currency", p)
-        put("consensus.brokers", e.n, "count", p)
+        # 单位用渲染器认得的「元」「家」—— 原先写死 currency / count，研报里原样
+        # 出现「2.87 currency」「9 count」（所有公司都中）
+        put("consensus.eps", e.median, "元", p)
+        put("consensus.eps_low", e.low, "元", p)
+        put("consensus.eps_high", e.high, "元", p)
+        put("consensus.brokers", e.n, "家", p)
     for y, (prev, now) in c.drift.items():
         if prev.median:
             put("consensus.eps_revision",

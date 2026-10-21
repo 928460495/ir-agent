@@ -362,3 +362,24 @@ def test_撰写闸门接上了单位重复检查():
 def test_规则里讲清了占位符自带单位():
     from ir_agent.analyst import _RULES
     assert "占位符渲染后自带单位" in _RULES and "17 分位分位" in _RULES
+
+
+def test_一致预期的单位渲染成元与家():
+    """原先单位写死成 currency / count，研报里出现「2.87 currency」「9 count」——
+    5 家公司的研报全中。改单位时提示词里手写的「家」也要去掉，否则成「42 家 家」。"""
+    from ir_agent import corpus as C
+    from ir_agent.citation import render
+    from ir_agent.sources import reports as R
+    from ir_agent.sources.reports import consensus_facts
+
+    c = R.Consensus(as_of=AS_OF, window_days=180, n_reports=42,
+                    eps={2026: R.Estimate(2026, 42, D("2.87"), D("2.28"), D("4.23"))},
+                    drift={})
+    led = FactLedger()
+    for f in consensus_facts(c):
+        led.put(f)
+    units = {f.key: f.unit for f in consensus_facts(c)}
+    assert units["consensus.eps"] == "元" and units["consensus.brokers"] == "家"
+    txt, _ = render(C.consensus_prompt(c), led, AS_OF)
+    assert "2.87 元" in txt and "42 家" in txt
+    assert "currency" not in txt and "count" not in txt and "家 家" not in txt

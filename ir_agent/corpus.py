@@ -116,7 +116,7 @@ def consensus_prompt(c: R.Consensus | None) -> str:
     for y in sorted(c.eps):
         lines.append(
             f"  FY{y}　EPS 中位 [[consensus.eps@{y}FY]]"
-            f"（[[consensus.brokers@{y}FY]] 家，区间 "
+            f"（覆盖 [[consensus.brokers@{y}FY]]，区间 "
             f"[[consensus.eps_low@{y}FY]]~[[consensus.eps_high@{y}FY]]）")
     for y in sorted(c.drift):
         lines.append(f"  FY{y}　较早前的一致预期已修正 "
