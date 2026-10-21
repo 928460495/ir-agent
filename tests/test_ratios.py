@@ -228,3 +228,59 @@ def test_趋势方向是结论():
 def test_单期不出趋势():
     led = _multi({"2024FY": BASE})
     assert ratios.trend(led, "current_ratio", ["2024FY"], AS_OF) is None
+
+
+# ── EV 口径：加回少数股东权益 ─────────────────────────────────
+# EBITDA 是合并口径，含少数股东那一份；EV 不加回少数股东权益，
+# 分子分母就不是同一群出资人。生益科技 600183: 所有者权益合计 189.10 亿、
+# 归母 167.24 亿，少数股东权益约 21.86 亿（子公司生益电子有外部股东）。
+
+SPOT = "2026-09-04"
+# EBITDA = 营业利润 200 + 折旧摊销 100 + 利息 20 = 320
+EV_BASE = {**BASE, "depreciation_fixed_asset": 100, "short_loan": 300,
+           "total_equity": 18910, "equity_attr_parent": 16724}
+
+
+def _ev_led(**over):
+    led = _led({k: v for k, v in {**EV_BASE, **over}.items() if v is not None})
+    led.put(Fact(key="market_cap", value=D(30000), unit="元", period=SPOT,
+                 as_of=date(2026, 9, 4), source_id="t", method=Method.REPORTED))
+    return led
+
+
+def _ev_ebitda(**over):
+    return ratios.compute(_ev_led(**over), P, AS_OF, CompanyType.GENERAL,
+                          spot=SPOT)
+
+
+def test_EV加回少数股东权益():
+    """少数股东权益 = 所有者权益合计 − 归母权益 = 18910 − 16724 = 2186。"""
+    rs = _ev_ebitda()
+    ev = D(30000) + D(300) - D(200) + D(2186)
+    assert rs.facts["ev_ebitda"].value == ev / D(320)
+
+
+def test_无少数股东时EV不变():
+    rs = _ev_ebitda(total_equity=16724)
+    assert rs.facts["ev_ebitda"].value == (D(30000) + D(300) - D(200)) / D(320)
+
+
+def test_少数股东权益为负照常加回():
+    """子公司累计亏损时少数股东权益可以为负 —— 照常加回，不截成 0。"""
+    rs = _ev_ebitda(total_equity=16000)
+    ev = D(30000) + D(300) - D(200) - D(724)
+    assert rs.facts["ev_ebitda"].value == ev / D(320)
+
+
+@pytest.mark.parametrize("gone", ["total_equity", "equity_attr_parent"])
+def test_取不到权益两端之一判缺数据而非按零算(gone):
+    """资产负债表一定有这两项，取不到是取数故障 —— 按 0 算会悄悄低估 EV。"""
+    rs = _ev_ebitda(**{gone: None})
+    assert "ev_ebitda" not in rs.facts
+    missing = dict((s.key, m) for s, m in rs.unavailable)
+    assert gone in missing["ev_ebitda"]
+
+
+def test_EV的派生事实可溯源到两端权益():
+    f = _ev_ebitda().facts["ev_ebitda"]
+    assert {f"total_equity@{P}", f"equity_attr_parent@{P}"} <= set(f.derived_from)

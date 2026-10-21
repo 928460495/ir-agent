@@ -172,9 +172,12 @@ REGISTRY: tuple[MetricSpec, ...] = (
                "金融企业的「投入资本」与经营资产不可分离，ROIC 无意义"),
     MetricSpec("ev_ebitda", "EV/EBITDA", Category.MARKET,
                ("market_cap", "operating_profit", "interest_expense_fe",
-                "depreciation_amortization", "cash_and_equivalents"),
+                "depreciation_amortization", "total_equity",
+                "equity_attr_parent", "cash_and_equivalents"),
                NONFINANCIAL,
-               "金融企业无 EBITDA 口径（折旧摊销不是主要成本）", unit="x"),
+               "金融企业无 EBITDA 口径（折旧摊销不是主要成本）", unit="x",
+               note="EV = 市值 + 有息负债 − 现金 + 少数股东权益"
+                    "（所有者权益合计 − 归母权益）"),
 
     # ── 金融企业专有 ──────────────────────────────────────
     # 「不适用」不等于「无话可说」。银行有它自己该看的指标。

@@ -171,11 +171,16 @@ def _market(f) -> dict:
         invested = te.value + _debt_of(f) - cash.value
         v = None if invested <= 0 else ebit * (Decimal(1) - rate) / invested
         out["roic"] = (v, [op, ie, tax, tp, te, cash])
-    if mc and op and da and cash:
+    if mc and op and da and cash and te and eqp:
         ebitda = op.value + da.value + (max(ie.value, Decimal(0)) if ie else 0)
-        ev = mc.value + _debt_of(f) - cash.value
+        # EBITDA 是合并口径，含少数股东那一份 —— EV 必须加回少数股东权益，
+        # 分子分母才是同一群出资人（Damodaran / CFA 标准口径）。
+        # 少数股东权益取「所有者权益合计 − 归母权益」，与相对估值模块同一定义；
+        # 为负（子公司累计亏损）照常加回，不截成 0。
+        minority = te.value - eqp.value
+        ev = mc.value + _debt_of(f) - cash.value + minority
         v = None if ebitda <= 0 else ev / ebitda
-        out["ev_ebitda"] = (v, [mc, op, da, cash])
+        out["ev_ebitda"] = (v, [mc, op, da, te, eqp, cash])
     return out
 
 
