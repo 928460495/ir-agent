@@ -2929,6 +2929,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     _refresh_external_md(r, md)
 
     dcf_res = None
+    rel_res = None
     stage = Stage.NOT_APPLICABLE
     try:
         print("三表 DCF 建模（ashare-dcf）…", file=sys.stderr)
@@ -2943,6 +2944,21 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         md["估值"] = dcf_res.summary()
         for f in dcf.to_facts(dcf_res, as_of):
             r.ledger.put(f)
+        # 相对估值：与 DCF 并列交叉验证。要用 DCF 三档与蒙特卡洛画足球场图，
+        # 所以排在 DCF 之后；要进研报，所以排在撰写之前。失败只进 skipped。
+        print("相对估值（可比法 + 全行业回归）…", file=sys.stderr)
+        rel_res, rel_skipped = _relative_valuation(code, r, as_of, dcf_res, snapshot_dir)
+        skipped += rel_skipped
+        if rel_res is not None:
+            from ir_agent import relval, relval_sheet
+            for f in relval.to_facts(rel_res, as_of):
+                r.ledger.put(f)
+            md["相对估值"] = rel_res.summary()
+            try:
+                relval_sheet.write_sheet(dcf_res.workbook, rel_res, dcf_res)
+            except Exception as e:                          # noqa: BLE001
+                skipped.append(f"相对估值页未写入工作簿（{e.__class__.__name__}: "
+                               f"{str(e)[:120]}）")
         stage = Stage.VALUED if dcf_res.verified else Stage.AWAITING_REVIEW
         if not dcf_res.verified:
             skipped.append("估值（公式引擎验算未通过，结果不可采信）")
@@ -2967,7 +2983,8 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     if dcf_res is not None:
         full, cost, ferr, debate_md, dnote = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), out,
-            caveat=caveat)
+            caveat=caveat,
+            relval_summary=(rel_res.summary() if rel_res is not None else ""))
         if ferr:
             skipped.append(ferr)
         if dnote:
@@ -3014,7 +3031,35 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
         cost_usd=Decimal(str(cost)), route_reason=reason, phase="value")
 
 
-def _write_full_report(code, r, brief, model, dcf_res, bundle, out=None, caveat=""):
+def _relative_valuation(code, r, as_of: date, dcf_res, snapshot_dir):
+    """相对估值（设计 2026-10-21）：6 家可比的倍数法 + 全行业横截面回归。
+
+    返回 (结果或 None, skipped 条目)。**任何失败都不抛出** —— 相对估值是与 DCF 并列的
+    交叉验证，缺了它研报第 8 节只讲 DCF 并说明原因，不能把 DCF 与研报一起拖垮。
+    """
+    from ir_agent import relval, relval_data
+
+    try:
+        tgt, sample, comps, shares, price, notes = relval_data.gather(r, as_of, snapshot_dir)
+        bands, cnotes = relval.comps_bands(comps, tgt, shares)
+        regs = {k: relval.regress(k, sample, tgt, shares) for k in relval.REG_SPEC}
+        res = relval.RelvalResult(
+            as_of=as_of, price=price, shares=shares, target=tgt, comps=bands,
+            comps_notes=cnotes, regs=regs, sample_size=len(sample),
+            industry=r.peer_set.classification.used_path,
+            sample_notes=notes, comps_peers=comps)
+    except relval_data.RelvalUnavailable as e:
+        return None, [f"相对估值（{e}）"]
+    except Exception as e:                                  # noqa: BLE001
+        return None, [f"相对估值（{e.__class__.__name__}: {str(e)[:160]}）"]
+    skipped = [f"相对估值：{n}" for n in cnotes]
+    skipped += [f"相对估值：回归 {relval.REG_SPEC[k][2]} 不可用 —— {g.why}"
+                for k, g in regs.items() if not g.usable]
+    return res, skipped
+
+
+def _write_full_report(code, r, brief, model, dcf_res, bundle, out=None, caveat="",
+                       relval_summary=""):
     """在简报之上补出完整研报 —— 第 8 节要拿估值结果与前面各节对账。"""
     from ir_agent.analyst import FactCatalog, write_body
 
@@ -3026,6 +3071,8 @@ def _write_full_report(code, r, brief, model, dcf_res, bundle, out=None, caveat=
         print("撰写完整研报（含估值一节）…", file=sys.stderr)
         full, _ = write_body(cat, client, code=code, period=r.period,
                              valuation_summary=(dcf_res.summary()
+                                                + ("\n\n" + relval_summary
+                                                   if relval_summary else "")
                                                 + ("\n\n" + caveat if caveat else "")),
                              context=f"**已完成的分析简报**\n\n{brief}",
                              **{k: v or None for k, v in bundle.items()})
