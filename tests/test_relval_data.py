@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -74,7 +74,8 @@ def test_EBITDA与有息负债走同一套合计():
 # ── gather：样本、可比子集、行情快照、剔除说明 ──────────────────────
 
 def _quote(mc):
-    return {"market_cap": D(mc), "last": D(50), "code": "", "name": ""}
+    return {"market_cap": D(mc), "last": D(50), "code": "", "name": "",
+            "as_of": datetime(2026, 10, 21, 15, 0)}
 
 
 def fake_r(peers: dict[str, dict], comps=("002384",)):
@@ -164,3 +165,56 @@ def test_剔除说明只上页面不进摘要():
     assert "sample_notes" in RelvalResult.__dataclass_fields__
     import inspect
     assert "sample_notes" not in inspect.getsource(RelvalResult.summary)
+
+
+# ── 审查意见 2、3、6：不静默、口径一致 ────────────────────────────
+
+def test_财报未取到的同业也要留下说明(monkeypatch, tmp_path):
+    """行业聚合时取数失败的公司不在 cache 里 —— 不能就此从样本里无声消失。"""
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    r = fake_r({"002384": facts_years()})
+    r.peer_set.members.append(SimpleNamespace(code="002916", name="深南电路"))
+    _, _, _, _, _, notes = gather(r, AS_OF, tmp_path)
+    assert any("002916" in n and "财报未取到" in n for n in notes)
+
+
+def test_行情停留在旧日期的同业剔除(monkeypatch, tmp_path):
+    """停牌股的行情是旧日期的市值 —— 所有公司必须同一个报价日。"""
+    def fake(symbols, **kw):
+        return {"002384": {**_quote(1000), "as_of": datetime(2026, 9, 1, 15, 0)}}, [("U", "R")]
+    monkeypatch.setattr(relval_data, "fetch_quotes", fake)
+    _, sample, _, _, _, notes = gather(fake_r({"002384": facts_years()}), AS_OF, tmp_path)
+    assert not sample
+    assert any("002384" in n and "停牌" in n for n in notes)
+
+
+def test_可比名单里没进样本的要说明(monkeypatch, tmp_path):
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    _, _, comps, _, _, notes = gather(
+        fake_r({"002384": facts_years(), "002463": facts_years()}, comps=("002384", "002463")),
+        AS_OF, tmp_path)
+    assert [o.code for o in comps] == ["002384"]
+    assert any("可比" in n and "002463" in n for n in notes)
+
+
+def _with_h1(facts):
+    """在年报之外加一期 2026 中报（半年流量）。"""
+    out = dict(facts)
+    for k, v in dict(revenue=70, net_profit_attr_parent=7, net_profit=8,
+                     equity_attr_parent=55, total_equity=66, total_assets=130,
+                     cash_and_equivalents=6, short_loan=20, operating_profit=9,
+                     interest_expense_fe=1, depreciation_fixed_asset=4).items():
+        out[(k, "2026H1")] = F(k, "2026H1", v, date(2026, 8, 20))
+    return out
+
+
+def test_中报期的基本面取最近完整财年(monkeypatch, tmp_path):
+    """中报的利润、EBITDA 是半年流量，直接算倍数会差一倍；增速也不能锚在未披露的当年 FY。"""
+    _patch_quotes(monkeypatch, ["600183", "002384"])
+    r = fake_r({"002384": _with_h1(facts_years())})
+    r.period = "2026H1"
+    tgt, sample, _, _, _, _ = gather(r, AS_OF, tmp_path)
+    o = sample[0]
+    assert o.net_profit == D(10) and o.ebitda == D(15 + 7 + 1)   # 2025 年报，不是半年数
+    assert o.growth_basis == "3y" and float(o.growth) == pytest.approx(0.1, rel=1e-4)
+    assert tgt.net_profit == D(10)

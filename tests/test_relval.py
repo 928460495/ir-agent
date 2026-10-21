@@ -295,3 +295,29 @@ def test_外推要在摘要里说出来():
     res = make_result()
     res.regs["pb_roe"].extrapolated = True
     assert "外推" in res.summary()
+
+
+# ── 审查意见 1：退路口径要显示，本司口径不一致不能静默算价 ─────────────
+
+def _growth_sample(one_year=()):
+    return [obs(code=f"{i:06d}", market_cap=D(str(10 + 50 * 0.01 * i + (i % 3))),
+                net_profit=D(1), growth=D(str(0.01 * i)),
+                growth_basis="1y" if i in one_year else "3y") for i in range(40)]
+
+
+def test_样本里用一年增速的公司带标记():
+    r = regress("pe_growth", _growth_sample(one_year={5, 6}), _tgt(growth=D("0.2"), net_profit=D(1)), D(1))
+    assert r.flags.get("000005") == "一年增速" and "000007" not in r.flags
+
+
+def test_本司只有一年增速时PE回归不可用():
+    r = regress("pe_growth", _growth_sample(),
+                _tgt(growth=D("0.2"), growth_basis="1y", net_profit=D(1)), D(1))
+    assert not r.usable and "口径" in r.why and r.fit is None
+    assert audit_bare_numbers(r.why) == []
+
+
+def test_可比名单为空时原因不说成不足四家():
+    bands, why = comps_bands([], obs(), shares=D(1))
+    assert all(b is None for b in bands.values())
+    assert all("可比名单未取到" in w for w in why) and len(why) == 3

@@ -114,6 +114,10 @@ def _target_metric_ok(kind: str, t: PeerObs) -> bool:
 def comps_bands(peers: list[PeerObs], target: PeerObs,
                 shares: Decimal) -> tuple[dict[str, Band | None], list[str]]:
     """同业 P25 / 中位数 / P75 × 本司指标。第二项是「不适用」的原因，每条以倍数名开头。"""
+    if not peers:
+        # 可比名单没取到（可比分析未完成）—— 说成「不足四家」会误导
+        return ({k: None for k in KINDS},
+                [f"{LABEL[k]}：可比名单未取到，不适用" for k in KINDS])
     bands: dict[str, Band | None] = {}
     why: list[str] = []
     for kind in KINDS:
@@ -162,6 +166,8 @@ class Regression:
     extrapolated: bool = False
     sample: list[tuple[str, str, float, float]] = field(default_factory=list)
     excluded: list[tuple[str, str, str]] = field(default_factory=list)
+    # 样本里用了退路口径的公司（代码 → 说明），页面逐家标出
+    flags: dict[str, str] = field(default_factory=dict)
 
 
 _X_CN = {"roe": "ROE", "growth": "营收增速"}
@@ -172,6 +178,7 @@ def _screen(kind: str, peers: list[PeerObs], target: PeerObs):
     xf, yk, _ = REG_SPEC[kind]
     rows: list[tuple[str, str, float, float]] = []
     excluded: list[tuple[str, str, str]] = []
+    flags: dict[str, str] = {}
     for p in peers:
         if p.code == target.code:
             excluded.append((p.code, p.name, "本司"))
@@ -183,6 +190,8 @@ def _screen(kind: str, peers: list[PeerObs], target: PeerObs):
             excluded.append((p.code, p.name, f"缺{_X_CN[xf]}或{LABEL[yk]}"))
         else:
             rows.append((p.code, p.name, float(getattr(p, xf)), float(y)))
+            if xf == "growth" and p.growth_basis == "1y":
+                flags[p.code] = "一年增速"
     if len(rows) >= 3:
         lo, hi = np.percentile([r[3] for r in rows], TRIM)
         keep = []
@@ -192,7 +201,8 @@ def _screen(kind: str, peers: list[PeerObs], target: PeerObs):
             else:
                 keep.append(r)
         rows = keep
-    return rows, excluded
+    kept = {r[0] for r in rows}
+    return rows, excluded, {c: f for c, f in flags.items() if c in kept}
 
 
 def regress(kind: str, sample: list[PeerObs], target: PeerObs,
@@ -205,8 +215,8 @@ def regress(kind: str, sample: list[PeerObs], target: PeerObs,
     from scipy.stats import t as tdist
 
     xf, yk, _ = REG_SPEC[kind]
-    rows, excluded = _screen(kind, sample, target)
-    r = Regression(kind=kind, sample=rows, excluded=excluded, n=len(rows))
+    rows, excluded, flags = _screen(kind, sample, target)
+    r = Regression(kind=kind, sample=rows, excluded=excluded, n=len(rows), flags=flags)
     if r.n < 3:
         r.why = "样本不足十五家"
         return r
@@ -244,6 +254,9 @@ def regress(kind: str, sample: list[PeerObs], target: PeerObs,
         r.why = "斜率不显著"
     elif r.x0 is None:
         r.why = f"本司缺{_X_CN[xf]}，不适用"
+    elif xf == "growth" and target.growth_basis != "3y":
+        # 本司 x₀ 与样本不同口径，算出的应得倍数是错的 —— 停下，不静默算价
+        r.why = "本司营收增速只有一年数据，与样本的三年复合增速口径不同"
     elif r.fit_mult <= 0 or r.lo_mult <= 0:
         r.why = "应得倍数或区间下限不为正"
     else:

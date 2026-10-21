@@ -112,6 +112,15 @@ def obs_from_facts(code: str, name: str, facts: dict, period: str,
     return obs_from_ledger(code, name, led, period, as_of, market_cap)
 
 
+def fund_period(period: str) -> str:
+    """基本面取最近一个完整财年：报告期是 FY 就是它本身，中报期取上一年 FY。
+
+    中报的利润、EBITDA 是半年流量，直接算倍数会差一倍；增速也不能锚在当年尚未
+    披露的 FY 上。本司与同业用同一个期间，口径才一致。
+    """
+    return period if period.endswith("FY") else f"{int(period[:4]) - 1}FY"
+
+
 def _disclosed(facts: dict, period: str, as_of: date) -> bool:
     return all((f := facts.get((k, period))) is not None and f.as_of <= as_of
                for k in ("revenue", "equity_attr_parent"))
@@ -121,7 +130,8 @@ def gather(r, as_of: date, snapshot_dir):
     """返回 (本司, 行业样本, 可比, 总股本, 现价, 剔除说明)。
 
     可比 = 行业样本中 `r.comps_codes` 那几家 —— **同一份观测**，保证可比法与回归同口径。
-    截至 as_of 尚无本期财报的同业剔除，不用上期凑（与 comps.py 的立场一致）。
+    截至 as_of 尚无该期财报的同业剔除，不用上期凑（与 comps.py 的立场一致）。
+    **没进样本的每一家都留一条说明**：财报没取到、没有行情、行情停在旧日期、未披露。
     """
     from ir_agent.operators import aggregates
     from ir_agent.sources.snapshot import SnapshotStore
@@ -130,10 +140,23 @@ def gather(r, as_of: date, snapshot_dir):
     peers = getattr(r, "peer_set", None)
     if not cache or peers is None:
         raise RelvalUnavailable("行业样本未取到（第二阶段行业聚合失败或未运行）")
-    period = r.period
+    fp = fund_period(r.period)
     tcode = peers.target
     names = {m.code: m.name for m in peers.members}
+    notes: list[str] = [f"{m.code} {m.name}：财报未取到（行业聚合时取数失败），剔除"
+                        for m in peers.members if m.code not in cache]
     codes = [c for c in cache if c != tcode]
+
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    try:
+        mc_fact = r.ledger.get("market_cap", spot, as_of=as_of) if spot else None
+    except (KeyError, LookAheadError):
+        mc_fact = None
+    price = _v(r.ledger, "last_price", spot, as_of) if spot else None
+    if mc_fact is None or not mc_fact.value or not price:
+        raise RelvalUnavailable("本司市值或现价缺失")
+    quote_day = mc_fact.as_of
 
     symbols = [quote_symbol(c) for c in codes]
     try:
@@ -145,7 +168,6 @@ def gather(r, as_of: date, snapshot_dir):
         store.save(source="tencent_batch", payload={"raw": raw}, url=url,
                    fetched_at=now, params={"url": url})
 
-    notes: list[str] = []
     sample: list[PeerObs] = []
     for c in codes:
         name = names.get(c, c)
@@ -153,23 +175,24 @@ def gather(r, as_of: date, snapshot_dir):
         if q is None or q.get("market_cap") is None:
             notes.append(f"{c} {name}：无行情（停牌或接口未返回），剔除")
             continue
-        if not _disclosed(cache[c], period, as_of):
-            notes.append(f"{c} {name}：截至估值时点未披露 {period} 财报，剔除（不用上期凑）")
+        if q.get("as_of") is not None and q["as_of"].date() != quote_day:
+            notes.append(f"{c} {name}：行情停在 {q['as_of'].date()}，与本司报价日 "
+                         f"{quote_day} 不同（可能停牌），剔除")
             continue
-        sample.append(obs_from_facts(c, name, cache[c], period, q["market_cap"], as_of))
+        if not _disclosed(cache[c], fp, as_of):
+            notes.append(f"{c} {name}：截至估值时点未披露 {fp} 财报，剔除（不用上期凑）")
+            continue
+        sample.append(obs_from_facts(c, name, cache[c], fp, q["market_cap"], as_of))
 
-    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
-                 if f.key == "market_cap"), None)
-    mc = _v(r.ledger, "market_cap", spot, as_of) if spot else None
-    price = _v(r.ledger, "last_price", spot, as_of) if spot else None
-    if not mc or not price:
-        raise RelvalUnavailable("本司市值或现价缺失")
     try:
-        aggregates.compute(r.ledger, period, as_of)
+        aggregates.compute(r.ledger, fp, as_of)
     except Exception:                                       # noqa: BLE001
         pass
-    target = obs_from_ledger(tcode, peers.target_name, r.ledger, period, as_of, mc)
+    target = obs_from_ledger(tcode, peers.target_name, r.ledger, fp, as_of, mc_fact.value)
 
     by_code = {o.code: o for o in sample}
-    comps = [by_code[c] for c in (getattr(r, "comps_codes", None) or []) if c in by_code]
-    return target, sample, comps, mc / price, price, notes
+    comps_codes = getattr(r, "comps_codes", None) or []
+    notes += [f"可比 {c} {names.get(c, c)}：未进入样本（原因见上），可比法少一家"
+              for c in comps_codes if c not in by_code]
+    comps = [by_code[c] for c in comps_codes if c in by_code]
+    return target, sample, comps, mc_fact.value / price, price, notes
