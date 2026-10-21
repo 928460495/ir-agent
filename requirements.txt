@@ -8,3 +8,4 @@ pandas>=2.2,<4
 numpy>=2.1,<3
 akshare>=1.18
 formulas>=1.2,<2
+scipy>=1.11,<2          # 相对估值回归的 t 分位；此前只作为 formulas 的传递依赖被装上

@@ -91,3 +91,137 @@ def test_同业有效值不足四家不适用():
     bands, why = comps_bands(peers, obs(), shares=D(1))
     assert bands["pe"] is None
     assert any(w.startswith("PE") and "不足" in w for w in why)
+
+
+# ── 横截面回归 ────────────────────────────────────────────────
+
+import numpy as np  # noqa: E402
+
+from ir_agent.relval import regress  # noqa: E402
+
+
+def _pb_sample(n=40, a=4.84, b=28.08, noise=1.0, seed=1, roe_lo=0.0, roe_hi=0.3):
+    """PB = a + b·ROE + ε 的合成行业样本（净资产 1、净利润 = ROE，均为正）。"""
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(n):
+        roe = rng.uniform(roe_lo, roe_hi)
+        pb = a + b * roe + rng.normal(0, noise)
+        out.append(obs(code=f"{i:06d}", market_cap=D(str(round(pb, 6))),
+                       equity_parent=D(1), total_equity=D(1),
+                       net_profit=D(str(round(roe, 6))), roe=D(str(round(roe, 6)))))
+    return out
+
+
+def _tgt(**kw):
+    return obs(code="600183", **{"equity_parent": D(1), "total_equity": D(1), **kw})
+
+
+def test_系数与numpy一致():
+    r = regress("pb_roe", _pb_sample(), _tgt(roe=D("0.2")), D(1))
+    xs = np.array([x for _, _, x, _ in r.sample])
+    ys = np.array([y for _, _, _, y in r.sample])
+    b, a = np.polyfit(xs, ys, 1)
+    assert r.a == pytest.approx(a) and r.b == pytest.approx(b)
+    assert r.n == len(xs) and r.usable
+
+
+def test_预测区间与scipy独立计算一致():
+    from scipy import stats
+    r = regress("pb_roe", _pb_sample(), _tgt(roe=D("0.2")), D(1))
+    xs = np.array([x for _, _, x, _ in r.sample])
+    ys = np.array([y for _, _, _, y in r.sample])
+    lr = stats.linregress(xs, ys)
+    n = len(xs)
+    s = np.sqrt(((ys - (lr.intercept + lr.slope * xs)) ** 2).sum() / (n - 2))
+    half = stats.t.ppf(0.90, n - 2) * s * np.sqrt(
+        1 + 1 / n + (0.2 - xs.mean()) ** 2 / ((xs - xs.mean()) ** 2).sum())
+    fit = lr.intercept + lr.slope * 0.2
+    assert r.fit_mult == pytest.approx(fit)
+    assert r.lo_mult == pytest.approx(fit - half) and r.hi_mult == pytest.approx(fit + half)
+    assert r.r2 == pytest.approx(lr.rvalue ** 2)
+    assert r.t == pytest.approx(lr.slope / lr.stderr)
+
+
+def test_隐含每股价值由应得倍数换算():
+    r = regress("pb_roe", _pb_sample(), _tgt(roe=D("0.2"), equity_parent=D(10),
+                                              total_equity=D(10)), shares=D(2))
+    assert float(r.fit) == pytest.approx(r.fit_mult * 10 / 2)
+
+
+def test_外推时区间变宽且标记():
+    near = regress("pb_roe", _pb_sample(), _tgt(roe=D("0.15")), D(1))
+    far = regress("pb_roe", _pb_sample(), _tgt(roe=D("0.6")), D(1))
+    assert (far.hi_mult - far.lo_mult) > (near.hi_mult - near.lo_mult)
+    assert far.extrapolated and not near.extrapolated
+
+
+def test_剔除本司亏损负净资产与两端():
+    s = _pb_sample()
+    s.append(obs(code="600183"))                                         # 本司
+    s.append(obs(code="900001", net_profit=D(-1), roe=D("-0.1")))        # 亏损
+    s.append(obs(code="900002", equity_parent=D(-5), total_equity=D(-5)))  # 负净资产
+    r = regress("pb_roe", s, _tgt(roe=D("0.2")), D(1))
+    why = {c: w for c, _, w in r.excluded}
+    assert why["600183"] == "本司"
+    assert "亏损" in why["900001"] and "净资产" in why["900002"]
+    assert any("P5–P95" in w for w in why.values())
+    assert "600183" not in {c for c, _, _, _ in r.sample}
+
+
+def _search(cond, **kw):
+    """找一个满足前提的随机种子 —— 让「不显著」这类用例不靠运气。"""
+    for seed in range(500):
+        s = _pb_sample(seed=seed, **kw)
+        r = regress("pb_roe", s, _tgt(roe=D("0.15")), D(1))
+        if cond(r):
+            return r
+    raise AssertionError("找不到满足前提的样本")
+
+
+def test_样本不足十五家不可用():
+    r = regress("pb_roe", _pb_sample(n=15), _tgt(roe=D("0.15")), D(1))
+    assert r.n < 15 and not r.usable and "样本" in r.why and r.fit is None
+
+
+def test_斜率方向相反不可用():
+    r = regress("pb_roe", _pb_sample(b=-20.0), _tgt(roe=D("0.15")), D(1))
+    assert not r.usable and "斜率" in r.why and r.fit is None
+
+
+def test_斜率不显著不可用():
+    r = _search(lambda r: r.b > 0 and r.t < 2, b=0.5, noise=3.0)
+    assert not r.usable and "不显著" in r.why and r.fit is None
+
+
+def test_应得倍数不为正不可用():
+    r = regress("pb_roe", _pb_sample(), _tgt(roe=D("-0.5")), D(1))
+    assert not r.usable and "倍数" in r.why and r.fit is None
+
+
+def test_不可用时仍保留统计量供页面展示():
+    r = regress("pb_roe", _pb_sample(b=-20.0), _tgt(roe=D("0.15")), D(1))
+    assert r.n > 0 and r.b < 0 and r.sample
+
+
+def test_不可用原因不含数字():
+    """原因会进研报摘要，而摘要不许有裸数字。"""
+    from ir_agent.citation import audit_bare_numbers
+    for r in (regress("pb_roe", _pb_sample(n=15), _tgt(roe=D("0.15")), D(1)),
+              regress("pb_roe", _pb_sample(b=-20.0), _tgt(roe=D("0.15")), D(1)),
+              regress("pb_roe", _pb_sample(), _tgt(roe=D("-0.5")), D(1))):
+        assert audit_bare_numbers(r.why) == []
+
+
+def test_本司亏损时PE回归不出价格():
+    s = [obs(code=f"{i:06d}", market_cap=D(10 + 2 * i), net_profit=D(1),
+             growth=D(str(0.01 * i))) for i in range(40)]
+    r = regress("pe_growth", s, _tgt(net_profit=D(-1), growth=D("0.2")), D(1))
+    assert r.fit is None and "不适用" in r.why
+
+
+def test_PE回归用增速():
+    s = [obs(code=f"{i:06d}", market_cap=D(str(10 + 50 * 0.01 * i + (i % 3))),
+             net_profit=D(1), growth=D(str(0.01 * i))) for i in range(40)]
+    r = regress("pe_growth", s, _tgt(growth=D("0.2"), net_profit=D(1)), D(1))
+    assert r.b > 0 and r.kind == "pe_growth"
