@@ -51,8 +51,11 @@ def test_只认两个判断项():
 
 
 def test_填校准项记进读数事实且说明原因():
-    a = assume.parse(_line(item="销售费用率"), 2)
+    # 2026-11-16 起费用率是判断项（opex_judg）；仍由代码校准的是折旧率、周转天数等
+    a = assume.parse(_line(item="折旧率"), 2)
     assert "由历史数据校准" in _notes(a)
+    b = assume.parse(_line(item="销售费用率"), 2)
+    assert "由历史数据校准" not in _notes(b) and b.opex_rows
 
 
 # ── 三档必须拉开 ─────────────────────────────────────────────

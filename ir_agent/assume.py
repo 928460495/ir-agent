@@ -2,9 +2,10 @@
 
 **只填判断项，不碰校准项。** ashare-dcf 的假设分两类:
 
-  · **校准项**（费用率、周转天数、折旧率、税率、β、Kd……）由 calibrate
+  · **校准项**（周转天数、折旧率、税率、β、Kd……）由 calibrate
     从历史财务数据算出。那些不是判断，是对历史的度量 —— AI 去动它们
-    只会把已经算对的东西改坏。
+    只会把已经算对的东西改坏。**费用率例外**（2026-11-16 起是判断项，见
+    `opex_judg`）：近 3 年均值会抹掉经营杠杆，PLTR 营业利润率因此从 31.6% 退回 19%。
   · **判断项**（逐年营收增速、逐年毛利率）是 ashare-dcf 自己标成黄底、
     并写明「三档初始同值，必须自行复核并拉开」的两项。它们**只能靠判断**，
     而判断正是前面那一整套分析的产出。
@@ -242,6 +243,11 @@ def to_json(a: "AssumptionSet", **extra) -> dict:
            **extra}
     if m is not None and not m.legacy:
         out["model"] = _model_to_dict(m)
+    if a.market:
+        from ir_agent import opex_judg as OJ
+        out["market"] = a.market
+        out["opex_rows"] = [OJ.row_to_dict(r) for r in a.opex_rows]
+        out["steady_rows"] = [OJ.row_to_dict(r) for r in a.steady_rows]
     if a.base_values:
         out["base_values"] = {
             k: {"value": str(v.value), "bases": [b.to_dict() for b in v.bases],
@@ -310,6 +316,11 @@ def from_json(d: dict, code: str = "") -> tuple["AssumptionSet", list[str]]:
                 edits.append(
                     f"{cn} 第{r.year}年 {case}：模型给 {p[case]}，"
                     f"核实后改为 {getattr(r, case)}")
+    if d.get("market"):
+        from ir_agent import opex_judg as OJ
+        a.market = d["market"]
+        a.opex_rows = [OJ.row_from_dict(x, edits) for x in d.get("opex_rows") or []]
+        a.steady_rows = [OJ.row_from_dict(x, edits) for x in d.get("steady_rows") or []]
     return a, edits
 
 
@@ -371,6 +382,10 @@ class AssumptionSet:
     judge_review: object = None
     # 判断项审核的各轮记录（`assume_review.Round`），写 assumptions_rounds.md 用。
     judge_rounds: list = field(default_factory=list)
+    # 费用率分项与稳态值（`opex_judg`，2026-11-16）。market 为 "us"/"cn"；空表示旧文件、没有这两块。
+    market: str = ""
+    opex_rows: list = field(default_factory=list)
+    steady_rows: list = field(default_factory=list)
 
     def _m(self) -> FormulaModel | None:
         if self.model is None and self.decomps:
@@ -729,7 +744,7 @@ def _fmt_factor(v: Decimal, unit: str) -> str:
 def parse(text: str, years: int,
           decomps: list[Decomposition] | None = None,
           factor_data: dict | None = None,
-          as_of: date | None = None) -> AssumptionSet:
+          as_of: date | None = None, us: bool = False) -> AssumptionSet:
     """decomps 给定时按因子解析；否则沿用两标量模式（降级路径）。
 
     降级路径不删 —— 预研（拆分解式、采数据）失败不该让整轮研究停摆。
@@ -739,9 +754,16 @@ def parse(text: str, years: int,
     `_factor_basis`）。两标量模式不需要，两者都留空即可；不传时因子
     模式退回旧行为（只认账本占位符与正文逐字引用），不影响既有调用方。
     """
-    if not decomps:
-        return _parse_scalar(text, years)
-    return _parse_factors(text, years, decomps, factor_data, as_of)
+    from ir_agent import opex_judg as OJ
+
+    market = "us" if us else "cn"
+    rest, mine = OJ.split_lines(text, market)
+    a = (_parse_scalar(rest, years) if not decomps
+         else _parse_factors(rest, years, decomps, factor_data, as_of))
+    a.market = market
+    a.opex_rows, a.steady_rows, notes = OJ.parse(mine, market, min(years, OJ.JUDGED_YEARS))
+    a.read_notes += notes
+    return a
 
 
 def _shown(raw: str) -> str:
@@ -838,7 +860,7 @@ def _parse_scalar(text: str, years: int) -> AssumptionSet:
         cn = pick(parts[0], list(DRIVERS))
         if cn is None:
             out.read_notes.append(
-                f"未知的判断项 {parts[0]!r}（只能填：{'、'.join(DRIVERS)}；费用率、"
+                f"未知的判断项 {parts[0]!r}（只能填：{'、'.join(DRIVERS)}、费用率分项与稳态值；"
                 "周转天数、折旧率等由历史数据校准，不在此处填写），这一行没读进来")
             continue
         year = _year(parts[1], years, f"{cn} ", out.read_notes)
@@ -1567,6 +1589,10 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
                               f"（{a.implied.describe()}）")
     facts.problems += _basis_problems(a, ledger=ledger, body=body, as_of=as_of,
                                       decomps=decomps)
+    from ir_agent import opex_judg as OJ
+    ob, op = OJ.check(a)
+    facts.blocking += ob
+    facts.problems += op
     a.facts = facts
     return facts
 
@@ -2284,6 +2310,8 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
                              for c in Case}
         ju["gm_scen"] = {c.name.lower(): [float(x) for x in a.path("gm", c)]
                          for c in Case}
+    from ir_agent import opex_judg as OJ
+    ju.update(OJ.judg_block(a))         # 费用率逐年三档与稳态值（没有时不写，建表按校准值）
     out = dict(cal)
     out["judg"] = ju
     return out
