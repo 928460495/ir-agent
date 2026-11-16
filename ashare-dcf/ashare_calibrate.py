@@ -593,7 +593,12 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
                   g_stats=(round(float(np.mean(g_hist)),4), round(float(np.std(g_hist)),4), round(min(g_hist),4), round(max(g_hist),4)),
                   gm_stats=(round(gm_mean,4), round(gm_std_ann,4), round(min(gm_hist),4), round(max(gm_hist),4)),
                   cagr3=round(cagr3,4), mish_hist=mish_hist, wc_interim=wc.get("interim_note"),
-                  other_op_hist=[round((_other_op(p) or 0)/rev[p],5) for p in a3 if rev.get(p)]),
+                  other_op_hist=[round((_other_op(p) or 0)/rev[p],5) for p in a3 if rev.get(p)],
+                  # 费用率逐年历史：第③步判断项的参照（opex_judg.history_lines）。看趋势，不取均值
+                  opex_hist={"years": [p[:4]+"A" for p in ann if rev.get(p)],
+                             **{lbl: [round((_v(inc, item, p) or 0)/rev[p], 4) for p in ann if rev.get(p)]
+                                for lbl, item in (("销售费用率","销售费用"),("管理费用率","管理费用"),
+                                                  ("研发费用率","研发费用"))}}),
         # 融资/股本变动模块：默认全部关停（增发股数=0 → 整块对估值无影响）。
         # 发行价默认取现价：定增实务上多为定价基准日前20日均价×80%，需用户按方案改。
         fin=dict(new_shares=0.0, issue_price=round(float(q["price"]), 2), fee=.015,
@@ -602,5 +607,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
         dcf=dict(rf=rf, erp=.060, beta=round(beta,4), kd=kd,
                  wd=_wd, g=g_term, t_term=.15, midyear=1, roll=roll,
                  nonop=round(_v0(bal,"长期股权投资",last)+_v0(bal,"投资性房地产",last)+_v0(bal,"其他非流动金融资产",last), 4),
-                 mi_mode=2),
+                 mi_mode=2,
+                 # 终值 ROIC 默认收敛至 WACC + 溢价、终值 Beta 向 1（spec 2026-11-16）
+                 roic_mode=2, beta_term=1.0),
         rev=rev, cogs=cogs)

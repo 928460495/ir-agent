@@ -29,6 +29,11 @@ P_G=PatternFill("solid",fgColor=GREY); P_Y=PatternFill("solid",fgColor=YEL); P_O
 BX=Border(bottom=Side(style="thin",color="BFBFBF"))
 NUM="#,##0.00"; PCT="0.0%"; PCT2="0.00%"; CNY="¥#,##0.00"; MX="0.00\"x\""; Z="0.00000000"; D1="0.0"
 
+# 判断项覆盖的年数；其后为过渡期（spec 2026-11-16：第 6–10 年按规则向稳态收敛，工作簿里是活公式）
+JUDGED_YEARS = 5
+OPEX_ITEMS = (("销售费用率", "sell"), ("管理费用率", "admin"), ("研发费用率", "rd"))
+
+
 def build(cal: dict, path: str) -> dict:
     M, PR, O, GEN, JU, DC = cal["meta"], cal["periods"], cal["open"], cal["gen"], cal["judg"], cal["dcf"]
     DA_SRC = cal.get("da_src") or "未标注"
@@ -68,9 +73,45 @@ def build(cal: dict, path: str) -> dict:
     c=ws.cell(r,2,2); c.font=F_IN; c.fill=P_O; c.number_format="0"
     ws.cell(r,6,"◀ 改这一格切换全模型情景").font=Font(size=10,color="C00000",bold=True); r+=1
     ws.cell(r,1,"当前情景").font=Font(bold=True,size=10)
-    ws.cell(r,2,f'=CHOOSE(B{SCEN},"Bull 乐观","Base 中性","Bear 悲观")').font=F_LNK; r+=2
+    ws.cell(r,2,f'=CHOOSE(B{SCEN},"Bull 乐观","Base 中性","Bear 悲观")').font=F_LNK; r+=1
+    NJ=min(JUDGED_YEARS, NY)
+    ws.cell(r,1,"判断项年数（其后为过渡期）").font=Font(size=10)
+    cc=ws.cell(r,2,NJ); cc.font=F_FX; cc.number_format="0"
+    ws.cell(r,6,(f"第 1–{NJ} 年为判断项；第 {NJ+1}–{NY} 年按规则向下方稳态值线性收敛、增速回落到永续增长率"
+                 if NY>NJ else "预测期全部为判断项（无过渡期）")).font=Font(size=9,color="808080")
+    r+=2
+    # ---------- 稳态与终值 ----------
+    # 过渡期公式与终值引用这一区。来源：ir-agent 第③步判断项；没有时用校准值（毛利率近 3 年均值、
+    # 费用率近 3 年均值、ROIC 溢价 3%）。
+    ST=JU.get("steady") or {}
+    r=sec(r,"稳态与终值（过渡期收敛的目标；Damodaran：成熟后利润率向同业成熟水平收敛、Beta 向 1）")
+    for i,t in enumerate(["稳态项","Bull","Base","Bear","生效值"]):
+        cc=ws.cell(r,i+1,t); cc.font=F_COL; cc.fill=P_B; cc.alignment=Alignment(horizontal="center")
+    r+=1
+    STR={}
+    _st_spec=[("稳态毛利率","稳态毛利率",JU["gm_stats"][0],"公司成熟后的长期毛利率，参照同业成熟公司")]
+    _st_spec+=[(f"稳态 {lbl}",f"稳态{lbl}",GEN[k],f"成熟后的{lbl}") for lbl,k in OPEX_ITEMS]
+    _st_spec+=[("终值 ROIC 收敛溢价（三档）","终值ROIC溢价",0.03,
+                "成熟后 ROIC 超出 WACC 的部分 —— 护城河越宽越高；过高等于把超额回报永续化")]
+    for lbl,key,dflt,note in _st_spec:
+        v=ST.get(key)
+        v3=[v[k] for k in ("bull","base","bear")] if v else [dflt]*3
+        ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
+        for j in range(3):
+            cc=ws.cell(r,2+j,round(float(v3[j]),6)); cc.font=F_IN; cc.number_format=PCT; cc.fill=P_Y
+        cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=PCT
+        ws.cell(r,6,note+("" if v else "（未给判断项：用校准值）")).font=Font(size=9,color="808080")
+        STR[lbl]=r; r+=1
+    r+=1
 
-    r=sec(r,"二、判断项 —— 模板不做外推，三档初始同值，请自行拉开")
+    def _fade_cells(rr, i, target):
+        """第 NJ+1 年起的过渡期公式：同列第 NJ 年 → 目标线性收敛（target(col) 给目标引用；None 沿用）。"""
+        for j in range(3):
+            L=CL(2+j); last=f"{L}{rr-i+NJ-1}"
+            f=(f"={last}+({target(L)}-{last})*{i+1-NJ}/{NY-NJ}" if target else f"={last}")
+            cc=ws.cell(rr,2+j,f); cc.font=F_FX; cc.number_format=PCT; cc.fill=P_G
+
+    r=sec(r,"二、判断项 —— 第 1–5 年三档；过渡期为公式（灰色），改上方稳态值即可")
     for i,t in enumerate(["假设项","Bull","Base","Bear","生效值"]):
         cc=ws.cell(r,i+1,t); cc.font=F_COL; cc.fill=P_B; cc.alignment=Alignment(horizontal="center")
     ws.cell(r,6,"历史参考").font=F_COL; ws.cell(r,6).fill=P_B; r+=1
@@ -87,9 +128,12 @@ def build(cal: dict, path: str) -> dict:
     G_ROW=r
     for i,y in enumerate(YE):
         ws.cell(r,1,f"{y} 营收增速").font=Font(size=10); ws.cell(r,1).border=BX
-        _v3=_scen("growth_scen", i, JU["growth"][i])
-        for j in range(3):
-            cc=ws.cell(r,2+j,_v3[j]); cc.font=F_IN; cc.number_format=PCT; cc.fill=P_Y
+        if i>=NJ:
+            _fade_cells(r,i,lambda L:"§G§")          # 永续增长率的行号建到 DR 时回填
+        else:
+            _v3=_scen("growth_scen", i, JU["growth"][min(i,len(JU["growth"])-1)])
+            for j in range(3):
+                cc=ws.cell(r,2+j,_v3[j]); cc.font=F_IN; cc.number_format=PCT; cc.fill=P_Y
         cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=PCT
         if i==0:
             ws.cell(r,6,f"近3年CAGR {JU['cagr3']*100:.1f}%｜历史均值 {gs_[0]*100:.1f}% 标准差 {gs_[1]*100:.1f}pp "
@@ -99,14 +143,37 @@ def build(cal: dict, path: str) -> dict:
     M_ROW=r
     for i,y in enumerate(YE):
         ws.cell(r,1,f"{y} 毛利率").font=Font(size=10); ws.cell(r,1).border=BX
-        _v3=_scen("gm_scen", i, JU["gm"][i])
-        for j in range(3):
-            cc=ws.cell(r,2+j,_v3[j]); cc.font=F_IN; cc.number_format=PCT; cc.fill=P_Y
+        if i>=NJ:
+            _fade_cells(r,i,lambda L:f"{L}${STR['稳态毛利率']}")
+        else:
+            _v3=_scen("gm_scen", i, JU["gm"][min(i,len(JU["gm"])-1)])
+            for j in range(3):
+                cc=ws.cell(r,2+j,_v3[j]); cc.font=F_IN; cc.number_format=PCT; cc.fill=P_Y
         cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=PCT
         if i==0:
             ws.cell(r,6,f"最近一期 {JU['gm_hist'][-1]*100:.1f}%｜历史均值 {gm_[0]*100:.1f}% 标准差 {gm_[1]*100:.1f}pp "
                         f"区间 {gm_[2]*100:.1f}%~{gm_[3]*100:.1f}%").font=Font(size=9,color="C00000")
             ws.cell(r,1).comment=Comment("判断项：默认为最近一期毛利率向历史均值线性回归。毛利率对估值的杠杆通常大于营收增速。","Template")
+        r+=1
+    OPS=JU.get("opex_scen") or {}; OH=JU.get("opex_hist") or {}
+    OPEX_ROW={}
+    for lbl,k in OPEX_ITEMS:
+        OPEX_ROW[lbl]=r
+        hist=[x for x in (OH.get(lbl) or []) if x is not None]
+        for i,y in enumerate(YE):
+            ws.cell(r,1,f"{y} {lbl}").font=Font(size=10); ws.cell(r,1).border=BX
+            if i>=NJ:
+                _fade_cells(r,i,lambda L,lbl=lbl:f"{L}${STR['稳态 '+lbl]}")
+            else:
+                sc=OPS.get(lbl)
+                v3=[sc[c][min(i,len(sc[c])-1)] for c in ("bull","base","bear")] if sc else [GEN[k]]*3
+                for j in range(3):
+                    cc=ws.cell(r,2+j,v3[j]); cc.font=F_IN; cc.number_format=PCT; cc.fill=P_Y
+            cc=ws.cell(r,5,f"=CHOOSE($B${SCEN},B{r},C{r},D{r})"); cc.font=F_FX; cc.number_format=PCT
+            if i==0:
+                ws.cell(r,6,(f"历史 {'／'.join(f'{x*100:.1f}%' for x in hist)}｜" if hist else "")
+                        +"第③步判断项（未给时用近3年均值）").font=Font(size=9,color="808080")
+            r+=1
         r+=1
     CX_ROW=r
     # 资本开支由各档营收增速推出（见 _capex_from_growth）：三档因此自动一致，
@@ -121,8 +188,12 @@ def build(cal: dict, path: str) -> dict:
     # 首个预测年按季度估算（ashare_calibrate.interim_block）：三档相同。旧版 calibrate
     # 的中期块（缓存的 pickle）没有季度明细，_it_fy 为 None，不做首年估算。
     _it_fy = IT.get("fy_rev") if IT else None
-    _growth3_for_cx = {k: [_scen("growth_scen", i, JU["growth"][i])[j] for i in range(len(YE))]
+    _growth3_for_cx = {k: [_scen("growth_scen", i, JU["growth"][min(i,len(JU["growth"])-1)])[j]
+                           for i in range(min(NJ,len(YE)))]
                         for j, k in enumerate(("bull", "base", "bear"))}
+    for k in _growth3_for_cx:        # 过渡期：与工作簿公式同一规则（线性回落到永续 g），资本开支是静态值
+        _l=_growth3_for_cx[k][-1]
+        _growth3_for_cx[k] += [_l+(DC["g"]-_l)*(i+1-NJ)/(NY-NJ) for i in range(NJ,NY)]
     if _it_fy:
         _g1 = float(IT["fy_rev"]) / float(OR_base_rev) - 1.0
         for k in ("bull", "base", "bear"):
@@ -147,11 +218,11 @@ def build(cal: dict, path: str) -> dict:
     DG_ROW=r
     ws.cell(r,1,"营收增速 Δ（敏感性平移，平时保持 0）").font=Font(size=10); ws.cell(r,1).border=BX
     cc=ws.cell(r,2,0.0); cc.font=F_IN; cc.number_format=PCT2; cc.fill=P_O
-    ws.cell(r,6,"对上面 5 年增速路径整体加减。原生模拟运算表以此格为「行输入单元格」").font=Font(size=9,color="808080"); r+=1
+    ws.cell(r,6,"对上面整条增速路径（含过渡期）整体加减。原生模拟运算表以此格为「行输入单元格」").font=Font(size=9,color="808080"); r+=1
     DM_ROW=r
     ws.cell(r,1,"毛利率 Δ（敏感性平移，平时保持 0）").font=Font(size=10); ws.cell(r,1).border=BX
     cc=ws.cell(r,2,0.0); cc.font=F_IN; cc.number_format=PCT2; cc.fill=P_O
-    ws.cell(r,6,"对上面 5 年毛利率路径整体加减").font=Font(size=9,color="808080"); r+=2
+    ws.cell(r,6,"对上面整条毛利率路径（含过渡期）整体加减").font=Font(size=9,color="808080"); r+=2
     for i in range(len(YE)):
         ws.cell(G_ROW+i,5).value=f"=CHOOSE($B${SCEN},B{G_ROW+i},C{G_ROW+i},D{G_ROW+i})+$B${DG_ROW}"
         ws.cell(M_ROW+i,5).value=f"=CHOOSE($B${SCEN},B{M_ROW+i},C{M_ROW+i},D{M_ROW+i})+$B${DM_ROW}"
@@ -239,9 +310,7 @@ def build(cal: dict, path: str) -> dict:
             # 摊薄效应会被外推到全部预测年+终值，读者必须能看到这层关联。
             txt += f"｜该调整期营收同比 {_rev_yoy*100:+.1f}%，下调中含营收增长带来的摊薄，是否可持续请自行判断"
         return txt
-    GEN_SPEC=[("销售费用率",GEN["sell"],PCT,_fee_note("sell","近3年均值")),
-      ("管理费用率",GEN["admin"],PCT,_fee_note("admin","近3年均值")),
-      ("研发费用率",GEN["rd"],PCT,_fee_note("rd","近3年均值｜CAS 全额费用化")),("税金及附加率",GEN["tsur"],PCT,"近3年均值"),
+    GEN_SPEC=[("税金及附加率",GEN["tsur"],PCT,"近3年均值"),
       ("其他收益 / 营收",GEN["other_inc"],PCT,"近3年均值"),("投资收益 / 营收",GEN["inv_inc"],PCT,"近3年均值"),
       ("有息负债利率",GEN["irate"],PCT,"财务费用 ÷ 期初有息负债，近3年均值"),("现金收益率",GEN["cash_yield"],PCT,"常量"),
       ("实际所得税率",GEN["tax"],PCT,"近3年均值，夹于 5%–25%"),
@@ -318,13 +387,23 @@ def build(cal: dict, path: str) -> dict:
         ("估值基准日滚动年数",DC["roll"],"0.000",f"{PR['annual'][-1][:4]}-12-31 → {M['asof']}"),
         ("非经营资产（加回）",DC["nonop"],NUM,"长期股权投资+投资性房地产+其他非流动金融资产"),
         ("少数股东扣除方式（1=账面 2=价值）",DC["mi_mode"],"0","价值法按其利润分成折算"),
-        ("少数股东利润占比",None,PCT2,"链接自上方自动校准值，避免两处副本发散")]
+        ("少数股东利润占比",None,PCT2,"链接自上方自动校准值，避免两处副本发散"),
+        ("终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）",DC.get("roic_mode",2),"0",
+         "沿用末年 = 假设当前超额回报永续；收敛 = 竞争终将侵蚀超额回报（Damodaran / 麦肯锡 RONIC）"),
+        ("终值 ROIC 收敛溢价（模式2 用）",f"=E{STR['终值 ROIC 收敛溢价（三档）']}",PCT2,
+         "收敛后的终值 ROIC = 终值 WACC + 本溢价。取自上方「稳态与终值」区当前情景"),
+        ("终值 Beta（向 1 收敛）",DC.get("beta_term") or 1.0,"0.000",
+         "Damodaran：成熟公司 Beta 向 1 收敛。只用于终值（终值 WACC 的 Ke），明确期仍用上方 Beta")]
     DCF_ROW=r
     for lbl,v,f,note in DP:
         ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
-        cc=ws.cell(r,2,None if v is None else round(float(v),6)); cc.font=F_FX if v is None else F_IN
+        cc=ws.cell(r,2,None if v is None else (v if isinstance(v,str) else round(float(v),6)))
+        cc.font=F_FX if (v is None or isinstance(v,str)) else F_IN
         cc.number_format=f; ws.cell(r,6,note).font=Font(size=9,color="808080"); r+=1
     DR={s[0]:DCF_ROW+i for i,s in enumerate(DP)}
+    for i in range(NJ,NY):      # 回填营收增速过渡期的收敛目标：永续增长率 g
+        for j in range(3):
+            cc=ws.cell(G_ROW+i,2+j); cc.value=str(cc.value).replace("§G§",f"$B${DR['永续增长率 g']}")
     KE=DR["股权成本 Ke"]; WC=DR["WACC"]
     ws.cell(DR["少数股东利润占比"],2).value=f"=B{GR['少数股东损益占比']}"
     ws.cell(DR["少数股东利润占比"],2).font=F_LNK
@@ -410,6 +489,7 @@ def build(cal: dict, path: str) -> dict:
     r+=1
     ws.freeze_panes="A5"
     cal["_rows"]=dict(SCEN=SCEN,G_ROW=G_ROW,M_ROW=M_ROW,CX_ROW=CX_ROW,GR=GR,OR_=OR_,DR=DR,FN=FN,DG=DG_ROW,DM=DM_ROW,IT=IT_ROWS,
+                      OPEX_ROW=OPEX_ROW,STR=STR,NJ=NJ,
                       HC=HC,CC=CC,BASE=BASE,NH=NH,NY=NY)
 
     # 驱动因子分解：只有当上游（ir-agent 的方法论预研）给出 drivers 时才建表。
@@ -662,7 +742,10 @@ def _sheets(wb, cal, path):
     for row,lbl,item,key in [(RTS,"税金及附加","营业税金及附加","税金及附加率"),(RSE,"销售费用","销售费用","销售费用率"),
         (RAD,"管理费用","管理费用","管理费用率"),(RRD,"研发费用","研发费用","研发费用率"),
         (ROI,"其他收益","其他收益","其他收益 / 营收"),(RII,"投资收益","投资收益","投资收益 / 营收")]:
-        emit(wi,row,lbl,hrow(IS,item),lambda c,i,k=key:f"={c}{RV}*{A}!$B${GR[k]}")
+        if key in R["OPEX_ROW"]:      # 费用率逐年判断（2026-11-16）
+            emit(wi,row,lbl,hrow(IS,item),lambda c,i,k=key:f"={c}{RV}*{A}!$E${R['OPEX_ROW'][k]+i}")
+        else:
+            emit(wi,row,lbl,hrow(IS,item),lambda c,i,k=key:f"={c}{RV}*{A}!$B${GR[k]}")
     emit(wi,RFIN,"财务费用",hrow(IS,"财务费用"),
          lambda c,i:f"=({B_}!{pc(c)}18+{B_}!{pc(c)}21+{B_}!{pc(c)}22)*{A}!$B${GR['有息负债利率']}-{B_}!{pc(c)}6*{A}!$B${GR['现金收益率']}",
          NUM,False,"期初有息负债×利率 − 期初现金×收益率（用期初值，避免循环引用）")
@@ -839,6 +922,10 @@ def _dcf_sheet(wb, cal, path):
     TXr=r; r=put(r,"实际所得税率 t",f"={A}!B{GR['实际所得税率']}",PCT2,False,None,True)
     WDr=r; r=put(r,"债务权重 D/(D+E)",f"={A}!B{DR['债务权重 D/(D+E)']}",PCT2,False,None,True)
     WCr=r; r=put(r,"WACC",f"=(1-B{WDr})*B{KEr}+B{WDr}*B{KDr}*(1-B{TXr})",PCT2,True)
+    BTr=r; r=put(r,"终值 Beta（向 1 收敛）",f"={A}!B{DR['终值 Beta（向 1 收敛）']}","0.000",False,
+                 "Damodaran：成熟公司 Beta 向 1 收敛；只用于终值",True)
+    WTr=r; r=put(r,"终值 WACC（终值 Beta）",f"=(1-B{WDr})*(B{RFr}+B{BTr}*B{ERPr})+B{WDr}*B{KDr}*(1-B{TXr})",PCT2,True,
+                 "终值的分母与 ROIC 收敛基准用它；明确期与终值折现到今天仍用上方 WACC")
     GTr=r; r=put(r,"永续增长率 g",f"={A}!B{DR['永续增长率 g']}",PCT2,False,None,True)
     MYr=r; r=put(r,"期中折现开关（1=期中 0=期末）",f"={A}!B{DR['期中折现开关（1=是 0=否）']}","0",False,"现金流全年均匀发生时取 1",True)
     r+=1
@@ -868,10 +955,15 @@ def _dcf_sheet(wb, cal, path):
     TNr=r; r=put(r,f"{YE[-1]} 营运资本 NWC",f"={B_}!{CC[-1]}31")
     TPr=r; r=put(r,f"{YE[-1]} 固定资产净额",f"={B_}!{CC[-1]}12")
     ICr=r; r=put(r,"投入资本 IC = NWC + 固定资产",f"=B{TNr}+B{TPr}",NUM,True)
-    ROr=r; r=put(r,"终值 ROIC = EBIT×(1−t_term) / IC",f"=B{TEr}*(1-B{TTr})/B{ICr}",PCT2,True,"必须可持续，否则终值不成立")
+    RBr=r; r=put(r,"终值 ROIC（计算值）= EBIT×(1−t_term) / IC",f"=B{TEr}*(1-B{TTr})/B{ICr}",PCT2,False,"把末年超额回报直接永续化")
+    RCr=r; r=put(r,"终值 ROIC（收敛口径）",f"=B{WTr}+{A}!$B${DR['终值 ROIC 收敛溢价（模式2 用）']}",PCT2,False,
+                 "竞争终将侵蚀超额回报：终值 ROIC = 终值 WACC + 溢价")
+    ROr=r; r=put(r,"终值 ROIC（生效）",
+                 f"=IF({A}!$B${DR['终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）']}=2,B{RCr},B{RBr})",PCT2,True,
+                 "必须可持续，否则终值不成立")
     RRr=r; r=put(r,"稳态再投资率 RR = g / ROIC",f"=B{GTr}/B{ROr}",PCT2,True,"Damodaran：g = RR × ROIC，三者不可自由设定")
     TFr=r; r=put(r,"终值 FCFF = EBIT(1+g)(1−t_term)(1−RR)",f"=B{TEr}*(1+B{GTr})*(1-B{TTr})*(1-B{RRr})",NUM,True)
-    TVr=r; r=put(r,"终值 TV = FCFF终 /(WACC − g)",f"=B{TFr}/(B{WCr}-B{GTr})",NUM,True)
+    TVr=r; r=put(r,"终值 TV = FCFF终 /(终值 WACC − g)",f"=B{TFr}/(B{WTr}-B{GTr})",NUM,True)
     PTr=r; r=put(r,"终值现值 PV(TV)",f"=B{TVr}/(1+B{WCr})^({NY}-0.5*B{MYr})",NUM,True)
     r+=1
     r=sec(r,"四、企业价值 → 每股内在价值")
@@ -912,7 +1004,8 @@ def _dcf_sheet(wb, cal, path):
     TMr=r;r=put(r,"模型理论倍数 = 1/(WACC − g)",f"=1/(B{WCr}-B{GTr})",MX)
     r=put(r,"倍数差异（隐含 ÷ 理论）",f"=B{IXr}/B{TMr}",MX,True,"倍数 >1 表示现价隐含的终值远高于模型")
     r+=1
-    r=sec(r,"六、敏感性：每股内在价值（行 = WACC，列 = 永续增长率 g）")
+    r=sec(r,"六、敏感性：每股内在价值（行 = WACC，列 = 永续增长率 g；本表只变终值 g，过渡期增速按基准 g ——"
+            "过渡期跟着 g 变的完整重算见引擎各表）")
     SHROW=r
     w.cell(r,1,"WACC \\ g").font=F_COL; w.cell(r,1).fill=P_B
     GS=[.020,.025,.030,.035,.040]
@@ -924,9 +1017,13 @@ def _dcf_sheet(wb, cal, path):
         for i in range(5):
             col=CL(2+i)
             pv="+".join(f"${CL(2+t)}${FFr}/(1+$A{r})^({t+1}-0.5*$B${MYr})" for t in range(NY))
+            # 终值 WACC = 本行 WACC −（Beta − 终值 Beta）× ERP ×（1 − Wd），与主模型同式
+            wt=f"($A{r}-($B${BEr}-$B${BTr})*$B${ERPr}*(1-$B${WDr}))"
+            roic=(f"IF({A}!$B${DR['终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）']}=2,"
+                  f"{wt}+{A}!$B${DR['终值 ROIC 收敛溢价（模式2 用）']},($B${TEr}*(1-$B${TTr})/$B${ICr}))")
             tf=(f"$B${TEr}*(1+{col}${SHROW})*(1-$B${TTr})"
-                f"*(1-{col}${SHROW}/($B${TEr}*(1-$B${TTr})/$B${ICr}))")
-            tvpv=f"({tf})/($A{r}-{col}${SHROW})/(1+$A{r})^({NY}-0.5*$B${MYr})"
+                f"*(1-{col}${SHROW}/({roic}))")
+            tvpv=f"({tf})/({wt}-{col}${SHROW})/(1+$A{r})^({NY}-0.5*$B${MYr})"
             ev=(f"(({pv})+{tvpv})*(1+$A{r})^$B${RLr}"
                 f"-$B${FFr}*$B${RLr}*(1+$A{r})^($B${RLr}/2)")
             gx=f"({ev}-$B${NDr}+$B${NOr}+$B${FNr})"
@@ -936,6 +1033,7 @@ def _dcf_sheet(wb, cal, path):
         r+=1
     r+=1
     _engine(wb, cal, dict(WC=WCr,GT=GTr,MY=MYr,TT=TTr,RL=RLr,ND=NDr,NO=NOr,MM=MMr,MS=MSr,SH=SHr,
+                          BE=BEr,BT=BTr,ER=ERPr,WD=WDr,
                           FN=FNr,PS=PSr,PR=PRr,EV0=EV0,SHROW=SHROW,GSTART=r))
     _ratios(wb, cal, dict(WC=WCr,TT=TTr))
     wb.save(path)
@@ -953,11 +1051,12 @@ def _engine(wb, cal, D_):
     M,PR,GEN,DC = cal["meta"],cal["periods"],cal["gen"],cal["dcf"]
     R=cal["_rows"]; GR,OR_,DR,FN = R["GR"],R["OR_"],R["DR"],R["FN"]
     NY=R["NY"]; CX_ROW=R["CX_ROW"]; G_ROW=R["G_ROW"]; M_ROW=R["M_ROW"]; IT_=R.get("IT") or {}
+    OPR=R["OPEX_ROW"]; NJ=R["NJ"]
     A="'1_假设'"; E="'6_敏感性引擎'"; DS="'5_DCF'"
     w=wb.create_sheet("6_敏感性引擎"); w.sheet_properties.tabColor="7F7F7F"
     w.column_dimensions["A"].width=10
     for i in range(2,4): w.column_dimensions[CL(i)].width=11
-    w.cell(1,1,f"{M['name']} {M['code']} — 敏感性引擎（每行 = 一次完整 5 年 FCFF 重算）").font=Font(bold=True,size=13,color=NAVY)
+    w.cell(1,1,f"{M['name']} {M['code']} — 敏感性引擎（每行 = 一次完整 {NY} 年 FCFF 重算）").font=Font(bold=True,size=13,color=NAVY)
     w.cell(2,1,"本页为计算中间层，不需要手工编辑；「5_DCF」页的敏感性表从这里取数。改「1_假设」后本页自动重算。").font=Font(size=9,italic=True,color="808080")
 
     # ---- 基期锚点 ----
@@ -967,7 +1066,7 @@ def _engine(wb, cal, D_):
     anchors=[("基期营业总收入",f"={A}!B{OR_['基期营业总收入']}"),
              ("期初固定资产净额",f"={A}!B{OR_['固定资产净额']}"),
              ("期初 NWC",f"={A}!B{OR_['应收票据及应收账款']}+{A}!B{OR_['存货']}+{A}!B{OR_['其他流动资产']}-{A}!B{OR_['应付票据及应付账款']}-{A}!B{OR_['其他流动负债']}"),
-             ("经营费用率合计",f"={A}!B{GR['税金及附加率']}+{A}!B{GR['销售费用率']}+{A}!B{GR['管理费用率']}+{A}!B{GR['研发费用率']}"),
+             ("税金及附加率",f"={A}!B{GR['税金及附加率']}"),
              ("其他收益+其他经营损益率",f"={A}!B{GR['其他收益 / 营收']}+{A}!B{GR['其他经营损益 / 营收']}"),
              ("非现金其他经营损益率",f"=-{A}!B{GR['其他经营损益 / 营收']}"),
              ("减值减记固定资产占比",f"={A}!B{GR['非现金减值减记中固定资产占比']}"),
@@ -986,7 +1085,11 @@ def _engine(wb, cal, D_):
              ("少数股东占比",f"={DS}!B{D_['MS']}"),
              ("账面少数股东权益",f"={A}!B{OR_['少数股东权益']}"),
              ("总股本",f"={DS}!B{D_['SH']}"),
-             ("募资净额现值",f"={DS}!B{D_['FN']}")]
+             ("募资净额现值",f"={DS}!B{D_['FN']}"),
+             ("终值ROIC模式",f"={A}!B{DR['终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）']}"),
+             ("终值ROIC溢价",f"={A}!B{DR['终值 ROIC 收敛溢价（模式2 用）']}"),
+             ("Beta",f"={DS}!B{D_['BE']}"),("终值Beta",f"={DS}!B{D_['BT']}"),
+             ("ERP",f"={DS}!B{D_['ER']}"),("债务权重",f"={DS}!B{D_['WD']}")]
     _BY=f"{A}!$B${FN['募投资本开支建设期（年）']}"; _YR=f"{A}!$B${FN['到账年份序号（1=首个预测年）']}"
     _UC=f"{A}!$B${FN['投向 — 资本开支（亿元）']}"
     anchors += [(f"募投资本开支{t}",
@@ -1043,13 +1146,21 @@ def _engine(wb, cal, D_):
                 elif mode=="gm_gterm":gexp=LG; gmexp=lambda t:f"({LM(t)}+{_d(t,f'$B{r}')})"; wexp=LW; gtexp=f"$C{r}"
                 elif mode=="g_gm":    gexp=lambda t:f"({LG(t)}+{_d(t,f'$B{r}')})"; gmexp=lambda t:f"({LM(t)}+{_d(t,f'$C{r}')})"; wexp=LW; gtexp=LGT
                 else:                 gexp=LG; gmexp=lambda t:f"({LM(t)}+{_d(t,f'$C{r}')})"; wexp=f"$B{r}"; gtexp=LGT
+                if gtexp!=LGT and NY>NJ:
+                    # 本表变动永续 g：过渡期增速也收敛到本行的 g（与假设页的过渡期公式同一规则）
+                    _g0=gexp
+                    gexp=(lambda t,_g0=_g0,_gt=gtexp: _g0(t) if t<=NJ else
+                          f"({_g0(NJ)}+({_gt}-{_g0(NJ)})*{t-NJ}/{NY-NJ})")
+                wt=(f"({wexp}-($B${AR_['Beta']}-$B${AR_['终值Beta']})*$B${AR_['ERP']}"
+                    f"*(1-$B${AR_['债务权重']}))")
+                OPX=lambda t:("("+"+".join(f"{A}!$E${OPR[l]+t-1}" for l in OPR)+f"+$B${AR_['税金及附加率']})")
                 for t in range(1,NY+1):
                     prev_rev = f"$B${AR_['基期营业总收入']}" if t==1 else f"{yc(t-1,0)}{r}"
                     prev_ppe = f"$B${AR_['期初固定资产净额']}" if t==1 else f"{yc(t-1,3)}{r}"
                     prev_nwc = f"$B${AR_['期初 NWC']}" if t==1 else f"{yc(t-1,6)}{r}"
                     w[f"{yc(t,0)}{r}"]=f"={prev_rev}*(1+{gexp(t)})"                                   # 营收
                     w[f"{yc(t,1)}{r}"]=f"={yc(t,0)}{r}*(1-{gmexp(t)})"                                # 成本
-                    w[f"{yc(t,2)}{r}"]=(f"={yc(t,0)}{r}-{yc(t,1)}{r}-{yc(t,0)}{r}*$B${AR_['经营费用率合计']}"
+                    w[f"{yc(t,2)}{r}"]=(f"={yc(t,0)}{r}-{yc(t,1)}{r}-{yc(t,0)}{r}*{OPX(t)}"
                                         f"+{yc(t,0)}{r}*$B${AR_['其他收益+其他经营损益率']}")                    # EBIT
                     w[f"{yc(t,4)}{r}"]=f"={prev_ppe}*$B${AR_['折旧率']}"                               # 折旧
                     w[f"{yc(t,5)}{r}"]=(f"={yc(t,0)}{r}*{A}!$E${CX_ROW+t-1}"
@@ -1070,10 +1181,11 @@ def _engine(wb, cal, D_):
                 pv="+".join(f"{yc(t,7)}{r}/(1+{wexp})^({t}-0.5*$B${AR_['期中折现开关']})" for t in range(1,NY+1))
                 w[f"{SC['PV']}{r}"]=f"={pv}"
                 _tebit=(f"({yc(NY,2)}{r}+{yc(NY,0)}{r}*$B${AR_['非现金其他经营损益率']})")   # 正常化终值 EBIT
-                w[f"{SC['ROIC']}{r}"]=f"={_tebit}*(1-$B${AR_['终值税率']})/({yc(NY,6)}{r}+{yc(NY,3)}{r})"
+                w[f"{SC['ROIC']}{r}"]=(f"=IF($B${AR_['终值ROIC模式']}=2,{wt}+$B${AR_['终值ROIC溢价']},"
+                                      f"{_tebit}*(1-$B${AR_['终值税率']})/({yc(NY,6)}{r}+{yc(NY,3)}{r}))")
                 w[f"{SC['RR']}{r}"]=f"={gtexp}/{SC['ROIC']}{r}"
                 w[f"{SC['TF']}{r}"]=f"={_tebit}*(1+{gtexp})*(1-$B${AR_['终值税率']})*(1-{SC['RR']}{r})"
-                w[f"{SC['TV']}{r}"]=f"={SC['TF']}{r}/({wexp}-{gtexp})"
+                w[f"{SC['TV']}{r}"]=f"={SC['TF']}{r}/({wt}-{gtexp})"
                 w[f"{SC['PVTV']}{r}"]=f"={SC['TV']}{r}/(1+{wexp})^({NY}-0.5*$B${AR_['期中折现开关']})"
                 w[f"{SC['EV0']}{r}"]=f"={SC['PV']}{r}+{SC['PVTV']}{r}"
                 w[f"{SC['EV']}{r}"]=(f"={SC['EV0']}{r}*(1+{wexp})^$B${AR_['滚动年数']}"

@@ -95,8 +95,11 @@ def simulate(inp: dict, P: dict) -> dict:
     IPS=G.get("非现金减值减记中固定资产占比",1.0)
     n=int(P["n_paths"]); rng=np.random.default_rng(int(P["seed"]))
 
-    g_live=np.array(inp["growth"],dtype=float); m_live=np.array(inp["gm"],dtype=float)
-    cx_live=np.array(inp["capex"],dtype=float)
+    import ashare_verify as _V
+    full=_V.expand_paths(inp)          # 判断期 + 过渡期向稳态收敛（与 recompute 同一来源，2026-11-16）
+    g_live=np.array(full["growth"],dtype=float); m_live=np.array(full["gm"],dtype=float)
+    cx_live=np.array(full["capex"],dtype=float)
+    opx_live=np.array(full["sell"],dtype=float)+np.array(full["admin"],dtype=float)+np.array(full["rd"],dtype=float)
     anchored = bool(IT and IT["sw"]==1)
     if anchored:                       # 首年被已披露中期锁定（与 verify.recompute 一致）
         g_live[0]=IT["fy_rev"]/o["基期营业总收入"]-1
@@ -117,12 +120,15 @@ def simulate(inp: dict, P: dict) -> dict:
     W=(1-D["债务权重 D/(D+E)"])*ke + D["债务权重 D/(D+E)"]*D["债务成本 Kd"]*(1-tax)
     gt=np.clip(rng.normal(D["永续增长率 g"],P["sd_gt"],n), P["lo_gt"], None)
     gt_raw=gt.copy()
-    gt=np.minimum(gt, W-P["gap_gt"])                      # 逐路径保证 WACC−g 有下界
+    # 终值 WACC：终值 Beta 向 1（不随机），与 recompute 同式
+    WT=((1-D["债务权重 D/(D+E)"])*(D["无风险利率 Rf"]+D["终值 Beta（向 1 收敛）"]*D["股权风险溢价 ERP"])
+        +D["债务权重 D/(D+E)"]*D["债务成本 Kd"]*(1-tax))
+    gt=np.minimum(gt, WT-P["gap_gt"])                     # 逐路径保证 终值WACC−g 有下界
     rej_g=float((gt_raw>gt).mean())
     clipped=float(max(rej_gm, rej_b, rej_t, rej_c, rej_g))
     rej_detail=dict(增速与毛利率=rej_gm, Beta=rej_b, 实际税率=rej_t, 资本开支=rej_c, 永续g=rej_g)
 
-    opex=G["税金及附加率"]+G["销售费用率"]+G["管理费用率"]+G["研发费用率"]
+    tsur=G["税金及附加率"]
     oth=G["其他收益 / 营收"]+G["其他经营损益 / 营收"]
     rev=np.full(n,o["基期营业总收入"]); ppe=np.full(n,o["固定资产净额"])
     nwc_prev=np.full(n, o["应收票据及应收账款"]+o["存货"]+o["其他流动资产"]
@@ -135,7 +141,7 @@ def simulate(inp: dict, P: dict) -> dict:
         else:
             rev=rev*(1+g_live[t]+dg+eg[t])
             cogs=rev*(1-(m_live[t]+dm+em[t]))
-        ebit=rev-cogs-rev*opex+rev*oth
+        ebit=rev-cogs-rev*(tsur+opx_live[t])+rev*oth
         dep=ppe*G["折旧率（占期初固定资产净额）"]
         amt=rev*G["无形摊销 / 营收"]      # 折旧/摊销拆分后 MC 一直漏了摊销，与确定性模型不一致
         fcx=(F["ucx"]/F["by"]) if (F["by"]>0 and F["yr"]<=t+1<=F["yr"]+F["by"]-1) else 0.0
@@ -150,13 +156,13 @@ def simulate(inp: dict, P: dict) -> dict:
         pv+=fcff/(1+W)**(t+1-0.5*MY)
     tt=D["终值所得税率 t_term"]
     nopat_T=(ebit+ncx)*(1-tt)          # 正常化终值 EBIT
-    roic=nopat_T/(nwc+ppe)
+    roic=(WT+D["终值 ROIC 收敛溢价"])*np.ones_like(nopat_T) if D["终值 ROIC 处理"]==2 else nopat_T/(nwc+ppe)
     rr=np.where(roic>0, gt/np.where(roic>0,roic,1.0), np.inf)
     # ROIC ≤ WACC 时增长不创造价值，Gordon 式 (1−g/ROIC) 会失真甚至变负。
     # 经济上正确的处理是降级为【无增长永续】TV = NOPAT / WACC。
-    degrade = (roic<=W) | (rr>=1) | (rr<0) | ~np.isfinite(rr)
+    degrade = (roic<=WT) | (rr>=1) | (rr<0) | ~np.isfinite(rr)
     tf_gordon=nopat_T*(1+gt)*(1-np.where(np.isfinite(rr),rr,0.0))
-    tv=np.where(degrade, nopat_T/W, tf_gordon/(W-gt))
+    tv=np.where(degrade, nopat_T/WT, tf_gordon/(WT-gt))
     neg_ebit=float((ebit<=0).mean()); degraded=float(degrade.mean())
     pvtv=tv/(1+W)**(ny-0.5*MY)
     ev0=pv+pvtv
@@ -196,13 +202,14 @@ def _shifted(inp, P, key, shift):
     """把某个变量的均值平移 shift，其余不随机，返回单路径每股价值。"""
     import copy
     inp2=copy.deepcopy(inp); P2=dict(P); P2["n_paths"]=1
-    if key=="sd_g":     inp2["growth"]=[x+shift for x in inp["growth"]]
+    J=inp2.get("judged") or inp2      # 重算经 expand_paths 展开判断期；平移判断期的数才生效
+    if key=="sd_g":     J["growth"]=[x+shift for x in J["growth"]]
 
-    elif key=="sd_m":   inp2["gm"]=[x+shift for x in inp["gm"]]
+    elif key=="sd_m":   J["gm"]=[x+shift for x in J["gm"]]
 
     elif key=="sd_beta":inp2["dcf"]=dict(inp["dcf"]); inp2["dcf"]["Beta（5年"]+=shift
     elif key=="sd_gt":  inp2["dcf"]=dict(inp["dcf"]); inp2["dcf"]["永续增长率 g"]+=shift
-    elif key=="sd_cx":  inp2["capex"]=[x+shift for x in inp["capex"]]
+    elif key=="sd_cx":  J["capex"]=[x+shift for x in J["capex"]]
     elif key=="sd_tax": inp2["gen"]=dict(inp["gen"]); inp2["gen"]["实际所得税率"]+=shift
     return float(simulate(inp2, P2)["ps"][0])
 
