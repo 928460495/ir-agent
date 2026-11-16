@@ -73,6 +73,13 @@ def checklist(a, balances=()) -> list[tuple[str, str]]:
         items += [("平衡点", _subject(f)) for f in m.factors if f.label in mids]
         items += [("依据", _subject(f)) for f in m.factors]
     items += [("合成", "营收"), ("合成", "毛利率"), ("后果", "营收路径")]
+    if getattr(a, "opex_rows", None) or getattr(a, "steady_rows", None):
+        # 费用率与稳态值（2026-11-16）。只在填了才扩充 —— 实跑回放与旧文件没有这两块
+        from ir_agent import opex_judg as OJ
+        for it in OJ.OPEX_ITEMS[a.market]:
+            items += [("取值", it), ("依据", it)]
+        items += [("取值", it) for it in OJ.steady_items(a.market)]
+        items += [("依据", "稳态值"), ("合成", "营业利润率"), ("后果", "稳态营业利润率")]
     return items
 
 
@@ -137,6 +144,13 @@ RULES = """你是研究总监，正在审核一份 **DCF 判断项**（营收与
   加上平移量 —— 那是代码的处理，不要当成引擎错误。
 - 后果：5 年累计倍数、隐含市占率，放到行业格局、产能、CR5、周转与杠杆（账本事实
   目录里有）下看是否可能。
+- 费用率（取值、依据两类下的各费用率科目）：成本项悲观 ≥ 中性 ≥ 乐观；对照代码给的逐年历史看**趋势**
+  —— 处在经营杠杆释放期的公司，费用率取历史均值等于让利润率倒退（PLTR：销售及管理费用率五年间
+  79.5% → 38.3%，取近 3 年均值 49% 会把营业利润率从 31.6% 拉回 19%）；成熟公司平线是合理的。
+- 稳态值（取值类下的各稳态项、依据类下的「稳态值」）：公司成熟后的长期水平，第 6–10 年按线性收敛过去。
+  稳态毛利率与费用率应参照同业成熟公司；终值ROIC溢价体现护城河（参照 3%），过高等于把超额回报永续化。
+- 营业利润率（合成类）：代码给的三档路径（毛利率 − 各费用率）是否与历史趋势衔接、是否单调拉开；
+  稳态营业利润率（后果类）：放到同业成熟水平下看是否可能。
 
 **每条一行，格式严格如下**（结论、理由、建议之间用全角空格）：
 
@@ -154,7 +168,8 @@ RULES = """你是研究总监，正在审核一份 **DCF 判断项**（营收与
 """
 
 
-def facts_for_judge(a, *, balances=(), ledger=None, as_of=None, anchor=None) -> str:
+def facts_for_judge(a, *, balances=(), ledger=None, as_of=None, anchor=None,
+                    judg: dict | None = None) -> str:
     """只给审核者看的、代码现算的事实（spec 二）。"""
     from ir_agent import assume
 
@@ -183,6 +198,25 @@ def facts_for_judge(a, *, balances=(), ledger=None, as_of=None, anchor=None) -> 
                     lines.append(f"- 第{y + 1}年 {cn} {v}（悲观 / 中性 / 乐观）")
         except assume.AssumeFailed as e:
             lines.append(f"- 算不出来：{e}")
+    if getattr(a, "opex_rows", None):
+        from ir_agent import opex_judg as OJ
+        gm_case: dict = {}
+        try:
+            if m is not None and facts is not None and not facts.blocking:
+                for c, k in ((assume.Case.BEAR, "bear"), (assume.Case.BASE, "base"), (assume.Case.BULL, "bull")):
+                    gm_case[k] = assume.synthesize(a, c, a.base_margin if a.base_margin is not None
+                                                   else Decimal(0), a.margin_bases)[1]
+            elif m is None:
+                gm_case = {k: a.path("gm", c) for c, k in ((assume.Case.BEAR, "bear"),
+                                                            (assume.Case.BASE, "base"),
+                                                            (assume.Case.BULL, "bull"))}
+        except assume.AssumeFailed:
+            gm_case = {}
+        for r in sorted(a.opex_rows + a.steady_rows, key=lambda x: (x.driver, x.year)):
+            when = "稳态" if r.year == 0 else f"第{r.year}年"
+            lines.append(f"- {OJ.row_label(r)} {when}：原文 {' / '.join(r.raw) if r.raw else '（无原文）'}"
+                         f" → 读作 " + " / ".join(f"{v:.2%}" for v in (r.bear, r.base, r.bull)))
+        lines += OJ.margin_lines(a, gm_case, judg)
     if anchor:
         lines += _anchor_lines(a, anchor)
     if a.implied is not None:
@@ -351,7 +385,7 @@ def fill_and_review(filler, judge, *, judg: dict, labels: list[str], context: st
         if model is not None and not facts.blocking:
             a.residuals = assume._reconcile_model(model, ledger, as_of)
         ftxt = facts_for_judge(a, balances=balances, ledger=ledger, as_of=as_of,
-                               anchor=anchor)
+                               anchor=anchor, judg=judg)
         try:
             res = review(judge, draft=raw, materials=materials, facts=ftxt,
                          catalog=catalog, expected=checklist(a, balances),

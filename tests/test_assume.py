@@ -159,7 +159,8 @@ def test_提示词点明边界与拉开():
     txt = assume.build_prompt({"g_stats": (0.1, 0.05, 0.0, 0.2), "cagr3": 0.12,
                                "gm_stats": (0.15, 0.02, 0.12, 0.18),
                                "gm_hist": [0.14]}, ["2026E"], "上下文")
-    assert "你只填这两项" in txt and "严格拉开" in txt
+    # 2026-11-16 起费用率与稳态值也由 AI 判断；其余校准项的边界仍要写明
+    assert "费用率与稳态值" in txt and "由历史财务数据校准" in txt and "严格拉开" in txt
     assert "不是理由" in txt          # 不许复述历史当依据
 
 

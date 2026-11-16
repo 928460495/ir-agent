@@ -180,3 +180,86 @@ def row_from_dict(x: dict, edits: list[str]):
             edits.append(f"{row_label(r)} {when} {case}：模型给 {p[case]}，核实后改为 {getattr(r, case)}")
     return r
 
+
+
+# ── 第③步：提示词段落与审核事实 ───────────────────────────────────
+
+
+def _pct(x) -> str:
+    return f"{float(x) * 100:.1f}%"
+
+
+def history_lines(market: str, judg: dict) -> list[str]:
+    """各科目逐年历史费用率、最新一年、近 3 年均值（旧的默认口径，作对照）、同业中位数。"""
+    hist = (judg or {}).get("opex_hist") or {}
+    years = hist.get("years") or []
+    peers = (judg or {}).get("opex_peer_median") or {}
+    out = []
+    for item in OPEX_ITEMS[market]:
+        xs = [x for x in (hist.get(item) or []) if x is not None]
+        if not xs:
+            out.append(f"  - {item}：历史：无" + (f"；同业中位数 {_pct(peers[item])}" if item in peers else ""))
+            continue
+        series = "、".join(f"{y} {_pct(x)}" for y, x in zip(years[-len(xs):], xs))
+        tail = xs[-3:]
+        out.append(f"  - {item}：{series}；最新 {_pct(xs[-1])}；近3年均值 {_pct(sum(tail) / len(tail))}"
+                   + (f"；同业中位数 {_pct(peers[item])}" if item in peers else ""))
+    return out
+
+
+def prompt_section(market: str, judg: dict) -> str:
+    items = OPEX_ITEMS[market]
+    steady = steady_items(market)
+    return "\n".join([
+        "**费用率与稳态值（也由你判断）**",
+        "",
+        f"费用率分项（{'、'.join(items)}）第 1–{JUDGED_YEARS} 年逐年三档。下面是逐年历史，"
+        "**看趋势，不要简单取均值**：近 3 年均值在费用率单向变化的公司身上会抹掉经营杠杆"
+        "（或掩盖费用率回升）。",
+        *history_lines(market, judg),
+        "",
+        f"稳态值（各一行，年份写「稳态」）：{'、'.join(steady)}。第 6–10 年是过渡期，代码按规则把"
+        "增速线性回落到永续增长率、把毛利率与各费用率线性收敛到你给的稳态值 —— **你不用填第 6–10 年**。"
+        "稳态值是公司成熟后的长期水平，参照同业成熟公司；终值ROIC溢价是成熟后投入资本回报率超出 WACC"
+        "的部分（护城河越宽越高，参照 3%）。",
+        "",
+        "**三档方向**：费用率是成本项，**悲观 ≥ 中性 ≥ 乐观**（悲观费用率更高）；稳态毛利率与终值ROIC溢价"
+        "是收益项，悲观 ≤ 中性 ≤ 乐观。单位一律带 %（如 38.3%）。",
+        "",
+        "`假设: <费用率科目> | 第N年 | <悲观> | <中性> | <乐观> | 理由与依据`",
+        "`假设: <稳态项> | 稳态 | <悲观> | <中性> | <乐观> | 理由与依据`",
+    ])
+
+
+def margin_lines(a, gm_by_case: dict, judg: dict | None = None) -> list[str]:
+    """【营业利润率】三档逐年 = 毛利率 − Σ费用率（不含代码校准的其他经营损益）；稳态同式。
+
+    `gm_by_case`：{"bear"|"base"|"bull": [第1..5年毛利率]}。"""
+    if not a.opex_rows:
+        return []
+    by = {}
+    for r in a.opex_rows:
+        by.setdefault(r.year, []).append(r)
+    out = ["", "【营业利润率】（毛利率 − 各费用率，悲观 / 中性 / 乐观；不含其他经营损益）"]
+    for y in sorted(by):
+        vals = []
+        for c in ("bear", "base", "bull"):
+            gm = gm_by_case.get(c) or []
+            if len(gm) < y:
+                break
+            vals.append(float(gm[y - 1]) - sum(float(getattr(r, c)) for r in by[y]))
+        if len(vals) == 3:
+            out.append(f"- 第{y}年 营业利润率 " + " / ".join(f"{v:.2%}" for v in vals))
+    st = {r.driver.split(":", 1)[1]: r for r in a.steady_rows}
+    if STEADY_GM in st and all(("稳态" + x) in st for x in OPEX_ITEMS.get(a.market, ())):
+        vals = [float(getattr(st[STEADY_GM], c))
+                - sum(float(getattr(st["稳态" + x], c)) for x in OPEX_ITEMS[a.market])
+                for c in ("bear", "base", "bull")]
+        out.append("- 稳态 营业利润率 " + " / ".join(f"{v:.2%}" for v in vals))
+    hist = (judg or {}).get("opex_hist") or {}
+    gmh = (judg or {}).get("gm_hist") or []
+    if gmh and all(hist.get(x) for x in OPEX_ITEMS.get(a.market, ())):
+        last = float(gmh[-1]) - sum(float(hist[x][-1]) for x in OPEX_ITEMS[a.market])
+        yrs = hist.get("years") or ["最新"]
+        out.append(f"- {yrs[-1]} 营业利润率参照（历史实际，同口径）{last:.2%}")
+    return out
