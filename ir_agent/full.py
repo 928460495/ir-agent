@@ -1865,6 +1865,24 @@ def _review_stage(arts: dict):
         "但估值尚无从谈起")
 
 
+def _judged_labels(cal: dict) -> list[str]:
+    """第③步只判断前五年（opex_judg.JUDGED_YEARS）；第 6–10 年是过渡期，由工作簿公式按规则收敛。"""
+    from ir_agent.opex_judg import JUDGED_YEARS
+
+    return list((cal.get("periods") or {}).get("proj") or [])[:JUDGED_YEARS]
+
+
+def _require_opex(a, path) -> None:
+    """第④步：判断项里必须有费用率与稳态值（2026-11-16 起）。旧文件或没填的，明确停下 —— 不悄悄用
+    近 3 年均值顶替（PLTR：那正是营业利润率从 31.6% 退回 19% 的原因）。"""
+    if not getattr(a, "market", ""):
+        raise SystemExit(f"{path} 是旧格式的判断项（没有费用率与稳态值）—— 请重跑第③步"
+                         "（--assume），由 AI 补填费用率三档与稳态值、经审核后再签门③。")
+    if not a.opex_rows or not a.steady_rows:
+        raise SystemExit(f"{path} 里没有费用率或稳态值 —— 请重跑第③步（--assume）补填，"
+                         "或按 assumptions.md 的格式在 assumptions.json 里补上 opex_rows / steady_rows。")
+
+
 def _stop_if_uncomputable(facts) -> None:
     """第二阶段唯一会停下的情况：批准的判断项**算不下去**（缺年份、缺基期、重复
     行、公式算不动 —— 多半是人手改坏了 JSON）。内容上的问题（三档、单调、依据、
@@ -2668,7 +2686,7 @@ def _propose_assumptions(code, r, body, md, as_of, out, client, arts,
     except dcf.DcfUnavailable as e:
         return f"DCF 判断项（校准失败：{e}）"
 
-    labels = (cal.get("periods") or {}).get("proj") or []
+    labels = _judged_labels(cal)
     ctx = "\n\n".join(f"【{k}】\n{v}" for k, v in md.items() if v)
     # 加法链（毛利率）的基期水平——与 assume.apply_to/to_driver_block
     # 里用的必须是同一个数，否则第一阶段判断项的口径与第二阶段建模的
@@ -2832,6 +2850,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     if not a.rows:
         raise SystemExit(
             f"{js} 里没有判断项 —— 请先跑完第一阶段。")
+    _require_opex(a, js)
     # 分解模式下重新校验要用同一套 decomps/base_margin，否则 check()
     # 会退回两标量分支，把因子模式的行误判成「营收增速缺第 N 年」而
     # 拒绝建模——那不是假设真的不合法，是校验用错了口径。

@@ -40,6 +40,9 @@ from ir_agent.ledger import Fact, FactLedger, LookAheadError, Method
 ENV_DIR = "ASHARE_DCF_DIR"
 DEFAULT_DIR = Path(__file__).resolve().parent.parent / "ashare-dcf"
 
+# 预测期（spec 2026-11-16）：第 1–5 年判断项，第 6–10 年按规则向稳态收敛（工作簿活公式）
+HORIZON = 10
+
 YI = Decimal("100000000")          # ashare-dcf 以亿元计，账本以元计
 
 # 交叉核对的容忍度。两边取的是同一份公告数字，**差异只会来自口径或单位**，
@@ -183,6 +186,10 @@ class DcfResult:
         at = f"@{per}" if per else ""
         lines.append(f"  每股内在价值 [[valuation.value_per_share{at}]]　"
                      f"现价 [[valuation.price{at}]]")
+        # 写中文数字：这一行进研报提示词，阿拉伯数字会被裸数字审计判掉
+        lines.append("  预测期十年：第一至五年为人批准的判断项；第六至十年为过渡期，营收增速线性回落到"
+                     "永续增长率、毛利率与费用率线性收敛到稳态值；终值 ROIC 收敛至终值 WACC 加溢价，"
+                     "终值 Beta 向一收敛")
         lines.append(f"  WACC [[valuation.wacc{at}]]　终值 ROIC "
                      f"[[valuation.terminal_roic{at}]]　"
                      f"终值占企业价值 [[valuation.terminal_share{at}]]")
@@ -515,8 +522,9 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
         # 「Δ」是 1_假设 里人有意加的整体偏移，read_inputs 已经并进了
         # 逐年值。它不是错位，扣掉再比。
         delta = float(inp.get(dkey) or 0.0)
-        got = [float(x) - delta for x in (inp.get(key) or [])]
         want = [float(x) for x in (judg.get(key) or [])]
+        # 只比判断期：工作簿第 6–10 年是过渡期公式，不是人批准的数（2026-11-16）
+        got = [float(x) - delta for x in (inp.get(key) or [])][:len(want)]
         if _close(got, want, tol):
             continue
         scen = judg.get(f"{key}_scen") or {}
@@ -536,7 +544,7 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
 
 
 def run(code: str, out_dir: str | Path, *, as_of: date,
-        ledger: FactLedger | None = None, years: int = 5,
+        ledger: FactLedger | None = None, years: int = HORIZON,
         dirpath: Path | None = None, assumptions=None,
         approved_by: str = "") -> DcfResult:
     """跑一遍 ashare-dcf，返回结果与全部警告。
@@ -564,10 +572,10 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
             notes.append("工作簿含「1b_驱动分解」表，"
                          "改一个因子会带动整条估值链重算")
         notes.append(
-            "营收增速与毛利率三档由分析结论填入"
+            "营收增速、毛利率、费用率三档与稳态值由分析结论填入"
             + (f"，经 {approved_by} 核实" if approved_by else
                "，**未经人工核实**")
-            + "；其余假设（费用率、周转天数、折旧率、税率、β、Kd）"
+            + "；其余假设（周转天数、折旧率、税率、β、Kd）"
             "由历史财务数据校准。")
     else:
         # 模板默认三档同值。不说出来，读者会以为那是三个不同的情景。
