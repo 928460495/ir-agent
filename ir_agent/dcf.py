@@ -484,7 +484,35 @@ def _anchor_note(judg: dict, inp: dict) -> str:
               "——但待核实清单、终端与研报都是按批准值讲的，这个差异必须让人看见")
 
 
-def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
+_OPEX_KEY = {"研发费用率": "rd", "销售及管理费用率": "sga", "销售费用率": "sell", "管理费用率": "admin"}
+
+
+def _readback_opex(judg: dict, inp: dict, tol: float) -> list[str]:
+    """费用率与稳态值也要回读（终审 I5）：建表时键名对不上会悄悄退回校准值，验算器读的是工作簿，发现不了。"""
+    out: list[str] = []
+    J = inp.get("judged") or {}
+
+    def judge(cn, got, scen):
+        if _close(got, [float(x) for x in scen.get("base") or []], tol):
+            return
+        hit = next((n for n, v in scen.items() if _close(got, [float(x) for x in v], tol)), "")
+        out.append(f"工作簿的{cn}用的是{_SCEN_CN.get(hit, hit)}档，不是批准清单定案的中性档" if hit else
+                   f"工作簿的{cn}与人工批准的对不上：工作簿 {got} —— 人批准的数没有进到真正参与估值的地方，"
+                   "**本结果不可采信**")
+    for item, scen in (judg.get("opex_scen") or {}).items():
+        k = _OPEX_KEY.get(item)
+        if k and k in J:
+            want = scen.get("base") or []
+            judge(item, [float(x) for x in J[k]][:len(want)], scen)
+    st = inp.get("steady") or {}
+    for item, scen in (judg.get("steady") or {}).items():
+        k = "gm" if item == "稳态毛利率" else _OPEX_KEY.get(item.replace("稳态", "", 1))
+        if k and k in st:
+            judge(item, [float(st[k])], {c: [v] for c, v in scen.items()})
+    return out
+
+
+def _readback_check(judg: dict, inp: dict, tol: float = 1e-9, code: str = "") -> list[str]:
     """建完表再回读一遍：工作簿里真正参与估值的数，是不是人批准的那几个。
 
     **闸门查的都是「用得对不对」，没有一道查「结果对不对」。** 人工批准
@@ -540,7 +568,7 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9) -> list[str]:
                 f"工作簿的{cn}与人工批准的对不上：批准 {want}，工作簿 "
                 f"{got} —— 人批准的数没有进到真正参与估值的地方，"
                 f"**本结果不可采信**")
-    return problems
+    return problems + _readback_opex(judg, inp, tol)
 
 
 def run(code: str, out_dir: str | Path, *, as_of: date,

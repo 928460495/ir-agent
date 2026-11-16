@@ -133,3 +133,16 @@ def test_蒙特卡洛零波动复现确定性结果(built):
     out = MC.simulate(inp, P)
     _, dv = V.recompute(inp)
     assert abs(float(out["ps"].mean()) - dv["ps"]) < 1e-6 * max(1.0, abs(dv["ps"]))
+
+
+def test_全局营收增速Δ不为零时引擎与主模型一致(tmp_path):
+    """终审 I2：引擎变动 g 的模块里，过渡期从「第 5 年生效值 + 本行 Δ」收敛到本行 g，Δ 在第 10 年消失；
+    主模型 Δ 加在每一年 —— 中心格对不上，验算失败。"""
+    p = _build(tmp_path, cal10(opex_scen=OPEX, steady=STEADY), "d.xlsx")
+    wb = load_workbook(p); a = wb["1_假设"]; m = _rows(a)
+    k = next(x for x in m if isinstance(x, str) and x.startswith("营收增速 Δ"))
+    a.cell(m[k], 2).value = 0.01
+    wb.save(p)
+    fails = V.verify(p, quiet=True)
+    fails = fails[0] if isinstance(fails, tuple) else fails
+    assert fails == []

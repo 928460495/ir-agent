@@ -440,6 +440,8 @@ class AssumptionSet:
             lines += self._describe_factors()
         else:
             lines += self._describe_scalar()
+        from ir_agent import opex_judg as OJ
+        lines += [""] + OJ.describe_lines(self)
         return "\n".join(lines)
 
     def _describe_scalar(self) -> list[str]:

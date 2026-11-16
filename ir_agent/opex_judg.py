@@ -114,8 +114,8 @@ def check(a) -> tuple[list[str], list[str]]:
     if not a.opex_rows and not a.steady_rows:
         # 整块没填（旧文件、实跑回放、或 AI 完全漏掉）：不在这里拦 —— 交审核者，第④步读到没有费用率的
         # 判断项文件时明确停下（见 full 的建模入口）。只填了一部分才是「算不下去」。
-        return [], [f"没有填费用率（{'、'.join(OPEX_ITEMS[market])}）与稳态值 —— 将按校准值"
-                    "（近 3 年均值、第 5 年值永续）建模，未经判断"]
+        return [], [f"没有填费用率（{'、'.join(OPEX_ITEMS[market])}）与稳态值 —— 第④步会停下，"
+                    "需要补填（不会按近 3 年均值顶替）"]
     have = {(r.driver.split(":", 1)[1], r.year) for r in a.opex_rows}
     for item in OPEX_ITEMS[market]:
         miss = [y for y in range(1, JUDGED_YEARS + 1) if (item, y) not in have]
@@ -133,6 +133,10 @@ def check(a) -> tuple[list[str], list[str]]:
                 problems.append(f"{where}三档方向不对（成本项应 悲观 ≥ 中性 ≥ 乐观：{r.bear} / {r.base} / {r.bull}）")
         elif not (r.bear <= r.base <= r.bull):
             problems.append(f"{where}三档方向不对（应 悲观 ≤ 中性 ≤ 乐观：{r.bear} / {r.base} / {r.bull}）")
+        if item == ROIC_PREMIUM and min(r.bear, r.base, r.bull) < 0:
+            # 负溢价 = 终值 ROIC 低于终值 WACC，增长毁灭价值；A 股工作簿没有降级保护，终值会失真
+            problems.append(f"{ROIC_PREMIUM}不应为负（{r.bear} / {r.base} / {r.bull}）：成熟后 ROIC 低于 WACC "
+                            "时增长不创造价值，应给 0 或正数")
     return blocking, problems
 
 
@@ -263,3 +267,44 @@ def margin_lines(a, gm_by_case: dict, judg: dict | None = None) -> list[str]:
         yrs = hist.get("years") or ["最新"]
         out.append(f"- {yrs[-1]} 营业利润率参照（历史实际，同口径）{last:.2%}")
     return out
+
+
+def describe_lines(a) -> list[str]:
+    """核实清单（assumptions.md）里的费用率与稳态值 —— 人签门③ 时必须看得到（终审 C1，2026-11-17）。"""
+    if not a.opex_rows and not a.steady_rows:
+        return []
+    from ir_agent.assume import Case
+
+    def ref(r):
+        refs = "；".join(b.describe() for b in r.bases)
+        return refs or "⚠ 没有可核验的依据"
+    lines = ["## 费用率（三档；成本项 悲观 ≥ 中性 ≥ 乐观）", ""]
+    for item in OPEX_ITEMS.get(a.market, ()):
+        got = sorted((r for r in a.opex_rows if row_label(r) == item), key=lambda r: r.year)
+        if not got:
+            continue
+        lines += [f"### {item}", "", "| 年 | 悲观 | 中性 | 乐观 | 理由 | 依据 |", "| --- | --- | --- | --- | --- | --- |"]
+        for r in got:
+            lab = a.labels[r.year - 1] if r.year <= len(a.labels) else f"第{r.year}年"
+            lines.append(f"| {lab} | {r.bear:.2%} | {r.base:.2%} | {r.bull:.2%} | {r.note or '—'} | {ref(r)} |")
+        lines.append("")
+    if a.steady_rows:
+        lines += ["## 稳态值（第 6–10 年过渡期线性收敛的目标；终值 ROIC = 终值 WACC + 溢价）", "",
+                  "| 稳态项 | 悲观 | 中性 | 乐观 | 理由 | 依据 |", "| --- | --- | --- | --- | --- | --- |"]
+        for r in a.steady_rows:
+            lines.append(f"| {row_label(r)} | {r.bear:.2%} | {r.base:.2%} | {r.bull:.2%} | {r.note or '—'} | {ref(r)} |")
+        lines.append("")
+    gm_case: dict = {}
+    try:
+        if a._m() is not None and a.base_margin is not None:
+            from ir_agent.assume import synthesize
+            for c, k in ((Case.BEAR, "bear"), (Case.BASE, "base"), (Case.BULL, "bull")):
+                gm_case[k] = synthesize(a, c, a.base_margin, a.margin_bases)[1]
+        elif a._m() is None:
+            gm_case = {k: a.path("gm", c) for c, k in ((Case.BEAR, "bear"), (Case.BASE, "base"), (Case.BULL, "bull"))}
+    except Exception:                                   # noqa: BLE001
+        gm_case = {}
+    ml = margin_lines(a, gm_case)
+    if ml:
+        lines += [x for x in ml if x] + [""]
+    return lines

@@ -43,7 +43,7 @@ def test_填了费用率才扩充审核清单():
     a = assume.parse(US_TEXT, 5, us=True)
     items = AR.checklist(a)
     for it in (("取值", "研发费用率"), ("依据", "研发费用率"), ("取值", "销售及管理费用率"),
-               ("取值", "稳态毛利率"), ("取值", "终值ROIC溢价"), ("依据", "稳态值"),
+               ("取值", "稳态毛利率"), ("取值", "终值ROIC溢价"), ("依据", "稳态毛利率"), ("依据", "终值ROIC溢价"),
                ("合成", "营业利润率"), ("后果", "稳态营业利润率")):
         assert it in items, it
     bare = "\n".join(l for l in US_TEXT.splitlines() if "费用率" not in l and "稳态" not in l and "ROIC" not in l)
@@ -63,7 +63,7 @@ def test_审核事实给出三档营业利润率路径与稳态值():
 
 def test_审核者短名作答能认领新条目():
     from ir_agent.methodology_review import parse
-    exp = [("取值", "研发费用率"), ("取值", "稳态毛利率"), ("依据", "稳态值")]
-    vs = parse("[取值] 研发费用率：通过\n[取值] 稳态毛利率：提醒　偏高\n[依据] 稳态值：通过", exp,
+    exp = [("取值", "研发费用率"), ("取值", "稳态毛利率"), ("依据", "稳态毛利率")]
+    vs = parse("[取值] 研发费用率：通过\n[取值] 稳态毛利率：提醒　偏高\n[依据] 稳态毛利率：通过", exp,
                kinds=("取值", "依据"))
     assert [v.level for v in vs] == ["通过", "提醒", "通过"]

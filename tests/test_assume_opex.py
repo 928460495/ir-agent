@@ -95,4 +95,4 @@ def test_A股三项():
 def test_整块没填不判算不下去_但记成问题():
     text = "\n".join(l for l in US_TEXT.splitlines() if "费用率" not in l and "稳态" not in l and "ROIC" not in l)
     blocking, problems = OJ.check(assume.parse(text, 5, us=True))
-    assert blocking == [] and any("没有填费用率" in p and "未经判断" in p for p in problems)
+    assert blocking == [] and any("没有填费用率" in p and "第④步会停下" in p for p in problems)
