@@ -327,3 +327,45 @@ class TestMarginRebased:
     def test_没锚定就谈不上平移(self):
         a = assume.parse(_change_lines(1), 1, decomps=CHANGE)
         assert not a.margin_rebased()
+
+
+# ── PLTR 2026-11-16：比例因子「商业占比」的基期被取成美元金额 28.87 亿，第 1 年营收增速爆成千亿 % ──
+
+def _fill(hint, unit, facts):
+    from datetime import date as _d
+    from types import SimpleNamespace as NS
+    from ir_agent.assume import _fill_from_ledger
+    from ir_agent.ledger import FactLedger
+    led = FactLedger()
+    for f in facts:
+        led.put(f)
+    f = NS(short="商业占比", unit=unit, source_hint=hint)
+    a = NS(_m=lambda: NS(needs_base=lambda: [f]), base_values={}, base_revenue=1)
+    _fill_from_ledger(a, led, _d(2026, 11, 15))
+    return a.base_values
+
+
+def _fact(key, per, v, unit, cur=None):
+    from datetime import date as _d
+    from decimal import Decimal as _D
+    from ir_agent.ledger import Fact, Method
+    return Fact(key=key, value=_D(v), unit=unit, period=per, as_of=_d(2026, 2, 1),
+                source_id="s", method=Method.REPORTED, currency=cur)
+
+
+def test_两个键相除的线索不由代码取第一个键():
+    got = _fill("第 0 年 [[seg_rev.segment.Commercial@2025FY]] 除以 [[revenue@2025FY]]（约 0.463）", "比例",
+                [_fact("seg_rev.segment.Commercial", "2025FY", "2073000000", "美元", "USD"),
+                 _fact("revenue", "2025FY", "4475000000", "美元", "USD")])
+    assert "商业占比" not in got                      # 留给 AI 补填并给依据
+
+
+def test_金额类事实不填给比例因子():
+    got = _fill("[[seg_rev.segment.Commercial@2025FY]]", "比例",
+                [_fact("seg_rev.segment.Commercial", "2025FY", "2073000000", "美元", "USD")])
+    assert "商业占比" not in got
+
+
+def test_单个同口径键照旧由代码取():
+    got = _fill("[[gross_margin@2025FY]]", "比例", [_fact("gross_margin", "2025FY", "0.82", "ratio")])
+    assert got["商业占比"].value == __import__("decimal").Decimal("0.82") and got["商业占比"].source == "账本"

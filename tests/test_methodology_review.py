@@ -362,3 +362,22 @@ def test_同一key声明了两个期间_两条各认各的():
     # 顺序反过来也一样
     got = R.parse("\n".join(reversed(raw.splitlines())), exp)
     assert [v.level for v in got] == ["致命", "提醒"]
+
+
+# ── PLTR 2026-11-16：审核者用短名作答，10 条全被判漏答，判断项审核卡死 ──
+
+def test_审核者只写短名时按短名认_短名唯一():
+    from ir_agent.methodology_review import parse
+    exp = [("取值", "商业增速（美国商业收入同比增速（8-K 披露为 Q3 单季美国口径，用作商业分部增速的代理））"),
+           ("取值", "商业占比（上一年商业分部收入占总营收的比重（权重，非独立驱动））")]
+    raw = "[取值] 商业增速：通过\n[取值] 商业占比：提醒　理由在此"
+    vs = parse(raw, exp, kinds=("取值",))
+    assert [v.subject for v in vs] == [s for _, s in exp] and vs[1].level == "提醒"
+
+
+def test_短名撞名时不按短名认():
+    import pytest
+    from ir_agent.methodology_review import ReviewIncomplete, parse
+    exp = [("取值", "增速（商业）"), ("取值", "增速（政府）")]
+    with pytest.raises(ReviewIncomplete):
+        parse("[取值] 增速：通过", exp, kinds=("取值",))

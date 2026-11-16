@@ -1625,6 +1625,11 @@ def _check_scalar(a: AssumptionSet, years: int, facts: "Facts") -> None:
                 f"三档未拉开（悲观 {r.bear} / 中性 {r.base} / 乐观 {r.bull}，未严格递增）")
 
 
+_RATIO_HINT = re.compile(r"除以|÷|/|占比|比重")
+# 金额类因子的单位。其余单位（比例、%、pp、变化率、x 等）一律不接金额事实
+_MONEY_UNITS = frozenset({"美元", "元", "亿元", "万元", "百万美元", "亿美元", "USD", "CNY"})
+
+
 def _fill_from_ledger(a: AssumptionSet, ledger: FactLedger, as_of: date) -> None:
     """第 0 年取值里账本拿得到的部分（spec 2026-10-14 决定 9：账本有就用账本）。
 
@@ -1638,8 +1643,14 @@ def _fill_from_ledger(a: AssumptionSet, ledger: FactLedger, as_of: date) -> None
         have, _ = gaps.ledger_refs(f.source_hint, ledger, as_of)
         if not have:
             continue
+        # 线索是两个键相除（「A 除以 B」）时，第一个键不是基期值，交 AI 补填并给依据。
+        # PLTR 2026-11-16：商业占比被取成商业分部收入 28.87 亿美元，第 1 年营收增速爆成千亿 %
+        if len({h.rsplit("@", 1)[0] for h in have}) > 1 and _RATIO_HINT.search(f.source_hint or ""):
+            continue
         key, per = have[0].rsplit("@", 1)
         fact = ledger.get(key, per, as_of=as_of)
+        if getattr(fact, "currency", None) and f.unit not in _MONEY_UNITS:
+            continue                                 # 金额填不进比例 / 变化率 / pp 因子
         a.base_values[f.short] = BaseValue(
             value=_as_unit(fact, f.unit),
             bases=[Basis.fact(f"[[{key}@{per}]]")], source="账本")

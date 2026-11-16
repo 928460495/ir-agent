@@ -208,8 +208,18 @@ def parse(raw: str, expected: list[tuple[str, str]],
             hit = next(((s, h) for s in cands
                         if (h := _subject_rx(kind, s).match(rest))), None)
             if hit is None:
-                continue
-            subj, end = hit[0], hit[1].end()
+                # 最后一道：审核者只写了短名（「商业增速」而非「商业增速（美国商业收入…）」）。
+                # PLTR 2026-11-16：10 条全按短名作答，全被判漏答，审核卡死。短名在同类条目里
+                # 唯一才认，撞名就不认（宁可漏答重问，不能张冠李戴）。
+                shorts = [s for s in cands if s.split("（", 1)[0] != s
+                          and rest.startswith(s.split("（", 1)[0])
+                          and rest[len(s.split("（", 1)[0]):].lstrip()[:1] in ("：", ":")]
+                same = [s for s in cands if shorts and s.split("（", 1)[0] == shorts[0].split("（", 1)[0]]
+                if len(shorts) != 1 or len(same) != 1:
+                    continue
+                subj, end = shorts[0], len(shorts[0].split("（", 1)[0])
+            else:
+                subj, end = hit[0], hit[1].end()
         tail = rest[end:].lstrip()
         if not tail or tail[0] not in "：:":
             continue
