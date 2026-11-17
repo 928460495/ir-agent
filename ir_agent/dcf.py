@@ -167,6 +167,9 @@ class DcfResult:
     # DCF 三档每股价值（键 bear / base / bull）。验算未全部通过时为空 —— 相对估值页的
     # 足球场图要画三档，不能拿一个没验算过的数去画。
     scenario_ps: dict = field(default_factory=dict)
+    # 终值 WACC（终值 Beta 向 1，2026-11-16）。终值 ROIC 要与它比，不是与明确期 WACC 比 —— PLTR 研报曾写「终值
+    # ROIC 10.40% 低于 WACC 10.92%，不创造超额价值」，实际终值 WACC 8.40%，ROIC 高出 2%（2026-11-17）。
+    wacc_term: Decimal | None = None
 
     @property
     def upside(self) -> Decimal | None:
@@ -193,6 +196,9 @@ class DcfResult:
         lines.append(f"  WACC [[valuation.wacc{at}]]　终值 ROIC "
                      f"[[valuation.terminal_roic{at}]]　"
                      f"终值占企业价值 [[valuation.terminal_share{at}]]")
+        if self.wacc_term is not None:
+            lines.append(f"  终值 WACC [[valuation.wacc_term{at}]]（终值 Beta 向一收敛；终值 ROIC 应与终值 WACC 比，"
+                         "不是与上面明确期的 WACC 比 —— 高于终值 WACC 即终值期新增投资创造价值）")
         # 期限写中文数字：这一行进研报提示词，照抄阿拉伯数字会被裸数字审计判掉。
         lines.append(f"  WACC 所用 β [[valuation.beta{at}]]（五年对上证综指回归，Blume 调整）")
         if self.scenario_ps:
@@ -325,6 +331,8 @@ def to_facts(res: DcfResult, as_of: date,
     ]
     out += [f(f"valuation.dcf_{k}", res.scenario_ps[k], "元")
             for k in ("bear", "base", "bull") if k in res.scenario_ps]
+    if res.wacc_term is not None:
+        out.append(f("valuation.wacc_term", res.wacc_term, "ratio"))
     # 蒙特卡洛：键都以 `valuation.` 开头 —— 辩论裁判的可引用清单按这个前缀收
     # （`full._catalog_periods` 的 PROMPT_SIDE），换前缀就会被判成伪造、回写删光。
     m = res.mc
@@ -410,7 +418,7 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int):
     return cal, notes, stmts
 
 
-def calibrate_only(code: str, *, as_of: date, ledger=None, years: int = 5,
+def calibrate_only(code: str, *, as_of: date, ledger=None, years: int = HORIZON,
                    dirpath: Path | None = None) -> dict:
     """只校准不建模 —— 第一阶段用它拿到历史参照与预测期标签。"""
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
@@ -663,6 +671,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         beta=Decimal(str(inp["dcf"]["Beta（5年"])),
         mc=mc,
         scenario_ps=scenario_ps,
+        wacc_term=(Decimal(str(dv["wacc_term"])) if dv.get("wacc_term") is not None else None),
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"

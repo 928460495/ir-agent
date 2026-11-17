@@ -81,3 +81,24 @@ def test_终值ROIC溢价为负是问题():
     text = US_TEXT.replace("终值ROIC溢价 | 稳态 | 1% | 3% | 5%", "终值ROIC溢价 | 稳态 | -1% | 3% | 5%")
     _, problems = OJ.check(assume.parse(text, 5, us=True))
     assert any("终值ROIC溢价" in p and "不应为负" in p for p in problems)
+
+
+def test_章节序号引用不算裸数字():
+    """PLTR 2026-11-17 第④步：研报写「这正是第 3、4 节讨论的……」，连续三次被判裸数字，拒绝出报告。
+    章节序号是结构引用，不是数据（审计的报错文字本来就这样说）。"""
+    from ir_agent.citation import audit_bare_numbers
+    assert audit_bare_numbers("这正是第 3、4 节讨论的问题") == []
+    assert audit_bare_numbers("见第8节与第 10 节") == []
+    assert audit_bare_numbers("增速 3、4 个百分点") != []              # 不是章节引用照判
+    assert audit_bare_numbers("第 3 年增速") != []
+
+
+def test_摘要给出终值WACC_供与终值ROIC比较():
+    """PLTR 2026-11-17 研报：「终值 ROIC 10.40% 低于 WACC 10.92%，新增投资不创造超额价值」——终值 ROIC 应与
+    终值 WACC（8.40%，终值 Beta 向 1）比，撰写者拿不到终值 WACC，比错了基准。"""
+    res = dcf.DcfResult(code="PLTR", workbook="/tmp/x.xlsx", price=D("100"), value_per_share=D("120"),
+                        wacc=D("0.109"), terminal_roic=D("0.104"), reinvest_rate=D("0.1"),
+                        terminal_share=D("0.5"), verified=True, as_of=AS_OF, wacc_term=D("0.084"))
+    s = res.summary()
+    assert "[[valuation.wacc_term@2026-11-15]]" in s and "终值 ROIC 应与终值 WACC 比" in s
+    assert "valuation.wacc_term" in {f.key for f in dcf.to_facts(res, AS_OF)}
