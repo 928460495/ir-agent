@@ -386,6 +386,10 @@ class AssumptionSet:
     market: str = ""
     opex_rows: list = field(default_factory=list)
     steady_rows: list = field(default_factory=list)
+    # 首年锚定值 (营收增速, 毛利率)（spec 2026-11-17-year1-anchor）。首年已有季报、算得出锚定时
+    # 非空：三档首年一律取它，清单、审核事实、judg 与模型同一个数。派生量，不进 JSON ——
+    # 第③步由 check() 按 anchor 算，第④步由 apply_to 按当时的 cal 再算（同源 anchored_year1）。
+    anchor_y1: tuple | None = None
 
     def _m(self) -> FormulaModel | None:
         if self.model is None and self.decomps:
@@ -1019,6 +1023,17 @@ def anchor_year1(anchor: dict) -> dict[str, tuple[float, float]]:
     return {name: y1 for name in _CASES3}
 
 
+def anchor_y1_of(anchor: dict | None) -> tuple[Decimal, Decimal] | None:
+    """首年锚定值 (营收增速, 毛利率)，四舍五入到 6 位（与 `_anchor_values` / 工作簿同口径）。
+    没有锚定返回 None —— 首年回到判断项。"""
+    if not anchor:
+        return None
+    from ir_agent.dcf import anchored_year1
+
+    g, m = anchored_year1(fy_rev=anchor["fy_rev"], fy_cogs=anchor["fy_cogs"], base_rev=anchor["base_rev"])
+    return Decimal(str(round(g, 6))), Decimal(str(round(m, 6)))
+
+
 def margin_bases(a: AssumptionSet, base_margin: Decimal,
                  anchor: dict | None) -> dict[str, list[Decimal]] | None:
     """锚定开启时 `基期(毛利率)` 的按档、按年取值；没有锚定返回 None。
@@ -1095,6 +1110,18 @@ def synthesize(a: AssumptionSet, case: Case, base_margin: Decimal,
 
     注意: 本函数本身**不做单调性校验** —— 校验属于 `check`。
     """
+    g, m = synthesize_raw(a, case, base_margin, bases)
+    if a.anchor_y1 is not None and g and m:
+        # 首年已有季报：首年取锚定值，三档相同（spec 2026-11-17）。因子的首年取值只是
+        # 对锚定值的拆解（量 / 价 / 成本各贡献多少），不再决定首年的数。
+        g, m = list(g), list(m)
+        g[0], m[0] = a.anchor_y1
+    return g, m
+
+
+def synthesize_raw(a: AssumptionSet, case: Case, base_margin: Decimal,
+                   bases: dict | None = None) -> tuple[list[Decimal], list[Decimal]]:
+    """因子原样合成，首年不换成锚定值 —— 核对「首年拆解解释不解释得了锚定值」用。"""
     p = _simulate(a, case, base_margin)
     if bases:
         seq = bases[case.name.lower()]
@@ -1569,6 +1596,7 @@ def check(a: AssumptionSet, years: int, *, ledger: FactLedger, body: str,
     `run_valuation` 也调它：那里只看 `blocking`（算不下去才停），不看 `problems`。
     """
     facts = Facts(problems=list(a.read_notes))
+    a.anchor_y1 = anchor_y1_of(anchor)
     model = as_model(decomps)
     if model is not None:
         a.model = model
@@ -1758,11 +1786,12 @@ def _monotonic_problems(a: AssumptionSet, base_margin: Decimal,
     mid, midm = synthesize(a, Case.BASE, base_margin, bases)
     hi, him = synthesize(a, Case.BULL, base_margin, bases)
     out: list[str] = []
-    for i in range(len(mid)):
+    first = 1 if a.anchor_y1 is not None else 0        # 锚定首年三档相同，是数据不是情景
+    for i in range(first, len(mid)):
         if not (lo[i] < mid[i] < hi[i]):
             out.append(f"第 {i + 1} 年的营收增速合成后不单调"
                        f"（悲观 {lo[i]:.2%} / 中性 {mid[i]:.2%} / 乐观 {hi[i]:.2%}）")
-    for i in range(len(midm)):
+    for i in range(first, len(midm)):
         if not (lom[i] < midm[i] < him[i]):
             out.append(f"第 {i + 1} 年的毛利率合成后不单调"
                        f"（悲观 {lom[i]:.2%} / 中性 {midm[i]:.2%} / 乐观 {him[i]:.2%}）")
@@ -2290,6 +2319,7 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
     否则两处各算各的，会在第一年的毛利率上重复计入一次 pp 增量。
     """
     ju = dict(cal["judg"])
+    a.anchor_y1 = anchor_y1_of(anchor_from_cal(cal))
     if a._m() is not None:
         base_margin = _base_margin_of(cal)
         # 第 0 年营收按工作簿口径（亿元）——公式用到绝对金额时，ir-agent 与
@@ -2308,12 +2338,15 @@ def apply_to(cal: dict, a: AssumptionSet, case: Case = Case.BASE) -> dict:
         ju["growth_scen"] = growth_scen
         ju["gm_scen"] = gm_scen
     else:
-        ju["growth"] = [float(x) for x in a.path("growth", case)]
-        ju["gm"] = [float(x) for x in a.path("gm", case)]
-        ju["growth_scen"] = {c.name.lower(): [float(x) for x in a.path("growth", c)]
-                             for c in Case}
-        ju["gm_scen"] = {c.name.lower(): [float(x) for x in a.path("gm", c)]
-                         for c in Case}
+        def _p(drv, c):
+            seq = [float(x) for x in a.path(drv, c)]
+            if a.anchor_y1 is not None and seq:
+                seq[0] = float(a.anchor_y1[0 if drv == "growth" else 1])
+            return seq
+        ju["growth"] = _p("growth", case)
+        ju["gm"] = _p("gm", case)
+        ju["growth_scen"] = {c.name.lower(): _p("growth", c) for c in Case}
+        ju["gm_scen"] = {c.name.lower(): _p("gm", c) for c in Case}
     from ir_agent import opex_judg as OJ
     ju.update(OJ.judg_block(a))         # 费用率逐年三档与稳态值（没有时不写，建表按校准值）
     out = dict(cal)
