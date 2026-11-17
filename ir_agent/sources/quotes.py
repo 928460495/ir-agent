@@ -183,24 +183,43 @@ KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 MAX_QUOTE_GAP_DAYS = 10            # 最近一笔收盘离分析时点更远就不算当时的价格（停牌）
 
 
-def close_asof(symbol: str, as_of: date, session: requests.Session | None = None) -> tuple[date, Decimal]:
-    """分析时点当日或之前最近一个交易日的**不复权**收盘（腾讯日 K，末段复权参数留空）。
+SINA_KLINE_URL = "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData"
 
-    不复权：要与总股本相乘还原当时市值；前复权价会被之后的分红送转改写。"""
-    s = session or requests
+
+def _tencent_day(s, symbol: str, as_of: date) -> list[tuple[date, Decimal]]:
     beg = as_of - timedelta(days=MAX_QUOTE_GAP_DAYS + 20)
     r = s.get(KLINE_URL, params={"param": f"{symbol},day,{beg.isoformat()},{as_of.isoformat()},40,"},
               timeout=TIMEOUT)
     r.raise_for_status()
     rows = (((r.json() or {}).get("data") or {}).get(symbol) or {}).get("day") or []
-    best = None
-    for row in rows:
+    return [(date.fromisoformat(str(x[0])), Decimal(str(x[2]))) for x in rows if len(x) > 2]
+
+
+def _sina_day(s, symbol: str, as_of: date) -> list[tuple[date, Decimal]]:
+    """新浪日 K（不复权）。只能从最新一天往回数 datalen 根，按距今天数留冗余。"""
+    n = min(1023, (date.today() - as_of).days + MAX_QUOTE_GAP_DAYS + 30)
+    r = s.get(SINA_KLINE_URL, params={"symbol": symbol, "scale": 240, "ma": "no", "datalen": n},
+              timeout=TIMEOUT)
+    r.raise_for_status()
+    return [(date.fromisoformat(str(x["day"])[:10]), Decimal(str(x["close"]))) for x in (r.json() or [])]
+
+
+def close_asof(symbol: str, as_of: date, session: requests.Session | None = None) -> tuple[date, Decimal]:
+    """分析时点当日或之前最近一个交易日的**不复权**收盘。腾讯日 K 为 Tier-1，新浪日 K 为 Tier-2
+    （2026-11-17 腾讯 fqkline 整体返回 501）。
+
+    不复权：要与总股本相乘还原当时市值；前复权价会被之后的分红送转改写。"""
+    s = session or requests
+    errs, rows = [], None
+    for name, fetch in (("腾讯", _tencent_day), ("新浪", _sina_day)):
         try:
-            d = date.fromisoformat(str(row[0])); px = Decimal(str(row[2]))
-        except (ValueError, InvalidOperation, IndexError):
-            continue
-        if d <= as_of and (best is None or d > best[0]):
-            best = (d, px)
+            rows = fetch(s, symbol, as_of)
+            break
+        except Exception as e:                               # noqa: BLE001
+            errs.append(f"{name}: {e.__class__.__name__}: {str(e)[:60]}")
+    if rows is None:
+        raise ParseError(f"{symbol} 日 K 收盘取不到 —— " + "；".join(errs))
+    best = max(((d, px) for d, px in rows if d <= as_of), default=None)
     if best is None:
         raise ParseError(f"{symbol} 在 {as_of} 之前没有日 K 收盘。")
     if (as_of - best[0]).days > MAX_QUOTE_GAP_DAYS:

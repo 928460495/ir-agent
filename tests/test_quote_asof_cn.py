@@ -61,3 +61,35 @@ def test_分析时点就是今天_照用实时行情(monkeypatch, tmp_path):
     monkeypatch.setattr(quotes, "close_asof", lambda sym, d: pytest.fail("不该取历史收盘"))
     res = pipeline._quote_facts("600183", SnapshotStore(tmp_path), cross_check=False, as_of=date(2026, 11, 17))
     assert {x.key: x.value for x in res.facts}["last_price"] == Decimal("58.61")
+
+
+SINA = [{"day": "2026-10-20", "close": "117.630"}, {"day": "2026-10-21", "close": "118.990"},
+        {"day": "2026-11-17", "close": "58.610"}]
+
+
+class _Down:
+    """腾讯 fqkline 整体 501（2026-11-17 实测），新浪日 K 正常。"""
+    def __init__(self): self.urls = []
+    def get(self, url, params=None, timeout=None):
+        self.urls.append(url)
+        if "gtimg" in url:
+            import requests
+            r = requests.Response(); r.status_code = 501; r.url = url
+            return r
+        return _Resp(SINA)
+
+
+def test_腾讯日K不可用时降级新浪日K():
+    s = _Down()
+    assert quotes.close_asof("sh600183", date(2026, 10, 21), session=s) == (date(2026, 10, 21), Decimal("118.990"))
+    assert any("sina" in u for u in s.urls)
+
+
+def test_两个日K源都不可用时报错写明两者():
+    class _Both(_Down):
+        def get(self, url, params=None, timeout=None):
+            if "sina" in url:
+                raise ConnectionError("断开")
+            return super().get(url, params, timeout)
+    with pytest.raises(quotes.ParseError, match="腾讯.*新浪"):
+        quotes.close_asof("sh600183", date(2026, 10, 21), session=_Both())
