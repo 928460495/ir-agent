@@ -243,10 +243,13 @@ def _load(dirpath: Path):
     return D, C, B, V
 
 
-def _asof_note(as_of: date) -> list[str]:
-    """as_of 与今天不一致时必须说出来 —— 否则就是个不报错的未来函数。"""
+def _asof_note(as_of: date, meta: dict | None = None) -> list[str]:
+    """as_of 与今天不一致时必须说出来 —— 否则就是个不报错的未来函数。
+
+    校准已按分析时点取行情、β、无风险利率（meta.asof == as_of，2026-11-17 起）时不再提示 ——
+    否则撰写者会把一句已不成立的话写进研报风险一节。"""
     today = date.today()
-    if as_of >= today:
+    if as_of >= today or (meta or {}).get("asof") == as_of.isoformat():
         return []
     gap = (today - as_of).days
     return [f"本模型取的是**今日（{today}）**的行情与最新报表，"
@@ -673,7 +676,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         scenario_ps=scenario_ps,
         wacc_term=(Decimal(str(dv["wacc_term"])) if dv.get("wacc_term") is not None else None),
         warnings=[str(w) for w in warns],
-        notes=notes + _asof_note(as_of) + [
+        notes=notes + _asof_note(as_of, meta) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"
             f"（原始 {meta.get('beta_raw')}，{meta.get('beta_n')} 期）",
         ] + [f"校准被截断：{x}" for x in (cal.get("clamps") or [])],

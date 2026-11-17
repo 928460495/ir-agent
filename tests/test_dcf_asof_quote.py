@@ -19,3 +19,13 @@ def test_校准拿到分析时点():
     C = SimpleNamespace(calibrate=calibrate)
     dcf._calibrate(D, C, "600183", date(2026, 10, 21), None, 10)
     assert seen == {"code": "600183", "years": 10, "as_of": date(2026, 10, 21)}
+
+
+def test_校准按分析时点取了行情就不再说取的是今日行情():
+    """生益 2026-11-17 重跑：行情已按 10-21 收盘，注释仍说「本模型取的是今日行情」，
+    撰写者照写进风险一节「模型取行情时点晚于分析时点」。"""
+    from datetime import timedelta
+    past = date.today() - timedelta(days=27)
+    assert dcf._asof_note(past, meta={"asof": past.isoformat()}) == []
+    assert dcf._asof_note(past, meta={"asof": date.today().isoformat()})       # 校准没按时点，照旧提醒
+    assert dcf._asof_note(past)
