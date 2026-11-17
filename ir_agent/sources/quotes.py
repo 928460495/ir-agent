@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -176,3 +176,34 @@ def fetch_quote_sina(symbol: str, session: requests.Session | None = None) -> di
     resp.raise_for_status()
     resp.encoding = "gbk"
     return parse_sina_quote(resp.text)
+
+
+# ── 分析时点收盘 ──────────────────────────────────────────────
+KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+MAX_QUOTE_GAP_DAYS = 10            # 最近一笔收盘离分析时点更远就不算当时的价格（停牌）
+
+
+def close_asof(symbol: str, as_of: date, session: requests.Session | None = None) -> tuple[date, Decimal]:
+    """分析时点当日或之前最近一个交易日的**不复权**收盘（腾讯日 K，末段复权参数留空）。
+
+    不复权：要与总股本相乘还原当时市值；前复权价会被之后的分红送转改写。"""
+    s = session or requests
+    beg = as_of - timedelta(days=MAX_QUOTE_GAP_DAYS + 20)
+    r = s.get(KLINE_URL, params={"param": f"{symbol},day,{beg.isoformat()},{as_of.isoformat()},40,"},
+              timeout=TIMEOUT)
+    r.raise_for_status()
+    rows = (((r.json() or {}).get("data") or {}).get(symbol) or {}).get("day") or []
+    best = None
+    for row in rows:
+        try:
+            d = date.fromisoformat(str(row[0])); px = Decimal(str(row[2]))
+        except (ValueError, InvalidOperation, IndexError):
+            continue
+        if d <= as_of and (best is None or d > best[0]):
+            best = (d, px)
+    if best is None:
+        raise ParseError(f"{symbol} 在 {as_of} 之前没有日 K 收盘。")
+    if (as_of - best[0]).days > MAX_QUOTE_GAP_DAYS:
+        raise ParseError(f"{symbol} 最近收盘在 {best[0]}，距分析时点 {as_of} 已 "
+                         f"{(as_of - best[0]).days} 天（停牌？），不能当作当时的价格。")
+    return best

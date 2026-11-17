@@ -160,7 +160,7 @@ def statement_sources(eastmoney_fetch, sina_fetch):
 
 
 def _quote_facts(code: str, store: SnapshotStore,
-                 cross_check: bool = True):
+                 cross_check: bool = True, as_of: date | None = None):
     """腾讯为 Tier-1（含市值/PE/PB），新浪为 Tier-2（仅价格）。
 
     新浪缺市值，降级后估值章节会缺失 —— 这是有意的:
@@ -176,15 +176,27 @@ def _quote_facts(code: str, store: SnapshotStore,
                              payload={k: str(v) for k, v in q.items()},
                              url=url, fetched_at=fetched_at,
                              params={"symbol": symbol})
-            as_of = q["as_of"].date()
+            q_day = q["as_of"].date()
+            if as_of is not None and q_day > as_of:
+                # 分析时点早于报价日：价格换成当时收盘，市值按价格同比缩放（股本沿用实时口径）。
+                # 否则账本里只有「将来」的行情，as_of 守卫下取不到，相对估值缺本司市值。
+                day, px = quotes.close_asof(symbol, as_of)
+                k = px / q["last"] if q.get("last") else None
+                cap = q.get("market_cap")
+                q = dict(q, last=px, market_cap=(cap * k if cap is not None and k is not None else None))
+                sid = store.save(source=source + "_close", payload={"date": day.isoformat(), "close": str(px),
+                                                                     "live_quote_sid": sid},
+                                 url=quotes.KLINE_URL, fetched_at=fetched_at,
+                                 params={"symbol": symbol, "as_of": as_of.isoformat()})
+                q_day = day
             # 行情是即期量 —— period 用报价日，不挂在会计期上
-            sp = spot_period(as_of)
+            sp = spot_period(q_day)
             out = []
             for key, value in (("market_cap", q.get("market_cap")),
                                ("last_price", q.get("last"))):
                 if value is not None:
                     out.append(Fact(key=key, value=value, unit="元",
-                                    currency="CNY", period=sp, as_of=as_of,
+                                    currency="CNY", period=sp, as_of=q_day,
                                     source_id=sid, method=Method.REPORTED))
             return out
         return _f
@@ -355,7 +367,7 @@ def run(
                                 f"沿用 Tier-1 取值: {str(e)[:80]}")
 
     # 3) 行情。Tier-1 腾讯（含市值/PE/PB）/ Tier-2 新浪（仅价格）。
-    quote_res = _quote_facts(code, store, cross_check=cross_check)
+    quote_res = _quote_facts(code, store, cross_check=cross_check, as_of=as_of)
     for f in quote_res.facts:
         led.put(f)
     spot = next((f.period for f in quote_res.facts if f.key == "market_cap"), None)

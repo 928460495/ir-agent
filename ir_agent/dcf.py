@@ -412,7 +412,7 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int):
                          "此时分析层与估值层用的不是同一套数字")
     try:
         code = D.validate_code(code)
-        cal = C.calibrate(code, years, stmts=stmts)
+        cal = C.calibrate(code, years, stmts=stmts, as_of=as_of)
     except getattr(D, "DataError", Exception) as e:
         raise DcfUnavailable(f"{code} 无法建模：{e}") from e
     return cal, notes, stmts

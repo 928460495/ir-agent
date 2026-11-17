@@ -293,17 +293,34 @@ def interim_block(inc, interim: str) -> dict | None:
     return interim_block_why(inc, interim)[0]
 
 
-def beta_blume(code: str, years: int = 5) -> tuple[float, float, int]:
+def beta_blume(code: str, years: int = 5, as_of: dt.date | None = None) -> tuple[float, float, int]:
+    """给了分析时点就只用时点及之前的行情回归 —— 之后的价格当时看不到。"""
     px = D.fetch_prices(code); ix = D.fetch_index()
     m = px.join(ix, lsuffix="_s", rsuffix="_i").dropna()
+    if as_of is not None:
+        m = m[m.index <= pd.Timestamp(as_of)]
     r = np.log(m).diff().dropna()
     r = r[r.index >= r.index[-1] - pd.DateOffset(years=years)]
     if len(r) < 200: raise D.DataError(f"可用交易日仅 {len(r)} 天，不足以回归 beta（需 ≥200）。")
     raw = float(np.polyfit(r["close_i"], r["close_s"], 1)[0])
     return 0.67*raw + 0.33, raw, len(r)
 
-def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
-    """stmts 给定时不再自行取数 —— 供上游（如 ir-agent 的事实账本）注入
+def _quote_at(code: str, q: dict, as_of: dt.date) -> dict:
+    """实时报价换成分析时点收盘：股本沿用实时口径，市值/PE/PB 按价格同比缩放。"""
+    day, px = D.close_asof(code, as_of)
+    k = px / q["price"] if q.get("price") else np.nan
+    scale = lambda v: v * k if v is not None and v == v else v
+    return dict(q, price=px, mktcap=scale(q.get("mktcap")), pe=scale(q.get("pe")), pb=scale(q.get("pb")),
+                quote_date=day.isoformat(),
+                source=f"{day.isoformat()} 收盘（不复权，新浪日线）；股本取 {q.get('source')}")
+
+
+def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
+              as_of: dt.date | None = None) -> dict:
+    """as_of：分析时点。早于今天时，价格取当时收盘、β 与无风险利率截至当时，
+    折现起点也按当时算 —— 否则内在价值与「现价」比较时掺进了当时看不到的信息。
+
+    stmts 给定时不再自行取数 —— 供上游（如 ir-agent 的事实账本）注入
     已经过双源交叉验证、带披露日的报表，避免分析层与估值层各取一套数据
     而悄悄分叉。形状须与 fetch_statements 一致: {表: DataFrame}，
     索引为报告日 YYYYMMDD，列为中文科目名，值以元计。"""
@@ -317,8 +334,13 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     interim = D.latest_interim(inc, ann)
     hp = ann + ([interim] if interim else [])
     last = ann[-1]
-    q = D.fetch_quote(code); rf, rfd = D.fetch_riskfree()
-    beta, beta_raw, nobs = beta_blume(code)
+    today = as_of or dt.date.today()
+    q = D.fetch_quote(code)
+    q.setdefault("quote_date", dt.date.today().isoformat())
+    if as_of is not None and as_of < dt.date.today():
+        q = _quote_at(code, q, as_of)
+    rf, rfd = D.fetch_riskfree(as_of) if as_of is not None else D.fetch_riskfree()
+    beta, beta_raw, nobs = beta_blume(code, as_of=as_of) if as_of is not None else beta_blume(code)
 
     last_ann = ann[-1]
     rev = {p: _v(inc, "营业总收入", p) or _v(inc, "营业收入", p) for p in hp}
@@ -527,7 +549,6 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     _wd = round(float(_debt/(_debt+_mktcap)), 4) if _mktcap == _mktcap and (_debt+_mktcap) > 0 else 0.02
     _wd = float(min(max(_wd, 0.0), 0.60))
 
-    today = dt.date.today()
     y_end = dt.date(int(last[:4]), 12, 31)
     roll = round((today - y_end).days / 365.0, 3)
 
@@ -564,7 +585,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None) -> dict:
     return dict(
         meta=dict(code=code, name=q.get("name") or code, price=q["price"],
                   shares=q.get("shares") if q.get("shares") and np.isfinite(q["shares"]) else np.nan,
-                  quote_source=q["source"], asof=today.isoformat(), rf=rf, rf_date=rfd,
+                  quote_source=q["source"], quote_date=q["quote_date"], asof=today.isoformat(), rf=rf, rf_date=rfd,
                   beta=round(beta,4), beta_raw=round(beta_raw,4), beta_n=nobs,
                   nyears=nyears, last_annual=last),
         periods=dict(annual=ann, interim=interim, all=hp,

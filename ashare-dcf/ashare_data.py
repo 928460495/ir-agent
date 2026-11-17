@@ -240,17 +240,44 @@ def fetch_prices(code: str, years: int = 6) -> pd.DataFrame:
     d["date"] = pd.to_datetime(d["date"])
     return d.set_index("date").sort_index()
 
+# 分析时点的收盘距时点超过这么多天就不算「当时的价格」（长期停牌）
+MAX_QUOTE_GAP_DAYS = 10
+
+
+def last_close_on_or_before(df: pd.DataFrame, as_of: dt.date) -> tuple[dt.date, float]:
+    """分析时点当日或之前最后一个交易日的收盘。之后的价格一律不看。"""
+    d = df[df.index <= pd.Timestamp(as_of)]
+    if d.empty:
+        raise DataError(f"{as_of} 之前没有任何收盘价。")
+    day = d.index[-1].date()
+    if (as_of - day).days > MAX_QUOTE_GAP_DAYS:
+        raise DataError(f"最近一笔收盘在 {day}，距分析时点 {as_of} 已 {(as_of - day).days} 天"
+                        "（停牌？）—— 不能当作分析时点的价格。")
+    return day, float(d["close"].iloc[-1])
+
+
+def close_asof(code: str, as_of: dt.date) -> tuple[dt.date, float]:
+    """不复权收盘 —— 与总股本相乘得当时市值；前复权价会被之后的分红送转改写。"""
+    import akshare as ak
+    d = ak.stock_zh_a_daily(symbol=_mk(code) + code, adjust="")[["date", "close"]]
+    d["date"] = pd.to_datetime(d["date"])
+    return last_close_on_or_before(d.set_index("date").sort_index(), as_of)
+
+
 def fetch_index(symbol: str = "sh000001") -> pd.DataFrame:
     import akshare as ak
     d = ak.stock_zh_index_daily(symbol=symbol)[["date", "close"]]
     d["date"] = pd.to_datetime(d["date"])
     return d.set_index("date").sort_index()
 
-def fetch_riskfree() -> tuple[float, str]:
+def fetch_riskfree(as_of: dt.date | None = None) -> tuple[float, str]:
+    """10 年国债收益率，取分析时点当日或之前最近一笔（不给时点即今天）。"""
     import akshare as ak
     try:
-        start = (dt.date.today() - dt.timedelta(days=45)).strftime("%Y%m%d")
-        b = ak.bond_zh_us_rate(start_date=start).dropna(subset=["中国国债收益率10年"]).tail(1)
+        end = as_of or dt.date.today()
+        start = (end - dt.timedelta(days=45)).strftime("%Y%m%d")
+        b = ak.bond_zh_us_rate(start_date=start).dropna(subset=["中国国债收益率10年"])
+        b = b[pd.to_datetime(b["日期"]) <= pd.Timestamp(end)].tail(1)
         return float(b["中国国债收益率10年"].iloc[0]) / 100, str(b["日期"].iloc[0])
     except Exception:
         return 0.01681, "取数失败，使用常量 1.681%（请自行核对）"
