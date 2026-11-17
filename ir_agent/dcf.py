@@ -557,6 +557,7 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9, code: str = "") ->
     note = _anchor_note(judg, inp)
     if note:
         problems.append(note)
+    eff = _effective_first_year(inp)
     for key, cn, dkey in (("growth", "营收增速", "dg"), ("gm", "毛利率", "dm")):
         # 「Δ」是 1_假设 里人有意加的整体偏移，read_inputs 已经并进了
         # 逐年值。它不是错位，扣掉再比。
@@ -564,6 +565,11 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9, code: str = "") ->
         want = [float(x) for x in (judg.get(key) or [])]
         # 只比判断期：工作簿第 6–10 年是过渡期公式，不是人批准的数（2026-11-16）
         got = [float(x) - delta for x in (inp.get(key) or [])][:len(want)]
+        if eff is not None and got and want:
+            # 锚定生效：首年参与估值的是第三小节的生效值，不是情景列（分解模式下情景列首年是
+            # 因子原样合成，与锚定值差在 0.5pp 内）。首年「批准值 vs 生效值」只由上面的
+            # _anchor_note 比（它不说不可采信）；这里只查第 2 年起（spec 2026-11-17）。
+            got[0] = want[0]
         if _close(got, want, tol):
             continue
         scen = judg.get(f"{key}_scen") or {}

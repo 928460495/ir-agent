@@ -1950,8 +1950,9 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
     estimated = assume.estimated_labels(a)
     rebased = a.margin_rebased()
     qual_unreviewed = list(qual_unreviewed or [])
+    anchored = getattr(a, "anchor_y1", None) is not None
     if (not unverified and not estimated and not anchor_note and not rebased
-            and not unreviewed and not qual_unreviewed):
+            and not unreviewed and not qual_unreviewed and not anchored):
         return "", ""
 
     says: list[str] = []
@@ -1966,11 +1967,18 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
     if anchor_note:
         says.append("**首个预测年由已披露中期锚定**，批准清单上该年的营收增速"
                     "与毛利率不进模型，估值用的是按中期实际反推的全年值")
+    # 需如实说明、但**不是弱项**的事实（spec 2026-11-17）：锚定首年是已公布季度的实际加外推，
+    # 基期平移是计算方式。生益验收时它们和「未核验 / 估计」并在一句「不要写得同等确定」里，
+    # 撰写者写成「首年取值来自锚定而非独立出处，确定性弱」。
+    info: list[str] = []
+    if anchored:
+        info.append("**首年取锚定值**：已公布季度用实际、其余季度按年初至今同比外推的全年数，"
+                    "是数据而不是判断，首年各因子的取值是对它的拆解")
     if rebased:
         # I3：这句不能带阿拉伯数字（进提示词，会被裸数字审计判掉）——
         # 「第二年」用汉字数字，不写成「第 2 年」。具体数字在
         # assumptions.md 与下面的 body 附录里给。
-        says.append("**从第二年起，毛利率的合成基期已从年报基期改为"
+        info.append("**从第二年起，毛利率的合成基期已从年报基期改为"
                     "锚定后的首年水平**，不能用年报基期加累计变化手算复现")
     if unverified:
         says.append("部分 DCF 判断项的依据**未能逐字核验**——出处是转述"
@@ -1979,10 +1987,15 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
         says.append("部分驱动因子**没有任何数据支撑、取值是估计**（该因子"
                     "在公开渠道本就无口径数据），依据列里的东西只是方向性"
                     "参照，不是这个取值的证据")
-    prompt_line = ("**注意：以下关于判断项的保留必须写进估值一节**（具体"
-                   "条目见待核实清单 assumptions.md 上的逐行标注）："
-                   + "；".join(says)
-                   + "。不要把它们写得与有确凿出处的判断项同等确定。")
+    parts: list[str] = []
+    if says:
+        parts.append("**注意：以下关于判断项的保留必须写进估值一节**（具体"
+                     "条目见待核实清单 assumptions.md 上的逐行标注）："
+                     + "；".join(says)
+                     + "。不要把它们写得与有确凿出处的判断项同等确定。")
+    if info:
+        parts.append("**估值一节还需如实说明**：" + "；".join(info) + "。")
+    prompt_line = "".join(parts)
 
     body: list[str] = ["", "---", "", "## ⚠ 判断项依据核验", ""]
     if unreviewed:
@@ -2014,6 +2027,8 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
                  "数据时给出估计，换来分解能真正跑通；代价是上述条目无法被逐字"
                  "反查。请据此调整对相应判断项的信任度——它们未必错，但没有"
                  "原文或数据替它们背书。", ""]
+    if len(body) <= 6:                       # 只有标题（只剩首年锚定这条说明）：附录不留空节
+        return prompt_line, ""
     return prompt_line, "\n".join(body)
 
 

@@ -190,3 +190,48 @@ def test_清单横幅说首年取锚定值():
     from ir_agent import full
     b = full._anchor_banner(_cal_600183(), ["2026E", "2027E"])
     assert "取锚定值" in b and "不进模型" not in b
+
+
+# ── 验收发现（生益 2026-11-17 第④步）：回读拿锚定首年与工作簿情景列的原样合成比 ──
+
+def test_回读校验锚定时首年与生效值比_不与原样合成比():
+    """实跑：批准首年 0.500455（锚定），工作簿情景列首年 0.50050758528（AI 拆解原样合成），报「本结果不可采信」。
+    锚定生效时真正参与估值的是第三小节的生效值，首年应与它比。"""
+    judg = {"growth": [0.500455, 0.180283116], "gm": [0.312689, 0.3072319304950495],
+            "growth_scen": {}, "gm_scen": {}}
+    inp = {"growth": [0.5005075852800001, 0.18028311600000002],
+           "gm": [0.3127895903030302, 0.3072319304950495],
+           "it": {"sw": 1, "fy_rev": 426.596379280956, "fy_cogs": 293.2044922458345},
+           "o": {"基期营业总收入": 284.3113845944}}
+    assert dcf._readback_check(judg, inp) == []
+    bad = dict(judg, growth=[0.500455, 0.17])                        # 第 2 年真错了照报
+    assert any("营收增速" in x and "不可采信" in x for x in dcf._readback_check(bad, inp))
+    off = dict(inp, it={"sw": 0})                                    # 锚定没开：首年照常与情景列比
+    assert any("营收增速" in x for x in dcf._readback_check(judg, off))
+
+
+def test_研报提示不把锚定首年当成确定性弱的保留():
+    """验收：研报写「首年取值来自锚定而非独立出处，确定性弱于有出处的项目」。锚定值是已公布季度的实际
+    加外推，是数据；基期平移是计算说明，也不是弱项 —— 不能并进「不要写得同等确定」那句。"""
+    from types import SimpleNamespace
+    from ir_agent import full
+    a = SimpleNamespace(code="600183", margin_rebased=lambda: True, anchor_y1=(D("0.500455"), D("0.312689")),
+                        rows=[], base_values={}, opex_rows=[], steady_rows=[])
+    import ir_agent.assume as A
+    orig = (A.unverified_labels, A.estimated_labels)
+    A.unverified_labels = lambda a: []
+    A.estimated_labels = lambda a: []
+    try:
+        prompt, body = full._assumption_caveats(a)
+    finally:
+        A.unverified_labels, A.estimated_labels = orig
+    assert "同等确定" not in prompt and "保留" not in prompt
+    assert "首年取锚定值" in prompt and "数据" in prompt
+    a.margin_rebased = lambda: False                       # 只剩锚定：附录不留一个空的「依据核验」标题
+    A.unverified_labels = lambda a: []
+    A.estimated_labels = lambda a: []
+    try:
+        prompt, body = full._assumption_caveats(a)
+    finally:
+        A.unverified_labels, A.estimated_labels = orig
+    assert "首年取锚定值" in prompt and body == ""
