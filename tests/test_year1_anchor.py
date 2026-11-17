@@ -139,3 +139,54 @@ def test_分解首年拆解在半个百分点内不记问题():
         facts = assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds,
                              base_margin=D("0.2647"), anchor=_anchor_600183())
         assert ("拆解解释不了锚定值" in facts.text()) is hit, (extra, facts.text())
+
+
+# ── Task 4 ──
+
+def test_方法论预研提示词写明首年锚定规则与方法():
+    from ir_agent import methodology
+    p = methodology.build_prompt("电子-元件-印制电路板", "600183")
+    for k in ("首年锚定", "已公布季度用实际", "年初至今同比", "三档相同", "拆解"):
+        assert k in p, k
+
+
+def _judg():
+    return {"g_stats": (0.1, 0.05, 0.0, 0.2), "gm_stats": (0.25, 0.01, 0.24, 0.27), "gm_hist": [0.2647], "cagr3": 0.1}
+
+
+def test_判断项提示词给出本公司锚定结果():
+    _, ds = _two_year_set()
+    p = assume.build_prompt(_judg(), ["2026E", "2027E"], "ctx", decomps=ds, anchor=_anchor_600183())
+    assert "50.05%" in p and "31.27%" in p and "解释锚定值" in p and "Q1–Q2" in p
+    p2 = assume.build_prompt(_judg(), ["2026E", "2027E"], "ctx", decomps=None, anchor=_anchor_600183())
+    assert "不用填" in p2
+    p0 = assume.build_prompt(_judg(), ["2026E", "2027E"], "ctx", decomps=ds, anchor=None)
+    assert "本公司首年锚定结果" not in p0
+
+
+def test_审核者拿到的填写提示词带锚定():
+    import inspect
+    from ir_agent import assume_review
+    src = inspect.getsource(assume_review.fill_and_review)
+    assert "anchor=anchor" in src[src.index("assume.build_prompt("):]
+
+
+def test_清单首年标锚定():
+    a, _ = _checked()
+    a.base_margin = D("0.2647")
+    md = a.describe()
+    assert "2026E（锚定）" in md
+    a0, _ = _checked(anchor=None)
+    a0.base_margin = D("0.2647")
+    assert "（锚定）" not in a0.describe()
+
+
+def test_审核规则说首年取锚定值():
+    from ir_agent import assume_review
+    assert "第 1 年取锚定值" in assume_review.RULES and "解释得了锚定值" in assume_review.RULES
+
+
+def test_清单横幅说首年取锚定值():
+    from ir_agent import full
+    b = full._anchor_banner(_cal_600183(), ["2026E", "2027E"])
+    assert "取锚定值" in b and "不进模型" not in b

@@ -108,9 +108,10 @@ def _sheet_values(path, label_suffix, cal):
 
 
 def _engine(a, cal):
+    # 工作簿「（合成）」格是因子原样合成；首年锚定生效值走第三小节，不经这一格（spec 2026-11-17）
     bm = assume._base_margin_of(cal)
     bases = assume.margin_bases(a, bm, assume.anchor_from_cal(cal))
-    return {c.name.lower(): assume.synthesize(a, c, bm, bases)
+    return {c.name.lower(): assume.synthesize_raw(a, c, bm, bases)
             for c in (Case.BULL, Case.BASE, Case.BEAR)}
 
 

@@ -1350,7 +1350,8 @@ def test_批准前就要告诉人首年会被锚定():
     txt = full._anchor_banner(_cal_with_interim(), ["2026E", "2027E"])
     assert "2026E" in txt and "半年报" in txt
     assert "50.05%" in txt and "31.27%" in txt
-    assert "不进模型" in txt
+    # 2026-11-17 起首年判断项本身就取锚定值：横幅说「取锚定值」，不再说「不进模型」
+    assert "取锚定值" in txt and "不进模型" not in txt
 
 
 def test_横幅讲清季度估算规则_三档相同():

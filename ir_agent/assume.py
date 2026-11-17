@@ -588,6 +588,10 @@ class AssumptionSet:
         lines += self._describe_unverified()
         return lines
 
+    def _year_label(self, y: int) -> str:
+        lab = self.labels[y] if y < len(self.labels) else f"第{y+1}年"
+        return lab + ("（锚定）" if y == 0 and self.anchor_y1 is not None else "")
+
     def _describe_synthesis(self) -> list[str]:
         lines = ["## 合成结果（代码按公式算出，不是模型直接填的数）", ""]
         m = self.model
@@ -602,7 +606,7 @@ class AssumptionSet:
         lines += ["| 年 | 营收增速 悲观 | 中性 | 乐观 | 毛利率 悲观 | 中性 | 乐观 |",
                   "| --- | --- | --- | --- | --- | --- | --- |"]
         for y in range(len(got[Case.BASE][0])):
-            lab = self.labels[y] if y < len(self.labels) else f"第{y+1}年"
+            lab = self._year_label(y)
             g = [got[c][0][y] for c in (Case.BEAR, Case.BASE, Case.BULL)]
             mg = [got[c][1][y] for c in (Case.BEAR, Case.BASE, Case.BULL)]
             lines.append(f"| {lab} | " + " | ".join(f"{x:.2%}" for x in g)
@@ -695,7 +699,7 @@ class AssumptionSet:
         lines.append("| 年 | 悲观 | 中性 | 乐观 |")
         lines.append("| --- | --- | --- | --- |")
         for y in range(len(mid_s)):
-            lab = self.labels[y] if y < len(self.labels) else f"第{y+1}年"
+            lab = self._year_label(y)
             lines.append(f"| {lab} | {lo_s[y]:.2%} | {mid_s[y]:.2%} "
                         f"| {hi_s[y]:.2%} |")
         lines.append("")
@@ -2056,10 +2060,31 @@ def _formula_head(m: FormulaModel, factor_data: dict,
     return "\n".join(lines)
 
 
+def _anchor_prompt(anchor: dict, *, decomposed: bool) -> str:
+    """首年锚定的规则、方法与本公司结果（spec 2026-11-17：告诉 AI 建模时首年怎么定）。"""
+    g1, m1 = anchor_y1_of(anchor)
+    k = int(anchor.get("k") or 0)
+    qs = "Q1" + (f"–Q{k}" if k > 1 else "")
+    lines = ["**首年锚定（代码规则，你改不了）**：首年已公布 "
+             f"{qs}（{anchor.get('label') or '已披露季度'}）。建模时首年 = 已公布季度实际 + 其余季度按"
+             "去年同季 ×（1 + 年初至今同比）外推，营收与营业成本各用各的同比，三档相同。",
+             f"本公司首年锚定结果：营收增速 {g1:.2%}、毛利率 {m1:.2%}（年初至今同比：营收 "
+             f"{float(anchor.get('g_rev') or 0):+.2%}、营业成本 {float(anchor.get('g_cogs') or 0):+.2%}）。"]
+    if decomposed:
+        lines.append("第 1 年各因子填一组**能解释锚定值**的拆解，三档相同：由你判断首年增长来自量、价"
+                     "还是成本，这是首年唯一要判断的地方。代码按公式合成，与锚定值相差超过 "
+                     f"{ANCHOR_TOL:.1%} 会交审核者指出。")
+    else:
+        lines.append("第 1 年的营收增速、毛利率不用填，代码写入锚定值。")
+    lines.append("第 2 年起照常判断（三档严格拉开）；「三档严格拉开」的要求不适用于第 1 年。")
+    return "\n".join(lines)
+
+
 def build_prompt(judg: dict, labels: list[str], context: str,
                  brief: str = "", decomps=None,
                  factor_data: dict | None = None,
-                 ledger_bases: dict | None = None, us: bool = False) -> str:
+                 ledger_bases: dict | None = None, us: bool = False,
+                 anchor: dict | None = None) -> str:
     g, gm = judg.get("g_stats") or (), judg.get("gm_stats") or ()
     hist = []
     if g:
@@ -2083,6 +2108,8 @@ def build_prompt(judg: dict, labels: list[str], context: str,
         head = _formula_head(m, factor_data or {}, ledger_bases)
     from ir_agent import opex_judg as OJ
     head = head + "\n\n" + OJ.prompt_section("us" if us else "cn", judg)
+    if anchor_y1_of(anchor) is not None:
+        head = _anchor_prompt(anchor, decomposed=m is not None) + "\n\n" + head
     return PROMPT.format(head=head, years=len(labels), labels="、".join(labels),
                          history="\n".join(hist) or "  （无）",
                          context=context, brief=brief or "（无）")

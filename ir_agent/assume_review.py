@@ -141,8 +141,9 @@ RULES = """你是研究总监，正在审核一份 **DCF 判断项**（营收与
 - 合成：代码按公式合成的三档营收增速与毛利率是否拉开、是否单调；合成路径与理由
   栏引用的参照（行业增速、历史 CAGR、同业水平）是否自洽；与首年锚定是否衔接。
   有首年锚定时（见代码事实【首年锚定】：已公布季度用实际，其余季度按年初至今同比
-  外推，三档相同），第 1 年由锚定值替换；第 2 年起的毛利率若含基期平移，手算时要
-  加上平移量 —— 那是代码的处理，不要当成引擎错误。
+  外推，三档相同），第 1 年取锚定值（数据，不是情景：三档相同不算没拉开）；审核第 1 年各
+  因子是否是解释得了锚定值的合理拆解（代码给出拆解合成与锚定值的偏差）。第 2 年起的毛利率
+  若含基期平移，手算时要加上平移量 —— 那是代码的处理，不要当成引擎错误。
 - 后果：5 年累计倍数、隐含市占率，放到行业格局、产能、CR5、周转与杠杆（账本事实
   目录里有）下看是否可能。
 - 费用率（取值、依据两类下的各费用率科目）：成本项悲观 ≥ 中性 ≥ 乐观；对照代码给的逐年历史看**趋势**
@@ -364,7 +365,8 @@ def fill_and_review(filler, judge, *, judg: dict, labels: list[str], context: st
         assume._fill_from_ledger(probe, ledger, as_of)
         ledger_bases = probe.base_values
     prompt = assume.build_prompt(judg, labels, context, brief=body, decomps=decomps,
-                                 factor_data=factor_data, ledger_bases=ledger_bases)
+                                 factor_data=factor_data, ledger_bases=ledger_bases,
+                                 anchor=anchor)
     materials = prompt
     hay = "\n".join([body, *[getattr(fd, "source_excerpt", "") or ""
                              for fd in (factor_data or {}).values()]])
