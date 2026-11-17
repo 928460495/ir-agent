@@ -146,3 +146,12 @@ def test_全局营收增速Δ不为零时引擎与主模型一致(tmp_path):
     fails = V.verify(p, quiet=True)
     fails = fails[0] if isinstance(fails, tuple) else fails
     assert fails == []
+
+
+def test_健全性检查拿终值ROIC与终值WACC比(built):
+    """生益 2026-11-17：「终值 ROIC 9.0% ≤ WACC 9.9%」——终值 ROIC 按模式 2 = 终值 WACC + 溢价，必高于终值
+    WACC；拿明确期 WACC 比是误报（PLTR 研报同一误读）。"""
+    rows, dv = V.recompute(V.read_inputs(built))
+    dv = dict(dv, roic=0.090, wacc=0.099, wacc_term=0.075)
+    assert not any("终值 ROIC" in w for w in V.sanity(dv, rows))
+    assert any("终值 ROIC" in w and "终值 WACC" in w for w in V.sanity(dict(dv, roic=0.070), rows))

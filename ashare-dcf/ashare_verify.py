@@ -542,8 +542,11 @@ def sanity(dv, rows, wacc_key="wacc"):
         w.append(f"终值占 EV {_tw*100:.0f}%（>75%）：估值高度依赖终值假设，明确期只贡献 {(1-_tw)*100:.0f}%")
     if dv["pv"] < 0:
         w.append(f"明确期 FCFF 现值为负（{dv['pv']:.1f} 亿）：预测期内公司净消耗现金，DCF 点估值意义有限")
-    if dv["roic"] <= dv[wacc_key]:
-        w.append(f"终值 ROIC {dv['roic']*100:.1f}% ≤ WACC {dv[wacc_key]*100:.1f}%：永续期不创造价值，增长反而毁灭价值，终值公式在此失真")
+    # 终值 ROIC 与终值 WACC 比（终值 Beta 向 1，2026-11-16）；旧工作簿没有终值 WACC 时退回明确期 WACC。
+    # 生益 2026-11-17：拿明确期 WACC 9.9% 比终值 ROIC 9.0%（= 终值 WACC 7.5% + 溢价）误报「毁灭价值」
+    _wt = dv.get("wacc_term", dv[wacc_key]); _wl = "终值 WACC" if "wacc_term" in dv else "WACC"
+    if dv["roic"] <= _wt:
+        w.append(f"终值 ROIC {dv['roic']*100:.1f}% ≤ {_wl} {_wt*100:.1f}%：永续期不创造价值，增长反而毁灭价值，终值公式在此失真")
     if dv["rr"] > 0.60:
         w.append(f"稳态再投资率 {dv['rr']*100:.0f}%（>60%）：ROIC 偏低导致维持增长需吞掉大部分利润")
     if dv["rr"] < 0:
