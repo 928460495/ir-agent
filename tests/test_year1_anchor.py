@@ -70,3 +70,72 @@ def test_旧JSON读回无anchor_y1不报错():
     a, _ = _two_year_set()
     b, edits = assume.from_json(assume.to_json(a))
     assert b.anchor_y1 is None and edits == []
+
+
+# ── Task 3 ──
+
+def _scalar(y1_growth="0.10", with_y1=True):
+    rows = []
+    for y in (1, 2):
+        if y == 1 and not with_y1:
+            continue
+        g = D(y1_growth) if y == 1 else D("0.08")
+        rows.append(assume.Row(driver="growth", year=y, bear=g - D("0.02"), base=g, bull=g + D("0.02"), note="理由"))
+        rows.append(assume.Row(driver="gm", year=y, bear=D("0.25"), base=D("0.27"), bull=D("0.29"), note="理由"))
+    return assume.AssumptionSet(code="600183", labels=["2026E", "2027E"], rows=rows)
+
+
+def _check_scalar_set(a, anchor=_anchor_600183()):
+    return assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, anchor=anchor)
+
+
+def test_两标量首年由代码写入锚定值():
+    a = _scalar()
+    facts = _check_scalar_set(a)
+    for drv, v in (("growth", a.anchor_y1[0]), ("gm", a.anchor_y1[1])):
+        r = [r for r in a.rows if r.driver == drv and r.year == 1][0]
+        assert (r.bear, r.base, r.bull) == (v, v, v) and r.note.startswith("锚定")
+    assert any("锚定" in n and "10" in n for n in a.read_notes)
+    assert "第 1 年的营收增速三档未拉开" not in facts.text()
+    b, edits = assume.from_json(assume.to_json(a))
+    assert edits == []                                           # 代码写入不算人工修改
+
+
+def test_两标量首年未填也不算缺年份():
+    a = _scalar(with_y1=False)
+    facts = _check_scalar_set(a)
+    assert not facts.blocking
+    assert [r.year for r in a.rows if r.driver == "growth"] == [1, 2]
+
+
+def test_两标量无锚定时首年照AI判断():
+    a = _scalar()
+    _check_scalar_set(a, anchor=None)
+    assert [r for r in a.rows if r.driver == "growth" and r.year == 1][0].base == D("0.10")
+
+
+def _explaining_set(extra_pp=0.0):
+    """首年拆解恰好解释锚定值（± extra_pp 个百分点的毛利率）。"""
+    a, ds = _two_year_set()
+    cap = D(str(round((1 + G1) / 1.01 - 1, 6)))
+    spread = D(str(round((M1 - 0.2647) * 100 - 0.5 + extra_pp, 6)))
+    for r in a.rows:
+        if r.year != 1:
+            continue
+        v = {"cap": cap, "asp": D("0.01"), "spread": spread, "util": D("0.5")}[r.factor_key]
+        r.bear = r.base = r.bull = v
+    return a, ds
+
+
+def test_分解首年拆解解释不了锚定值记问题_不阻断():
+    _, facts = _checked()                                # 固件首年合成 6.05%，锚定 50.05%
+    assert not facts.blocking
+    assert "拆解解释不了锚定值" in facts.text()
+
+
+def test_分解首年拆解在半个百分点内不记问题():
+    for extra, hit in ((0.3, False), (1.0, True)):
+        a, ds = _explaining_set(extra)
+        facts = assume.check(a, 2, ledger=FactLedger(), body="正文", as_of=AS_OF, decomps=ds,
+                             base_margin=D("0.2647"), anchor=_anchor_600183())
+        assert ("拆解解释不了锚定值" in facts.text()) is hit, (extra, facts.text())

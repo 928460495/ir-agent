@@ -1023,6 +1023,12 @@ def anchor_year1(anchor: dict) -> dict[str, tuple[float, float]]:
     return {name: y1 for name in _CASES3}
 
 
+# 分解模式：首年因子拆解合成后与锚定值相差超过这么多（营收增速或毛利率），记一条问题交审核者
+ANCHOR_TOL = Decimal("0.005")
+ANCHOR_NOTE = ("锚定：首年已有季报，取已公布季度实际 + 其余季度按去年同季 ×（1 + 年初至今同比）"
+               "外推的全年值，三档相同（代码写入，不是判断）")
+
+
 def anchor_y1_of(anchor: dict | None) -> tuple[Decimal, Decimal] | None:
     """首年锚定值 (营收增速, 毛利率)，四舍五入到 6 位（与 `_anchor_values` / 工作簿同口径）。
     没有锚定返回 None —— 首年回到判断项。"""
@@ -1660,6 +1666,8 @@ def _check_scalar(a: AssumptionSet, years: int, facts: "Facts") -> None:
     """两标量模式的计算前提与事实。重复行、缺年份 → 算不下去（`path()` 按年份
     排序后按下标取值，错位一格就是错数）；三档没拉开 → 事实，交审核者 [合成]。"""
     inv = {v: k for k, v in DRIVERS.items()}
+    if a.anchor_y1 is not None:
+        _write_anchor_rows(a, inv)
     seen: set[tuple[str, int]] = set()
     for r in a.rows:
         key = (r.driver, r.year)
@@ -1675,10 +1683,26 @@ def _check_scalar(a: AssumptionSet, years: int, facts: "Facts") -> None:
         if missing:
             facts.blocking.append(f"{cn} 缺第 {missing} 年")
     for r in a.rows:
+        if a.anchor_y1 is not None and r.year == 1:
+            continue                                     # 锚定首年三档相同，是数据不是情景
         if not (r.bear < r.base < r.bull):
             facts.problems.append(
                 f"第 {r.year} 年的{'营收增速' if r.driver == 'growth' else '毛利率'}"
                 f"三档未拉开（悲观 {r.bear} / 中性 {r.base} / 乐观 {r.bull}，未严格递增）")
+
+
+def _write_anchor_rows(a: AssumptionSet, inv: dict) -> None:
+    """两标量模式：首年营收增速、毛利率由代码写入锚定值（三档相同）。AI 填了不同的值就覆盖，
+    并在 read_notes 记一句（spec 2026-11-17：首年已有季报就用锚定值）。"""
+    for drv, v in (("growth", a.anchor_y1[0]), ("gm", a.anchor_y1[1])):
+        got = [r for r in a.rows if r.driver == drv and r.year == 1]
+        for r in got:
+            if (r.bear, r.base, r.bull) != (v, v, v):
+                a.read_notes.append(f"{inv.get(drv, drv)} 第 1 年 AI 填 {r.bear}/{r.base}/{r.bull}，"
+                                    f"已由锚定值 {v} 替换（三档相同）")
+        a.rows = [r for r in a.rows if not (r.driver == drv and r.year == 1)]
+        a.rows.append(Row(driver=drv, year=1, bear=v, base=v, bull=v, note=ANCHOR_NOTE))
+    a.rows.sort(key=lambda r: (r.driver, r.year))
 
 
 _RATIO_HINT = re.compile(r"除以|÷|/|占比|比重")
@@ -1773,8 +1797,26 @@ def _check_factors(a: AssumptionSet, years: int, decomps,
         # 锚定开启时看的必须是平移后的路径——那才是建模用的。
         a.margin_bases = margin_bases(a, base_margin, anchor)
         facts.problems += _monotonic_problems(a, base_margin, a.margin_bases)
+        facts.problems += _anchor_split_problems(a, base_margin)
     except AssumeFailed as e:
         facts.blocking.append(str(e))
+
+
+def _anchor_split_problems(a: AssumptionSet, base_margin: Decimal) -> list[str]:
+    """分解模式 + 锚定：首年各因子是对锚定值的拆解。原样合成后与锚定值差超过 `ANCHOR_TOL`
+    → 事实交审核者（不阻断；模型照用锚定值）。"""
+    if a.anchor_y1 is None:
+        return []
+    g1, m1 = a.anchor_y1
+    out = []
+    for c in Case:
+        g, m = synthesize_raw(a, c, base_margin)
+        if not g or not m:
+            continue
+        if abs(g[0] - g1) > ANCHOR_TOL or abs(m[0] - m1) > ANCHOR_TOL:
+            out.append(f"首年拆解（{c.value}）合成营收增速 {g[0]:.2%}、毛利率 {m[0]:.2%}，与锚定值 "
+                       f"{g1:.2%}、{m1:.2%} 相差超过 {ANCHOR_TOL:.1%} —— 拆解解释不了锚定值")
+    return out
 
 
 def _monotonic_problems(a: AssumptionSet, base_margin: Decimal,
