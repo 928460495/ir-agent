@@ -18,7 +18,7 @@ from decimal import Decimal
 from ir_agent.ledger import FactLedger, LookAheadError
 from ir_agent.market import quote_symbol
 from ir_agent.relval import PeerObs
-from ir_agent.sources.quotes import fetch_quotes
+from ir_agent.sources.quotes import close_asof, fetch_quotes
 
 
 
@@ -257,6 +257,25 @@ def _disclosed(facts: dict, period: str, as_of: date) -> bool:
                for k in ("revenue", "equity_attr_parent"))
 
 
+def _peer_closes(snapshot_dir, day: date) -> tuple[dict, "Path"]:
+    """同业在本司报价日的收盘，按报价日落盘：{symbol: [日期, 收盘]}。重跑同一时点不再逐家取日 K。"""
+    import json
+    from pathlib import Path
+    path = Path(snapshot_dir) / f"peer_close_{day.isoformat()}.json"
+    try:
+        return json.loads(path.read_text("utf-8")), path
+    except (OSError, ValueError):
+        return {}, path
+
+
+def _close_on(symbol: str, day: date, cache: dict) -> tuple[date, Decimal]:
+    if symbol not in cache:
+        d, px = close_asof(symbol, day)
+        cache[symbol] = [d.isoformat(), str(px)]
+    d, px = cache[symbol]
+    return date.fromisoformat(d), Decimal(px)
+
+
 def gather(r, as_of: date, snapshot_dir):
     """返回 (本司, 行业样本, 可比, 总股本, 现价, 剔除说明)。
 
@@ -306,12 +325,27 @@ def gather(r, as_of: date, snapshot_dir):
                    fetched_at=now, params={"url": url})
 
     sample: list[PeerObs] = []
+    closes, close_path = _peer_closes(snapshot_dir, quote_day)
+    n_cached = len(closes)
     for c in codes:
         name = names.get(c, c)
         q = got.get(c)
         if q is None or q.get("market_cap") is None:
             notes.append(f"{c} {name}：无行情（停牌或接口未返回），剔除")
             continue
+        if q.get("as_of") is not None and q["as_of"].date() > quote_day and q.get("last"):
+            # 本司报价日早于同业实时行情日（分析时点早于今天）：同业也换成本司报价日的收盘，
+            # 市值按价格同比缩放（股本沿用实时口径）。否则两边不是同一天的价格。
+            try:
+                d, px = _close_on(quote_symbol(c), quote_day, closes)
+            except Exception as e:                          # noqa: BLE001
+                notes.append(f"{c} {name}：{quote_day} 收盘取不到（{e.__class__.__name__}），剔除")
+                continue
+            if d != quote_day:
+                notes.append(f"{c} {name}：{quote_day} 无成交（最近收盘 {d}，可能停牌），剔除")
+                continue
+            q = dict(q, market_cap=q["market_cap"] * px / q["last"], last=px,
+                     as_of=datetime(d.year, d.month, d.day))
         if q.get("as_of") is not None and q["as_of"].date() != quote_day:
             notes.append(f"{c} {name}：行情停在 {q['as_of'].date()}，与本司报价日 "
                          f"{quote_day} 不同（可能停牌），剔除")
@@ -322,6 +356,14 @@ def gather(r, as_of: date, snapshot_dir):
         sample.append(obs_from_facts(c, name, cache[c], fp, q["market_cap"], as_of,
                                      ttm_end=ttm_end, bs_period=tgt_bs,
                                      flow_end=tgt_flow))
+
+    if len(closes) != n_cached:
+        import json
+        try:
+            close_path.parent.mkdir(parents=True, exist_ok=True)
+            close_path.write_text(json.dumps(closes, ensure_ascii=False, indent=1), "utf-8")
+        except OSError:
+            pass
 
     try:
         aggregates.compute(r.ledger, fp, as_of)
