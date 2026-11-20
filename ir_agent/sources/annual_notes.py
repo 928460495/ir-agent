@@ -101,6 +101,25 @@ def _nca1y(block: str, n: FinNotes) -> None:
     n.nca1y_total = total
 
 
+# 受限资产表的科目名（记录锚点）。按科目名分记录，不靠数数 —— 期初为空的行会让「读满 4 个数」的数法
+# 吞掉下一条记录（终审 I4）。资产负债表科目名多以这些字结尾；受限原因（质押、保证金……）不会。
+_ASSET_LABEL = re.compile(r"^(?:[一-龥（）()]{1,16}(?:资产|资金|投资|票据|账款|存货|工程|款项|房地产|使用权|"
+                          r"款|权益|存单|存款))$")
+# 分类顺序（终审 I4）：先判权利受限（「定期存单质押」是质押，不是定期），再判准备金（「存款准备金」「存放中央
+# 银行准备金」不一定带「法定」二字），最后才是期限限制；都不是 → 按权利受限保守扣除。
+_ENCUMBER = ("质押", "冻结", "保证金", "担保", "抵押", "诉讼", "查封", "司法", "监管")
+
+
+def _classify(reason: str) -> str:
+    if any(k in reason for k in _ENCUMBER):
+        return "encumbered"
+    if "准备金" in reason or "存放中央银行" in reason:
+        return "statutory"
+    if "不能随时支取" in reason or "定期" in reason:
+        return "term"
+    return "encumbered"
+
+
 def _restricted(block: str, n: FinNotes) -> None:
     k = _unit(block)
     lines = _lines(block)
@@ -109,37 +128,32 @@ def _restricted(block: str, n: FinNotes) -> None:
     except ValueError:
         n.missing.append("受限资产：附注表头读不出")
         return
-    # 记录 = 标签 + 期末(余额, 账面价值) + 期末(类型, 情况) + 期初(余额, 账面价值) + 期初(类型, 情况)
-    recs: list[tuple[str, list]] = []
-    body = lines[start:]
-    for j, x in enumerate(body):
+    body = []
+    for x in lines[start:]:
         if x.startswith("合计"):
             break
+        body.append(x)
+    # 记录 = 科目名（后面紧跟数字）+ 期末(余额, 账面价值) + 期末(类型, 情况) + [期初(余额, 账面价值, 类型, 情况)]
+    recs: list[tuple[str, list]] = []
+    for j, x in enumerate(body):
         v = _num(x)
-        cur = recs[-1] if recs else None
-        if v is None:
-            # 新记录的标签：紧跟着就是数字（账面余额），且上一条已读满 4 个数或还没有记录。
-            # 期初「受限类型 / 受限情况」也出现在 4 个数之后，但它们后面不是紧跟数字 —— 不能当标签。
-            nxt_is_num = j + 1 < len(body) and _num(body[j + 1]) is not None
-            if nxt_is_num and (cur is None or len([t for t in cur[1] if isinstance(t, Decimal)]) >= 4):
-                recs.append((x, []))
-            elif cur is not None:
-                cur[1].append(x)
-        elif cur is not None:
-            cur[1].append(v)
+        if v is None and _ASSET_LABEL.match(x) and j + 1 < len(body) and _num(body[j + 1]) is not None:
+            recs.append((x, []))
+        elif recs:
+            recs[-1][1].append(v if v is not None else x)
     n.statutory_reserve = Decimal(0)
     for label, toks in recs:
-        nums = [t for t in toks if isinstance(t, Decimal)]
-        if len(nums) < 2 or not any(label.startswith(r) for r in _FIN_ROWS):
+        pos = [i for i, t in enumerate(toks) if isinstance(t, Decimal)]   # 按位置，不按值（余额常与账面价值相等）
+        if len(pos) < 2 or not any(label.startswith(r) for r in _FIN_ROWS):
             continue
-        # 期末账面价值后、期初余额前的文字 = 期末的受限类型 + 受限情况（PDF 折行，拼回去）
-        i2 = toks.index(nums[1])
-        i3 = toks.index(nums[2]) if len(nums) > 2 else len(toks)
-        reason = "".join(t for t in toks[i2 + 1:i3] if isinstance(t, str))
-        amt = nums[1] * k
-        if "法定" in reason and "准备金" in reason:
+        # 期末账面价值之后、下一个数（期初余额）之前的文字 = 期末的受限类型 + 受限情况（PDF 折行，拼回去）
+        i3 = pos[2] if len(pos) > 2 else len(toks)
+        reason = "".join(t for t in toks[pos[1] + 1:i3] if isinstance(t, str))
+        amt = toks[pos[1]] * k
+        kind = _classify(reason)
+        if kind == "statutory":
             n.statutory_reserve += amt
-        elif "不能随时支取" in reason or "定期" in reason:
+        elif kind == "term":
             n.term_restricted[label] = n.term_restricted.get(label, Decimal(0)) + amt
         else:
             n.encumbered[label] = n.encumbered.get(label, Decimal(0)) + amt

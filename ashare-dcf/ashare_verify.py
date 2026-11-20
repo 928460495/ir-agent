@@ -121,6 +121,33 @@ def _cell_value(wb, sheet, addr, _depth=0):
     return _cell_value(wb, nxt, target, _depth + 1)
 
 
+def _check_fin_bridge(wb):
+    """非经营性金融资产小节（spec 2026-11-20）：期初「交易性金融资产」= 报表列报值 + 明细净额。小节是只读列示，
+    有人只改了一边（改了明细以为生效、或改了交易性金融资产忘了明细）就报出来（终审 I6）。"""
+    a = wb["1_假设"]; am = _rowmap(a)
+    head = next((k for k in am if isinstance(k, str) and k.startswith("五（补）、非经营性金融资产")), None)
+    if head is None:
+        return []
+    r = am[head] + 1
+    raw, tot = None, 0.0
+    while r <= a.max_row:
+        lbl = a.cell(r, 1).value
+        if isinstance(lbl, str) and lbl.startswith("净额（"):
+            break
+        v = a.cell(r, 2).value
+        if lbl == "报表列报的交易性金融资产":
+            raw = float(v or 0)
+        elif isinstance(lbl, str) and not lbl.startswith("附：") and isinstance(v, (int, float)):
+            tot += float(v)
+        r += 1
+    tfa = a.cell(_find(am, "交易性金融资产"), 2).value
+    if raw is None or tfa is None:
+        return [("非经营性金融资产", "小节不完整", raw, tfa)]
+    if abs(float(tfa) - (raw + tot)) > 1e-4:
+        return [("非经营性金融资产", "交易性金融资产 ≠ 报表列报 + 明细净额", round(float(tfa), 4), round(raw + tot, 4))]
+    return []
+
+
 def read_inputs(path):
     wb = load_workbook(path, data_only=False)
     a = wb["1_假设"]; am = _rowmap(a)
@@ -381,6 +408,7 @@ def verify(path, quiet=False):
     wb=load_workbook(path)
     hdr=[wb["2_利润表"].cell(5,c).value for c in range(2,2+nh+ny)]
     if len([h for h in hdr if h])!=nh+ny: fails.append(("列头","不完整",hdr,None))
+    fails += _check_fin_bridge(wb)
     if not all(str(h).endswith("E") for h in hdr[nh:]): fails.append(("预测列头",hdr[nh:],"应全部以E结尾",None))
     sol=formulas.ExcelModel().loads(path).finish().calculate()
     _fn=os.path.basename(path)

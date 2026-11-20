@@ -114,6 +114,7 @@ def fin_bridge(bal, p, fin_notes: dict | None = None) -> dict:
     g = lambda k: _v0(bal, k, p)
     yi = lambda x: float(x) / 1e8
     items: list = []
+    remarks: list = []      # 不改数的说明（不进明细小节：多数公司都有一年内到期科目，0 值进明细会改版式，终审 I3）
     fa_cur = 0.0
     for k in FIN_ASSET_CUR:
         if g(k):
@@ -121,11 +122,11 @@ def fin_bridge(bal, p, fin_notes: dict | None = None) -> dict:
     if g(NCA1Y):
         fin = (fin_notes or {}).get("nca1y_fin")
         if fin is None:
-            items.append((f"{NCA1Y}（金融部分）", 0.0,
-                          f"未取到附注：{NCA1Y} {g(NCA1Y):.2f} 亿按经营性处理（保守）"))
+            remarks.append(f"未取到附注：{NCA1Y} {g(NCA1Y):.2f} 亿按经营性处理（保守）")
         else:
             v = min(g(NCA1Y), yi(fin))
-            fa_cur += v; items.append((f"{NCA1Y}（金融部分）", round(v, 4), "年报附注：一年内到期的债权投资等"))
+            if v:
+                fa_cur += v; items.append((f"{NCA1Y}（金融部分）", round(v, 4), "年报附注：一年内到期的债权投资等"))
     fa_nc = 0.0
     for k in FIN_ASSET_NC:
         if g(k):
@@ -138,7 +139,21 @@ def fin_bridge(bal, p, fin_notes: dict | None = None) -> dict:
     if restr:
         items.append(("减：质押 / 冻结等受限（类）现金", round(-restr, 4), "年报附注：所有权或使用权受限资产"))
     net = fa_cur + fa_nc - fl - restr
-    return dict(fa_cur=fa_cur, fa_nc=fa_nc, fl=fl, restr=restr, net=net, items=items)
+    kind = ("finance" if (fa_cur or fa_nc or fl) else "restricted_only" if restr else "none")
+    return dict(fa_cur=fa_cur, fa_nc=fa_nc, fl=fl, restr=restr, net=net, items=items, remarks=remarks, kind=kind)
+
+
+def strip_fin_income(inc, bal, p_last):
+    """有财务公司金融资产时，营收口径用「营业收入」（剔除利息收入、手续费及佣金收入）——资产已按账面加回，它产生
+    的收入就不能再在经营价值里资本化（终审 I1：茅台营业总收入 1720.54 = 营业收入 1688.38 + 利息收入 32.16）。
+    返回 (income 表, 最近年报剔除额·亿元)；没有财务公司科目时原样返回。"""
+    has = any(_v0(bal, k, p_last) for k in FIN_ASSET_CUR + FIN_ASSET_NC + FIN_LIAB)
+    if not has or "营业收入" not in inc.columns or "营业总收入" not in inc.columns:
+        return inc, 0.0
+    out = inc.copy()
+    out["营业总收入"] = inc["营业收入"].where(inc["营业收入"].notna(), inc["营业总收入"])
+    adj = _v0(inc, "营业总收入", p_last) - _v0(inc, "营业收入", p_last)
+    return out, adj
 
 
 def opening_balances(bal, p, fin_notes: dict | None = None) -> dict:
@@ -181,10 +196,10 @@ def implied_da(inc, bal, cf, periods) -> list[float]:
     for i in range(1, len(periods)):
         p0, p1 = periods[i-1], periods[i]
         def nwc(p):
-            # 财务公司金融资产与存款不是经营占用（茅台存放同业一年 +570 亿），一并剔除
-            fb = fin_bridge(bal, p)
-            return (_v0(bal,"流动资产合计",p) - _v0(bal,"货币资金",p) - _v0(bal,"交易性金融资产",p) - fb["fa_cur"]) - \
-                   (_v0(bal,"流动负债合计",p) - _v0(bal,"短期借款",p) - _v0(bal,"一年内到期的非流动负债",p) - fb["fl"])
+            # 拆出资金、吸收存款等**留在**这里（终审 I5，2026-11-20）：合并现金流量表把「拆出资金净增加额」
+            # 「客户存款和同业存放款项净增加额」列在经营活动，经营现金流已含它们，与这里的营运资本变动相互抵消。
+            return (_v0(bal,"流动资产合计",p) - _v0(bal,"货币资金",p) - _v0(bal,"交易性金融资产",p)) - \
+                   (_v0(bal,"流动负债合计",p) - _v0(bal,"短期借款",p) - _v0(bal,"一年内到期的非流动负债",p))
         ocf = _v(cf, "经营活动产生的现金流量净额", p1)
         ni = _v(inc, "净利润", p1)
         if ocf is None or ni is None: continue
@@ -391,6 +406,9 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
     D.assert_non_financial(bal, ann0[-1], inc)
     D.assert_modelable(inc, ann0)
     ann = D.annual_periods(inc, 5)
+    inc, _fin_rev_adj = strip_fin_income(inc, bal, ann[-1])
+    if _fin_rev_adj:
+        st = dict(st, income=inc)          # 工作簿历史列与估值同一营收口径
     interim = D.latest_interim(inc, ann)
     hp = ann + ([interim] if interim else [])
     last = ann[-1]
@@ -697,4 +715,4 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
                  roic_mode=2, beta_term=1.0),
         rev=rev, cogs=cogs,
         # 财务公司 / 类现金金融资产的逐项明细（建表在 1_假设 列示；净额已并入交易性金融资产）
-        fin_bridge=fin_bridge(bal, last, fin_notes))
+        fin_bridge=dict(fin_bridge(bal, last, fin_notes), rev_adj=round(_fin_rev_adj, 4)))

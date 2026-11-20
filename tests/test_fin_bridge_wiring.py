@@ -69,3 +69,26 @@ def test_A股营业利润率扣税金及附加():
     assert any("第1年 营业利润率 56.00% / 59.00% / 62.00%" in x for x in with_t)      # 90 − 16 − 3×(6/5/4)
     without = OJ.margin_lines(a, gm, None)
     assert "未扣税金及附加" in without[1]
+
+
+def test_净金融资产作为估值事实入账_研报能引用():
+    """茅台验收：研报写「净额已加回，其数额未列入可引事实，故不在此复述」—— 净额要进账本。"""
+    import inspect
+    res = dcf.DcfResult(code="600519", workbook="/tmp/x.xlsx", price=D("1485.75"), value_per_share=D("1594.99"),
+                        wacc=D("0.0653"), terminal_roic=D("0.1"), reinvest_rate=D("0.1"), terminal_share=D("0.6"),
+                        verified=True, as_of=AS, nonop_fin_net=D("121418198465.2"))
+    assert "[[valuation.nonop_fin_net@2026-11-20]]" in res.summary()
+    facts = {f.key: f for f in dcf.to_facts(res, AS)}
+    assert facts["valuation.nonop_fin_net"].value == D("121418198465.2") and facts["valuation.nonop_fin_net"].unit == "元"
+    assert "nonop_fin_net=" in inspect.getsource(dcf.run)
+
+
+def test_只有受限资金扣除时说明措辞不说财务公司加回():
+    def calibrate(code, years, stmts=None, as_of=None, fin_notes=None):
+        return {"meta": {}, "fin_bridge": {"net": -5.0, "kind": "restricted_only",
+                                            "items": [("减：质押 / 冻结等受限（类）现金", -5.0, "附注")]}}
+    D_ = SimpleNamespace(validate_code=lambda c: c, DataError=RuntimeError)
+    import ir_agent.dcf as M
+    cal, notes, _ = M._calibrate(D_, SimpleNamespace(calibrate=calibrate), "600183", AS, None, 10)
+    assert any("受限" in n and "扣除" in n for n in notes)
+    assert not any("财务公司" in n for n in notes)

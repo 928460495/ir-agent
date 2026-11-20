@@ -170,6 +170,9 @@ class DcfResult:
     # 终值 WACC（终值 Beta 向 1，2026-11-16）。终值 ROIC 要与它比，不是与明确期 WACC 比 —— PLTR 研报曾写「终值
     # ROIC 10.40% 低于 WACC 10.92%，不创造超额价值」，实际终值 WACC 8.40%，ROIC 高出 2%（2026-11-17）。
     wacc_term: Decimal | None = None
+    # 非经营性金融资产（财务公司等）净额，单位元（A 股；spec 2026-11-20）。茅台验收：研报写「净额已加回，其数额
+    # 未列入可引事实，故不在此复述」—— 不进账本，撰写者就引用不了。
+    nonop_fin_net: Decimal | None = None
 
     @property
     def upside(self) -> Decimal | None:
@@ -199,6 +202,9 @@ class DcfResult:
         if self.wacc_term is not None:
             lines.append(f"  终值 WACC [[valuation.wacc_term{at}]]（终值 Beta 向一收敛；终值 ROIC 应与终值 WACC 比，"
                          "不是与上面明确期的 WACC 比 —— 高于终值 WACC 即终值期新增投资创造价值）")
+        if self.nonop_fin_net:
+            lines.append(f"  非经营性金融资产（财务公司等）净额 [[valuation.nonop_fin_net{at}]] 已按账面在股权桥加回"
+                         "（拆出资金、买入返售、债权投资等，减吸收存款；不随营收增长、不进营运资本）")
         # 期限写中文数字：这一行进研报提示词，照抄阿拉伯数字会被裸数字审计判掉。
         lines.append(f"  WACC 所用 β [[valuation.beta{at}]]（五年对上证综指回归，Blume 调整）")
         if self.scenario_ps:
@@ -336,6 +342,8 @@ def to_facts(res: DcfResult, as_of: date,
             for k in ("bear", "base", "bull") if k in res.scenario_ps]
     if res.wacc_term is not None:
         out.append(f("valuation.wacc_term", res.wacc_term, "ratio"))
+    if res.nonop_fin_net:
+        out.append(f("valuation.nonop_fin_net", res.nonop_fin_net, "元"))
     # 蒙特卡洛：键都以 `valuation.` 开头 —— 辩论裁判的可引用清单按这个前缀收
     # （`full._catalog_periods` 的 PROMPT_SIDE），换前缀就会被判成伪造、回写删光。
     m = res.mc
@@ -438,9 +446,13 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str
     except getattr(D, "DataError", Exception) as e:
         raise DcfUnavailable(f"{code} 无法建模：{e}") from e
     fb = cal.get("fin_bridge") or {}
-    if fb.get("items"):
+    if fb.get("items") and fb.get("kind") == "restricted_only":
+        # 只有受限资金扣除（终审 I3）：不是财务公司，不能说「加回」
+        notes.append(f"受限资金（质押、冻结、保证金等，年报附注）{-fb['net']:.2f} 亿已从净现金中扣除")
+    elif fb.get("items"):
         notes.append(f"非经营性金融资产（财务公司等）净额 {fb['net']:.2f} 亿已按账面在股权桥加回（并入交易性金融资产，"
-                     "不随营收增长、不进营运资本）：" + "；".join(f"{l} {v:.2f}" for l, v, _ in fb["items"]))
+                     "不随营收增长、不进营运资本）：" + "；".join(f"{l} {v:.2f}" for l, v, _ in fb["items"])
+                     + (f"；营收口径剔除财务公司利息等收入 {fb['rev_adj']:.2f} 亿" if fb.get("rev_adj") else ""))
     return cal, notes, stmts
 
 
@@ -704,6 +716,8 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         mc=mc,
         scenario_ps=scenario_ps,
         wacc_term=(Decimal(str(dv["wacc_term"])) if dv.get("wacc_term") is not None else None),
+        nonop_fin_net=(Decimal(str(round((cal.get("fin_bridge") or {}).get("net", 0) * 1e8, 2)))
+                       if (cal.get("fin_bridge") or {}).get("kind") == "finance" else None),
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of, meta) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"

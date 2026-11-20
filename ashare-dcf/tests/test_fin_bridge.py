@@ -43,7 +43,7 @@ def test_茅台净金融资产():
 def test_没有附注时一年内到期部分不计并写明():
     fb = C.fin_bridge(_bal(), P, None)
     assert fb["fa_cur"] == pytest.approx(990.96 + 88.80)
-    assert any("未取到附注" in s for _, _, s in fb["items"])
+    assert any("未取到附注" in s for s in fb["remarks"]) and not any("未取到附注" in s for _, _, s in fb["items"])
 
 
 def test_质押冻结的扣除_法定准备金与定期不扣():
@@ -75,17 +75,46 @@ def test_没有财务公司科目的公司逐位不变():
     assert {k: a[k] for k in a} == {k: b[k] for k in b}
 
 
-def test_倒推折旧不受拆出资金波动影响():
-    """implied_da 用 Δ经营性营运资本 倒推 D&A；财务公司存放同业从 991 亿涨到 1561 亿不是经营占用。"""
+def test_倒推折旧_拆出资金增加已在经营现金流里_与营运资本相互抵消():
+    """终审 I5：合并现金流量表里「拆出资金净增加额」列在经营活动 —— 经营现金流已减去它，营运资本里的拆出资金
+    增加正好抵消。把它从营运资本剔除反而让倒推的 D&A 偏差 Δ拆出资金（茅台约 570 亿）。"""
     idx = ["20241231", P]
     def frames(lend):
         bal = pd.DataFrame({"流动资产合计": [2000 * Y, (2000 + lend) * Y], "货币资金": [500 * Y, 500 * Y],
                             "交易性金融资产": [0, 0], "流动负债合计": [600 * Y, 600 * Y], "短期借款": [0, 0],
                             "一年内到期的非流动负债": [0, 0], "拆出资金": [900 * Y, (900 + lend) * Y]}, index=idx)
         inc = pd.DataFrame({"净利润": [800 * Y, 800 * Y]}, index=idx)
-        cf = pd.DataFrame({"经营活动产生的现金流量净额": [900 * Y, 900 * Y]}, index=idx)
+        cf = pd.DataFrame({"经营活动产生的现金流量净额": [900 * Y, (900 - lend) * Y]}, index=idx)
         return inc, bal, cf
     assert C.implied_da(*frames(0), idx) == pytest.approx(C.implied_da(*frames(570), idx))
+
+
+def test_没有附注且只有经营性一年内到期科目时_不出小节不改余额():
+    """终审 I3：多数公司都有一年内到期的非流动资产（多为一年内到期的长期应收款）—— 0 值不能进明细。"""
+    plain = _bal(**{k: 0.0 for k in ("拆出资金", "买入返售金融资产", "债权投资", "吸收存款及同业存放")})
+    fb = C.fin_bridge(plain, P, None)
+    assert fb["items"] == [] and fb["net"] == 0 and fb["remarks"]
+    assert C.opening_balances(plain, P, None)["tfa"] == 0
+
+
+def test_只有受限资金扣除时措辞不说财务公司():
+    plain = _bal(**{k: 0.0 for k in ("拆出资金", "买入返售金融资产", "一年内到期的非流动资产", "债权投资",
+                                     "吸收存款及同业存放")})
+    fb = C.fin_bridge(plain, P, dict(NOTES, nca1y_fin=None, encumbered={"货币资金": Decimal("500000000")}))
+    assert fb["net"] == pytest.approx(-5.0) and fb["kind"] == "restricted_only"
+
+
+def test_有财务公司时营收剔除利息收入():
+    """终审 I1：营业总收入 1720.54 = 营业收入 1688.38 + 财务公司利息收入 32.16 —— 资产按账面加回，它产生的收入
+    就不能再在经营价值里资本化。"""
+    inc = pd.DataFrame({"营业总收入": [1700 * Y, 1720.54 * Y], "营业收入": [1670 * Y, 1688.38 * Y]},
+                       index=["20241231", P])
+    out, adj = C.strip_fin_income(inc, _bal(), P)
+    assert list(out["营业总收入"] / Y) == pytest.approx([1670, 1688.38]) and adj == pytest.approx(32.16)
+    plain = _bal(**{k: 0.0 for k in ("拆出资金", "买入返售金融资产", "一年内到期的非流动资产", "债权投资",
+                                     "吸收存款及同业存放")})
+    out2, adj2 = C.strip_fin_income(inc, plain, P)
+    assert out2 is inc and adj2 == 0
 
 
 def test_校准接收附注并交出明细(monkeypatch):
@@ -147,6 +176,14 @@ def test_有财务公司科目时1_假设逐项列示且验算通过(tmp_path, c
     assert "非经营性金融资产" in (a.cell(m["交易性金融资产"], 6).value or "")
     fails, _ = V.verify(p, quiet=True)
     assert fails == []
+    from openpyxl.styles import Font
+    assert a.cell(m["拆出资金"], 2).font.color.rgb != B.F_IN.color.rgb          # 只读，不是可编辑输入的蓝色
+    # 验算器核对：期初交易性金融资产 = 报表列报值 + 明细净额；有人只改了一边就报
+    wb = load_workbook(p); ws = wb["1_假设"]; mm = _rowmap(ws)
+    ws.cell(mm["交易性金融资产"], 2).value = float(ws.cell(mm["交易性金融资产"], 2).value) + 100
+    p2 = str(tmp_path / "fin_bad.xlsx"); wb.save(p2)
+    fails2, _ = V.verify(p2, quiet=True)
+    assert any("非经营性金融资产" in str(f) for f in fails2)
 
 
 def test_没有财务公司科目时版式与数值不变(tmp_path, cal600183):

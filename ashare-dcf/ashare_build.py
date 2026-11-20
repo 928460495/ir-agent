@@ -379,13 +379,25 @@ def build(cal: dict, path: str) -> dict:
         ws.cell(OR_["交易性金融资产"],6,f"含非经营性金融资产（财务公司等）净额 {FB['net']:.2f} 亿，"
                 "逐项见下方小节").font=Font(size=9,color="C00000")
         r=sec(r,"五（补）、非经营性金融资产（财务公司等）—— 净额已并入上方「交易性金融资产」")
+        # 只读列示（终审 I6）：改这里不影响模型；要调整就改上方「交易性金融资产」，验算器核对两者一致
+        F_RO=Font(size=10,color="808080",italic=True)
+        ws.cell(r,1,"报表列报的交易性金融资产").font=Font(size=10); ws.cell(r,1).border=BX
+        cc=ws.cell(r,2,round(float(O["tfa"])-float(FB["net"]),6)); cc.font=F_RO; cc.number_format=NUM
+        ws.cell(r,6,"报表原值（不含下列并入项）").font=Font(size=9,color="808080"); r+=1
         r0=r
         for lbl,v,src in FB["items"]:
             ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
-            cc=ws.cell(r,2,float(v)); cc.font=F_IN; cc.number_format=NUM
+            cc=ws.cell(r,2,float(v)); cc.font=F_RO; cc.number_format=NUM
             ws.cell(r,6,src).font=Font(size=9,color="808080"); r+=1
+        if FB.get("rev_adj"):
+            ws.cell(r,1,"附：营收口径剔除财务公司利息等收入").font=Font(size=10)
+            cc=ws.cell(r,2,float(FB["rev_adj"])); cc.font=F_RO; cc.number_format=NUM
+            ws.cell(r,6,"资产已按账面加回，它产生的收入不再在经营价值里资本化（营业总收入改取营业收入）").font=Font(size=9,color="808080")
+            r+=1
+        for x in FB.get("remarks") or []:
+            ws.cell(r,6,x).font=Font(size=9,color="808080"); r+=1
         ws.cell(r,1,"净额（已并入交易性金融资产，按账面在股权桥加回）").font=Font(bold=True,size=10)
-        cc=ws.cell(r,2,f"=SUM(B{r0}:B{r-1})"); cc.font=F_FX; cc.number_format=NUM
+        cc=ws.cell(r,2,f"=SUM(B{r0}:B{r0+len(FB['items'])-1})"); cc.font=F_FX; cc.number_format=NUM
         ws.cell(r,6,"不随营收增长、不进营运资本；依据 McKinsey《Valuation》第16章、Damodaran（多余现金按账面加回）").font=Font(size=9,color="808080")
         r+=2
     r=sec(r,"六、DCF 参数")
