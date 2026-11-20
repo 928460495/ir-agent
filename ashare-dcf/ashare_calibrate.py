@@ -93,8 +93,60 @@ def _apply_expense_hedge(gen, itm_now, itm_prev, note):
         gen[k] = hedged
 
 
-def opening_balances(bal, p) -> dict:
-    """最近年报期初余额，8 项资产 + 8 项负债权益，保证恒等。"""
+# 非经营性金融资产（财务公司等，spec 2026-11-20-nonop-financial-assets）。茅台：拆出资金 990.96 亿、
+# 占营收 59%，此前进「其他流动资产」随营收增长扣自由现金流，又没作为现金加回。
+FIN_ASSET_CUR = ("拆出资金", "买入返售金融资产")
+FIN_ASSET_NC = ("债权投资", "其他债权投资")
+FIN_LIAB = ("吸收存款及同业存放", "卖出回购金融资产款")
+NCA1Y = "一年内到期的非流动资产"
+
+
+def fin_bridge(bal, p, fin_notes: dict | None = None) -> dict:
+    """财务公司 / 类现金金融资产的净额（亿元）。
+
+    fa_cur = 拆出资金 + 买入返售 + 一年内到期的非流动资产中附注确认为金融资产的部分（无附注 = 0，保守）
+    fa_nc  = 债权投资 + 其他债权投资
+    fl     = 吸收存款及同业存放 + 卖出回购（财务公司负债，配对扣除）
+    restr  = 附注里质押 / 冻结 / 保证金等权利受限的（类）现金；法定准备金（对应已扣的吸收存款）与
+             定期 / 不能随时支取的存款（期限限制）不扣 —— 台账裁定 2026-11-20
+    net    = fa_cur + fa_nc − fl − restr
+    `fin_notes` 金额单位为元（ir-agent 读年报附注得到），这里换成亿元。"""
+    g = lambda k: _v0(bal, k, p)
+    yi = lambda x: float(x) / 1e8
+    items: list = []
+    fa_cur = 0.0
+    for k in FIN_ASSET_CUR:
+        if g(k):
+            fa_cur += g(k); items.append((k, round(g(k), 4), "报表"))
+    if g(NCA1Y):
+        fin = (fin_notes or {}).get("nca1y_fin")
+        if fin is None:
+            items.append((f"{NCA1Y}（金融部分）", 0.0,
+                          f"未取到附注：{NCA1Y} {g(NCA1Y):.2f} 亿按经营性处理（保守）"))
+        else:
+            v = min(g(NCA1Y), yi(fin))
+            fa_cur += v; items.append((f"{NCA1Y}（金融部分）", round(v, 4), "年报附注：一年内到期的债权投资等"))
+    fa_nc = 0.0
+    for k in FIN_ASSET_NC:
+        if g(k):
+            fa_nc += g(k); items.append((k, round(g(k), 4), "报表"))
+    fl = 0.0
+    for k in FIN_LIAB:
+        if g(k):
+            fl += g(k); items.append((f"减：{k}", round(-g(k), 4), "报表（财务公司负债）"))
+    restr = sum(yi(v) for v in ((fin_notes or {}).get("encumbered") or {}).values())
+    if restr:
+        items.append(("减：质押 / 冻结等受限（类）现金", round(-restr, 4), "年报附注：所有权或使用权受限资产"))
+    net = fa_cur + fa_nc - fl - restr
+    return dict(fa_cur=fa_cur, fa_nc=fa_nc, fl=fl, restr=restr, net=net, items=items)
+
+
+def opening_balances(bal, p, fin_notes: dict | None = None) -> dict:
+    """最近年报期初余额，8 项资产 + 8 项负债权益，保证恒等。
+
+    财务公司 / 类现金金融资产（`fin_bridge`）从其他流动 / 非流动资产与其他流动负债里移出，**净额并入
+    交易性金融资产**：该格预测期按基期持有、不进营运资本，净负债已减去它 —— 等于按账面加回
+    （台账裁定 2026-11-20）。质押冻结的受限部分从中扣出、移入其他非流动资产，恒等不变。"""
     g = lambda k: _v0(bal, k, p)
     ca, nca = g("流动资产合计"), g("非流动资产合计")
     o = dict(
@@ -113,6 +165,12 @@ def opening_balances(bal, p) -> dict:
     o["oncl"] = g("负债合计") - g("流动负债合计") - o["lt"]
     o["mi"] = g("少数股东权益")
     o["eq"] = g("资产总计") - g("负债合计") - o["mi"]
+    fb = fin_bridge(bal, p, fin_notes)
+    if fb["fa_cur"] or fb["fa_nc"] or fb["fl"] or fb["restr"]:
+        o["tfa"] += fb["net"]
+        o["oca"] -= fb["fa_cur"]
+        o["onca"] -= fb["fa_nc"] - fb["restr"]
+        o["ocl"] -= fb["fl"]
     o["_check"] = (o["cash"]+o["tfa"]+o["ar"]+o["inv"]+o["oca"]+o["ppe"]+o["cip"]+o["onca"]) - \
                   (o["st"]+o["ap"]+o["ocl"]+o["cur"]+o["lt"]+o["oncl"]+o["mi"]+o["eq"])
     return o
@@ -123,8 +181,10 @@ def implied_da(inc, bal, cf, periods) -> list[float]:
     for i in range(1, len(periods)):
         p0, p1 = periods[i-1], periods[i]
         def nwc(p):
-            return (_v0(bal,"流动资产合计",p) - _v0(bal,"货币资金",p) - _v0(bal,"交易性金融资产",p)) - \
-                   (_v0(bal,"流动负债合计",p) - _v0(bal,"短期借款",p) - _v0(bal,"一年内到期的非流动负债",p))
+            # 财务公司金融资产与存款不是经营占用（茅台存放同业一年 +570 亿），一并剔除
+            fb = fin_bridge(bal, p)
+            return (_v0(bal,"流动资产合计",p) - _v0(bal,"货币资金",p) - _v0(bal,"交易性金融资产",p) - fb["fa_cur"]) - \
+                   (_v0(bal,"流动负债合计",p) - _v0(bal,"短期借款",p) - _v0(bal,"一年内到期的非流动负债",p) - fb["fl"])
         ocf = _v(cf, "经营活动产生的现金流量净额", p1)
         ni = _v(inc, "净利润", p1)
         if ocf is None or ni is None: continue
@@ -316,7 +376,7 @@ def _quote_at(code: str, q: dict, as_of: dt.date) -> dict:
 
 
 def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
-              as_of: dt.date | None = None) -> dict:
+              as_of: dt.date | None = None, fin_notes: dict | None = None) -> dict:
     """as_of：分析时点。早于今天时，价格取当时收盘、β 与无风险利率截至当时，
     折现起点也按当时算 —— 否则内在价值与「现价」比较时掺进了当时看不到的信息。
 
@@ -494,10 +554,11 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
     # 原因记进 itm_skip（首年回到增速判断项）。下方营运资本天数的中期年化也用它，
     # 所以必须先算。
     itm_block, itm_skip = interim_block_why(inc, interim) if interim else (None, "")
-    o = opening_balances(bal, last)
+    # fin_notes：ir-agent 读最近年报附注得到（一年内到期非流动资产明细、受限资产），只对最近年报期有效
+    o = opening_balances(bal, last, fin_notes)
     # 营运资本天数：优先用最近中期年化（最新信息），否则用最近年报
     def _wc(p, ann_factor):
-        b = opening_balances(bal, p)
+        b = opening_balances(bal, p, fin_notes if p == last else None)
         rv = rev[p]*ann_factor; cg = cogs[p]*ann_factor
         return dict(dso=round(b["ar"]/rv*365,1), dio=round(b["inv"]/cg*365,1),
                     dpo=round(b["ap"]/cg*365,1), ocap=b["oca"]/rv, oclp=b["ocl"]/rv)
@@ -631,4 +692,6 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
                  mi_mode=2,
                  # 终值 ROIC 默认收敛至 WACC + 溢价、终值 Beta 向 1（spec 2026-11-16）
                  roic_mode=2, beta_term=1.0),
-        rev=rev, cogs=cogs)
+        rev=rev, cogs=cogs,
+        # 财务公司 / 类现金金融资产的逐项明细（建表在 1_假设 列示；净额已并入交易性金融资产）
+        fin_bridge=fin_bridge(bal, last, fin_notes))
