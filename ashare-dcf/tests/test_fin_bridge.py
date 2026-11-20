@@ -104,3 +104,59 @@ def test_校准接收附注并交出明细(monkeypatch):
     cal = C.calibrate("600183", 10, stmts=cal_dict["stmts"], as_of=AS_OF, fin_notes=NOTES)
     assert NOTES in calls
     assert cal["fin_bridge"]["net"] == 0 and cal["fin_bridge"]["items"] == []      # 生益没有财务公司科目
+
+
+# ── Task 4：工作簿列示与验算 ──
+
+def _rowmap(ws):
+    return {ws.cell(r, 1).value: r for r in range(1, ws.max_row + 1) if isinstance(ws.cell(r, 1).value, str)}
+
+
+@pytest.fixture(scope="module")
+def cal600183():
+    import pickle
+    fix = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "cal_600183.pkl")
+    if not os.path.exists(fix):
+        pytest.skip("缺离线夹具")
+    return pickle.load(open(fix, "rb"))
+
+
+def _with_fin(cal, fb):
+    import copy
+    c = copy.deepcopy(cal)
+    c["fin_bridge"] = fb
+    c["open"]["tfa"] = c["open"]["tfa"] + fb["net"]
+    c["open"]["oca"] = c["open"]["oca"] - fb["fa_cur"]
+    c["open"]["onca"] = c["open"]["onca"] - fb["fa_nc"] + fb["restr"]
+    c["open"]["ocl"] = c["open"]["ocl"] - fb["fl"]
+    return c
+
+
+def test_有财务公司科目时1_假设逐项列示且验算通过(tmp_path, cal600183):
+    import ashare_build as B, ashare_verify as V
+    from openpyxl import load_workbook
+    fb = C.fin_bridge(_bal(), P, NOTES)
+    p = str(tmp_path / "fin.xlsx")
+    B.build(_with_fin(cal600183, fb), p)
+    a = load_workbook(p)["1_假设"]
+    m = _rowmap(a)
+    head = [k for k in m if k.startswith("五（补）、非经营性金融资产")]
+    assert head, "要有逐项列示小节"
+    assert a.cell(m["拆出资金"], 2).value == pytest.approx(990.96)
+    assert "净额" in "".join(k for k in m if k.startswith("净额"))
+    assert "非经营性金融资产" in (a.cell(m["交易性金融资产"], 6).value or "")
+    fails, _ = V.verify(p, quiet=True)
+    assert fails == []
+
+
+def test_没有财务公司科目时版式与数值不变(tmp_path, cal600183):
+    import ashare_build as B
+    from openpyxl import load_workbook
+    p1, p2 = str(tmp_path / "a.xlsx"), str(tmp_path / "b.xlsx")
+    B.build(cal600183, p1)
+    c2 = dict(cal600183); c2["fin_bridge"] = C.fin_bridge(_bal(**{k: 0.0 for k in (
+        "拆出资金", "买入返售金融资产", "一年内到期的非流动资产", "债权投资", "吸收存款及同业存放")}), P, None)
+    B.build(c2, p2)
+    a1, a2 = load_workbook(p1)["1_假设"], load_workbook(p2)["1_假设"]
+    assert a1.max_row == a2.max_row
+    assert [[c.value for c in r] for r in a1.iter_rows()] == [[c.value for c in r] for r in a2.iter_rows()]

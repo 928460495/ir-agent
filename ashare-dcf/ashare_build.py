@@ -371,6 +371,23 @@ def build(cal: dict, path: str) -> dict:
     cc=ws.cell(r,2,f"=SUM(B{OR_['货币资金']}:B{OR_['其他非流动资产']})-SUM(B{OR_['短期借款']}:B{OR_['归母权益']})")
     cc.font=F_FX; cc.number_format=Z; cc.fill=P_O
     ws.cell(r,6,"必须为 0").font=Font(size=9,color="006400"); r+=2
+    # 财务公司 / 类现金金融资产（spec 2026-11-20-nonop-financial-assets）：净额已并入上方「交易性金融资产」
+    # （预测期按基期持有、不进营运资本，净负债已减去它 = 按账面加回）。只在有这些科目时出现，
+    # 没有的公司版式与数值逐位不变。
+    FB=cal.get("fin_bridge") or {}
+    if FB.get("items"):
+        ws.cell(OR_["交易性金融资产"],6,f"含非经营性金融资产（财务公司等）净额 {FB['net']:.2f} 亿，"
+                "逐项见下方小节").font=Font(size=9,color="C00000")
+        r=sec(r,"五（补）、非经营性金融资产（财务公司等）—— 净额已并入上方「交易性金融资产」")
+        r0=r
+        for lbl,v,src in FB["items"]:
+            ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
+            cc=ws.cell(r,2,float(v)); cc.font=F_IN; cc.number_format=NUM
+            ws.cell(r,6,src).font=Font(size=9,color="808080"); r+=1
+        ws.cell(r,1,"净额（已并入交易性金融资产，按账面在股权桥加回）").font=Font(bold=True,size=10)
+        cc=ws.cell(r,2,f"=SUM(B{r0}:B{r-1})"); cc.font=F_FX; cc.number_format=NUM
+        ws.cell(r,6,"不随营收增长、不进营运资本；依据 McKinsey《Valuation》第16章、Damodaran（多余现金按账面加回）").font=Font(size=9,color="808080")
+        r+=2
     r=sec(r,"六、DCF 参数")
     DP=[("无风险利率 Rf（中债10Y）",DC["rf"],PCT2,f"AkShare bond_zh_us_rate，{M['rf_date']}"),
         ("股权风险溢价 ERP",DC["erp"],PCT2,"中国 A 股常规 6–8%，默认取下限"),
