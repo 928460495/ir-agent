@@ -158,6 +158,15 @@ _GENERAL_BALANCE = {
     "NONCURRENT_LIAB_1YEAR": "noncurrent_liab_1y",
     "GOODWILL": "goodwill",
     "INVEST_REALESTATE": "investment_property",
+    # 财务公司 / 类现金科目（spec 2026-11-20-nonop-financial-assets）：此前未映射，被「其他流动资产」
+    # 倒挤吸收进营运资本（茅台拆出资金 990.96 亿、占营收 59%）。字段名按茅台 2026-11-20 快照实测。
+    "LEND_FUND": "lend_fund",                           # 拆出资金
+    "BUY_RESALE_FINASSET": "buy_resale_finasset",       # 买入返售金融资产
+    "CREDITOR_INVEST": "debt_investment",               # 债权投资
+    "OTHER_CREDITOR_INVEST": "other_debt_investment",   # 其他债权投资
+    "NONCURRENT_ASSET_1YEAR": "noncurrent_asset_1y",    # 一年内到期的非流动资产（实质看附注）
+    "ACCEPT_DEPOSIT_INTERBANK": "accept_deposit_interbank",  # 吸收存款及同业存放（财务公司负债）
+    "SELL_REPO_FINASSET": "sell_repo_finasset",         # 卖出回购金融资产款
 }
 
 _GENERAL_INCOME = {

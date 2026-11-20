@@ -86,6 +86,14 @@ BALANCE = {
     "minority_equity": "少数股东权益",
     "equity_attr_parent": "归属于母公司所有者权益合计",
     "total_equity": "所有者权益合计",
+    # 财务公司 / 类现金科目（spec 2026-11-20-nonop-financial-assets）
+    "lend_fund": "拆出资金",
+    "buy_resale_finasset": "买入返售金融资产",
+    "debt_investment": "债权投资",
+    "other_debt_investment": "其他债权投资",
+    "noncurrent_asset_1y": "一年内到期的非流动资产",
+    "accept_deposit_interbank": "吸收存款及同业存放",
+    "sell_repo_finasset": "卖出回购金融资产款",
 }
 
 CASHFLOW = {
