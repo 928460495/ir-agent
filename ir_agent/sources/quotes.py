@@ -213,10 +213,16 @@ def close_asof(symbol: str, as_of: date, session: requests.Session | None = None
     errs, rows = [], None
     for name, fetch in (("腾讯", _tencent_day), ("新浪", _sina_day)):
         try:
-            rows = fetch(s, symbol, as_of)
-            break
+            got = fetch(s, symbol, as_of)
         except Exception as e:                               # noqa: BLE001
             errs.append(f"{name}: {e.__class__.__name__}: {str(e)[:60]}")
+            continue
+        if any(d <= as_of for d, _ in got):
+            rows = got
+            break
+        # 200 但没有分析时点之前的数据（参数错误、空 data）：照样降级（终审 M5）
+        errs.append(f"{name}: 没有 {as_of} 及之前的日 K")
+        rows = rows if rows is not None else got
     if rows is None:
         raise ParseError(f"{symbol} 日 K 收盘取不到 —— " + "；".join(errs))
     best = max(((d, px) for d, px in rows if d <= as_of), default=None)

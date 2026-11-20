@@ -1953,8 +1953,10 @@ def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
     # 撰写者写成「首年取值来自锚定而非独立出处，确定性弱」。
     info: list[str] = []
     if anchored:
+        from ir_agent import assume as _A
         info.append("**首年取锚定值**：已公布季度用实际、其余季度按年初至今同比外推的全年数，"
-                    "是数据而不是判断，首年各因子的取值是对它的拆解")
+                    "是数据而不是判断"
+                    + ("，首年各因子的取值是对它的拆解" if _A.has_model(a) else ""))
     if rebased:
         # I3：这句不能带阿拉伯数字（进提示词，会被裸数字审计判掉）——
         # 「第二年」用汉字数字，不写成「第 2 年」。具体数字在
@@ -2905,6 +2907,12 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # 做过；这里只看算不算得下去（缺年份、缺基期、重复行、公式算不动）。此前
     # 这里会把人批准的判断项再按内容闸门拒绝一遍 —— 600584 实测，人批准了，
     # 建模前一刻又被拒，人工门被架空。
+    # 首年填写值与锚定值不一致（人改了首年 / 旧文件）：check() 会改写两标量首年行，先取证（终审 I1）
+    if a.base_margin is None:
+        a.base_margin = base_margin
+    y1_override = assume.year1_override_note(a, anchor)
+    if y1_override:
+        skipped.append(f"判断项被锚定覆盖：{y1_override}")
     facts = assume.check(a, len(a.labels), ledger=r.ledger, body=body, as_of=as_of,
                          # **读 `a._m()`，不读 `a.decomps`**：公式化写法下 decomps
                          # 是空列表，`decomps=a.decomps or None` 会让第二阶段悄悄
@@ -2980,7 +2988,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     cost = 0.0
     # 判断项的软处（依据未逐字核验 / 取值是估计）要跟着交付物走，见 `_assumption_caveats`。
     caveat, caveats_md = _assumption_caveats(
-        a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""))
+        a, anchor_note=((dcf_res.anchor_note if dcf_res is not None else "") or y1_override))
     if dcf_res is not None:
         full, cost, ferr, debate_md, dnote = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), out,

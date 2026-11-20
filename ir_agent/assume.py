@@ -465,6 +465,8 @@ class AssumptionSet:
                 ref = "；".join(b.describe() for b in r.bases)
                 if r.basis_unverified:
                     ref = "⚠ 依据未能逐字核验：" + ref
+                elif not r.bases and r.note.startswith("锚定："):
+                    ref = "已公布季度实际（工作簿第三小节）"
                 elif not r.bases:
                     ref = "⚠ 没有可核验的依据"
                 lines.append(f"| {lab} | {r.bear:.2%} | {r.base:.2%} "
@@ -1557,6 +1559,8 @@ def check_deviation(a: AssumptionSet, balances: list,
         return []
     out: list[str] = []
     for r in sorted(a.rows, key=lambda x: (x.factor_key, x.year)):
+        if a.anchor_y1 is not None and not r.factor_key and r.year == 1:
+            continue                     # 代码写入的锚定行：是数据，填写者改不了（终审 M1）
         name = _row_label(r, a._m() or a.decomps or [])
         mid = mids.get(name)
         if mid is None:
@@ -1671,7 +1675,10 @@ def _check_scalar(a: AssumptionSet, years: int, facts: "Facts") -> None:
     排序后按下标取值，错位一格就是错数）；三档没拉开 → 事实，交审核者 [合成]。"""
     inv = {v: k for k, v in DRIVERS.items()}
     if a.anchor_y1 is not None:
+        n0 = len(a.read_notes)
         _write_anchor_rows(a, inv)
+        # read_notes 在 check() 开头已抄进 facts.problems；这里新增的要另外送到审核者（终审 I2）
+        facts.problems += a.read_notes[n0:]
     seen: set[tuple[str, int]] = set()
     for r in a.rows:
         key = (r.driver, r.year)
@@ -1695,6 +1702,42 @@ def _check_scalar(a: AssumptionSet, years: int, facts: "Facts") -> None:
                 f"三档未拉开（悲观 {r.bear} / 中性 {r.base} / 乐观 {r.bull}，未严格递增）")
 
 
+def year1_override_note(a: AssumptionSet, anchor: dict | None) -> str:
+    """读回的首年值（人改过的、或旧文件里 AI 判断的）与锚定值不一致时的说明 —— **必须在 check() 之前调**，
+    check() 会把两标量首年行改写成锚定值（终审 I1：人改了首年，第④步被锚定静默替换，一字不提）。
+
+    两标量：任一档与锚定值差 > 5e-5；分解：首年拆解原样合成与锚定值差 > ANCHOR_TOL（拆解本就允许小偏差）。
+    没有锚定、或一致时返回空串。"""
+    y1 = anchor_y1_of(anchor)
+    if y1 is None:
+        return ""
+    g1, m1 = y1
+    if a._m() is None:
+        tol = Decimal("0.00005")
+        got = {drv: [r for r in a.rows if r.driver == drv and r.year == 1] for drv in ("growth", "gm")}
+        vals = {drv: rs[-1] for drv, rs in got.items() if rs}
+        if not vals:
+            return ""
+        g = vals.get("growth"); m = vals.get("gm")
+        off = [(cn, r, v) for cn, r, v in (("营收增速", g, g1), ("毛利率", m, m1))
+               if r is not None and any(abs(x - v) > tol for x in (r.bear, r.base, r.bull))]
+        if not off:
+            return ""
+        parts = [f"{cn} {r.base:.2%}" for cn, r, _ in off]
+    else:
+        if a.base_margin is None:
+            return ""
+        try:
+            g, m = synthesize_raw(a, Case.BASE, a.base_margin)
+        except AssumeFailed:
+            return ""
+        if not g or not m or (abs(g[0] - g1) <= ANCHOR_TOL and abs(m[0] - m1) <= ANCHOR_TOL):
+            return ""
+        parts = [f"营收增速 {g[0]:.2%}", f"毛利率 {m[0]:.2%}"]
+    return ("首年已有季报，取锚定值（营收增速 " f"{g1:.2%}、毛利率 {m1:.2%}）；读回的首年填写值（"
+            + "、".join(parts) + "）未进模型")
+
+
 def _write_anchor_rows(a: AssumptionSet, inv: dict) -> None:
     """两标量模式：首年营收增速、毛利率由代码写入锚定值（三档相同）。AI 填了不同的值就覆盖，
     并在 read_notes 记一句（spec 2026-11-17：首年已有季报就用锚定值）。"""
@@ -1702,7 +1745,7 @@ def _write_anchor_rows(a: AssumptionSet, inv: dict) -> None:
         got = [r for r in a.rows if r.driver == drv and r.year == 1]
         for r in got:
             if (r.bear, r.base, r.bull) != (v, v, v):
-                a.read_notes.append(f"{inv.get(drv, drv)} 第 1 年 AI 填 {r.bear}/{r.base}/{r.bull}，"
+                a.read_notes.append(f"{inv.get(drv, drv)} 第 1 年填写值 {r.bear}/{r.base}/{r.bull}，"
                                     f"已由锚定值 {v} 替换（三档相同）")
         a.rows = [r for r in a.rows if not (r.driver == drv and r.year == 1)]
         a.rows.append(Row(driver=drv, year=1, bear=v, base=v, bull=v, note=ANCHOR_NOTE))

@@ -235,3 +235,90 @@ def test_研报提示不把锚定首年当成确定性弱的保留():
     finally:
         A.unverified_labels, A.estimated_labels = orig
     assert "首年取锚定值" in prompt and body == ""
+
+
+# ── 终审修复（2026-11-20 独立审查）──
+
+def test_I1_首年填写值被锚定替换时说出来():
+    """两标量：人在门③ 前把首年改成 30%，第④步被锚定换成 50.05%，终端与研报一字不提。"""
+    a = _scalar(y1_growth="0.30")
+    msg = assume.year1_override_note(a, _anchor_600183())
+    assert "30.00%" in msg and "50.05%" in msg and "未进模型" in msg
+    a2 = _scalar()
+    for r in a2.rows:
+        if r.year == 1:
+            v = dict(growth=D("0.500455"), gm=D("0.312689"))[r.driver]
+            r.bear = r.base = r.bull = v
+    assert assume.year1_override_note(a2, _anchor_600183()) == ""
+    assert assume.year1_override_note(_scalar(), None) == ""
+
+
+def test_I1_分解首年拆解在容差内不报_超出才报():
+    a, _ = _explaining_set(0.3)
+    a.base_margin = D("0.2647")
+    assert assume.year1_override_note(a, _anchor_600183()) == ""
+    a, _ = _two_year_set()
+    a.base_margin = D("0.2647")
+    assert "未进模型" in assume.year1_override_note(a, _anchor_600183())
+
+
+def test_I1_第二阶段在check之前取证并进研报():
+    import inspect
+    from ir_agent import full
+    src = inspect.getsource(full.run_valuation)
+    assert src.index("year1_override_note(") < src.index("facts = assume.check(")
+
+
+def test_I2_替换记录送到审核者():
+    a = _scalar(y1_growth="0.30")
+    facts = _check_scalar_set(a)
+    assert any("已由锚定值" in p and "填写值" in p for p in facts.problems), facts.problems
+    assert not any("AI 填" in p for p in facts.problems)
+
+
+def test_M1_锚定行不算偏离平衡点():
+    a = _scalar()
+    _check_scalar_set(a)
+    bal = [type("B", (), {"subject": "营收增速", "mid": D("0.10")})()]
+    out = assume.check_deviation(a, bal)
+    assert not any("第 1 年" in x for x in out), out
+
+
+def test_M2_清单上锚定行不标没有可核验的依据():
+    a = _scalar()
+    _check_scalar_set(a)
+    md = a.describe()
+    line = [l for l in md.splitlines() if l.startswith("| 2026E") and "锚定" in l]
+    assert line and "没有可核验的依据" not in line[0]
+
+
+def test_M3_两标量模式研报提示不说因子拆解():
+    from types import SimpleNamespace
+    from ir_agent import full
+    import ir_agent.assume as A
+    a = SimpleNamespace(code="600183", margin_rebased=lambda: False, anchor_y1=(D("0.5"), D("0.3")),
+                        rows=[], base_values={}, opex_rows=[], steady_rows=[], _m=lambda: None)
+    orig = (A.unverified_labels, A.estimated_labels)
+    A.unverified_labels = A.estimated_labels = lambda a: []
+    try:
+        prompt, _ = full._assumption_caveats(a)
+    finally:
+        A.unverified_labels, A.estimated_labels = orig
+    assert "首年取锚定值" in prompt and "拆解" not in prompt
+
+
+def test_M5_腾讯返回空数据时降级新浪():
+    from ir_agent.sources import quotes
+    import json as _j
+
+    class _R:
+        def __init__(self, p): self.p = p
+        def raise_for_status(self): pass
+        def json(self): return self.p
+
+    class _S:
+        def get(self, url, params=None, timeout=None):
+            if "gtimg" in url:
+                return _R({"code": 1, "msg": "param error", "data": {}})
+            return _R([{"day": "2026-10-21", "close": "118.990"}])
+    assert quotes.close_asof("sh600183", date(2026, 10, 21), session=_S()) == (date(2026, 10, 21), D("118.990"))
