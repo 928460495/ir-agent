@@ -135,13 +135,12 @@ _PREFIX = (
     # 判断项审核（子项目三）停下交人工 / 第二阶段读回人改过的判断项：都是「算
     # 出来了或停在那儿、必须被看见」，不是「未生成」。
     ("判断项审核", "  ⚠ "),
-    # 定性模块审核（子项目四）：停下 / 人工修改后未经审核 / 沿用时语料库已变。
+    # 定性模块审核（子项目四）：停下 / 沿用时语料库已变；人工修改（签名确认）只是记录。
     ("宏观定性审核", "  ⚠ "),
     ("战略分析审核", "  ⚠ "),
     ("产业链审核", "  ⚠ "),
-    ("定性分析未经审核：", "  ⚠ "),
+    ("定性分析经人工修改：", "  ✎ "),
     ("定性分析沿用：", "  ⚠ "),
-    ("判断项未经审核：", "  ⚠ "),
     # 第二阶段读回第一阶段落盘的公司公告：**成功**路径，为读者报告「读回了
     # 几篇、第一阶段候选与挑选各多少」——既不是警告也不是缺了什么产物。
     # 该条原先以「公司公告 N 篇…」起头、不匹配任何前缀，每一次成功的
@@ -243,8 +242,8 @@ def next_actions(stage: Stage, code: str,
             "（周转天数、折旧率、税率、β、Kd）由历史数据校准，"
             "不需要你确认。",
             f"要改数值就改 {out}/assumptions.json 的 rows（费用率在 opex_rows、稳态值在 steady_rows）。"
-            "改过的格子不再送 AI 审核，"
-            "第二阶段会标注「判断项未经审核」并列出改动；只有算不下去（缺年份、缺基期等）"
+            "改过的格子不再送 AI 审核，签名即为确认，"
+            "第二阶段只列出改动记录；只有算不下去（缺年份、缺基期等）"
             "才会停下。",
             "确认后进入第二阶段 —— 建模并产出完整研报：\n"
             f"     python -m ir_agent {code} {y} --value {out} "
@@ -280,8 +279,8 @@ def next_actions(stage: Stage, code: str,
                 acts.append(
                     f"方法论预研停下。若要人工给出分解式：以 {out}/drivers_failed_raw.md"
                     f" 为底稿改好，存为 {out}/drivers.md（各轮审核意见见 "
-                    f"{out}/drivers_rounds.md），再跑上面那条命令 —— 读回时会标注"
-                    "「人工修改后未经审核」。")
+                    f"{out}/drivers_rounds.md），再跑上面那条命令 —— 签名即为确认，"
+                    "不再送审。")
             for rnd in ("a", "b"):
                 tmpl = Path(out) / f"stance_{rnd}.template.json"
                 if tmpl.exists():
@@ -303,7 +302,7 @@ def next_actions(stage: Stage, code: str,
                     f"（各轮审核意见见 {out}/{ASSUMPTIONS_ROUNDS_MD}），再跑第二阶段：\n"
                     f"     python -m ir_agent {code} {y} --value {out} "
                     "--approved-by <你的名字>\n"
-                    "     —— 读回时会标注「判断项未经审核」。")
+                    "     —— 签名即为确认，不再送审。")
             if stale:
                 acts.append(
                     f"⚠ {out}/{ASSUMPTIONS_MD} 是**上一轮**留下的，不是本轮产物"
@@ -322,7 +321,7 @@ def next_actions(stage: Stage, code: str,
                     acts.append(
                         f"{cn}审核停下。若要人工给出：以 {out}/{pre}_failed_raw.md 为底稿"
                         f"改好，存为 {out}/{pre}.md（各轮审核意见见 {out}/{pre}_rounds.md），"
-                        "再跑上面那条命令 —— 读回时会标注「人工修改后未经审核」。")
+                        "再跑上面那条命令 —— 签名即为确认，不再送审。")
             if stale:
                 acts.append(
                     f"⚠ {out}/{ASSUMPTIONS_MD} 是**上一轮**留下的，不是本轮产物——"

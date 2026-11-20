@@ -364,8 +364,8 @@ def test_drivers_md已存在时读回而不重新联网(tmp_path, monkeypatch):
 
     m, err = full._research_methodology("600584", _R(), tmp_path, _boom_client,
                                         judge=_boom_client)
-    # 没有审核记录的 drivers.md（旧文件或人手写）：不送审，标注未经审核。
-    assert "人工修改后未经审核" in err
+    # 没有审核记录的 drivers.md（旧文件或人手写）：不送审，签名即确认（用户 2026-11-20）。
+    assert "签名确认" in err and "未经审核" not in err
     assert m is not None and len(m.decompositions) == 2
     assert m.industry == "电子-半导体-封测"
 
@@ -396,7 +396,7 @@ def test_drivers_md人工改过的内容读回后生效(tmp_path, monkeypatch):
     m, err = full._research_methodology(
         "600584", _R(), tmp_path, lambda p: (_ for _ in ()).throw(
             AssertionError("不该再联网预研")), judge=Judge())
-    assert "人工修改后未经审核" in err
+    assert "签名确认" in err and "未经审核" not in err
     assert m.decompositions[0].factors[0].source_hint == "人工改过：管理层交流纪要"
 
 
@@ -2883,6 +2883,8 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
                             "成未生成是对的"),
         "_load_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
         "_judged_labels": "不是清单生产者：返回第③步要判断的年份标签（前五年）",
+        "_human_edit_lines": ("前缀「判断项经人工调整：」已登记（✎），断言在 "
+                              "test_signed_edits.test_判断项人工改动记录不再说未经审核或原依据未必支撑"),
         "_restore_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
         "_method_review_lines": ("不是终端清单的生产者：返回 review.md 与 "
                                  "assumptions.md 的「方法论审核」行，不进 skipped"),
@@ -4291,7 +4293,7 @@ def test_审核到上限仍不过就停在预研_不往下走(tmp_path, monkeypa
     assert "  ⚠ 方法论审核" in o.summary()
     acts = "\n".join(next_actions(o.stage, "600183", out_dir=str(tmp_path),
                                   year=2025, phase=o.phase))
-    assert "drivers_failed_raw.md" in acts and "人工修改后未经审核" in acts
+    assert "drivers_failed_raw.md" in acts and "签名即为确认" in acts
 
 
 def test_第一轮驳回第二轮通过_一路到简报(tmp_path, monkeypatch):
@@ -4336,9 +4338,10 @@ def test_人改过drivers_md后重跑_不送审_门二标注未经审核(tmp_pat
         "\n陷阱: 出货量", "\n陷阱: 人工补充的一条\n陷阱: 出货量", 1), encoding="utf-8")
     o = full.run_brief("600183", _PhaseR(), d, tmp_path, "甲")
     assert calls["research"] == 1, "人改过的 drivers.md 不该重新预研或送审"
-    assert path.read_text(encoding="utf-8").startswith(full.UNREVIEWED_BANNER)
-    assert any("人工修改后未经审核" in x for x in o.skipped)
-    assert "人工修改后未经审核" in (tmp_path / full.REVIEW_MD).read_text(encoding="utf-8")
+    assert full.UNREVIEWED_BANNER not in path.read_text(encoding="utf-8")
+    assert any("签名确认" in x for x in o.skipped) and not any("未经审核" in x for x in o.skipped)
+    rv = (tmp_path / full.REVIEW_MD).read_text(encoding="utf-8")
+    assert "签名确认" in rv and "未经审核" not in rv
 
 
 
@@ -4462,7 +4465,7 @@ def test_定性模块人工修改过_门一清单与终端标注_记进state(tmp
 
     def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
              statuses=None):
-        statuses += [{"label": "战略分析", "state": "人工修改后未经审核", "rounds": 0,
+        statuses += [{"label": "战略分析", "state": full.HUMAN_SIGNED, "rounds": 0,
                       "flagged": [], "note": ""},
                      {"label": "产业链", "state": "沿用审核结论", "rounds": 1,
                       "flagged": [], "note": "本轮语料库与审核时不同，2 处依据本轮核对不过"}]
@@ -4471,11 +4474,11 @@ def test_定性模块人工修改过_门一清单与终端标注_记进state(tmp
     o = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
     assert o.stage is full.Stage.AWAITING_SOURCES
     src = (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
-    assert "## 定性分析审核" in src and "战略分析：⚠ 人工修改后未经审核" in src
-    assert any(s.startswith("定性分析未经审核：战略分析") for s in o.skipped)
+    assert "## 定性分析审核" in src and "战略分析：✎ 经人工修改，以签名确认的版本为准" in src
+    assert any(s.startswith("定性分析经人工修改：战略分析") for s in o.skipped)
     assert any(s.startswith("定性分析沿用：产业链") for s in o.skipped)
     st = json.loads((tmp_path / full.STATE).read_text(encoding="utf-8"))
-    assert st["qual_unreviewed"] == ["战略分析"]
+    assert st["qual_unreviewed"] == []          # 签名即确认，不带到研报里标注（用户 2026-11-20）
 
 
 # 中国巨石 600176 2026-10-17：五力引了研报，被代码判「需年报原文或占位符」连挂三次，
@@ -4548,8 +4551,8 @@ def test_定性审核_端到端_战略三轮不过停下_产业链照常落盘_�
     o2 = full.run_analyse("600176", _PhaseR(), date(2026, 10, 17), tmp_path)
     assert calls == {"战略": 0, "产业链": 0}, "通过的与人工接手的都不该再调模型"
     assert o2.stage is full.Stage.AWAITING_SOURCES, o2.skipped
-    assert any(s.startswith("定性分析未经审核：战略分析") for s in o2.skipped)
-    assert "战略分析：⚠ 人工修改后未经审核" in (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
+    assert any(s.startswith("定性分析经人工修改：战略分析") for s in o2.skipped)
+    assert "战略分析：✎ 经人工修改，以签名确认的版本为准" in (tmp_path / full.SOURCES_MD).read_text(encoding="utf-8")
 
 
 def test_有中期却未锚定时横幅写明原因():

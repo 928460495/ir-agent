@@ -305,14 +305,14 @@ def test_判断项审核停下时教人以底稿改好再跑第二阶段(tmp_pat
                         year=2025, phase="assume")
     txt = "\n".join(acts)
     assert "--assume" in txt and "--value" in txt and ASSUMPTIONS_FAILED_JSON in txt
-    assert "判断项未经审核" in txt
+    assert "签名即为确认" in txt and "未经审核" not in txt
     p = build_parser()
     for line in txt.splitlines():
         line = line.strip()
         if line.startswith("python -m ir_agent"):
             p.parse_args(shlex.split(line.replace("<你的名字>", "xhl"))[3:])
     assert _mark("判断项审核 3 轮未通过（最后一轮致命 2 条）").strip() == "⚠"
-    assert _mark("判断项未经审核：人工修改过 3 格").strip() == "⚠"
+    assert _mark("判断项经人工调整：x 第1年 base（签名确认）").strip() == "✎"
 
 
 def test_新前缀都注册进了白名单且失败与成功分开():
@@ -369,11 +369,12 @@ def test_门三指引不再说改完会重新校验():
                                  assumptions_path="out/x/assumptions.md",
                                  out_dir="out/x", year=2025))
     assert "重新校验" not in txt and "三档须严格拉开" not in txt
-    assert "未经审核" in txt
+    assert "签名即为确认" in txt and "未经审核" not in txt
 
 
 def test_定性分析审核的新措辞都登记了():
     from ir_agent.research import _mark
     for s in ("宏观定性审核 3 轮未通过（…）", "战略分析审核未完成：…", "产业链审核停下：模型接口问题",
-              "定性分析未经审核：战略分析（人工修改后未经审核）", "定性分析沿用：产业链 本轮语料库…"):
+              "定性分析沿用：产业链 本轮语料库…"):
         assert _mark(s).strip() == "⚠", s
+    assert _mark("定性分析经人工修改：战略分析（签名确认）").strip() == "✎"

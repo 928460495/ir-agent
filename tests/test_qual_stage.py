@@ -74,12 +74,12 @@ class TestReuse:
         _call(tmp_path, _passed)
         (tmp_path / "strategy.md").write_text("项: 人改过", encoding="utf-8")
         view, st, calls = _call(tmp_path, _passed)
-        assert calls == [] and st["state"] == "人工修改后未经审核" and view.raw == "项: 人改过"
+        assert calls == [] and st["state"] == full.HUMAN_SIGNED and view.raw == "项: 人改过"
 
     def test_没有审核记录_也标注(self, tmp_path):
         (tmp_path / "strategy.md").write_text("项: 人写的", encoding="utf-8")
         _, st, calls = _call(tmp_path, _passed)
-        assert calls == [] and st["state"] == "人工修改后未经审核"
+        assert calls == [] and st["state"] == full.HUMAN_SIGNED
 
     def test_语料库变了_重核依据并标出(self, tmp_path):
         _call(tmp_path, _passed, corpus=_Corpus("a"))
@@ -129,11 +129,11 @@ def test_一个模块停下_其余照常跑完(tmp_path, monkeypatch):
 def test_门一清单的定性分析审核一节():
     txt = full._qual_section([
         {"label": "宏观定性", "state": "审核通过", "rounds": 1, "flagged": [], "note": ""},
-        {"label": "战略分析", "state": "人工修改后未经审核", "rounds": 0, "flagged": [], "note": ""},
+        {"label": "战略分析", "state": full.HUMAN_SIGNED, "rounds": 0, "flagged": [], "note": ""},
         {"label": "产业链", "state": "沿用审核结论", "rounds": 2,
          "flagged": ["[议价] 对上游：提醒　x"], "note": "本轮语料库与审核时不同，1 处依据本轮核对不过"}])
     assert txt.startswith("\n## 定性分析审核")
-    assert "宏观定性：第 1 轮审核通过" in txt and "战略分析：⚠ 人工修改后未经审核" in txt
+    assert "宏观定性：第 1 轮审核通过" in txt and "战略分析：✎ 经人工修改，以签名确认的版本为准" in txt
     assert "[议价] 对上游：提醒" in txt and "1 处依据本轮核对不过" in txt
     assert full._qual_section([]) == ""
 
@@ -144,24 +144,15 @@ def test_重跑通过后删掉上一轮停下留的最后一稿(tmp_path):
     assert not (tmp_path / "strategy_failed_raw.md").exists()
 
 
-def test_研报附录写明人工修改后未经审核的定性模块():
-    """spec 六：第一次调用把「人工修改后未经审核」的模块名记进 state.json，第二阶段写进
-    研报末尾「⚠ 判断项依据核验」附录；进提示词那句不带数字。"""
-    import re
-
-    from ir_agent import assume
-    a = assume.AssumptionSet(code="600176", labels=["2026E"])
-    line, md = full._assumption_caveats(a, qual_unreviewed=["战略分析", "产业链"])
-    assert "战略分析" in line and "产业链" in line and "未经" in line
-    assert not re.search(r"\d", line)
-    assert "战略分析、产业链" in md and "人工修改后未经审核" in md
-
-
-def test_第二阶段读回未经审核的定性模块():
+def test_人工修改的定性模块签名即确认_研报不再标注():
+    """用户 2026-11-20：人改过的定性模块签名即确认 —— 第二阶段不读 qual_unreviewed，研报不写未经审核。"""
     import inspect
     src = inspect.getsource(full.run_valuation)
-    assert 'state.get("qual_unreviewed")' in src
-    assert "qual_unreviewed=qual_unreviewed" in src
+    assert "qual_unreviewed" not in src
+    from ir_agent import assume
+    line, md = full._assumption_caveats(assume.AssumptionSet(code="600176", labels=["2026E"]))
+    assert "未经" not in line + md
+
 
 
 def test_沿用时语料库变了_转述文章不在也计入_不计假事实(tmp_path):

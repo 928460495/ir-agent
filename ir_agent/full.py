@@ -1135,7 +1135,11 @@ DRIVERS_FAILED_RAW = "drivers_failed_raw.md"
 # 方法论审核（子项目二）：最后一轮逐项结论与指纹；每一轮的完整记录。
 DRIVERS_REVIEW_JSON = "drivers_review.json"
 DRIVERS_ROUNDS_MD = "drivers_rounds.md"
+# 旧版写进 drivers.md 顶部的横幅。人工修改并在闸门签名即为确认（用户 2026-10-19 / 2026-11-20），
+# 不再标「未经审核」；读回旧文件时把它去掉。
 UNREVIEWED_BANNER = "> ⚠ 本分解式人工修改后未经审核（与审核时的分解式不一致，或没有审核记录）。"
+# 人改过、由签名人确认的模块状态（取代「人工修改后未经审核」）。
+HUMAN_SIGNED = "人工修改（签名确认）"
 
 
 class MethodologyStop(Exception):
@@ -1305,7 +1309,7 @@ def _qual_module(out: Path, *, prefix: str, label: str, corpus, parse, facts, ru
                 if n:
                     status["note"] = f"本轮语料库与审核时不同，{n} 处依据本轮核对不过"
         else:
-            status["state"] = "人工修改后未经审核"
+            status["state"] = HUMAN_SIGNED
         return view, status
     try:
         view = run()
@@ -1335,8 +1339,8 @@ def _qual_section(statuses: list) -> str:
         return ""
     lines = ["", "## 定性分析审核", ""]
     for s in statuses:
-        if s["state"] == "人工修改后未经审核":
-            lines.append(f"- {s['label']}：⚠ 人工修改后未经审核")
+        if s["state"] == HUMAN_SIGNED:
+            lines.append(f"- {s['label']}：✎ 经人工修改，以签名确认的版本为准")
         else:
             head = "沿用上轮审核结论（" if s["state"] == "沿用审核结论" else ""
             lines.append(f"- {s['label']}：{head}第 {s['rounds']} 轮审核通过"
@@ -1742,16 +1746,17 @@ def _method_review(out: Path, m):
 
 
 def _unreviewed_note(out: Path, m) -> str:
-    """人改过的 drivers.md：不送审，标注（drivers.md 顶部、终端清单）。"""
+    """人改过的 drivers.md：不送审。人在闸门签名即为确认（用户 2026-11-20），只留一条中性记录；
+    旧版写进文件顶部的「未经审核」横幅读回时去掉。"""
     _, unreviewed = _method_review(out, m)
     if not unreviewed:
         return ""
     path = out / DRIVERS_MD
     text = path.read_text(encoding="utf-8")
-    if UNREVIEWED_BANNER not in text:
-        path.write_text(UNREVIEWED_BANNER + "\n\n" + text, encoding="utf-8")
-    return ("方法论预研：drivers.md 人工修改后未经审核（与审核时的分解式不一致，"
-            "或没有审核记录）—— 人的判断优先，未送审，已标注")
+    if UNREVIEWED_BANNER in text:
+        path.write_text(text.replace(UNREVIEWED_BANNER + "\n\n", "").replace(UNREVIEWED_BANNER, ""),
+                        encoding="utf-8")
+    return "方法论预研：drivers.md 经人工修改，以签名确认的版本为准（不再送审）"
 
 
 def _method_review_lines(out: Path, m) -> list[str]:
@@ -1760,7 +1765,7 @@ def _method_review_lines(out: Path, m) -> list[str]:
         return []
     res, unreviewed = _method_review(out, m)
     if unreviewed:
-        return ["⚠ 分解式人工修改后未经审核"]
+        return ["✎ 分解式经人工修改，以签名确认的版本为准"]
     return [f"- {v.line()}" for v in res.flagged()] if res else []
 
 
@@ -1773,7 +1778,7 @@ def _stop_for_methodology(code: str, r, as_of: date, out: Path, arts: dict,
           f"  ① 原样重试（重新预研）\n     {cmd}\n\n"
           f"  ② 人工给出分解式：以 {out}/{DRIVERS_FAILED_RAW} 为底稿改好，存为 "
           f"{out}/{DRIVERS_MD}（各轮审核意见见 {out}/{DRIVERS_ROUNDS_MD}），再跑\n"
-          f"     {cmd}\n     读回时会标注「人工修改后未经审核」。\n", file=sys.stderr)
+          f"     {cmd}\n     签名即为确认，不再送审。\n", file=sys.stderr)
     skipped.append(why)
     return ResearchOutcome(
         code=code, period=r.period, as_of=as_of, stage=Stage.INCOMPLETE,
@@ -1892,28 +1897,12 @@ def _stop_if_uncomputable(facts) -> None:
                          + "\n".join(f"  - {x}" for x in facts.blocking))
 
 
-def _unreviewed_assumptions(out: Path, a, edits: list[str]) -> str:
-    """第二阶段读回的判断项是不是审核通过的那一份。空串 = 是。
-
-    比对 `assumptions_review.json` 里审核时的取值指纹（只算因子、年、三档与基期
-    值，不算理由文字）。没有审核记录、审核未通过（人以底稿补写）、指纹对不上
-    （人改了数），都要标注 —— 不送审（子项目三决定 5）。"""
-    from ir_agent import assume_review
-
-    f = out / ASSUMPTIONS_REVIEW_JSON
-    if not f.exists():
-        return "没有判断项审核记录（未经 AI 审核，或审核停下后人工补写）"
-    d = json.loads(f.read_text(encoding="utf-8"))
-    if not d.get("passed"):
-        return "判断项审核未通过，这份是人工以底稿补写的"
-    if d.get("fingerprint") != assume_review.fingerprint(a):
-        n = f"（改动 {len(edits)} 格，逐条见「判断项经人工调整」）" if edits else ""
-        return f"判断项经人工修改，修改后未经审核{n}"
-    return ""
+def _human_edit_lines(edits: list[str]) -> list[str]:
+    """门③ 签名前人改过的格子：中性的改动记录。签名即确认，不标「未经审核」（用户 2026-11-20）。"""
+    return [f"判断项经人工调整：{x}（签名确认）" for x in edits]
 
 
-def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
-                        qual_unreviewed: list | None = None) -> tuple[str, str]:
+def _assumption_caveats(a, anchor_note: str = "") -> tuple[str, str]:
     """判断项的软处要跟着交付物走：(进提示词的一句话, 追加进 report.md 的附录)。
 
     两件事，分别说：
@@ -1949,20 +1938,12 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
     unverified = assume.unverified_labels(a)
     estimated = assume.estimated_labels(a)
     rebased = a.margin_rebased()
-    qual_unreviewed = list(qual_unreviewed or [])
     anchored = getattr(a, "anchor_y1", None) is not None
     if (not unverified and not estimated and not anchor_note and not rebased
-            and not unreviewed and not qual_unreviewed and not anchored):
+            and not anchored):
         return "", ""
 
     says: list[str] = []
-    # 人改过、未经 AI 审核：读者必须知道这份判断项没有审核者背书（子项目三）。
-    if unreviewed:
-        says.append("**判断项经人工修改或补写，修改后未经 AI 审核**")
-    # 子项目四：第一次调用的定性模块人工修改后未经审核 —— 研报引用它们的结论时要说明。
-    if qual_unreviewed:
-        says.append("**定性分析中的" + "、".join(qual_unreviewed)
-                    + "经人工修改，修改后未经 AI 审核**")
     # 锚定影响最大，先说：首年批准值整个没进模型，研报正文却一直按它讲。
     if anchor_note:
         says.append("**首个预测年由已披露中期锚定**，批准清单上该年的营收增速"
@@ -1998,11 +1979,6 @@ def _assumption_caveats(a, anchor_note: str = "", unreviewed: str = "",
     prompt_line = "".join(parts)
 
     body: list[str] = ["", "---", "", "## ⚠ 判断项依据核验", ""]
-    if unreviewed:
-        body += [f"**{unreviewed}。**", ""]
-    if qual_unreviewed:
-        body += ["**第一次调用的定性分析中，" + "、".join(qual_unreviewed)
-                 + " 经人工修改，人工修改后未经审核。**", ""]
     if anchor_note:
         body += [f"**{anchor_note}**", "",
                  "季度估算的明细（去年各季、本年已公布各季、年初至今同比）见工作簿"
@@ -2204,11 +2180,11 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
                                        out=out, stops=stops, statuses=statuses)
     cost = Decimal(str(research_client.total_cost_usd + qual_client.total_cost_usd))
     for st in statuses:
-        if st["state"] == "人工修改后未经审核":
-            skipped.append(f"定性分析未经审核：{st['label']}（人工修改后未经审核）")
+        if st["state"] == HUMAN_SIGNED:
+            skipped.append(f"定性分析经人工修改：{st['label']}（签名确认）")
         if st.get("note"):
             skipped.append(f"定性分析沿用：{st['label']} {st['note']}")
-    unreviewed = [st["label"] for st in statuses if st["state"] == "人工修改后未经审核"]
+    unreviewed: list[str] = []         # 人改过的定性模块签名即确认，不再带到研报里标注
     if stops:
         # **任一定性模块审核没通过 → 第一次调用停下交人工**（子项目四决定 9）：
         # 三个模块都已跑完（通过的已落盘，重跑沿用）；不写来源清单、不进门①。
@@ -2760,7 +2736,7 @@ def _stop_for_assume_review(out: Path, arts: dict, e, *, code: str) -> str:
 
     底稿写 `assumptions_failed.json` 而不是 `assumptions.json` —— 后者是门③ 批准的
     对象；人以底稿改好、自己存成 assumptions.json 再跑 --value，读回时会因没有通过
-    的审核记录而标注「人工修改后未经审核」（spec 一）。"""
+    的审核记录而不再送审，签名即为确认（用户 2026-11-20）。"""
     from ir_agent import assume, assume_review
 
     (out / ASSUMPTIONS_ROUNDS_MD).write_text(
@@ -2822,9 +2798,9 @@ _APPROVE_NOTE = """
 不在此列，也不需要你确认。
 
 - 认可就直接进入第二阶段建模。
-- 要改数值，改 `{js}` 里的 `rows`，再进入第二阶段。改过的格子**不再送 AI 审核**：
-  第二阶段比对审核时的取值指纹，在终端与研报里写明「判断项经人工修改，修改后
-  未经审核」并列出改动；代码只查算不算得下去（缺年份、缺基期等），不按内容拒绝。
+- 要改数值，改 `{js}` 里的 `rows`，再进入第二阶段。改过的格子**不再送 AI 审核**，
+  你签名即为确认：第二阶段在终端列出改动记录；代码只查算不算得下去（缺年份、缺基期等），
+  不按内容拒绝。
 """
 
 
@@ -2876,17 +2852,9 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # 会被那一句悄悄丢掉（edits 为空时侥幸不报错，是因为空列表压根不会
     # 走进这个 for 循环）。
     skipped: list[str] = []
-    for x in edits:
-        skipped.append(f"判断项经人工调整：{x}（原依据未必仍然支撑新取值）")
-    # **人改过的不再送审，只标注**（子项目三决定 5）：人在门③ 签字就是承担责任，
-    # AI 不该否决人的决定；但「这几格没经过审核」必须让读者看见。
-    unreviewed = _unreviewed_assumptions(out, a, edits)
-    if unreviewed:
-        skipped.append(f"判断项未经审核：{unreviewed}")
-    # 子项目四：第一次调用里人工修改后未经审核的定性模块，研报附录与终端都要写明。
-    qual_unreviewed = list(state.get("qual_unreviewed") or [])
-    for x in qual_unreviewed:
-        skipped.append(f"定性分析未经审核：{x}（人工修改后未经审核）")
+    # **人改过的不再送审**（子项目三决定 5），人在门③ 签字即为确认（用户 2026-11-20）：
+    # 只留改动记录（谁改了哪几格），不标「未经审核」，研报也不据此打折。
+    skipped += _human_edit_lines(edits)
 
     # **重建派生事实必须排在校验之前。** industry.* / comps.* / macro.*
     # 这些 key 只存在于内存账本，由 _analyse_facts 算出来；第一阶段的
@@ -3012,8 +2980,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     cost = 0.0
     # 判断项的软处（依据未逐字核验 / 取值是估计）要跟着交付物走，见 `_assumption_caveats`。
     caveat, caveats_md = _assumption_caveats(
-        a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""),
-        unreviewed=unreviewed, qual_unreviewed=qual_unreviewed)
+        a, anchor_note=(dcf_res.anchor_note if dcf_res is not None else ""))
     if dcf_res is not None:
         full, cost, ferr, debate_md, dnote = _write_full_report(
             code, r, body, model, dcf_res, _prompt_bundle(pr), out,
