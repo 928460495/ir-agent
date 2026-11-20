@@ -643,6 +643,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
             f"中期口径为{_label}（非半年报）——季节性对冲的回测闸门（tests/backtest_hedge.py）"
             "只验证过半年报口径，一季报/三季报噪声更大，未对冲，费用率仍取近3年年报均值")
 
+    _tsur = _mean(ratio("营业税金及附加"), default=.005, what="税金及附加率")   # gen 与 judg 共用，只记一次截断
     return dict(
         meta=dict(code=code, name=q.get("name") or code, price=q["price"],
                   shares=q.get("shares") if q.get("shares") and np.isfinite(q["shares"]) else np.nan,
@@ -659,7 +660,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
         open=o,
         gen=dict(sell=_gen["sell"], admin=_gen["admin"], rd=_gen["rd"],
                  _hedge_note=_hedge_note,
-                 tsur=_mean(ratio("营业税金及附加"), default=.005, what="税金及附加率"),
+                 tsur=_tsur,
                  other_inc=_mean(ratio("其他收益"), default=.005, what="其他收益 / 营收"), inv_inc=_mean(ratio("投资收益"), default=.003, what="投资收益 / 营收"),
                  irate=irate, cash_yield=.015, tax=taxr, mi_share=mish,
                  ocap=wc["ocap"], oclp=wc["oclp"],
@@ -675,6 +676,8 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
                   g_stats=(round(float(np.mean(g_hist)),4), round(float(np.std(g_hist)),4), round(min(g_hist),4), round(max(g_hist),4)),
                   gm_stats=(round(gm_mean,4), round(gm_std_ann,4), round(min(gm_hist),4), round(max(gm_hist),4)),
                   cagr3=round(cagr3,4), mish_hist=mish_hist, wc_interim=wc.get("interim_note"),
+                  # 营业利润率展示扣税金及附加（与建模同口径，2026-11-20）
+                  tsur=_tsur,
                   other_op_hist=[round((_other_op(p) or 0)/rev[p],5) for p in a3 if rev.get(p)],
                   # 费用率逐年历史：第③步判断项的参照（opex_judg.history_lines）。看趋势，不取均值
                   opex_hist={"years": [p[:4]+"A" for p in ann if rev.get(p)],

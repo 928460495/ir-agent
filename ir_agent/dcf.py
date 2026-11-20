@@ -394,7 +394,24 @@ def _monte_carlo(MC, path: str, cal: dict) -> tuple[dict, list[str]]:
                         for t in (out.get("tornado") or [])[:3]]}, []
 
 
-def _calibrate(D, C, code: str, as_of: date, ledger, years: int):
+def _fin_notes(annual_url: str, notes: list[str]) -> dict | None:
+    """最近年报附注里的两张表（一年内到期非流动资产明细、受限资产），交给 A 股校准判定非经营性金融资产
+    （spec 2026-11-20-nonop-financial-assets）。读不到不阻断：返回 None，一年内到期部分按经营性、受限资金不扣，
+    并在 notes 里写明。年报 PDF 与第①步共用缓存目录 snapshots/pdf。"""
+    from ir_agent.sources import annual_notes as AN
+    from ir_agent.sources.annual_pdf import _download
+    try:
+        n = AN.extract_fin_notes_from_pdf(_download(annual_url, Path("snapshots") / "pdf"))
+    except Exception as e:                                  # noqa: BLE001
+        notes.append(f"年报附注读取失败（{e.__class__.__name__}）—— 一年内到期的非流动资产按经营性处理、"
+                     "受限资金不扣（保守）")
+        return None
+    notes += [f"年报附注：{m}（相应口径按保守处理）" for m in n.missing]
+    return {"nca1y_fin": n.nca1y_fin, "statutory_reserve": n.statutory_reserve,
+            "term_restricted": dict(n.term_restricted), "encumbered": dict(n.encumbered)}
+
+
+def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str = ""):
     """取数 + 校准，不建模。返回 (cal, notes)。
 
     第一阶段只需要它: 校准值是 AI 填判断项的参照（历史均值、标准差、
@@ -415,18 +432,24 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int):
                          "此时分析层与估值层用的不是同一套数字")
     try:
         code = D.validate_code(code)
-        cal = C.calibrate(code, years, stmts=stmts, as_of=as_of)
+        fin_notes = _fin_notes(annual_url, notes) if annual_url else None
+        kw = {"fin_notes": fin_notes} if fin_notes is not None else {}
+        cal = C.calibrate(code, years, stmts=stmts, as_of=as_of, **kw)
     except getattr(D, "DataError", Exception) as e:
         raise DcfUnavailable(f"{code} 无法建模：{e}") from e
+    fb = cal.get("fin_bridge") or {}
+    if fb.get("items"):
+        notes.append(f"非经营性金融资产（财务公司等）净额 {fb['net']:.2f} 亿已按账面在股权桥加回（并入交易性金融资产，"
+                     "不随营收增长、不进营运资本）：" + "；".join(f"{l} {v:.2f}" for l, v, _ in fb["items"]))
     return cal, notes, stmts
 
 
 def calibrate_only(code: str, *, as_of: date, ledger=None, years: int = HORIZON,
-                   dirpath: Path | None = None) -> dict:
+                   dirpath: Path | None = None, annual_url: str = "") -> dict:
     """只校准不建模 —— 第一阶段用它拿到历史参照与预测期标签。"""
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
     D, C, _, _ = _load(dirpath)
-    return _calibrate(D, C, code, as_of, ledger, years)[0]
+    return _calibrate(D, C, code, as_of, ledger, years, annual_url)[0]
 
 
 _SCEN_CN = {"bull": "乐观", "base": "中性", "bear": "悲观"}
@@ -591,7 +614,7 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9, code: str = "") ->
 def run(code: str, out_dir: str | Path, *, as_of: date,
         ledger: FactLedger | None = None, years: int = HORIZON,
         dirpath: Path | None = None, assumptions=None,
-        approved_by: str = "") -> DcfResult:
+        approved_by: str = "", annual_url: str = "") -> DcfResult:
     """跑一遍 ashare-dcf，返回结果与全部警告。
 
     **账本给定时由它供数**，DCF 不再自行取数 —— 分析层与估值层用同一套
@@ -604,7 +627,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
     D, C, B, V = _load(dirpath)
 
-    cal, notes, stmts = _calibrate(D, C, code, as_of, ledger, years)
+    cal, notes, stmts = _calibrate(D, C, code, as_of, ledger, years, annual_url)
 
     if assumptions is not None:
         from ir_agent import assume

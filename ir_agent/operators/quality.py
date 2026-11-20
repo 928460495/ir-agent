@@ -238,8 +238,9 @@ def cash_gap_warning(ledger: FactLedger, period: str, as_of: date) -> str | None
     净现金，DCF 每股价值被低估约 60 元。
 
     穷举类现金科目会一直追着新情况跑；检测不一致才可持续 —— **对不上就报出来
-    交给人判断，取值仍用保守的货币资金**。把拆出资金视作自由现金是一个判断，
-    应由人做，不该由代码默认。
+    交给人判断**。2026-11-20 起（spec nonop-financial-assets，用户决定）拆出资金、买入返售等财务公司
+    金融资产由估值层按账面加回（并入交易性金融资产、配对扣除吸收存款）：差额能被这些科目解释时如实说
+    「已加回」；解释不了才请人工核对。不再写「估值偏保守」—— 那句话把系统性低估说成了稳健。
     """
     mf = _cash_optional(ledger, "cash_and_equivalents", period, as_of)
     ce = _cash_optional(ledger, "cash_end", period, as_of)
@@ -248,7 +249,13 @@ def cash_gap_warning(ledger: FactLedger, period: str, as_of: date) -> str | None
     if mf.value >= ce.value * (Decimal(1) - CASH_GAP_TOLERANCE):
         return None
     yi = Decimal("1e8")
-    return (f"货币资金 {mf.value / yi:,.0f} 亿显著低于期末现金及现金等价物 "
-            f"{ce.value / yi:,.0f} 亿 —— 现金可能分类在拆出资金、"
-            f"交易性金融资产等科目。净负债按货币资金计算会偏高"
-            f"（净现金偏低），估值相应偏保守，请人工核对。")
+    expl = Decimal(0)
+    for k in ("lend_fund", "buy_resale_finasset"):
+        f = _cash_optional(ledger, k, period, as_of)
+        if f is not None:
+            expl += f.value
+    head = (f"货币资金 {mf.value / yi:,.0f} 亿低于期末现金及现金等价物 {ce.value / yi:,.0f} 亿")
+    if expl and mf.value + expl >= ce.value * (Decimal(1) - CASH_GAP_TOLERANCE):
+        return (head + f"，差额来自财务公司拆出资金、买入返售等 {expl / yi:,.0f} 亿 —— 已作为非经营性"
+                "金融资产按账面在估值桥加回（配对扣除吸收存款，明细见工作簿 1_假设「非经营性金融资产」小节）。")
+    return (head + " —— 差额无法由拆出资金、买入返售等科目解释，现金可能分类在其他科目，请人工核对现金口径。")

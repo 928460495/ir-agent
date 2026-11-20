@@ -244,26 +244,34 @@ def margin_lines(a, gm_by_case: dict, judg: dict | None = None) -> list[str]:
     by = {}
     for r in a.opex_rows:
         by.setdefault(r.year, []).append(r)
-    out = ["", "【营业利润率】（毛利率 − 各费用率，悲观 / 中性 / 乐观；不含其他经营损益）"]
+    # A 股的营业利润扣税金及附加（会计准则口径；茅台约占营收 16%）—— 建模一直扣，展示此前漏了（2026-11-20）
+    tsur = float((judg or {}).get("tsur") or 0) if a.market == "cn" else 0.0
+    if a.market == "cn" and tsur:
+        head = f"（毛利率 − 税金及附加率 {tsur:.2%} − 各费用率，悲观 / 中性 / 乐观；不含其他经营损益）"
+    elif a.market == "cn":
+        head = "（毛利率 − 各费用率，悲观 / 中性 / 乐观；未扣税金及附加，建模另扣；不含其他经营损益）"
+    else:
+        head = "（毛利率 − 各费用率，悲观 / 中性 / 乐观；不含其他经营损益）"
+    out = ["", "【营业利润率】" + head]
     for y in sorted(by):
         vals = []
         for c in ("bear", "base", "bull"):
             gm = gm_by_case.get(c) or []
             if len(gm) < y:
                 break
-            vals.append(float(gm[y - 1]) - sum(float(getattr(r, c)) for r in by[y]))
+            vals.append(float(gm[y - 1]) - tsur - sum(float(getattr(r, c)) for r in by[y]))
         if len(vals) == 3:
             out.append(f"- 第{y}年 营业利润率 " + " / ".join(f"{v:.2%}" for v in vals))
     st = {r.driver.split(":", 1)[1]: r for r in a.steady_rows}
     if STEADY_GM in st and all(("稳态" + x) in st for x in OPEX_ITEMS.get(a.market, ())):
-        vals = [float(getattr(st[STEADY_GM], c))
+        vals = [float(getattr(st[STEADY_GM], c)) - tsur
                 - sum(float(getattr(st["稳态" + x], c)) for x in OPEX_ITEMS[a.market])
                 for c in ("bear", "base", "bull")]
         out.append("- 稳态 营业利润率 " + " / ".join(f"{v:.2%}" for v in vals))
     hist = (judg or {}).get("opex_hist") or {}
     gmh = (judg or {}).get("gm_hist") or []
     if gmh and all(hist.get(x) for x in OPEX_ITEMS.get(a.market, ())):
-        last = float(gmh[-1]) - sum(float(hist[x][-1]) for x in OPEX_ITEMS[a.market])
+        last = float(gmh[-1]) - tsur - sum(float(hist[x][-1]) for x in OPEX_ITEMS[a.market])
         yrs = hist.get("years") or ["最新"]
         out.append(f"- {yrs[-1]} 营业利润率参照（历史实际，同口径）{last:.2%}")
     return out
