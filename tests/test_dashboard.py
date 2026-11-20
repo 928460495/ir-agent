@@ -78,7 +78,7 @@ class TestProvenanceIsTheInteraction:
     def test_numbers_in_the_body_carry_a_hover_source(self, tmp_path, run_obj):
         """点/悬停看来源 —— 这是本项目最该有的交互。"""
         h = html(tmp_path, run_obj)
-        assert "title=" in h or "data-source" in h
+        assert "popovertarget=" in h and 'popover="hint"' in h      # toggletip（2026-11-20 起不靠 title）
 
     def test_traceability_rate_is_shown(self, tmp_path, run_obj):
         assert "100" in html(tmp_path, run_obj)
