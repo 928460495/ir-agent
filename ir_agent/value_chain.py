@@ -314,7 +314,7 @@ def for_prompt(corpus, ledger: FactLedger, period: str, as_of: date,
             lines.append("  " + s.text.replace("\n", "\n  "))
     if corpus is not None and corpus.docs:
         from ir_agent.sources.external import TIER_LABEL, TIER_RULE, Tier
-        seen_tiers = {d.tier for d in corpus.docs}
+        seen_tiers = {d.tier for d in corpus.visible("value_chain")}
         # 可引用范围要先说清楚，模型才是带着这条界线去读下面的资料 ——
         # 放在资料读完之后才说，等于让它先斩后奏。
         #
@@ -334,8 +334,10 @@ def for_prompt(corpus, ledger: FactLedger, period: str, as_of: date,
         # `gaps._match_announce` 按因子做全文检索，池子越大召回越高。
         # 紧邻的 `seen_tiers` 仍读 `corpus.docs` —— 它算的是「本轮语料库
         # 涉及哪几个分级」，那是语料库的属性，不是提示词给了哪几篇的属性。
-        for d in corpus.prompt_docs():
+        for d in corpus.prompt_docs(module="value_chain"):       # 共用 + 本模块采集的（spec 2026-11-21 §6）
             lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
+            if d.scope:
+                lines.append(f"  口径（采集时自述，未核验）：{d.scope}")
             lines.append("  " + d.for_prompt().replace("\n", "\n  "))
         for t in Tier:
             if t not in seen_tiers:

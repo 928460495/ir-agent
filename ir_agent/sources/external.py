@@ -179,6 +179,11 @@ class Document:
     # 2 = 其余。**只用于排序**（`Corpus.prompt_docs` 先给第一档），不影响
     # 引用与核验。非公告文档一律 2。
     rank: int = 2
+    # 开放网络资料由哪个模块采集（spec 2026-11-21-staged-collection §6）："" = 共用（研报、公告、
+    # 旧产物）/ "macro" / "strategy" / "value_chain" / "macro_track"。定性模块只看共用与本模块的
+    module: str = ""
+    # 采集时模型自述的统计口径与频率（未核验），如「规模以上，月度」
+    scope: str = ""
 
     def cite(self) -> str:
         return (f"{self.publisher}《{self.title}》"
@@ -265,7 +270,15 @@ class Corpus:
             self.skipped.append(f"{doc.title}（{doc.published}）")
             return False
 
-    def prompt_docs(self, company_limit: int | None = None) -> list[Document]:
+    def visible(self, module: str | None) -> list[Document]:
+        """某个定性模块看得见的文档：共用（module 为空：研报、公告、申报、旧产物）+ 本模块采集的。
+        `module` 为 None 时是全部（第二次调用及以后）。spec 2026-11-21-staged-collection §6。"""
+        if module is None:
+            return list(self.docs)
+        return [d for d in self.docs if d.module in ("", module)]
+
+    def prompt_docs(self, company_limit: int | None = None,
+                    module: str | None = None) -> list[Document]:
         """进提示词的文档。**只截断 COMPANY 级，其余分级照旧全给。**
 
         入库的公告不再限 8 篇之后，三个定性模块若仍
@@ -293,11 +306,12 @@ class Corpus:
         # 定性三节读到的是股东会决议与律师意见书，而投资建设覆铜板项目、
         # 年度业绩快报排在后面被截掉。档位来自交易所分类代码，见
         # `announce.type_tier`。
-        company = sorted((d for d in self.docs if d.tier is Tier.COMPANY),
+        pool = self.visible(module)
+        company = sorted((d for d in pool if d.tier is Tier.COMPANY),
                          key=lambda d: (d.rank, -d.published.toordinal())
                          )[:company_limit]
         keep = {id(d) for d in company}
-        return [d for d in self.docs
+        return [d for d in pool
                 if d.tier is not Tier.COMPANY or id(d) in keep]
 
     def by_tier(self, tier: Tier) -> list[Document]:

@@ -555,6 +555,29 @@ def build(industry: str, period: str, as_of: date,
     return prof
 
 
+def company_exposure_facts(led: FactLedger, period: str, as_of: date) -> list[Fact]:
+    """本公司对宏观的暴露（spec 2026-11-21-staged-collection §5.1），宏观敏感度段引用：
+
+    - `company.dol`：本公司经营杠杆，与行业中位同一口径（`dol`）；
+    - `company.net_debt_ratio` =（有息负债 − 货币资金）÷ 归母净资产，为负即净现金 —— 净现金的公司受加息
+      影响小于净负债的公司。有息负债分量缺的按 0（同 `ratios._debt_of`）；现金或净资产取不到不给。"""
+    from ir_agent.operators.aggregates import DEBT_PARTS
+
+    out: list[Fact] = []
+
+    def add(key, value, unit):
+        if value is not None:
+            out.append(Fact(key=key, value=value, unit=unit, period=period, as_of=as_of,
+                            source_id=SOURCE_ID, method=Method.COMPUTED))
+
+    add("company.dol", dol(led, period, as_of), "x")
+    cash, eq = _get(led, "cash_and_equivalents", period, as_of), _get(led, "equity_attr_parent", period, as_of)
+    if cash is not None and eq is not None and eq > 0:
+        debt = sum((v for k in DEBT_PARTS if (v := _get(led, k, period, as_of)) is not None), Decimal(0))
+        add("company.net_debt_ratio", (debt - cash) / eq, "ratio")
+    return out
+
+
 def profile_facts(prof: IndustryProfile) -> list[Fact]:
     """把行业画像写进账本，供正文以占位符引用。"""
     out: list[Fact] = []

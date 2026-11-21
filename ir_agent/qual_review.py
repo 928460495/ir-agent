@@ -168,9 +168,14 @@ def fingerprint(raw: str) -> str:
     return hashlib.sha256(re.sub(r"\s+", "", raw or "").encode("utf-8")).hexdigest()[:16]
 
 
-def corpus_fingerprint(corpus) -> str:
-    """审核时语料库的指纹（文档 id 集合）。沿用时资料可能已变（spec 五），便于对照。"""
-    ids = sorted(getattr(d, "doc_id", "") for d in (getattr(corpus, "docs", None) or []))
+def corpus_fingerprint(corpus, module: str | None = None) -> str:
+    """审核时语料库的指纹（文档 id 集合）。沿用时资料可能已变（spec 五），便于对照。
+
+    给了 `module` 时只对该模块看得见的文档取指纹 —— 别的模块多采了资料，不该让这个模块误报「语料库已变」
+    （spec 2026-11-21-staged-collection §6）。"""
+    docs = (corpus.visible(module) if module is not None and hasattr(corpus, "visible")
+            else (getattr(corpus, "docs", None) or []))
+    ids = sorted(getattr(d, "doc_id", "") for d in docs)
     if not ids:
         return ""
     return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:16]

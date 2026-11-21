@@ -1596,20 +1596,23 @@ def test_开放网络采集不在确定性层里():
 
 
 def test_第一阶段采集排在定性三节之前():
-    """战略/产业链/宏观定性要引用开放网络文档的原文，采集必须更早。"""
+    """战略/产业链/宏观定性要引用开放网络文档的原文，采集必须更早。
+
+    2026-11-21（spec staged-collection §2）：采集不再在开头一次做完，而是在 `_analyse_qualitative`
+    里、每个模块开工前各采各的 —— 不变式改为「每个模块的采集排在该模块撰写之前」，且仍在确定性层之后。"""
+    import inspect
+
     from ir_agent import full
 
     calls = _calls(full.run_analyse)
-
-    def first(name: str) -> int:
-        lines = [ln for n, ln in calls if n == name]
-        assert lines, f"run_analyse 里没有对 {name} 的真实调用"
-        return min(lines)
-
-    assert first("_analyse_facts") < first("_load_openweb"), \
-        "_load_openweb 必须排在 _analyse_facts 之后"
-    assert first("_load_openweb") < first("_analyse_qualitative"), \
-        "_load_openweb 必须排在 _analyse_qualitative 之前"
+    names = [n for n, _ in calls]
+    assert "_load_openweb" not in names
+    assert min(ln for n, ln in calls if n == "_analyse_facts") < \
+        min(ln for n, ln in calls if n == "_analyse_qualitative")
+    src = inspect.getsource(full._analyse_qualitative)
+    order = [src.index(x) for x in ('collect("macro"', 'take("宏观定性"', 'collect("strategy"',
+                                     'take("战略"', 'collect("value_chain"', 'take("产业链"')]
+    assert order == sorted(order)
 
 
 def test_第二阶段只读回不重新采集():
@@ -1724,14 +1727,14 @@ def test_采集用的是开了联网工具的client():
     """
     from ir_agent import full
 
+    # 2026-11-21（spec staged-collection）：采集挪进 `_analyse_qualitative`，联网客户端以
+    # `research_client=` 关键字传进去 —— 查这个调用点自己的那一个实参。
     tree = ast.parse(textwrap.dedent(inspect.getsource(full.run_analyse)))
     call = next(n for n in ast.walk(tree)
-                if isinstance(n, ast.Call) and _call_name(n) == "_load_openweb")
-    used: set[str] = set()
-    for part in list(call.args) + [kw.value for kw in call.keywords]:
-        used |= {n.id for n in ast.walk(part) if isinstance(n, ast.Name)}
-    assert "research_client" in used
-    assert "qual_client" not in used
+                if isinstance(n, ast.Call) and _call_name(n) == "_analyse_qualitative")
+    kw = next(k for k in call.keywords if k.arg == "research_client")
+    used = {n.id for n in ast.walk(kw.value) if isinstance(n, ast.Name)}
+    assert used == {"research_client"}
 
 
 def test_开放网络落盘失败不阻断整轮研究(tmp_path, monkeypatch):
@@ -2801,6 +2804,25 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
             missing_slots=["公司重大动态"])),
         INFO, "3 篇抓取失败")
 
+    # 按模块采集（spec 2026-11-21-staged-collection）
+    from ir_agent.sources import openweb as _ow
+    monkeypatch.setattr(full, "_company_name", lambda code: "某公司")
+    monkeypatch.setattr(full, "_industry_path", lambda code: "某行业")
+    monkeypatch.setattr(_ow, "fetch", lambda url, **k: _ow.Fetched(
+        final_url=url, text="正文", meta_published=date(2026, 9, 1)))
+    from types import SimpleNamespace as _NS
+    _r_cm = _NS(corpus=Corpus(as_of=asof), code="600183")
+
+    def _boom_client(p):
+        raise RuntimeError("登录过期")
+    add("_collect_module", "检索调用失败",
+        full._collect_module("strategy", "600183", _r_cm, asof, None, _boom_client, {}),
+        GAP, "开放网络采集未执行")
+    add("_collect_module", "采到了、有缺口",
+        full._collect_module("strategy", "600183", _r_cm, asof, None,
+                             lambda p: "候选: 竞争格局与份额 | 标题 | https://e.example/a | 某机构 | 2026-09-01", {}),
+        INFO, "战略：替代品与新进入者 未取到")
+
     add("_factor_host_check_note", "有因子降级",
         full._factor_host_check_note({"capacity": gaps.FactorData(
             factor=Factor(key="capacity", label="产能", unit="吨"),
@@ -2885,7 +2907,12 @@ def test_本分支新增的清单生产者逐个断言渲染标记(monkeypatch, 
         "_judged_labels": "不是清单生产者：返回第③步要判断的年份标签（前五年）",
         "_human_edit_lines": ("前缀「判断项经人工调整：」已登记（✎），断言在 "
                               "test_signed_edits.test_判断项人工改动记录不再说未经审核或原依据未必支撑"),
-        "_restore_openweb": "本分支未改动其清单措辞；共用 _openweb_notes",
+        "_restore_openweb": ("按模块读回（spec 2026-11-21-staged-collection）：采到的走 _openweb_notes(label)，"
+                             "前缀「开放网络资料采集（」已登记；缺文件 / 零文档 / 损坏是真缺口，落「未生成」是对的；"
+                             "行为断言在 tests/test_staged_collection_restore.py"),
+        "_restore_openweb_legacy": "原 _restore_openweb 原样改名（读改动前的 openweb.json），措辞未变",
+        "_track_macro": ("只产出真缺口条目（检索未执行、未能落盘、单个指标检索失败），落默认分支「未生成」"
+                         "是对的；读数本身写进宏观产物、不进清单。行为断言在 tests/test_macro_track.py"),
         "_method_review_lines": ("不是终端清单的生产者：返回 review.md 与 "
                                  "assumptions.md 的「方法论审核」行，不进 skipped"),
         "_review_factor_lines": ("不是终端清单的生产者：返回 review.md 的 markdown "
@@ -3401,6 +3428,8 @@ def _offline(monkeypatch, full, seq: list | None = None) -> list:
     monkeypatch.setattr(full, "_analyse_facts",
                         rec("定量采集", lambda: ({}, {}, [])))
     monkeypatch.setattr(full, "_load_openweb", rec("开放网络", list))
+    # 2026-11-21：开放网络采集挪进定性层各模块之前 —— 离线时同样不联网
+    monkeypatch.setattr(full, "_collect_module", lambda *a, **k: [])
     monkeypatch.setattr(full, "_load_announce", rec("公司公告", list))
     monkeypatch.setattr(full, "_analyse_qualitative",
                         rec("定性分析", _PhaseClient))
@@ -3467,7 +3496,8 @@ def test_第一阶段之一只跑到定性分析并产出来源清单(tmp_path, 
     seq = _offline(monkeypatch, full)
     o = full.run_analyse("600183", _PhaseR(), date(2026, 10, 12), tmp_path)
 
-    assert seq[:4] == ["定量采集", "开放网络", "公司公告", "定性分析"], seq
+    # 2026-11-21：开放网络采集挪进定性分析（各模块开工前），不再是单独一步
+    assert seq[:3] == ["定量采集", "公司公告", "定性分析"], seq
     assert "预研" not in seq and "撰写" not in seq
     # 门① 的清单是本次调用的交付物 —— 断言文件真的在盘上，不 monkeypatch
     # 一个「写清单」的函数来替代：那样断言的是「我们调了它」。
@@ -4424,7 +4454,7 @@ def test_定性模块审核停下_第一次调用停在这里_不出来源清单
     _offline(monkeypatch, full)
 
     def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
-             statuses=None):
+             statuses=None, **kw):
         (out / "strategy_failed_raw.md").write_text("最后一稿", encoding="utf-8")
         stops.append("战略分析审核 3 轮未通过（最后一轮致命 2 条） —— 各轮记录：x")
         return _PhaseClient()
@@ -4448,7 +4478,7 @@ def test_定性模块审核停下_删掉上一轮留下的门一文件(tmp_path,
     (tmp_path / full.SOURCES_JSON).write_text("[]", encoding="utf-8")
 
     def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
-             statuses=None):
+             statuses=None, **kw):
         stops.append("战略分析审核 3 轮未通过（最后一轮致命 1 条）")
         return _PhaseClient()
     monkeypatch.setattr(full, "_analyse_qualitative", qual)
@@ -4464,7 +4494,7 @@ def test_定性模块人工修改过_门一清单与终端标注_记进state(tmp
     _offline(monkeypatch, full)
 
     def qual(code, r, as_of, model, md, pr, skipped, *, out=None, stops=None,
-             statuses=None):
+             statuses=None, **kw):
         statuses += [{"label": "战略分析", "state": full.HUMAN_SIGNED, "rounds": 0,
                       "flagged": [], "note": ""},
                      {"label": "产业链", "state": "沿用审核结论", "rounds": 1,
