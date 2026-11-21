@@ -86,6 +86,12 @@ def _peer_ttm(led: FactLedger, end: tuple[int, int] | None,
 
 _HALF_ENDS = (2, 4)
 _EBITDA_PARTS = ("operating_profit", "depreciation_amortization", "interest_expense_fe")
+_EBITDA_PARTS_PRE_INTEREST = ("operating_profit", "depreciation_amortization")
+
+
+def _ebitda_parts(led: FactLedger) -> tuple[str, ...]:
+    """CAS 营业利润已扣息，EBITDA 要加回利息；US GAAP 营业利润在利息之前，不加也不要求在场。"""
+    return _EBITDA_PARTS            # 本仓只有 CAS（us-ir-agent 另判 US GAAP）
 
 
 def balance_period(led: FactLedger, as_of: date, probe: str = "equity_attr_parent") -> str | None:
@@ -106,20 +112,36 @@ def _ensure_da(led: FactLedger, period: str, as_of: date) -> None:
         pass
 
 
+def _fact(led: FactLedger, key: str, period: str, as_of: date):
+    try:
+        return led.get(key, period, as_of=as_of)
+    except (KeyError, LookAheadError):
+        return None
+
+
 def flow_ttm(led: FactLedger, key: str, end: tuple[int, int],
              as_of: date) -> Decimal | None:
-    """截至 end 的流量 TTM。end 的季度必须是 2（中报）或 4（年报）。"""
+    """截至 end 的流量 TTM = 本期累计 + 上年 FY − 上年同期累计。
+
+    A 股截止季只能是 2（中报）或 4（年报）：折旧摊销只在中报、年报披露。美股（美元事实）
+    每季都披露折旧摊销（设计「三.4」），截止季可以是 1–4。
+    """
     y, q = end
     if q == 4:
         return _v(led, key, _label((y, 4)), as_of)
-    if q != 2:
+    cur = _fact(led, key, _label(end), as_of)
+    if cur is None or (q != 2 and cur.currency != "USD"):
         return None
-    cur = _v(led, key, _label((y, 2)), as_of)
     prev_fy = _v(led, key, _label((y - 1, 4)), as_of)
-    prev_h1 = _v(led, key, _label((y - 1, 2)), as_of)
-    if None in (cur, prev_fy, prev_h1):
+    prev_cum = _v(led, key, _label((y - 1, q)), as_of)
+    if None in (prev_fy, prev_cum):
         return None
-    return cur + prev_fy - prev_h1
+    return cur.value + prev_fy - prev_cum
+
+
+def _flow_quarters(led: FactLedger) -> tuple[int, ...]:
+    """流量 TTM 可以截止的季度：A 股中报 / 年报，美股任一季（见 flow_ttm）。"""
+    return _HALF_ENDS
 
 
 def flow_end(led: FactLedger, as_of: date) -> tuple[int, int] | None:
@@ -127,13 +149,14 @@ def flow_end(led: FactLedger, as_of: date) -> tuple[int, int] | None:
     cands: list[tuple[int, int]] = []
     for f_end in sorted({(int(p[:4]), _Q_OF.get(p[4:]))
                          for k, p in list(led._facts)              # noqa: SLF001
-                         if k == "operating_profit" and _Q_OF.get(p[4:]) in _HALF_ENDS},
+                         if k == "operating_profit" and _Q_OF.get(p[4:]) in _flow_quarters(led)},
                         reverse=True):
         cands.append(f_end)
     for end in cands:
-        for per in (_label(end), _label((end[0] - 1, 4)), _label((end[0] - 1, 2))):
+        # 上年同期累计：A 股截止期只有 H1 / FY；美股任一季（Q1-Q3 要上年 Q1-Q3，不是 H1）
+        for per in (_label(end), _label((end[0] - 1, 4)), _label((end[0] - 1, end[1]))):
             _ensure_da(led, per, as_of)
-        if all(flow_ttm(led, k, end, as_of) is not None for k in _EBITDA_PARTS):
+        if all(flow_ttm(led, k, end, as_of) is not None for k in _ebitda_parts(led)):
             return end
     return None
 
@@ -143,16 +166,17 @@ _Q_OF = {"Q1": 1, "H1": 2, "Q1-Q3": 3, "FY": 4}
 
 def _ebitda_ttm(led: FactLedger, end: tuple[int, int] | None,
                 as_of: date) -> tuple[Decimal, str] | None:
-    """EBITDA = 营业利润 + 折旧摊销 + max(利息费用, 0)，三项都取同一截止期的 TTM。
-    同业没出本期就退上一期（与 PE 同一规则）。"""
+    """EBITDA = 营业利润 + 折旧摊销 + max(利息费用, 0)，三项都取同一截止期的 TTM
+    （US GAAP 不加利息，见 _ebitda_parts）。同业没出本期就退上一期（与 PE 同一规则）。"""
     if end is None:
         return None
-    for q in (end, _prev_quarter(end) if end[1] == 4 else (end[0] - 1, 4)):
-        for per in (_label(q), _label((q[0] - 1, 4)), _label((q[0] - 1, 2))):
+    us = _flow_quarters(led) != _HALF_ENDS
+    for q in (end, _prev_quarter(end) if end[1] == 4 or us else (end[0] - 1, 4)):
+        for per in (_label(q), _label((q[0] - 1, 4)), _label((q[0] - 1, q[1]))):
             _ensure_da(led, per, as_of)
-        vals = [flow_ttm(led, k, q, as_of) for k in _EBITDA_PARTS]
+        vals = [flow_ttm(led, k, q, as_of) for k in _ebitda_parts(led)]
         if all(v is not None for v in vals):
-            op, da, ie = vals
+            op, da, ie = (*vals, Decimal(0))[:3]
             return op + da + max(ie, Decimal(0)), f"TTM 截至 {_label(q)}"
     return None
 
@@ -177,6 +201,24 @@ def _growth(led: FactLedger, period: str, as_of: date,
             g = (float(now) / float(then)) ** (1 / back) - 1
             return Decimal(str(round(g, 10))), basis
     return None, ""
+
+
+ROE_YEARS = 3
+
+
+def _roe3y(led: FactLedger, period: str, as_of: date) -> tuple[Decimal | None, str]:
+    """近三个年报（截至 period）的 ROE 平均 = 各年归母净利润 ÷ 年末归母净资产。
+
+    净资产不为正、或该年数据缺失的年份跳过；一年都没有给 None。basis 写实有年数（「3y」「2y」）。"""
+    y = int(period[:4])
+    vals = []
+    for yy in range(y, y - ROE_YEARS, -1):
+        np_, eq = (_v(led, k, f"{yy}FY", as_of) for k in ("net_profit_attr_parent", "equity_attr_parent"))
+        if np_ is not None and eq is not None and eq > 0:
+            vals.append(np_ / eq)
+    if not vals:
+        return None, ""
+    return sum(vals, Decimal(0)) / len(vals), f"{len(vals)}y"
 
 
 def obs_from_ledger(code: str, name: str, led: FactLedger, period: str,
@@ -212,20 +254,30 @@ def obs_from_ledger(code: str, name: str, led: FactLedger, period: str,
     eb = _ebitda_ttm(led, fe, as_of)
     if eb is None:
         op, da, ie = (_v(led, k, period, as_of) for k in _EBITDA_PARTS)
+        if _ebitda_parts(led) is _EBITDA_PARTS_PRE_INTEREST:
+            ie = None
         if op is not None and da is not None:
             eb = (op + da + max(ie or Decimal(0), Decimal(0)), f"FY {period}")
     growth, gbasis = _growth(led, period, as_of, fe)
+    # TTM 营收（EV/Sales 的分母）：与 EBITDA 同一截止期，取不到退回 period 的年报
+    revenue = flow_ttm(led, "revenue", fe, as_of) if fe is not None else None
+    if revenue is None:
+        revenue = _v(led, "revenue", period, as_of)
 
     equity_parent = bv("equity_attr_parent")
     roe = (net_profit / equity_parent
            if net_profit is not None and equity_parent and equity_parent > 0 else None)
+    roe3y, roe3y_basis = _roe3y(led, period, as_of)
+    ebitda = eb[0] if eb else None
+    margin = ebitda / revenue if ebitda is not None and revenue and revenue > 0 else None
     return PeerObs(code=code, name=name, market_cap=market_cap,
                    net_profit=net_profit, np_basis=basis,
                    equity_parent=equity_parent, total_equity=bv("total_equity"),
                    debt=debt, cash=bv("cash_and_equivalents"),
                    ebitda=eb[0] if eb else None, roe=roe,
                    growth=growth, growth_basis=gbasis,
-                   bs_basis=bs, flow_basis=eb[1] if eb else "")
+                   bs_basis=bs, flow_basis=eb[1] if eb else "", revenue=revenue,
+                   roe3y=roe3y, roe3y_basis=roe3y_basis, ebitda_margin=margin)
 
 
 def obs_from_facts(code: str, name: str, facts: dict, period: str,
@@ -276,44 +328,12 @@ def _close_on(symbol: str, day: date, cache: dict) -> tuple[date, Decimal]:
     return date.fromisoformat(d), Decimal(px)
 
 
-def gather(r, as_of: date, snapshot_dir):
-    """返回 (本司, 行业样本, 可比, 总股本, 现价, 剔除说明)。
-
-    可比 = 行业样本中 `r.comps_codes` 那几家 —— **同一份观测**，保证可比法与回归同口径。
-    截至 as_of 尚无该期财报的同业剔除，不用上期凑（与 comps.py 的立场一致）。
-    **没进样本的每一家都留一条说明**：财报没取到、没有行情、行情停在旧日期、未披露。
-    """
-    from ir_agent.operators import aggregates
+def _build_sample(codes, names, paths, cache, ctx, notes) -> list[PeerObs]:
+    """批量行情 → 逐家观测（与本司同一报价日、同一截止期）。没进样本的每一家都在 notes 留一条。"""
     from ir_agent.sources.snapshot import SnapshotStore
 
-    cache = getattr(r, "peer_statements", None)
-    peers = getattr(r, "peer_set", None)
-    if not cache or peers is None:
-        raise RelvalUnavailable("行业样本未取到（第二阶段行业聚合失败或未运行）")
-    fp = fund_period(r.period)
-    tcode = peers.target
-    names = {m.code: m.name for m in peers.members}
-    notes: list[str] = [f"{m.code} {m.name}：财报未取到（行业聚合时取数失败），剔除"
-                        for m in peers.members if m.code not in cache]
-    codes = [c for c in cache if c != tcode]
-
-    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
-                 if f.key == "market_cap"), None)
-    try:
-        mc_fact = r.ledger.get("market_cap", spot, as_of=as_of) if spot else None
-    except (KeyError, LookAheadError):
-        mc_fact = None
-    price = _v(r.ledger, "last_price", spot, as_of) if spot else None
-    if mc_fact is None or not mc_fact.value or not price:
-        raise RelvalUnavailable("本司市值或现价缺失")
-    quote_day = mc_fact.as_of
-    # 本司 PE 分母的截止季度 —— 同业对齐它（没出就退上一季）
-    from ir_agent.operators.ttm import latest_quarter
-    ttm_end = latest_quarter(r.ledger, "net_profit_attr_parent", as_of)
-    # 存量与流量的截止期同样由本司定，同业对齐（没出则退一期）
-    tgt_bs = balance_period(r.ledger, as_of)
-    tgt_flow = flow_end(r.ledger, as_of)
-
+    quote_day, fp, as_of = ctx["quote_day"], ctx["fp"], ctx["as_of"]
+    snapshot_dir = ctx["snapshot_dir"]
     symbols = [quote_symbol(c) for c in codes]
     try:
         got, raws = fetch_quotes(symbols)
@@ -353,9 +373,11 @@ def gather(r, as_of: date, snapshot_dir):
         if not _disclosed(cache[c], fp, as_of):
             notes.append(f"{c} {name}：截至估值时点未披露 {fp} 财报，剔除（不用上期凑）")
             continue
-        sample.append(obs_from_facts(c, name, cache[c], fp, q["market_cap"], as_of,
-                                     ttm_end=ttm_end, bs_period=tgt_bs,
-                                     flow_end=tgt_flow))
+        o = obs_from_facts(c, name, cache[c], fp, q["market_cap"], as_of,
+                           ttm_end=ctx["ttm_end"], bs_period=ctx["tgt_bs"], flow_end=ctx["tgt_flow"])
+        o.path = paths.get(c, ())
+        o.price = q.get("last")                 # PE(NTM) 用每股口径（与本司报价日同一天）
+        sample.append(o)
 
     if len(closes) != n_cached:
         import json
@@ -364,6 +386,50 @@ def gather(r, as_of: date, snapshot_dir):
             close_path.write_text(json.dumps(closes, ensure_ascii=False, indent=1), "utf-8")
         except OSError:
             pass
+    return sample
+
+
+def gather(r, as_of: date, snapshot_dir):
+    """返回 (本司, 行业样本, 可比, 总股本, 现价, 剔除说明)。
+
+    可比 = 行业样本中 `r.comps_codes` 那几家 —— **同一份观测**，保证可比法与回归同口径。
+    截至 as_of 尚无该期财报的同业剔除，不用上期凑（与 comps.py 的立场一致）。
+    **没进样本的每一家都留一条说明**：财报没取到、没有行情、行情停在旧日期、未披露。
+    """
+    from ir_agent.operators import aggregates
+
+    cache = getattr(r, "peer_statements", None)
+    peers = getattr(r, "peer_set", None)
+    if not cache or peers is None:
+        raise RelvalUnavailable("行业样本未取到（第二阶段行业聚合失败或未运行）")
+    fp = fund_period(r.period)
+    tcode = peers.target
+    names = {m.code: m.name for m in peers.members}
+    paths = {m.code: tuple(getattr(m, "path", ()) or ()) for m in peers.members}
+    notes: list[str] = [f"{m.code} {m.name}：财报未取到（行业聚合时取数失败），剔除"
+                        for m in peers.members if m.code not in cache]
+    codes = [c for c in cache if c != tcode]
+
+    spot = next((f.period for f in (r.quotes.facts if r.quotes else [])
+                 if f.key == "market_cap"), None)
+    try:
+        mc_fact = r.ledger.get("market_cap", spot, as_of=as_of) if spot else None
+    except (KeyError, LookAheadError):
+        mc_fact = None
+    price = _v(r.ledger, "last_price", spot, as_of) if spot else None
+    if mc_fact is None or not mc_fact.value or not price:
+        raise RelvalUnavailable("本司市值或现价缺失")
+    quote_day = mc_fact.as_of
+    # 本司 PE 分母的截止季度 —— 同业对齐它（没出就退上一季）
+    from ir_agent.operators.ttm import latest_quarter
+    ttm_end = latest_quarter(r.ledger, "net_profit_attr_parent", as_of)
+    # 存量与流量的截止期同样由本司定，同业对齐（没出则退一期）
+    tgt_bs = balance_period(r.ledger, as_of)
+    tgt_flow = flow_end(r.ledger, as_of)
+
+    ctx = dict(quote_day=quote_day, fp=fp, as_of=as_of, ttm_end=ttm_end, tgt_bs=tgt_bs,
+               tgt_flow=tgt_flow, snapshot_dir=snapshot_dir)
+    sample = _build_sample(codes, names, paths, cache, ctx, notes)
 
     try:
         aggregates.compute(r.ledger, fp, as_of)
@@ -371,6 +437,13 @@ def gather(r, as_of: date, snapshot_dir):
         pass
     target = obs_from_ledger(tcode, peers.target_name, r.ledger, fp, as_of, mc_fact.value,
                              bs_period=tgt_bs, flow_end_q=tgt_flow)
+    tpath = getattr(peers.classification, "path", "") or ""
+    target.path = tuple(x for x in str(tpath).split("-") if x)
+    from ir_agent.relval_ntm import CN_FYE, ntm_from_ledger
+    target.price = price
+    got = ntm_from_ledger(r.ledger, CN_FYE, as_of)
+    if got is not None:
+        target.eps_ntm, target.ntm_basis = got
 
     by_code = {o.code: o for o in sample}
     comps_codes = getattr(r, "comps_codes", None) or []
@@ -378,3 +451,108 @@ def gather(r, as_of: date, snapshot_dir):
               for c in comps_codes if c not in by_code]
     comps = [by_code[c] for c in comps_codes if c in by_code]
     return target, sample, comps, mc_fact.value / price, price, notes
+
+
+def peer_ntm(codes, as_of: date, snapshot_dir) -> dict[str, tuple[Decimal, str]]:
+    """PE(NTM) 可比（沿用 PE 选中的名单）的一致预期：东财研报按分析时点检索、取中位数，财年末 12-31。
+
+    只问给定的几家（有界）。结果按分析时点落快照 `peer_consensus_<日期>.json`（{代码: {年: EPS} 或
+    null}），重跑同一时点直接读快照、不再请求 —— 研报列表会随时间增长，重取可能不是同一批。
+    缺本年或下一年预期的公司不返回。"""
+    import json
+    from pathlib import Path
+
+    from ir_agent.relval_ntm import CN_FYE, ntm_eps
+    from ir_agent.sources import reports
+
+    path = Path(snapshot_dir) / f"peer_consensus_{as_of.isoformat()}.json" if snapshot_dir else None
+    try:
+        cache = json.loads(path.read_text("utf-8")) if path else {}
+    except (OSError, ValueError):
+        cache = {}
+    changed = False
+    out: dict[str, tuple[Decimal, str]] = {}
+    for c in codes:
+        if c not in cache:
+            try:
+                cons = reports.consensus(reports.search(as_of=as_of, code=c), as_of)
+                cache[c] = {str(y): str(e.median) for y, e in cons.eps.items()} or None
+            except Exception:                               # noqa: BLE001
+                cache[c] = None
+            changed = True
+        eps = cache.get(c)
+        if not eps:
+            continue
+        from types import SimpleNamespace
+        cons = SimpleNamespace(eps={int(y): SimpleNamespace(median=Decimal(v)) for y, v in eps.items()},
+                               stat="中位")
+        got = ntm_eps(cons, CN_FYE, as_of, source="东财研报")
+        if got is not None:
+            out[c] = got
+    if changed and path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cache, ensure_ascii=False, indent=1), "utf-8")
+        except OSError:
+            pass
+    return out
+
+
+def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[PeerObs], *,
+                  taxonomy=None, fetch=None) -> tuple[list[PeerObs], list[str], str]:
+    """回归样本不足十五家时**有界**扩大（spec 2026-11-21 §5）：A 股从申万三级扩到二级，不突破
+    二级底线（`Taxonomy.widen` 的 floor）；美股样本本就是整个 FF49，不扩。新增公司最多补到
+    `REG_EXPAND_CAP` 家，财报逐家取（东财，失败的跳过）。只用于回归，不进可比名单。
+
+    返回（新增观测，页面说明，扩到的层级名）。**任何失败都不抛出** —— 回归照原样本做，如实写明。"""
+    from ir_agent import relval
+    if len(sample) >= relval.MIN_REG_N:
+        return [], [], ""
+    peers = getattr(r, "peer_set", None)
+    cls = getattr(peers, "classification", None)
+    level = getattr(cls, "level", None)
+    if not isinstance(level, int):
+        return [], [], ""
+    if level <= 2:
+        return [], ["回归扩样本：当前样本已是申万二级，不再扩大（分类底线）"], ""
+    notes: list[str] = []
+    try:
+        from ir_agent.sources.taxonomy import Taxonomy
+        tax = taxonomy or Taxonomy.load()
+        raw, new_level, used, _thin = tax.widen(peers.target, min_peers=relval.MIN_REG_N)
+        if new_level >= level:
+            return [], [], ""
+        have = {o.code for o in sample} | {peers.target} | set(getattr(r, "peer_statements", {}) or {})
+        new = [e for e in raw if e.code not in have and "退市" not in e.name]
+        room = max(relval.REG_EXPAND_CAP - len(sample), 0)
+        if len(new) > room:
+            notes.append(f"回归扩样本：申万二级「{used}」新增 {len(new)} 家，超过上限，只取前 {room} 家")
+            new = new[:room]
+        if fetch is None:
+            from ir_agent.market import market_of
+            from ir_agent.sources.eastmoney import fetch_statements_em
+
+            def fetch(c):
+                return fetch_statements_em(c, market=market_of(c))[0]
+        cache: dict[str, dict] = {}
+        for e in new:
+            try:
+                cache[e.code] = {(f.key, f.period): f for f in fetch(e.code)}
+            except Exception as ex:                         # noqa: BLE001
+                notes.append(f"回归扩样本：{e.code} {e.name} 财报取不到（{ex.__class__.__name__}），跳过")
+        if not cache:
+            return [], notes, ""
+        from ir_agent.operators.ttm import latest_quarter
+        spot = next((f.period for f in (r.quotes.facts if r.quotes else []) if f.key == "market_cap"), None)
+        mc = r.ledger.get("market_cap", spot, as_of=as_of)
+        ctx = dict(quote_day=mc.as_of, fp=fund_period(r.period), as_of=as_of,
+                   ttm_end=latest_quarter(r.ledger, "net_profit_attr_parent", as_of),
+                   tgt_bs=balance_period(r.ledger, as_of), tgt_flow=flow_end(r.ledger, as_of),
+                   snapshot_dir=snapshot_dir)
+        names = {e.code: e.name for e in new}
+        paths = {e.code: tuple(e.levels) for e in new}
+        extra = _build_sample(list(cache), names, paths, cache, ctx, notes)
+    except Exception as ex:                                 # noqa: BLE001
+        return [], notes + [f"回归扩样本未完成（{ex.__class__.__name__}: {str(ex)[:80]}），回归用原样本"], ""
+    notes.append(f"回归扩样本：扩大到申万二级「{used}」，新增 {len(extra)} 家（只用于回归）")
+    return extra, notes, f"申万二级「{used}」"

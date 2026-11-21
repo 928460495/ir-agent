@@ -17,6 +17,7 @@ def obs(code="000001", name="某公司", **kw) -> PeerObs:
                 debt=D(20), cash=D(5), ebitda=D(23), roe=D("0.2"),
                 growth=D("0.1"), growth_basis="3y")
     base.update(kw)
+    base.setdefault("roe3y", base["roe"])     # 回归的 ROE 驱动用三年平均（spec 2026-11-21 §5）
     return PeerObs(**base)
 
 

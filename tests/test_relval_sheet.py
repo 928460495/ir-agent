@@ -95,7 +95,7 @@ def test_足球场含现价与各方法(wb):
     from ir_agent.relval_sheet import write_sheet
     write_sheet(wb, _res(), DCF_OK)
     t = _text(wb)
-    for label in ("DCF 三档", "蒙特卡洛 P5–P95", "可比 PE(TTM)", "回归 PB 对 ROE", "现价"):
+    for label in ("DCF 三档", "蒙特卡洛 P5–P95", "可比 PE(TTM)", "回归 PB 对三年平均 ROE", "现价"):
         assert label in t
 
 
@@ -209,3 +209,47 @@ def test_页头写明存量与流量各取什么(wb):
     write_sheet(wb, _res(), DCF_OK)
     t = _text(wb)
     assert "最近一期余额" in t and "折旧摊销只在中报与年报披露" in t
+
+
+# ── spec 2026-11-21：逐倍数的可比名单、驱动与距离；调和平均；多元回归系数 ─────────
+
+def _res_v2():
+    from tests.test_relval_fundamentals import _pe_peer
+    r = _res()
+    pe = [_pe_peer(f"60000{i}", 10 + i) for i in range(5)]
+    for i, p in enumerate(pe):
+        p.name = f"驱动同业{i}"
+    r.comps_by_kind = {"pe": pe, "pb": r.comps_peers, "ev_ebitda": r.comps_peers}
+    r.selection = {"pe": [(p.code, 0 if i < 3 else 1, 0.1 * i) for i, p in enumerate(pe)]}
+    r.comps["pe"].mult_hm, r.comps["pe"].hm = D("11.8"), D("11.8")
+    r.regs["pb_roe"].coefs = {"roe3y": 25.0, "growth": 3.0}
+    r.regs["pb_roe"].ts = {"roe3y": 6.1, "growth": 1.2}
+    r.regs["pb_roe"].expanded = "申万二级「电子-元件」"
+    return r
+
+
+def test_逐倍数列出可比名单驱动与距离(wb):
+    from ir_agent.relval_sheet import write_sheet
+    write_sheet(wb, _res_v2(), DCF_OK)
+    t = _text(wb)
+    assert "可比名单：PE(TTM)（按驱动挑选）" in t and "可比名单：PB（市值近邻）" in t
+    assert "驱动同业4" in t and "同申万二级" in t and "三年平均 ROE" in t and "基本面距离" in t
+
+
+def test_倍数区间并列调和平均(wb):
+    from ir_agent.relval_sheet import write_sheet
+    write_sheet(wb, _res_v2(), DCF_OK)
+    ws = load_workbook(wb)["9_相对估值"]
+    hdr = next(row for row in ws.iter_rows(values_only=True) if row[0] == "倍数")
+    assert "倍数 调和平均" in hdr
+    pe_row = next(row for row in ws.iter_rows(values_only=True) if row[0] == "PE(TTM)" and row[1] != "—"
+                  and isinstance(row[1], (int, float)))
+    assert 11.8 in pe_row
+
+
+def test_回归块列出各系数t值与样本扩大(wb):
+    from ir_agent.relval_sheet import write_sheet
+    write_sheet(wb, _res_v2(), DCF_OK)
+    t = _text(wb)
+    assert "系数：三年平均 ROE" in t and "系数：营收增速" in t and "t 值：营收增速" in t
+    assert "样本扩大" in t and "申万二级「电子-元件」" in t
