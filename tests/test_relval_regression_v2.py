@@ -174,3 +174,54 @@ def test_回归用扩大后的样本且可比名单不变(monkeypatch, tmp_path)
     assert res.regs["pb_roe"].expanded == "申万二级「电子-元件」"
     assert not any(p.code.startswith("002") for p in res.comps_by_kind["pb"])
     assert "扩了" in res.sample_notes and "申万二级「电子-元件」" in res.summary()
+
+
+# ── 终审修复 ────────────────────────────────────────────────
+
+def test_扩样本按筛选后的有效样本数触发(monkeypatch, tmp_path):
+    """终审 2：原始样本够十五家、但亏损剔除后回归不足十五家，也要扩。"""
+    _quotes(monkeypatch)
+    r = _r()
+    tgt, sample, *_ = relval_data.gather(r, AS_OF, tmp_path)
+    sample = [obs(code=f"6009{i:02d}", roe3y=D("0.1"), growth=D("0.1")) for i in range(10)] + \
+             [obs(code=f"6008{i:02d}", net_profit=D(-1)) for i in range(8)]       # 18 家，有效 10 家
+    extra, notes, label = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(),
+                                                    fetch=lambda c: list(facts_years().values()))
+    assert extra and "电子-元件" in label
+
+
+def test_三级成员够数但样本不足也直接扩到二级(monkeypatch, tmp_path):
+    """终审 2：`widen(min_peers=15)` 数的是分类表成员，三级 16 家会让它停在三级 —— 不能用它判断。"""
+    _quotes(monkeypatch)
+    r = _r()
+    tgt, sample, *_ = relval_data.gather(r, AS_OF, tmp_path)
+    extra, notes, label = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(n3=16),
+                                                    fetch=lambda c: list(facts_years().values()))
+    assert any(o.code.startswith("0020") for o in extra) and "电子-元件" in label
+
+
+def test_扩样本连续失败即停(monkeypatch, tmp_path):
+    """终审 3：东财限流时每家都要等超时，有界不能只靠家数。"""
+    _quotes(monkeypatch)
+    r = _r()
+    tgt, sample, *_ = relval_data.gather(r, AS_OF, tmp_path)
+    calls = []
+
+    def boom(c):
+        calls.append(c)
+        raise RuntimeError("频控")
+    extra, notes, _ = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(), fetch=boom)
+    assert len(calls) == relval_data.EXPAND_FAIL_STOP and any("连续" in n for n in notes)
+
+
+def test_扩样本财报落盘重跑复用(monkeypatch, tmp_path):
+    _quotes(monkeypatch)
+    r = _r()
+    tgt, sample, *_ = relval_data.gather(r, AS_OF, tmp_path)
+    first, _, _ = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(),
+                                            fetch=lambda c: list(facts_years().values()))
+
+    def boom(c):
+        raise AssertionError("应读落盘的财报")
+    again, _, _ = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(), fetch=boom)
+    assert {o.code for o in again} == {o.code for o in first}

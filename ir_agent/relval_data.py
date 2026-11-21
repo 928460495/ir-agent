@@ -476,9 +476,9 @@ def peer_ntm(codes, as_of: date, snapshot_dir) -> dict[str, tuple[Decimal, str]]
         if c not in cache:
             try:
                 cons = reports.consensus(reports.search(as_of=as_of, code=c), as_of)
-                cache[c] = {str(y): str(e.median) for y, e in cons.eps.items()} or None
             except Exception:                               # noqa: BLE001
-                cache[c] = None
+                continue        # 取数失败不落快照（终审 4）：落成 null 会让同一时点重跑永远不再重试
+            cache[c] = {str(y): str(e.median) for y, e in cons.eps.items()} or None
             changed = True
         eps = cache.get(c)
         if not eps:
@@ -498,15 +498,27 @@ def peer_ntm(codes, as_of: date, snapshot_dir) -> dict[str, tuple[Decimal, str]]
     return out
 
 
+EXPAND_FAIL_STOP = 3        # 扩样本时连续这么多家财报取不到（多半是限流）就停
+
+
 def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[PeerObs], *,
                   taxonomy=None, fetch=None) -> tuple[list[PeerObs], list[str], str]:
     """回归样本不足十五家时**有界**扩大（spec 2026-11-21 §5）：A 股从申万三级扩到二级，不突破
-    二级底线（`Taxonomy.widen` 的 floor）；美股样本本就是整个 FF49，不扩。新增公司最多补到
-    `REG_EXPAND_CAP` 家，财报逐家取（东财，失败的跳过）。只用于回归，不进可比名单。
+    二级底线；美股样本本就是整个 FF49，不扩。只用于回归，不进可比名单。
+
+    - 触发看**筛选后**的有效样本数（亏损、缺驱动、两端剔除之后；终审 2），不看原始家数。
+    - 直接取申万二级的成员，不再问 `Taxonomy.widen` —— 它数的是分类表成员，三级成员够数时会停在三级。
+    - 有界：新增最多补到 `REG_EXPAND_CAP` 家；连续 `EXPAND_FAIL_STOP` 家财报取不到就停（终审 3）。
+      取到的财报按分析时点落盘 `expand_statements_<日期>.pkl`，重跑同一时点直接读，不再请求。
 
     返回（新增观测，页面说明，扩到的层级名）。**任何失败都不抛出** —— 回归照原样本做，如实写明。"""
+    import pickle
+    from pathlib import Path
+
     from ir_agent import relval
-    if len(sample) >= relval.MIN_REG_N:
+
+    usable = min(len(relval._screen(k, sample, target)[0]) for k in relval.REG_SPEC)
+    if usable >= relval.MIN_REG_N:
         return [], [], ""
     peers = getattr(r, "peer_set", None)
     cls = getattr(peers, "classification", None)
@@ -519,11 +531,10 @@ def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[Pe
     try:
         from ir_agent.sources.taxonomy import Taxonomy
         tax = taxonomy or Taxonomy.load()
-        raw, new_level, used, _thin = tax.widen(peers.target, min_peers=relval.MIN_REG_N)
-        if new_level >= level:
-            return [], [], ""
+        levels = [x for x in str(cls.path).split("-") if x]
+        used = "-".join(levels[:2])
         have = {o.code for o in sample} | {peers.target} | set(getattr(r, "peer_statements", {}) or {})
-        new = [e for e in raw if e.code not in have and "退市" not in e.name]
+        new = [e for e in tax.at_level(cls.path, 2) if e.code not in have and "退市" not in e.name]
         room = max(relval.REG_EXPAND_CAP - len(sample), 0)
         if len(new) > room:
             notes.append(f"回归扩样本：申万二级「{used}」新增 {len(new)} 家，超过上限，只取前 {room} 家")
@@ -534,12 +545,35 @@ def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[Pe
 
             def fetch(c):
                 return fetch_statements_em(c, market=market_of(c))[0]
+        path = Path(snapshot_dir) / f"expand_statements_{as_of.isoformat()}.pkl" if snapshot_dir else None
+        try:
+            saved = pickle.loads(path.read_bytes()) if path and path.exists() else {}
+        except Exception:                                   # noqa: BLE001
+            saved = {}
         cache: dict[str, dict] = {}
+        fails, changed = 0, False
         for e in new:
+            if e.code in saved:
+                cache[e.code] = {(f.key, f.period): f for f in saved[e.code]}
+                continue
             try:
-                cache[e.code] = {(f.key, f.period): f for f in fetch(e.code)}
+                facts = list(fetch(e.code))
             except Exception as ex:                         # noqa: BLE001
+                fails += 1
                 notes.append(f"回归扩样本：{e.code} {e.name} 财报取不到（{ex.__class__.__name__}），跳过")
+                if fails >= EXPAND_FAIL_STOP:
+                    notes.append(f"回归扩样本：连续 {fails} 家财报取不到（可能限流），停止扩样本")
+                    break
+                continue
+            fails = 0
+            saved[e.code], changed = facts, True
+            cache[e.code] = {(f.key, f.period): f for f in facts}
+        if changed and path is not None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(pickle.dumps(saved))
+            except OSError:
+                pass
         if not cache:
             return [], notes, ""
         from ir_agent.operators.ttm import latest_quarter

@@ -135,3 +135,17 @@ def test_NTM可比取PE选中名单的一致预期(monkeypatch, tmp_path):
     res, _ = full._relative_valuation("600183", _r(), AS_OF, None, tmp_path)
     assert set(asked) == {p.code for p in res.comps_by_kind["pe"]}
     assert res.comps["pe_ntm"] is not None and res.comps["pe_ntm"].mult_mid == D(25)   # 50 ÷ 2
+
+
+def test_同业一致预期取数失败不落快照(monkeypatch, tmp_path):
+    """终审 4：网络失败当成「没有预期」落盘，同一时点重跑就永远不再重试。"""
+    from ir_agent import relval_data
+    from ir_agent.sources import reports
+
+    def boom(**kw):
+        raise ConnectionError("断网")
+    monkeypatch.setattr(reports, "search", boom)
+    assert relval_data.peer_ntm(["000001"], AS_OF, tmp_path) == {}
+    monkeypatch.setattr(reports, "search", lambda *, as_of, code="", **kw: [
+        _rep(code, "1", "2", date(2026, 10, 1)), _rep(code, "1", "2", date(2026, 10, 2))])
+    assert set(relval_data.peer_ntm(["000001"], AS_OF, tmp_path)) == {"000001"}
