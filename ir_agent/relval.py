@@ -193,6 +193,15 @@ def select_by_drivers(kind: str, sample: list[PeerObs], target: PeerObs, k: int 
     return [p for p, _, _ in ranked], [(p.code, bd, ds) for p, bd, ds in ranked], note
 
 
+def near_count(kind: str, sample: list[PeerObs], target: PeerObs) -> int:
+    """业务距离 0（同申万三级 / 同四位 SIC）里该倍数适用且驱动齐全的家数 —— 不足 k 家时要用上一级补。"""
+    mk = _market(target.code)
+    return sum(1 for p in sample
+               if p.code != target.code and multiples(p)[kind] is not None
+               and all(getattr(p, d) is not None for d in DRIVERS[kind])
+               and business_distance(target.path, p.path, mk) == 0)
+
+
 _DRV_CN = {"growth": "营收增速", "roe3y": "三年平均 ROE", "ebitda_margin": "EBITDA 利润率"}
 
 
@@ -523,7 +532,7 @@ class RelvalResult:
         lines.append("  回归调整（全行业横截面，P10–P90 预测区间）：")
         if any(g.expanded for g in self.regs.values()):
             lab = next(g.expanded for g in self.regs.values() if g.expanded)
-            lines.append(f"    行业样本不足，回归样本扩大到{lab}（只用于回归，不用于可比名单）")
+            lines.append(f"    行业样本不足，回归样本扩大到{lab}（用于回归；三级同业不足时也补进可比名单）")
         for kind, (xfs, _, name) in REG_SPEC.items():
             xf = xfs[0]
             r = self.regs.get(kind)

@@ -3057,6 +3057,13 @@ def _relative_valuation(code, r, as_of: date, dcf_res, snapshot_dir):
     try:
         tgt, sample, comps, shares, price, notes = relval_data.gather(r, as_of, snapshot_dir)
         kinds = relval.kinds_for(tgt, False)
+        # 样本不足时扩到申万二级（有界）：回归有效样本不足十五家、或某个倍数的三级同业不足 k 家
+        # （用户 2026-11-21 决定二级公司可补进可比名单，业务距离记为同申万二级）
+        need_comps = any(relval.near_count(k, sample, tgt) < relval.RELVAL_K for k in kinds if k != "pe_ntm")
+        extra, xnotes, xlabel = relval_data.expand_sample(r, as_of, snapshot_dir, tgt, sample,
+                                                          force=need_comps)
+        notes = list(notes) + xnotes
+        pool = sample + extra
         # 各倍数按自己的理论驱动从行业样本挑可比（spec 2026-11-21 §2）；不足四家退回市值近邻名单并写明
         by_kind: dict = {}
         selection: dict = {}
@@ -3082,7 +3089,7 @@ def _relative_valuation(code, r, as_of: date, dcf_res, snapshot_dir):
                 else:
                     sel_notes.append("PE(NTM)：沿用 PE 的可比名单，只保留有一致预期的公司")
                 continue
-            picked, rows, note = relval.select_by_drivers(k, sample, tgt)
+            picked, rows, note = relval.select_by_drivers(k, pool, tgt)
             if picked:
                 by_kind[k], selection[k] = picked, rows
                 sel_notes.append(note)
@@ -3092,10 +3099,7 @@ def _relative_valuation(code, r, as_of: date, dcf_res, snapshot_dir):
         bands, cnotes = relval.comps_bands(comps, tgt, shares, kinds=kinds, comps_by_kind=by_kind)
         if ntm_short:
             cnotes = [n for n in cnotes if not (n.startswith("PE(NTM)") and "不足四家" in n)]
-        # 回归样本不足十五家：A 股有界扩到申万二级（只用于回归，不进可比名单）
-        extra, xnotes, xlabel = relval_data.expand_sample(r, as_of, snapshot_dir, tgt, sample)
-        notes = list(notes) + xnotes
-        regs = {k: relval.regress(k, sample + extra, tgt, shares) for k in relval.REG_SPEC}
+        regs = {k: relval.regress(k, pool, tgt, shares) for k in relval.REG_SPEC}
         for g in regs.values():
             g.expanded = xlabel if extra else ""
         res = relval.RelvalResult(

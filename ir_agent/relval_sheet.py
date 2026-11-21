@@ -210,7 +210,7 @@ def _regression(res: RelvalResult, w: _W, kind: str) -> tuple | None:
     for d in r.dropped:
         w.row(f"未进回归：{_XNAME[d]}", "样本里没有差异（或与主驱动共线），退化为少一个自变量")
     if r.expanded:
-        w.row("样本扩大", f"行业样本不足，扩大到{r.expanded}（只用于回归，不用于可比名单）")
+        w.row("样本扩大", f"行业样本不足，扩大到{r.expanded}（用于回归；三级同业不足时也补进可比名单）")
     w.row(f"本司{_XNAME[xf]}", r.x0, fmt=PCT)
     if r.fit_mult is not None:
         w.row("应得倍数", r.fit_mult, fmt=X2)

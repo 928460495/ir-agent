@@ -159,14 +159,14 @@ def test_扩样本取数失败不抛出(monkeypatch, tmp_path):
     assert extra == [] and any("取不到" in n for n in notes)
 
 
-def test_回归用扩大后的样本且可比名单不变(monkeypatch, tmp_path):
+def test_三级同业够数时二级公司只进回归不进可比(monkeypatch, tmp_path):
     from ir_agent import full
-    from tests.test_relval_fundamentals import _o, _pe_peer
+    from tests.test_relval_fundamentals import CN3B, _o, _pe_peer
     from tests.test_relval_wiring import _r as wr
 
     tgt = _o("600183")
     sample = [_pe_peer(f"60000{i}", 10 + i) for i in range(8)]
-    extra = [_pe_peer(f"00200{i}", 10 + i) for i in range(9)]
+    extra = [_pe_peer(f"00200{i}", 10 + i, path=CN3B) for i in range(9)]
     monkeypatch.setattr(relval_data, "gather", lambda *a, **k: (tgt, sample, [], D(1), D(100), []))
     monkeypatch.setattr(relval_data, "expand_sample", lambda *a, **k: (extra, ["扩了"], "申万二级「电子-元件」"))
     res, _ = full._relative_valuation("600183", wr(), AS_OF, None, tmp_path)
@@ -174,6 +174,41 @@ def test_回归用扩大后的样本且可比名单不变(monkeypatch, tmp_path)
     assert res.regs["pb_roe"].expanded == "申万二级「电子-元件」"
     assert not any(p.code.startswith("002") for p in res.comps_by_kind["pb"])
     assert "扩了" in res.sample_notes and "申万二级「电子-元件」" in res.summary()
+
+
+def test_三级同业不足时二级公司补进可比(monkeypatch, tmp_path):
+    """用户 2026-11-21 决定：申万三级同业不足 k 家时，用二级的公司补（业务距离 1）。"""
+    from ir_agent import full
+    from tests.test_relval_fundamentals import CN3B, _o, _pe_peer
+    from tests.test_relval_wiring import _r as wr
+
+    tgt = _o("600183")
+    sample = [_pe_peer(f"60000{i}", 10 + i) for i in range(3)]
+    extra = [_pe_peer(f"00200{i}", 10 + i, path=CN3B) for i in range(5)]
+    seen = {}
+
+    def fake_expand(r, as_of, snap, target, smp, **kw):
+        seen["force"] = kw.get("force")
+        return extra, [], "申万二级「电子-元件」"
+    monkeypatch.setattr(relval_data, "gather", lambda *a, **k: (tgt, sample, [], D(1), D(100), []))
+    monkeypatch.setattr(relval_data, "expand_sample", fake_expand)
+    res, _ = full._relative_valuation("600183", wr(), AS_OF, None, tmp_path)
+    assert seen["force"] is True
+    codes = [p.code for p in res.comps_by_kind["pb"]]
+    assert len(codes) == 6 and sum(c.startswith("002") for c in codes) == 3
+    assert any(n.startswith("PB") and "同申万二级" in n for n in res.comps_notes)
+
+
+def test_强制扩样本时不看回归有效家数(monkeypatch, tmp_path):
+    _quotes(monkeypatch)
+    r = _r()
+    tgt, sample, *_ = relval_data.gather(r, AS_OF, tmp_path)
+    many = [obs(code=f"6009{i:02d}", roe3y=D(str(0.05 + 0.01 * i)), growth=D(str(0.01 * i))) for i in range(20)]
+    none, _, _ = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, many, taxonomy=_tax(),
+                                           fetch=lambda c: list(facts_years().values()))
+    forced, _, label = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, many, taxonomy=_tax(), force=True,
+                                                 fetch=lambda c: list(facts_years().values()))
+    assert none == [] and forced and "电子-元件" in label
 
 
 # ── 终审修复 ────────────────────────────────────────────────

@@ -502,9 +502,10 @@ EXPAND_FAIL_STOP = 3        # 扩样本时连续这么多家财报取不到（�
 
 
 def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[PeerObs], *,
-                  taxonomy=None, fetch=None) -> tuple[list[PeerObs], list[str], str]:
+                  taxonomy=None, fetch=None, force: bool = False) -> tuple[list[PeerObs], list[str], str]:
     """回归样本不足十五家时**有界**扩大（spec 2026-11-21 §5）：A 股从申万三级扩到二级，不突破
-    二级底线；美股样本本就是整个 FF49，不扩。只用于回归，不进可比名单。
+    二级底线。用于回归；三级同业不足 k 家时也补进可比名单
+    （用户 2026-11-21 决定；`force=True` 由调用方在可比不足时传入，不看回归有效家数）。
 
     - 触发看**筛选后**的有效样本数（亏损、缺驱动、两端剔除之后；终审 2），不看原始家数。
     - 直接取申万二级的成员，不再问 `Taxonomy.widen` —— 它数的是分类表成员，三级成员够数时会停在三级。
@@ -518,7 +519,7 @@ def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[Pe
     from ir_agent import relval
 
     usable = min(len(relval._screen(k, sample, target)[0]) for k in relval.REG_SPEC)
-    if usable >= relval.MIN_REG_N:
+    if usable >= relval.MIN_REG_N and not force:
         return [], [], ""
     peers = getattr(r, "peer_set", None)
     cls = getattr(peers, "classification", None)
@@ -590,5 +591,5 @@ def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[Pe
         extra = _build_sample(list(cache), names, paths, cache, ctx, notes)
     except Exception as ex:                                 # noqa: BLE001
         return [], notes + [f"回归扩样本未完成（{ex.__class__.__name__}: {str(ex)[:80]}），回归用原样本"], ""
-    notes.append(f"回归扩样本：扩大到申万二级「{used}」，新增 {len(extra)} 家（只用于回归）")
+    notes.append(f"回归扩样本：扩大到申万二级「{used}」，新增 {len(extra)} 家（用于回归；三级同业不足时补可比）")
     return extra, notes, f"申万二级「{used}」"
