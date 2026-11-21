@@ -225,3 +225,13 @@ def test_扩样本财报落盘重跑复用(monkeypatch, tmp_path):
         raise AssertionError("应读落盘的财报")
     again, _, _ = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(), fetch=boom)
     assert {o.code for o in again} == {o.code for o in first}
+
+
+def test_二级与三级成员相同时写明无可扩(monkeypatch, tmp_path):
+    """茅台实跑：白酒Ⅱ 下只有白酒Ⅲ，扩到二级不多一家 —— 要写明，不能静默。"""
+    _quotes(monkeypatch)
+    r = _r()
+    tgt, sample, *_ = relval_data.gather(r, AS_OF, tmp_path)
+    extra, notes, label = relval_data.expand_sample(r, AS_OF, tmp_path, tgt, sample, taxonomy=_tax(n3b=0),
+                                                    fetch=lambda c: list(facts_years().values()))
+    assert extra == [] and label == "" and any("没有三级之外" in n for n in notes)

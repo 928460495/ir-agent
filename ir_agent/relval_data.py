@@ -535,6 +535,8 @@ def expand_sample(r, as_of: date, snapshot_dir, target: PeerObs, sample: list[Pe
         used = "-".join(levels[:2])
         have = {o.code for o in sample} | {peers.target} | set(getattr(r, "peer_statements", {}) or {})
         new = [e for e in tax.at_level(cls.path, 2) if e.code not in have and "退市" not in e.name]
+        if not new:
+            return [], notes + [f"回归扩样本：申万二级「{used}」没有三级之外的公司，无可扩大（分类底线是二级）"], ""
         room = max(relval.REG_EXPAND_CAP - len(sample), 0)
         if len(new) > room:
             notes.append(f"回归扩样本：申万二级「{used}」新增 {len(new)} 家，超过上限，只取前 {room} 家")
