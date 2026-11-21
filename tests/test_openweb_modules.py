@@ -138,3 +138,19 @@ def test_补搜失败不崩溃且已采到的照常落盘(monkeypatch, tmp_path)
     openweb.save(res, tmp_path / "s.json")
     back = openweb.load(tmp_path / "s.json", Corpus(as_of=AS_OF))
     assert back.search_failed == res.search_failed and len(back.docs) == 1
+
+
+# ── 每主题入库上限：统一 4 篇（用户 2026-11-22 决定）──────────────
+def test_per_slot_cap_is_four():
+    assert openweb.PER_SLOT == 4
+
+
+def test_gather_module_keeps_four_per_slot(monkeypatch):
+    _fake_fetch(monkeypatch)
+    raw = "\n".join(_line("竞争格局与份额", i) for i in range(1, 7))     # 6 篇候选，只留 4 篇
+    res = openweb.gather_module(lambda p: raw, "strategy", code="600519", company="X", industry="Y",
+                                as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert len(res.docs) == 4
+    assert "最多 4 个" in openweb.module_prompt("strategy", company="X", code="600519", industry="Y",
+                                              as_of=AS_OF, context={},
+                                              slots=openweb.module_slots("strategy", "600519"))

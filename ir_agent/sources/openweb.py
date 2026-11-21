@@ -920,7 +920,8 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
 
 # ── 编排 ────────────────────────────────────────────────────────
 
-PER_SLOT = 2
+# 每个主题最多入库 4 篇（用户 2026-11-22 决定；此前 2 篇）。
+PER_SLOT = 4
 MAX_DOCS = 10
 # `fetch_failed_reasons` 里单条原因的截断长度。原因字符串里带着完整
 # URL（见 fetch()/`_reject_unsafe_host` 里的 `f"{url}：..."` 格式），

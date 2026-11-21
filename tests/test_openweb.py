@@ -1182,19 +1182,19 @@ def test_晚于as_of的候选被挡下(monkeypatch):
     assert cp.skipped != []
 
 
-def test_每槽位最多两篇(monkeypatch):
+def test_每槽位最多四篇(monkeypatch):
     import ir_agent.sources.openweb as OW
-    three = "".join(
+    six = "".join(
         f"候选: 政策与监管 | 政策{i} | https://www.miit.gov.cn/{i} | 工信部 | 2026-06-15\n"
-        for i in range(3))
+        for i in range(6))
     pages = {f"https://www.miit.gov.cn/{i}":
              Fetched(f"https://www.miit.gov.cn/{i}", f"正文{i}", None)
-             for i in range(3)}
+             for i in range(6)}
     monkeypatch.setattr(OW, "fetch", _fake_fetch(pages))
     cp = Corpus(as_of=AS_OF)
-    gather(_Client(three), code="600183", company="生益科技",
+    gather(_Client(six), code="600183", company="生益科技",
            industry="电子/元件", as_of=AS_OF, corpus=cp)
-    assert len(cp.docs) == 2
+    assert len(cp.docs) == 4
 
 
 def test_已在语料库里的URL不重复入库(monkeypatch):
