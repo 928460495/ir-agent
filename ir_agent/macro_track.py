@@ -55,9 +55,10 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
 
     tracks = list(view.tracks)[:MACRO_TRACK_MAX]
     res = TrackResult(truncated=[t.indicator for t in list(view.tracks)[MACRO_TRACK_MAX:]])
-    prev = {i.indicator: i for i in (done.items if done else [])}
+    # 上一轮检索失败（没有结论也没有出处）的指标当作新的，重跑时再搜一次 —— 一次超时不能永久冻结
+    prev = {i.indicator: i for i in (done.items if done else []) if i.conclusion or i.sources}
     names = {t.indicator for t in tracks}
-    res.removed = [k for k in prev if k not in names]
+    res.removed = [i.indicator for i in (done.items if done else []) if i.indicator not in names]
     keep_urls = {u for k, i in prev.items() if k in names for u in i.sources}
     res.docs = [d for d in (done.docs if done else []) if d.url in keep_urls]
     have = {d.url for d in corpus.docs} if corpus is not None else set()
@@ -83,6 +84,9 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
                 if not a.opened or a.link in item.sources:
                     continue
                 item.sources.append(a.link)
+                if a.link in have:              # 两个指标打开同一篇、或与已入库网页同址：只入库一次
+                    continue
+                have.add(a.link)
                 doc = Document(doc_id="mt_" + _slug(a.link), url=a.link,
                                title=f"{t.indicator}（{a.publisher}）", publisher=a.publisher,
                                tier=a.tier, published=a.published, retrieved=as_of, text=a.text,
@@ -106,6 +110,16 @@ def summary(res: TrackResult) -> str:
         lines.append(f"    ⚠ 超过上限未检索：{'、'.join(res.truncated)}")
     if res.removed:
         lines.append(f"    · 人工删去、不再展示：{'、'.join(res.removed)}")
+    return "\n".join(lines)
+
+
+def writer_summary(res: TrackResult) -> str:
+    """进撰写提示词的版本：只列指标、对应传导与出处篇数，**不带网页结论原文与网址** —— 原文里的数字
+    不在账本里，会触发裸数字审计；撰写要用读数时引用已入库的原文。"""
+    lines = ["  跟踪指标（读数原文见已入库资料，引用请照原文）"]
+    for i in res.items:
+        lines.append(f"    · {i.indicator}（对应「{i.driver}」）："
+                     + (f"最新读数已入库，见标题为「{i.indicator}（…）」的资料" if i.sources else "未取到"))
     return "\n".join(lines)
 
 

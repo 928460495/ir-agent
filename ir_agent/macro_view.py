@@ -167,6 +167,10 @@ def parse(text: str, corpus=None) -> MacroView:
         if len(p) >= 9:
             _parse_nine(p, view, corpus)
             continue
+        if len(p) >= 5 and pick(p[0], list(CHANNELS)) is not None:
+            # 首段是渠道名却不满九段：模型漏写了字段。不能落进旧四段解析（会把渠道当事件、事件当路径）
+            view.read_notes.append(f"传导「{p[1]}」按九段写法缺字段（只有 {len(p)} 段），没读进来")
+            continue
         if len(p) < 4:
             view.read_notes.append(f"传导一行字段不足（需 4 段），没读进来：{m.group(1)}")
             continue
@@ -253,8 +257,9 @@ def facts(view: MacroView, ledger: FactLedger, as_of: date, corpus=None) -> list
         out.append(f"跟踪指标 {len(view.tracks)} 个，超过上限 {MACRO_TRACK_MAX}（只检索前 {MACRO_TRACK_MAX} 个）")
     from ir_agent.citation import audit_prose
 
-    bad = audit_prose({f"传导「{c.driver[:12]}」": c.driver + c.path + c.sensitivity
-                       for c in view.channels})
+    bad = audit_prose({**{f"传导「{c.driver[:12]}」": c.driver + c.path + c.sensitivity
+                          for c in view.channels},
+                       **{f"跟踪「{t.indicator[:12]}」": t.indicator + t.falsifier for t in view.tracks}})
     if bad:
         out.append("描述里有账本外的数字：" + "、".join(bad))
     holder = [view] + view.channels

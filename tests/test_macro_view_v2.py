@@ -92,3 +92,21 @@ def test_prompt_examples_neutral():
     ex = [l for l in MV.PROMPT.splitlines() if l.startswith("传导: ")]
     assert len({l.split("|")[0] for l in ex}) >= 4
     assert "{sensitivity}" in MV.PROMPT and "跟踪:" in MV.PROMPT and "排除:" in MV.PROMPT
+
+
+# ── 终审修复 ────────────────────────────────────────────────
+
+def test_证伪读数里的数字交审核者():
+    """终审 2：证伪读数会进 summary → 撰写提示词，裸数字要被审计到。"""
+    v = MV.parse(NINE + "\n" + FX + "\n跟踪: 新订单指数 | 按揭利率下调 | 跌破50"
+                 "\n跟踪: 出口报价 | 本币升值 | 回升")
+    assert any("账本外的数字" in f and "50" in f for f in MV.facts(v, FactLedger(), AS_OF))
+
+
+def test_九段缺一段不当成旧写法():
+    """终审 3：模型漏写一段（八段）时，不能落进旧四段解析把渠道当事件。"""
+    eight = NINE.replace(" | 延续 |", " |")
+    v = MV.parse(eight)
+    assert v.channels == []
+    assert any("九段" in n and "缺" in n for n in v.read_notes)
+    assert not any("不是 利好/中性/利空" in n for n in v.read_notes)

@@ -144,3 +144,55 @@ def test_restore_reads_track_docs(tmp_path, monkeypatch):
     r = SimpleNamespace(corpus=None, as_of=AS_OF, code="600519")
     full._restore_openweb(r, tmp_path)
     assert any(d.module == "macro_track" for d in r.corpus.docs)
+
+
+# ── 终审修复 ────────────────────────────────────────────────
+
+def test_检索失败的指标重跑时重新检索(monkeypatch, tmp_path):
+    """终审 4：一次超时不能让「未取到」永久冻结。"""
+    asked = []
+    _fake_search(monkeypatch, asked, fail=("指标0",))
+    first = MT.track(object(), _view(1), industry="x", as_of=AS_OF, corpus=Corpus(as_of=AS_OF), us=False)
+    MT.save(first, tmp_path / MT.TRACK_JSON)
+    asked.clear()
+    _fake_search(monkeypatch, asked)
+    again = MT.track(object(), _view(1), industry="x", as_of=AS_OF, corpus=Corpus(as_of=AS_OF), us=False,
+                     done=MT.load(tmp_path / MT.TRACK_JSON, None))
+    assert asked == ["指标0"] and again.items[0].conclusion
+
+
+def test_跟踪文章不重复入库(monkeypatch):
+    """终审 5：两个指标打开同一篇、或与已入库的网页同址，只入库一次。"""
+    def fake(client, label, key, industry, as_of, us=False):
+        art = conclusions.Article(no="1", url="https://same.example/x", publisher="统计局",
+                                  published=date(2026, 10, 15), tier=Tier.OFFICIAL, opened=True,
+                                  text="同一篇", final_url="https://same.example/x")
+        return conclusions.Searched(items=[conclusions.Conclusion(key, f"{label} 读数", [art])], dropped=[])
+    monkeypatch.setattr(conclusions, "search", fake)
+    c = Corpus(as_of=AS_OF)
+    MT.track(object(), _view(2), industry="x", as_of=AS_OF, corpus=c, us=False)
+    assert [d.url for d in c.docs] == ["https://same.example/x"]
+
+
+def test_撰写提示词里的跟踪读数不带裸数字(monkeypatch, tmp_path):
+    """终审 2：网页结论原文（含数字）只进 md（看板与门①），进撰写提示词的 pr 只列指标与出处篇数。"""
+    from ir_agent.citation import audit_bare_numbers
+    _stub(monkeypatch)
+
+    def macro(*a, **k):
+        (tmp_path / "macro_view.md").write_text("跟踪: 新订单指数 | 事件 | 证伪", encoding="utf-8")
+        return "宏观", "宏观", ""
+    monkeypatch.setattr(full, "_load_macro_view", macro)
+
+    def fake(client, label, key, industry, as_of, us=False):
+        art = conclusions.Article(no="1", url="https://stats.example/2026/10", publisher="统计局",
+                                  published=date(2026, 10, 15), tier=Tier.OFFICIAL, opened=True,
+                                  text="新订单指数为 51.2", final_url="https://stats.example/2026/10")
+        return conclusions.Searched(items=[conclusions.Conclusion(key, "新订单指数为 51.2", [art])], dropped=[])
+    monkeypatch.setattr(conclusions, "search", fake)
+    md, pr = {}, {"宏观": ""}
+    r = SimpleNamespace(code="600519", quotes=None, corpus=Corpus(as_of=AS_OF), as_of=AS_OF)
+    full._analyse_qualitative("600519", r, AS_OF, None, md, pr, [], out=tmp_path, stops=[],
+                              statuses=[], research_client="client")
+    assert "51.2" in md["宏观定性"]
+    assert audit_bare_numbers(pr["宏观定性"]) == [] and "新订单指数" in pr["宏观定性"]

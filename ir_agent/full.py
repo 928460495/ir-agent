@@ -210,9 +210,9 @@ def _track_macro(code: str, r, as_of: date, out: Path, client, md: dict, pr: dic
         MT.save(res, out / MT.TRACK_JSON)
     except OSError as e:
         notes.append(f"宏观跟踪指标未能落盘（{e.__class__.__name__}）——第二阶段读不到这些读数")
-    block = MT.summary(res)
-    md["宏观定性"] = md["宏观定性"] + "\n" + block
-    pr["宏观定性"] = (pr.get("宏观定性") or "") + "\n" + block
+    # 看板与门①（md）给结论原文与出处；撰写提示词（pr）只给不带数字的版本（终审 2）
+    md["宏观定性"] = md["宏观定性"] + "\n" + MT.summary(res)
+    pr["宏观定性"] = (pr.get("宏观定性") or "") + "\n" + MT.writer_summary(res)
     _refresh_external_md(r, md)
     return notes + [f"宏观跟踪指标检索失败：{x}" for x in res.failed]
 

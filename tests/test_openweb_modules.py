@@ -119,3 +119,22 @@ def test_legacy_prompts_neutral():
     """旧的整池采集提示词（改动前产物的路径与测试仍在用）同样不得只举单一行业。"""
     for t in (openweb.PROMPT,):
         assert not any(b in t for b in ("白酒", "封测", "覆铜板", "批价"))
+
+
+def test_补搜失败不崩溃且已采到的照常落盘(monkeypatch, tmp_path):
+    """终审 1（ir-agent 移植）：首次调用采到了、补搜抛异常 —— 不能因缺 search_failed 字段崩掉，
+    已入库的文档要照常落盘，第二阶段才读得回。"""
+    _fake_fetch(monkeypatch)
+    calls = []
+
+    def client(p):
+        calls.append(p)
+        if len(calls) == 1:
+            return _line("竞争格局与份额", 1)
+        raise TimeoutError("超时")
+    res = openweb.gather_module(client, "strategy", code="600519", company="x", industry="y",
+                                as_of=AS_OF, corpus=Corpus(as_of=AS_OF))
+    assert len(res.docs) == 1 and res.search_failed and "补搜" in res.search_failed[0]
+    openweb.save(res, tmp_path / "s.json")
+    back = openweb.load(tmp_path / "s.json", Corpus(as_of=AS_OF))
+    assert back.search_failed == res.search_failed and len(back.docs) == 1

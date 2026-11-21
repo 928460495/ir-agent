@@ -977,6 +977,8 @@ class OpenWebResult:
     # 可是读者无从从「10 篇入库」里看出来。与 `fetch_failed_reasons`
     # 同一条道理：静默的降级比报错更难发现。
     host_check_degraded: int = 0
+    # 按模块采集时补搜调用失败（「战略分析补搜：检索调用失败（…）」）。不拖垮已采到的部分，但必须说出来。
+    search_failed: list[str] = field(default_factory=list)
 
 
 def _doc_id(final_url: str) -> str:
@@ -1357,6 +1359,7 @@ def save(res: OpenWebResult, path: Path | str) -> None:
         "fetch_failed_reasons": res.fetch_failed_reasons,
         "model_dated": res.model_dated,
         "host_check_degraded": res.host_check_degraded,
+        "search_failed": res.search_failed,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1398,7 +1401,8 @@ def load(path: Path | str, corpus) -> OpenWebResult:
             fetch_failed=int(raw.get("fetch_failed", 0)),
             fetch_failed_reasons=_str_list_field(raw, "fetch_failed_reasons"),
             model_dated=int(raw.get("model_dated", 0)),
-            host_check_degraded=int(raw.get("host_check_degraded", 0)))
+            host_check_degraded=int(raw.get("host_check_degraded", 0)),
+            search_failed=_str_list_field(raw, "search_failed"))
         docs_raw = list(raw.get("docs", []))
     except Exception:                                       # noqa: BLE001
         # 顶层不是 dict（没有 .get）、docs 不是可迭代对象、或
