@@ -2289,6 +2289,18 @@ def _missing_snapshot_notes(res) -> list:
     return out
 
 
+def _readable_views(r, out: Path, md: dict, arts: dict) -> dict:
+    """写定性产物的只读阅读版（`readable`，用户 2026-11-22 选方案 A），返回看板用的上下文副本：
+    占位符换成账本数值。**原 `md` 不动** —— 它进 state.json 与后续撰写提示词，那里要的是占位符。
+    每次生成看板都重写，人改过源文件后下一次调用即刷新。"""
+    from ir_agent import readable
+
+    for f in readable.write_readables(out, r.ledger, r.as_of):
+        arts[f"{readable.LABELS[f.name[:-len(readable.SUFFIX)]]}（阅读版）"] = str(f)
+    return {k: readable.render_inline(v, r.ledger, r.as_of) if isinstance(v, str) else v
+            for k, v in (md or {}).items()}
+
+
 def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
     """看板与工作簿。**第①②两次调用各生成一次**（spec ④）。
 
@@ -2297,7 +2309,7 @@ def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
     末尾生成 —— 拆函数时若没人接着做，它们会无声消失：没有任何测试断言
     这两个文件，全量绿不代表它们还在。
     """
-    build_dashboard(r, path=out / "dashboard.html", context=md)
+    build_dashboard(r, path=out / "dashboard.html", context=_readable_views(r, out, md, arts))
     arts["看板"] = str(out / "dashboard.html")
     build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
                    path=out / "model.xlsx", verdicts=r.verdicts)
@@ -3180,7 +3192,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # **没写出研报就不算做完。** 见 `_report_stage`。
     stage = _report_stage(stage, arts)
 
-    build_dashboard(r, path=out / "dashboard.html", context=md, dcf=dcf_res)
+    build_dashboard(r, path=out / "dashboard.html", context=_readable_views(r, out, md, arts), dcf=dcf_res)
     arts["看板"] = str(out / "dashboard.html")
 
     reason = ""
