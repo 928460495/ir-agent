@@ -28,6 +28,7 @@ class TrackItem:
     falsifier: str
     conclusion: str = ""                 # 检索结论原文（多条用「；」连）；空 = 未取到
     sources: list[str] = field(default_factory=list)   # 代码打开过的文章网址
+    published: dict[str, str] = field(default_factory=dict)   # 网址 → 发布日期（YYYY-MM-DD），看读数新旧
 
 
 @dataclass
@@ -68,7 +69,8 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
     for t in tracks:
         if t.indicator in prev:
             old = prev[t.indicator]
-            res.items.append(TrackItem(t.indicator, t.driver, t.falsifier, old.conclusion, list(old.sources)))
+            res.items.append(TrackItem(t.indicator, t.driver, t.falsifier, old.conclusion, list(old.sources),
+                                       dict(old.published)))
             continue
         item = TrackItem(t.indicator, t.driver, t.falsifier)
         res.items.append(item)
@@ -84,6 +86,8 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
                 if not a.opened or a.link in item.sources:
                     continue
                 item.sources.append(a.link)
+                if getattr(a, "published", None):
+                    item.published[a.link] = a.published.isoformat()
                 if a.link in have:              # 两个指标打开同一篇、或与已入库网页同址：只入库一次
                     continue
                 have.add(a.link)
@@ -103,7 +107,8 @@ def summary(res: TrackResult) -> str:
         lines.append(f"    · {i.indicator}（对应「{i.driver}」；证伪条件：{i.falsifier}）："
                      + (i.conclusion or "未取到"))
         for u in i.sources:
-            lines.append(f"      出处：{u}")
+            d = i.published.get(u)
+            lines.append(f"      出处：{u}" + (f"（发布 {d}）" if d else ""))
     for x in res.failed:
         lines.append(f"    ⚠ 检索失败：{x}")
     if res.truncated:

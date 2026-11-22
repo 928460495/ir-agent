@@ -92,7 +92,7 @@ class ResearchOutcome:
             lines.append("  ⚠ 估值未建模 —— 本轮分析未跑完（原因见下方"
                          "清单），重跑即可")
         for s in self.skipped:
-            lines.append(f"  {_mark(s)}{s}")
+            lines.append(_format_skipped(s))
         return "\n".join(lines)
 
 
@@ -193,6 +193,15 @@ _PREFIX = (
     # 所以前缀写到「因子采集结果里有」为止，不写成「因子采集结果」。
     ("因子采集结果里有", "  · "),
 )
+
+
+def _format_skipped(s: str) -> str:
+    """清单里一条（可能多行）。续行整体缩进到标题文字之下 —— 此前续行只带自身的两格缩进，
+    比加了前缀的标题还浅（茅台实跑 2026-11-22：「开放网络资料采集（宏观）：」下的子项）。"""
+    mark = _mark(s)
+    head, *rest = s.split("\n")
+    pad = " " * (2 + len(mark))
+    return "\n".join([f"  {mark}{head}", *(pad + x for x in rest)])
 
 
 def _mark(s: str) -> str:

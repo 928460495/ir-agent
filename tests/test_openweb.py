@@ -783,12 +783,54 @@ def test_fetch_拒绝非网页内容类型(monkeypatch):
     import ir_agent.sources.openweb as OW
 
     monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
-    resp = _FakeFetchResp("https://x.example.com/a", b"%PDF-1.4 ...",
-                          content_type="application/pdf")
+    resp = _FakeFetchResp("https://x.example.com/a", b"\x89PNG...",
+                          content_type="image/png")
     monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
 
     with pytest.raises(OW.FetchFailed):
         OW.fetch("https://x.example.com/a")
+
+
+def _pdf_bytes(text: str) -> bytes:
+    import pymupdf
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), text)
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
+def test_fetch_接受PDF并抽取文字(monkeypatch):
+    """用户 2026-11-22 决定：HTML 与 PDF 两个市场都接受。PDF 由代码用 PyMuPDF 抽文字，
+    抽不出文字（扫描件）照旧算抓取失败，不让乱码入库。"""
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    resp = _FakeFetchResp("https://x.example.com/r.pdf", _pdf_bytes("Baijiu market report 2026"),
+                          content_type="application/pdf")
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+    got = OW.fetch("https://x.example.com/r.pdf")
+    assert "Baijiu market report 2026" in got.text and got.meta_published is None
+
+
+def test_fetch_PDF无文字时失败(monkeypatch):
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    resp = _FakeFetchResp("https://x.example.com/s.pdf", _pdf_bytes(""), content_type="application/pdf")
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+    with pytest.raises(OW.FetchFailed, match="正文提取为空"):
+        OW.fetch("https://x.example.com/s.pdf")
+
+
+def test_fetch_坏PDF算抓取失败(monkeypatch):
+    import ir_agent.sources.openweb as OW
+
+    monkeypatch.setattr(OW.socket, "getaddrinfo", _fake_getaddrinfo_public)
+    resp = _FakeFetchResp("https://x.example.com/b.pdf", b"%PDF-1.4 garbage", content_type="application/pdf")
+    monkeypatch.setattr(OW.requests, "get", lambda *a, **k: resp)
+    with pytest.raises(OW.FetchFailed):
+        OW.fetch("https://x.example.com/b.pdf")
 
 
 def test_fetch_超过字节上限时拒绝(monkeypatch):

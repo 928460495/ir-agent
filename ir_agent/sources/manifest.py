@@ -47,6 +47,17 @@ def missing_files(rows: list[SourceRow]) -> list[str]:
     return out
 
 
+def _doc_note(d) -> str:
+    """备注栏：发布机构；开放网络资料再标「模块 · 主题」—— 读清单的人才看得出每个主题采到了几篇。"""
+    from ir_agent.sources.openweb import MODULE_NAME
+
+    pub = str(getattr(d, "publisher", "") or "")
+    module, slot = getattr(d, "module", ""), getattr(d, "slot", "")
+    if module in MODULE_NAME and slot:
+        return f"{pub}｜{MODULE_NAME[module]} · {slot}"
+    return pub
+
+
 def render(rows: list[SourceRow], gaps: list[tuple[str, int]]) -> str:
     """生成 sources.md。`gaps` 是 (来源名, 本轮涉及的引用条数)。"""
     lines = ["# 资料来源清单（门①：请逐条核验）", "",
@@ -127,7 +138,7 @@ def collect_rows(ledger, corpus=None, pdf_dir=None, peers: tuple = (),
             origin=url,
             local=local,
             retrieved=str(getattr(d, "published", "") or ""),
-            note=str(getattr(d, "publisher", "") or "")))
+            note=_doc_note(d)))
     # **年报由年报地址定位，不扫缓存目录。** 上一版扫 `pdf_dir` 的 `*.pdf`
     # 当年报：那个目录里是公告；而文件名是大写 `.PDF`、glob 区分大小写，
     # 生益科技实跑时一个都没匹配上，这一节整个消失。

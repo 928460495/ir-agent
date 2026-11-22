@@ -184,6 +184,8 @@ class Document:
     module: str = ""
     # 采集时模型自述的统计口径与频率（未核验），如「规模以上，月度」
     scope: str = ""
+    # 开放网络资料属于本模块的哪个主题（如「竞争格局与份额」）；门① 清单按它标注。非开放网络文档为空
+    slot: str = ""
 
     def cite(self) -> str:
         return (f"{self.publisher}《{self.title}》"

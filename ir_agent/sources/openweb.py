@@ -261,6 +261,12 @@ TEXT_LIMIT = 2000
 # 正常、实则不可能被人类核对出处的引文。只比较分号前的主类型，因为真实
 # 响应几乎总带 `; charset=...` 后缀。
 _ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+# PDF 也接受（用户 2026-11-22 决定，两个市场相同）：代码用 PyMuPDF 抽文字。有些站点把 PDF 报成
+# `application/octet-stream`，网址以 .pdf 结尾时同样按 PDF 处理。PDF 报告常比网页大，字节上限单设；
+# 只抽前 `PDF_MAX_PAGES` 页 —— 入库正文供检索与引文核对，进提示词的只有前 `TEXT_LIMIT` 字。
+_PDF_CONTENT_TYPES = ("application/pdf", "application/x-pdf")
+PDF_MAX_BYTES = 20 * 1024 * 1024
+PDF_MAX_PAGES = 80
 
 # 单次抓取允许读取的最大字节数。**卡在读的过程中，不是读完再判断**——
 # 卡读完再判断仍然要求先把对方发来的任意大小的响应体整个吃进内存，等于
@@ -832,14 +838,24 @@ def meta_date(html: str) -> date | None:
     return None
 
 
+def _pdf_text(url: str, raw: bytes) -> str:
+    """PDF 字节 → 文字（前 `PDF_MAX_PAGES` 页）。解析失败转成 `FetchFailed`，不连累同批其余候选。"""
+    try:
+        import pymupdf
+        with pymupdf.open(stream=raw, filetype="pdf") as doc:
+            return "\n".join(doc[i].get_text() for i in range(min(len(doc), PDF_MAX_PAGES)))
+    except Exception as e:                                  # noqa: BLE001
+        raise FetchFailed(f"{url}：PDF 解析失败（{e.__class__.__name__}）") from e
+
+
 def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
     """代码自己把页面抓回来。**模型不经手正文一个字。**
 
     这也是本文件里第一处、也是唯一一处进程自己拿模型编出来的字符串去
     发网络请求的地方（其余数据源打的都是代码写死的已知接口）。三道闸门
     缺一不可：主机不能是内网/环回/链路本地/保留地址（见
-    `_reject_unsafe_host`，请求前后各查一次）；内容类型必须像网页，不
-    是 PDF/图片等二进制；读取的字节数有硬顶。三者都只是让抓取本身失败
+    `_reject_unsafe_host`，请求前后各查一次）；内容类型必须是网页或 PDF
+    （PDF 由 PyMuPDF 抽文字），不是图片等其他二进制；读取的字节数有硬顶。三者都只是让抓取本身失败
     （抛 `FetchFailed`），`gather()` 已经把它计进 `fetch_failed`、不会
     连累其余候选——这条契约不变。
 
@@ -881,22 +897,26 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
 
             content_type = (r.headers.get("Content-Type") or "").split(";")[0]
             content_type = content_type.strip().lower()
-            if content_type not in _ALLOWED_CONTENT_TYPES:
+            is_pdf = (content_type in _PDF_CONTENT_TYPES
+                      or (content_type == "application/octet-stream"
+                          and urlparse(final_url).path.lower().endswith(".pdf")))
+            if content_type not in _ALLOWED_CONTENT_TYPES and not is_pdf:
                 raise FetchFailed(
-                    f"{url}：内容类型不是网页（{content_type or '未声明'}）")
+                    f"{url}：内容类型不是网页或 PDF（{content_type or '未声明'}）")
 
+            cap = PDF_MAX_BYTES if is_pdf else FETCH_MAX_BYTES
             raw = bytearray()
             for chunk in r.iter_content(chunk_size=65536):
                 raw.extend(chunk)
-                if len(raw) > FETCH_MAX_BYTES:
+                if len(raw) > cap:
                     raise FetchFailed(
-                        f"{url}：正文超过 {FETCH_MAX_BYTES} 字节上限")
-            return final_url, bytes(raw), r.encoding
+                        f"{url}：正文超过 {cap} 字节上限")
+            return final_url, bytes(raw), r.encoding, is_pdf
         finally:
             r.close()
 
     try:
-        final_url, raw, header_encoding = with_retry(_get)
+        final_url, raw, header_encoding, is_pdf = with_retry(_get)
     except FetchFailed:
         # 闸门类失败（内容类型、字节上限、重定向后主机不安全）已经是
         # 成品 FetchFailed，直接透传——不能被下面那个 `except Exception`
@@ -907,6 +927,14 @@ def fetch(url: str, *, timeout: int = TIMEOUT) -> Fetched:
         raise
     except Exception as e:                                  # noqa: BLE001
         raise FetchFailed(f"{url}：{e.__class__.__name__}: {e}") from e
+
+    if is_pdf:
+        text = _pdf_text(url, raw)
+        if not text.strip():
+            raise FetchFailed(f"{url}：正文提取为空（PDF 可能是扫描件）")
+        # PDF 不读元数据里的日期：创建日期常是排版时间而非发布日期，用模型报的（标「未经代码核验」）
+        return Fetched(final_url=final_url, text=text,
+                       host_check_degraded=degraded[0], meta_published=None)
 
     html = _decode(raw, header_encoding)
 
@@ -1064,6 +1092,7 @@ def _ingest(raw: str, slots: tuple[str, ...], res: OpenWebResult, corpus, as_of:
             date_source="meta" if got.meta_published is not None else "model",
             module=module,
             scope=cand.scope,
+            slot=cand.slot,
         )
         if not corpus.add_if_visible(doc):
             continue
@@ -1141,6 +1170,10 @@ _MODULE_PROMPT = """为一份{market}研究报告的「{name}」一节采集外�
   名义还是实际、含税还是不含税、口径是否调整过 —— 下游会核对它们是否可比。
 - **定期发布的数据给最近一期**：月度、季度数据给 {as_of} 之前最近一次发布的页面，不要给更早的解读文章；
   年度数据注明是哪一年的。
+- **转引的数据给原发布页**：文章转引政府统计、监管部门或行业协会的数据时，给那份数据的原发布页，
+  不要给转载或解读它的媒体文章；原发布页确实找不到，才给转引的文章。
+- **同一份文件只给一次**：政策原文、公告、报告只给原发布页，不要再给转发、转载它的页面。
+- HTML 网页和 PDF 都可以（PDF 由我们抽取文字；扫描件抽不出文字，不要给）。
 - 找不到的主题就不要输出该主题的行，**不要用推测或不相关的网页填充**。
 
 只输出上述格式的行。
@@ -1268,7 +1301,8 @@ def _doc_to_json(d: Document) -> dict:
             "published": d.published.isoformat(),
             "retrieved": d.retrieved.isoformat(), "text": d.text,
             "prompt_limit": d.prompt_limit, "date_source": d.date_source,
-            "rank": d.rank, "module": d.module, "scope": d.scope}
+            "rank": d.rank, "module": d.module, "scope": d.scope,
+            "slot": d.slot}
 
 
 def _str_field(raw: dict, key: str) -> str:
@@ -1348,7 +1382,9 @@ def _doc_from_json(raw: dict) -> Document:
                     if "date_source" in raw else "",
                     # 旧落盘文件没有 module / scope —— 读成共用、无口径
                     module=_str_field(raw, "module") if "module" in raw else "",
-                    scope=_str_field(raw, "scope") if "scope" in raw else "")
+                    scope=_str_field(raw, "scope") if "scope" in raw else "",
+                    # 旧落盘文件没有 slot —— 读成未知主题
+                    slot=_str_field(raw, "slot") if "slot" in raw else "")
 
 
 def save(res: OpenWebResult, path: Path | str) -> None:
