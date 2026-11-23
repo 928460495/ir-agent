@@ -1930,6 +1930,13 @@ def _method_review_lines(out: Path, m) -> list[str]:
     return [f"- {v.line()}" for v in res.flagged()] if res else []
 
 
+def _gate2_method_lines(out: Path, m):
+    """门② 待核清单的方法论一节：未核实常量在前（spec：用户 2026-11-23 折中方案），审核遗留在后。"""
+    from ir_agent.formula import unverified_lines
+
+    return unverified_lines(m) + _method_review_lines(out, m)
+
+
 def _stop_for_methodology(code: str, r, as_of: date, out: Path, arts: dict,
                           skipped: list[str], client, why: str) -> ResearchOutcome:
     """方法论预研停下交人工。两条做法：重跑，或以最后一稿为底手写 drivers.md。"""
@@ -2691,7 +2698,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
         if (note := _audit_note("研究简报", r.audit)):
             skipped.append(note)
         _write_review(out, sa, sb, _missing_snapshot_notes(r.audit), factor_data,
-                      method=(_method_review_lines(out, meth)
+                      method=(_gate2_method_lines(out, meth)
                               if meth is not None else None))
         arts["待核清单"] = str(out / REVIEW_MD)
 

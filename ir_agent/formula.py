@@ -206,6 +206,27 @@ def parse_constant(raw: str) -> Decimal:
         raise FormulaInvalid(f"常量取值不是数字：{raw!r}") from e
 
 
+# 出处里带这些词的常量算「未核实」（用户 2026-11-23 选折中方案：不阻断，门② 单列、门③ 附敏感度）。
+# 不判致命：年报分产品表不在资料里时，逼模型给实数只会换来编造的出处 —— 比老实写「估计值」更糟。
+UNVERIFIED_RE = re.compile(r"估计|估算|待重算|未核实|未经核实")
+# 门③ 敏感度：常量上下浮动的幅度
+SENS_PCT = Decimal("0.2")
+
+
+def unverified_constants(model) -> list:
+    """分解式里出处写「估计值」一类的常量。`model` 可以是 `FormulaModel` 或带 `.model` 的预研结果。"""
+    if model is None:
+        return []
+    m = getattr(model, "model", model)
+    return [c for c in (getattr(m, "constants", None) or []) if UNVERIFIED_RE.search(c.source or "")]
+
+
+def unverified_lines(model) -> list[str]:
+    """门② 待核清单的「未核实常量」行（门③ 判断项清单另有带敏感度的表）。"""
+    return [f"- ⚠ 未核实常量：{c.name} = {c.value}（{c.source}）—— 门③ 判断项清单附 ±20% 敏感度"
+            for c in unverified_constants(model)]
+
+
 @dataclass(frozen=True)
 class Constant:
     name: str

@@ -544,7 +544,10 @@ class RelvalResult:
             stats = (f"（斜率 [[{k}_slope{at}]]，斜率 t 值 [[{k}_t{at}]]，"
                      f"R² [[{k}_r2{at}]]，样本 [[{k}_n{at}]]）" if _has_stats(r) else "")
             if not r.usable:
-                lines.append(f"    {name}：不可用 —— {r.why}{stats}")
+                # 统计量照样给（「为什么不可用」要能核验），但要说清它们不是回归有效的证据 ——
+                # 茅台实跑：样本 11 家判不可用，研报却拿 R² 写「统计上较强，不能凭空否决」
+                note = "；统计量只说明为什么不可用，不作依据" if stats else ""
+                lines.append(f"    {name}：不可用 —— {r.why}{stats[:-1] + note + '）' if stats else ''}")
                 continue
             ext = (f"（外推：本司{_X_CN[xf]}落在行业样本主体之外，区间因此变宽）"
                    if r.extrapolated else "")

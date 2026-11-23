@@ -396,6 +396,40 @@ class AssumptionSet:
             self.model = from_decomps(list(self.decomps))
         return self.model
 
+    def constant_sensitivity(self) -> list[tuple]:
+        """未核实常量的 ±`SENS_PCT` 敏感度：[(常量, 营收增速最大变动, 毛利率最大变动)]，按中性档
+        逐年合成结果比（小数；算不出为 None）。常量经公式进入第 2 年起的判断项，裸数字审计抓不到
+        它 —— 批准人要知道哪几个没核实、各自影响多大，影响大的先查（茅台实跑 2026-11-22）。"""
+        from dataclasses import replace
+
+        from ir_agent.formula import SENS_PCT, unverified_constants
+
+        m = self._m()
+        if m is None or m.legacy:
+            return []
+        targets = unverified_constants(m)
+        if not targets:
+            return []
+        try:
+            base = _simulate(self, Case.BASE, self.base_margin)
+        except AssumeFailed:
+            return [(c, None, None) for c in targets]
+        out = []
+        for c in targets:
+            dg = dm = Decimal(0)
+            try:
+                for k in (1 + SENS_PCT, 1 - SENS_PCT):
+                    consts = [replace(x, value=x.value * k) if x.name == c.name else x
+                              for x in m.constants]
+                    p = _simulate(self, Case.BASE, self.base_margin, model=replace(m, constants=consts))
+                    dg = max([dg, *(abs(x - y) for x, y in zip(p.growth, base.growth))])
+                    dm = max([dm, *(abs(x - y) for x, y in zip(p.margin, base.margin))])
+            except AssumeFailed:
+                out.append((c, None, None))
+                continue
+            out.append((c, dg, dm))
+        return out
+
     def margin_rebased(self) -> bool:
         """第 2 年起毛利率的基期是否**真的**被锚定平移：`margin_bases` 非空，且毛利率
         公式读 上期/基期(毛利率)。水平模式的毛利率公式不读它，平移不起作用——此时
@@ -429,6 +463,14 @@ class AssumptionSet:
             # 实测: 那条路径过了单位检查、三表勾稽、140 格复算、每股价值
             # 量级对账与人工门，没有一道闸门把假设换算成它的后果。
             lines += [f"📐 **算术后果**：{self.implied.describe()}", ""]
+        if (sens := self.constant_sensitivity()):
+            def _pp(x):
+                return "算不出" if x is None else f"±{x * 100:.2f}pp"
+            lines += ["🔎 **未核实常量**（出处写的是估计值，未按年报核实。表中是该常量上下浮动 20% 时，"
+                      "中性档逐年合成结果的最大变动 —— 变动大的先核实，改值请改 drivers.md 后重跑 --brief）：", "",
+                      "| 常量 | 取值 | 出处 | 营收增速 | 毛利率 |", "| --- | --- | --- | --- | --- |"]
+            lines += [f"| {c.name} | {c.value} | {c.source} | {_pp(dg)} | {_pp(dm)} |" for c, dg, dm in sens]
+            lines.append("")
         if self.method_review:
             lines += ["🧭 **方法论审核遗留**（预研阶段审核者判为提醒/待采集的条目）：", ""]
             lines += list(self.method_review) + [""]
@@ -1096,8 +1138,8 @@ def _values_for(a: AssumptionSet, case: Case) -> dict[str, list[Decimal]]:
 
 
 def _simulate(a: AssumptionSet, case: Case, base_margin: Decimal | None,
-              anchor_y1: Decimal | None = None):
-    m = a._m()
+              anchor_y1: Decimal | None = None, model: FormulaModel | None = None):
+    m = model or a._m()
     base_rev = a.base_revenue
     if base_rev is None and m.legacy:
         base_rev = Decimal(1)          # 旧乘法链与尺度无关

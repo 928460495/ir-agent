@@ -6,6 +6,7 @@ import pytest
 from ir_agent.citation import (
     UnresolvedReferenceError,
     audit_bare_numbers,
+    format_value,
     render,
 )
 from ir_agent.ledger import Fact, FactLedger, Method
@@ -450,3 +451,10 @@ def test_纯数字单位只显示数值():
     f = Fact(key="valuation.rel_reg_pb_t", value=_D("4.1534"), unit="num", period="2026-10-21",
              as_of=_d(2026, 10, 21), source_id="relval", method=Method.COMPUTED)
     assert format_value(f) == "4.15"
+
+
+def test_指数类单位只显示数值():
+    """茅台实跑（2026-11-22）：PMI 被写成「49.30 index」进了研报正文。"""
+    f = Fact(key="macro.pmi_manufacturing", value=Decimal("49.3"), unit="index", period="2026-10",
+             as_of=date(2026, 11, 15), source_id="em_macro", method=Method.REPORTED)
+    assert format_value(f) == "49.30"

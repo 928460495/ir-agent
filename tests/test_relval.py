@@ -369,3 +369,19 @@ def test_净资产余额期与本司不同的同业在PB回归里标出():
     s[2].bs_basis = "2025FY"
     r = regress("pb_roe", s, _tgt(roe=D("0.2"), bs_basis="2026H1"), D(1))
     assert "2025FY" in r.flags.get("000002", "")
+
+
+# ── 茅台实跑（2026-11-22）：不可用回归的统计量被研报当成「统计上较强」的证据 ──────────
+def test_不可用回归的统计量注明不作依据():
+    res = make_result()
+    res.regs["pb_roe"] = regress("pb_roe", _pb_sample(n=15), _tgt(roe=D("0.15")), D(1))
+    line = next(x for x in res.summary().split("\n") if "不可用" in x)
+    assert "rel_reg_pb_r2" in line and "统计量只说明为什么不可用，不作依据" in line
+
+
+def test_撰写规则禁止拿不可用回归的统计量作论据():
+    from ir_agent import analyst
+    src = analyst.build_prompt.__code__.co_consts
+    text = "".join(c for c in src if isinstance(c, str)) + "".join(
+        v for v in vars(analyst).values() if isinstance(v, str))
+    assert "不可用的回归" in text and "不得据此说回归" in text
