@@ -172,3 +172,98 @@ def test_无行业无研发表时不传新参数(monkeypatch):
     with pytest.raises(Exception):
         dcf._calibrate(FakeD, FakeC, "600519", AS_OF, None, 10, "http://x/a.pdf")
     assert "rd_life" not in seen and "rd_disclosure" not in seen
+
+
+# ── 终审 I2：研发投入表解析的健壮性 ─────────────────────────────
+
+_SH_COLMAJOR = """（四）研发投入情况表
+单位：元
+本期费用化研发投入
+本期资本化研发投入
+研发投入合计
+研发投入总额占营业收入比例（%）
+研发投入资本化的比重（%）
+465,000,000.00
+35,000,000.00
+500,000,000.00
+6.20
+7.00
+"""
+
+_MIXED_UNIT = """五、主要子公司 单位：万元 营业收入 12,345.67
+4、研发投入
+研发投入金额（元）
+800,000,000.00
+研发投入资本化的金额（元）
+80,000,000.00
+资本化研发投入占研发投入的比例
+10.00%
+"""
+
+_BAD_RATIO = """研发投入金额（元）
+100,000,000.00
+研发投入资本化的金额（元）
+20,000,000.00
+资本化研发投入占研发投入的比例
+35.00%
+"""
+
+
+def test_I2_沪市按列排布也读对():
+    from ir_agent.sources.annual_notes import extract_fin_notes
+    n = extract_fin_notes([_SH_COLMAJOR])
+    assert n.rd_total == Decimal("500000000.00") and n.rd_capitalized == Decimal("35000000.00")
+    assert n.rd_cap_ratio == Decimal("0.07")
+
+
+def test_I2_标签自带元时不被同页万元带偏():
+    from ir_agent.sources.annual_notes import extract_fin_notes
+    n = extract_fin_notes([_MIXED_UNIT])
+    assert n.rd_total == Decimal("800000000.00") and n.rd_capitalized == Decimal("80000000.00")
+    assert n.rd_cap_ratio == Decimal("0.1")
+
+
+def test_I2_比例与金额对不上时整组丢弃并说明():
+    from ir_agent.sources.annual_notes import extract_fin_notes
+    n = extract_fin_notes([_BAD_RATIO])
+    assert n.rd_total is None and n.rd_capitalized is None and n.rd_cap_ratio is None
+    assert "研发投入表" in n.rd_note and "不一致" in n.rd_note
+
+
+# ── 终审 I3：提示进 DCF 说明；摘要行常显（年限、完整性用占位符与中文） ──────────
+
+def test_I3_摘要行常显年限与完整性():
+    import dataclasses
+    from ir_agent import dcf
+    from ir_agent.citation import REF_RE
+    kw = {f.name: (f.default if f.default is not dataclasses.MISSING else
+                   (f.default_factory() if f.default_factory is not dataclasses.MISSING else Decimal(0)))
+          for f in dataclasses.fields(dcf.DcfResult)}
+    kw.update(code="600276", workbook="w.xlsx", as_of=AS_OF, rd_life=Decimal(10), rd_complete=False,
+              scenario_ps={}, mc=None, verified=True)
+    res = dcf.DcfResult(**kw)
+    s = res.summary()
+    assert "[[valuation.rd_life@2026-11-20]]" in s and "不足" in s
+    from ir_agent.citation import audit_bare_numbers
+    line = next(x for x in s.split("\n") if "研发" in x)
+    assert audit_bare_numbers(line) == []
+    facts = {f.key: f for f in dcf.to_facts(res, AS_OF)}
+    assert facts["valuation.rd_life"].unit == "年"
+
+
+def test_I3_校准提示进入DCF说明(monkeypatch):
+    from ir_agent import dcf
+
+    class FakeC:
+        @staticmethod
+        def calibrate(code, years, **kw):
+            return {"rdcap": {"notes": ["资产负债表缺「开发支出」，按 0 计入投入资本（ROIC 可能偏高）"]}}
+
+    class FakeD:
+        DataError = RuntimeError
+
+        @staticmethod
+        def validate_code(c):
+            return c
+    cal, notes, _ = dcf._calibrate(FakeD, FakeC, "600276", AS_OF, None, 10)
+    assert any("开发支出" in n for n in notes)

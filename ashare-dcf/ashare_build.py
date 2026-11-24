@@ -866,10 +866,14 @@ def _sheets(wb, cal, path):
     _SW=f"{A}!$B${DR['研发资本化开关（1=开 0=关）']}"; _LF=f"{A}!$B${DR['研发摊销年限（年）']}"
     _NI=f"{A}!$B${DR['基期非无形部分（长投、商誉等，预测期不变）']}"
     _RDC=cal.get("rdcap")
-    emit(wbs,32,"〔备查〕研发摊销",[None]*NH,lambda c,i:f"={pc(c)}33/{_LF}",NUM,False,
-         "上期研发资本 ÷ 摊销年限（直线法近似逐年归集口径）",(round(_RDC["amort"],6) if _RDC else 0))
-    emit(wbs,33,"〔备查〕研发资本（Damodaran）",[None]*NH,lambda c,i:f"={pc(c)}33+{P}!{c}{RRD}-{c}32",NUM,False,
-         "期初 + 本期研发费用 − 本期摊销（基期值由「1_假设」的期初研发资本给定）",
+    # 历史年报列：按「截至该年的研发历史」资本化的静态值（终审 I1）；中期列留空
+    _BP=(_RDC or {}).get("by_period") or {}
+    emit(wbs,32,"〔备查〕研发摊销",[(_BP.get(p) or {}).get("amort") for p in HP],lambda c,i:f"={pc(c)}33/{_LF}",NUM,False,
+         "上期研发资本 ÷ 摊销年限（直线法近似逐年归集口径）。历史列为按校准年限算的静态值",(round(_RDC["amort"],6) if _RDC else 0))
+    emit(wbs,33,"〔备查〕研发资本（Damodaran）",[(_BP.get(p) or {}).get("asset") for p in HP],
+         lambda c,i:f"={pc(c)}33+{P}!{c}{RRD}-{c}32",NUM,False,
+         "期初 + 本期研发费用 − 本期摊销（基期值由「1_假设」的期初研发资本给定；历史列为按校准年限、"
+         "截至该年的研发历史资本化的静态值，改年限不随之重算）",
          f"={A}!B{DR['期初研发资本']}")
     _ih=([round((H(BS,'无形资产',p) or 0)+(H(BS,'开发支出',p) or 0),4) for p in HP] if _RDC else [0]*NH)
     emit(wbs,34,"〔备查〕无形资产与开发支出",_ih,
@@ -1477,14 +1481,15 @@ def _ratios(wb, cal, D_):
     ROWS["roic_rd"]=r
     r=line(r,"ROIC（研发资本化）",
            lambda c,p,i,m=None,_r=ROWS["roic_rep"]: IE(
-               f'IF({_SWr}<>1,{c}{_r},IF({B_}!{c}33="","",{_npa(c,m)}/({B_}!{c}35+{B_}!{c}33)))'),PCT,False,
+               f'IF({_SWr}<>1,{c}{_r},IF(OR({B_}!{c}33="",{B_}!{c}32=""),"",{_npa(c,m)}/({B_}!{c}35+{B_}!{c}33)))'),PCT,False,
            "（EBIT×(1−t) + 研发 − 研发摊销）÷（报表口径投入资本 + 研发资本）。Damodaran 口径；"
            "开关关闭时与报表口径相同；研发资本只有基期与预测期，更早的历史列留空",ann="num",ann_caveat=_ANN_CAVEAT_PROFIT)
     ROWS["roic"]=r
     _rr,_rd=ROWS["roic_rep"],ROWS["roic_rd"]
     r=line(r,"ROIC（税后 / 投入资本）",
-           lambda c,p,i,m=None: f'=IF(AND({_SWr}=1,{c}{_rd}<>""),{c}{_rd},{c}{_rr})',PCT,True,
-           "生效口径：研发资本化开关打开时取「研发资本化」行，否则取「报表口径」行；与 DCF 终值 ROIC 同口径",
+           lambda c,p,i,m=None: f'=IF({_SWr}=1,{c}{_rd},{c}{_rr})',PCT,True,
+           "生效口径：研发资本化开关打开时取「研发资本化」行（没有研发资本的列留空，不退回报表口径 —— 两种口径"
+           "混在一条线上会造成假的跳变），否则取「报表口径」行；与 DCF 终值 ROIC 同口径",
            ann="num",ann_caveat=_ANN_CAVEAT_PROFIT)      # 引用的两行已年化，这里只为中期列带上同一条批注
     ROWS["wacc"]=r
     r=line(r,"（对照）WACC", lambda c,p,i,m=None: f"={DS}!$B${D_['WC']}",PCT,False,"ROIC 持续低于 WACC 即为价值毁灭")

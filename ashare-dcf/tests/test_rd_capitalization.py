@@ -292,3 +292,43 @@ def test_营运资本历史列是本列公式_与上方各行同口径(tmp_path)
     for i in range(cal["_rows"]["NH"]):
         c = CL(2 + i)
         assert ws[f"{c}31"].value == f"={c}8+{c}9+{c}10-{c}19-{c}20"
+
+
+# ── 终审修复轮（2026-11-24）──────────────────────────────────
+
+def test_I1_历史年份研发资本按前缀资本化():
+    inc = pd.DataFrame({"研发费用": [y * Y for y in (1.0, 2.0, 3.0, 4.0)], "营业总收入": [10 * Y] * 4},
+                       index=["20211231", "20221231", "20231231", "20241231"])
+    o = {"onca": 10.0, "intan": 2.0}
+    rb = C._rd_block(inc, "20241231", o, 3, None, _bal(无形资产=2.0))
+    assert rb["by_period"]["20221231"]["asset"] == pytest.approx(C.capitalize_rd([1.0, 2.0], 3)["asset"])
+    assert rb["by_period"]["20241231"]["amort"] == pytest.approx(rb["amort"])
+    assert set(rb["by_period"]) == {"20211231", "20221231", "20231231", "20241231"}
+
+
+def test_I3_缺科目与历史不足写提示():
+    inc = pd.DataFrame({"研发费用": [1.0 * Y, 2.0 * Y], "营业总收入": [10 * Y] * 2}, index=["20231231", "20241231"])
+    rb = C._rd_block(inc, "20241231", {"onca": 10.0, "intan": 0.0}, 10, None, _bal())
+    joined = "；".join(rb["notes"])
+    assert "无形资产" in joined and "开发支出" in joined and "按 0" in joined
+    assert "不足" in joined
+    rb2 = C._rd_block(inc, "20241231", {"onca": 10.0, "intan": 3.0}, 1, None, _bal(无形资产=3.0, 开发支出=0.0))
+    assert rb2["notes"] == []
+
+
+def test_I1_工作簿历史列有研发资本且生效行不混口径(tmp_path):
+    cal = _with_rd(_fixture_cal())
+    per = [p for p in cal["periods"]["all"] if p.endswith("1231")]
+    cal["rdcap"]["by_period"] = {p: {"asset": 10.0 + i, "amort": 1.0 + i} for i, p in enumerate(per)}
+    wb, G, cal = _calc(tmp_path, cal, name="hist.xlsx")
+    from openpyxl.utils import get_column_letter as CL
+    bs, rs = wb["3_资产负债表"], wb["7_财务比率与杜邦"]
+    r_rd, r_eff = _row(rs, "ROIC（研发资本化）"), _row(rs, "ROIC（税后 / 投入资本）")
+    allp = cal["periods"]["all"]
+    for i, p in enumerate(allp):
+        c = CL(2 + i)
+        if p.endswith("1231") and p != allp[len(cal["periods"]["annual"]) - 1]:
+            assert bs[f"{c}33"].value == pytest.approx(cal["rdcap"]["by_period"][p]["asset"])
+            assert G("7_财务比率与杜邦", f"{c}{r_rd}") not in (None, "")
+        if not p.endswith("1231"):                       # 中期列：没有研发资本 → 研发资本化行与生效行都留空
+            assert G("7_财务比率与杜邦", f"{c}{r_eff}") in (None, "")

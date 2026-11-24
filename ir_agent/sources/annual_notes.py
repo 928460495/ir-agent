@@ -42,6 +42,7 @@ class FinNotes:
     rd_total: Decimal | None = None
     rd_capitalized: Decimal | None = None
     rd_cap_ratio: Decimal | None = None
+    rd_note: str = ""                         # 研发投入表读到了但未采用时的说明
     missing: list = field(default_factory=list)
 
 
@@ -163,23 +164,47 @@ def _restricted(block: str, n: FinNotes) -> None:
             n.encumbered[label] = n.encumbered.get(label, Decimal(0)) + amt
 
 
-# 研发投入表的两种版式：深市（研发投入金额 / 研发投入资本化的金额 / 资本化研发投入占研发投入的比例）、
-# 沪市（本期资本化研发投入 / 研发投入合计 / 研发投入资本化的比重（%））。标签后第一个数即本期值。
-_RD_TOTAL = (r"研发投入金额（元）", r"研发投入合计")
-_RD_CAP = (r"研发投入资本化的金额（元）", r"本期资本化研发投入")
-_RD_RATIO = (r"资本化研发投入占研发投入的比例", r"研发投入资本化的比重（%）")
+# 研发投入表的两种版式：深市（研发投入金额（元）/ 研发投入资本化的金额（元）/ 资本化研发投入占研发投入的比例）、
+# 沪市（本期费用化研发投入 / 本期资本化研发投入 / 研发投入合计 / 研发投入资本化的比重（%））。
+# PDF 抽文字后可能逐行（标签、值、标签、值）也可能按列（先全部标签、后全部值）—— 两种都要读对（终审 I2）。
+_RD_TOTAL = ("研发投入金额（元）", "研发投入合计")
+_RD_CAP = ("研发投入资本化的金额（元）", "本期资本化研发投入")
+_RD_RATIO = ("资本化研发投入占研发投入的比例", "研发投入资本化的比重（%）")
+_RD_ROWS = ("研发投入金额（元）", "研发投入占营业收入比例", "研发投入资本化的金额（元）",
+            "资本化研发投入占研发投入的比例", "资本化研发投入占当期净利润的比重",
+            "本期费用化研发投入", "本期资本化研发投入", "研发投入合计", "研发投入总额占营业收入比例（%）",
+            "研发投入资本化的比重（%）")
 _TOKEN = re.compile(r"-?[\d,]+(?:\.\d+)?%?")
+_UNIT_AT = re.compile(r"单位\s*[:：]\s*(百万元|千元|万元|亿元|元)")
+_RATIO_TOL = Decimal("0.005")
 
 
-def _first_after(text: str, labels: tuple) -> str | None:
-    for lab in labels:
-        i = text.find(lab)
-        if i < 0:
-            continue
-        m = _TOKEN.search(text, i + len(lab), i + len(lab) + 80)
+def _rd_values(text: str) -> dict:
+    """{标签: 本期数（原文字符串）}。逐行排布取标签与下一个标签之间的第一个数；按列排布（标签之间没有数）
+    则把最后一个标签之后的数依次配给各标签。"""
+    pos = sorted((text.find(l), l) for l in _RD_ROWS if text.find(l) >= 0)
+    if not pos:
+        return {}
+    out = {}
+    for k, (at, lab) in enumerate(pos):
+        end = pos[k + 1][0] if k + 1 < len(pos) else at + len(lab) + 200
+        m = _TOKEN.search(text, at + len(lab), end)
         if m:
-            return m.group(0)
-    return None
+            out[lab] = m.group(0)
+    tail = text[pos[-1][0] + len(pos[-1][1]):]
+    toks = _TOKEN.findall(tail)
+    if len(out) < len(pos) and len(toks) >= len(pos):      # 有标签之间没有数 → 按列排布
+        return {lab: toks[k] for k, (_, lab) in enumerate(pos)}
+    return out
+
+
+def _rd_unit(text: str, label: str) -> Decimal:
+    """标签自带（元）时就是元；否则取标签**之前**最近的「单位：」—— 同页别的表的「万元」不能带偏（终审 I2）。"""
+    if "（元）" in label:
+        return Decimal(1)
+    at = text.find(label)
+    ms = list(_UNIT_AT.finditer(text, 0, at if at >= 0 else len(text)))
+    return _UNIT[ms[-1].group(1)] if ms else Decimal(1)
 
 
 def _rd(pages: list[str], n: FinNotes) -> None:
@@ -187,19 +212,31 @@ def _rd(pages: list[str], n: FinNotes) -> None:
     if text is None:
         # 不进 missing：missing 是「附注缺失 → 相应口径按保守处理」，研发投入表缺失只是资本化率不披露（字段留 None）
         return
-    unit = _unit(text)
+    vals = _rd_values(text)
 
-    def val(labels) -> Decimal | None:
-        tok = _first_after(text, labels)
-        return None if tok is None else _num(tok.rstrip("%"))
+    def amount(labels) -> Decimal | None:
+        for lab in labels:
+            if lab in vals and _num(vals[lab].rstrip("%")) is not None:
+                return _num(vals[lab].rstrip("%")) * _rd_unit(text, lab)
+        return None
 
-    tot, cap, rat = val(_RD_TOTAL), val(_RD_CAP), val(_RD_RATIO)
-    n.rd_total = None if tot is None else tot * unit
-    n.rd_capitalized = None if cap is None else cap * unit
-    if rat is not None:                                    # 表里的比例是百分数
-        n.rd_cap_ratio = rat / Decimal(100)
-    elif n.rd_total and n.rd_capitalized is not None:
-        n.rd_cap_ratio = n.rd_capitalized / n.rd_total
+    def ratio() -> Decimal | None:
+        for lab in _RD_RATIO:
+            if lab in vals and _num(vals[lab].rstrip("%")) is not None:
+                return _num(vals[lab].rstrip("%")) / Decimal(100)        # 表里的比例是百分数
+        return None
+
+    tot, cap, rat = amount(_RD_TOTAL), amount(_RD_CAP), ratio()
+    bad = ((tot is not None and tot <= 0) or (cap is not None and cap < 0)
+           or (tot is not None and cap is not None and cap > tot)
+           or (rat is not None and not (Decimal(0) <= rat <= Decimal(1))))
+    if not bad and tot and cap is not None and rat is not None and abs(cap / tot - rat) > _RATIO_TOL:
+        bad = True
+    if bad:
+        n.rd_note = "年报研发投入表：资本化比例与金额推算的比例不一致或越界，未采用（资本化率记为未取到）"
+        return
+    n.rd_total, n.rd_capitalized = tot, cap
+    n.rd_cap_ratio = rat if rat is not None else (cap / tot if tot and cap is not None else None)
 
 
 def extract_fin_notes(pages: list[str]) -> FinNotes:

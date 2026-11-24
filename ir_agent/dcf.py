@@ -178,6 +178,9 @@ class DcfResult:
     rd_total: Decimal | None = None
     rd_capitalized: Decimal | None = None
     rd_cap_rate: Decimal | None = None
+    # 研发资本的摊销年限与历史是否覆盖「年限 + 1」年（两个市场；终审 I3）
+    rd_life: Decimal | None = None
+    rd_complete: bool | None = None
 
     @property
     def upside(self) -> Decimal | None:
@@ -207,10 +210,13 @@ class DcfResult:
         if self.wacc_term is not None:
             lines.append(f"  终值 WACC [[valuation.wacc_term{at}]]（终值 Beta 向一收敛；终值 ROIC 应与终值 WACC 比，"
                          "不是与上面明确期的 WACC 比 —— 高于终值 WACC 即终值期新增投资创造价值）")
-        if self.rd_cap_rate is not None:
-            lines.append(f"  研发：费用化部分已按行业摊销年限资本化（只影响 ROIC 与投入资本，不改现金流）；"
-                         f"公司自行资本化的比例 [[valuation.rd_cap_rate{at}]]（年报「研发投入」表），"
-                         "比例越高、当期利润里被推迟的研发费用越多")
+        if self.rd_life is not None:
+            cov = ("研发历史覆盖摊销期" if self.rd_complete else
+                   "研发历史年数不足摊销期加一年，研发资本偏低、研发资本化 ROIC 偏高")
+            rate = (f"；公司自行资本化的比例 [[valuation.rd_cap_rate{at}]]（年报「研发投入」表），"
+                    "比例越高、当期利润里被推迟的研发费用越多" if self.rd_cap_rate is not None else "")
+            lines.append(f"  研发：费用化部分按 [[valuation.rd_life{at}]] 摊销资本化（只影响 ROIC 与投入资本，"
+                         f"不改现金流）；{cov}{rate}")
         if self.nonop_fin_net:
             lines.append(f"  非经营性金融资产（财务公司等）净额 [[valuation.nonop_fin_net{at}]] 已按账面在股权桥加回"
                          "（拆出资金、买入返售、债权投资等，减吸收存款；不随营收增长、不进营运资本）")
@@ -354,7 +360,7 @@ def to_facts(res: DcfResult, as_of: date,
     if res.nonop_fin_net:
         out.append(f("valuation.nonop_fin_net", res.nonop_fin_net, "元"))
     for key, val, unit in (("rd_total", res.rd_total, "元"), ("rd_capitalized", res.rd_capitalized, "元"),
-                           ("rd_cap_rate", res.rd_cap_rate, "ratio")):
+                           ("rd_cap_rate", res.rd_cap_rate, "ratio"), ("rd_life", res.rd_life, "年")):
         if val is not None:
             out.append(f(f"valuation.{key}", val, unit))
     # 蒙特卡洛：键都以 `valuation.` 开头 —— 辩论裁判的可引用清单按这个前缀收
@@ -379,8 +385,11 @@ def _rd_fields(rc: dict) -> dict:
     def yuan(x):
         return None if x is None else Decimal(str(round(float(x) * 1e8, 2)))
     rate = rc.get("rate")
+    life = rc.get("life")
     return dict(rd_total=yuan(rc.get("total")), rd_capitalized=yuan(rc.get("capitalized")),
-                rd_cap_rate=None if rate is None else Decimal(str(round(float(rate), 6))))
+                rd_cap_rate=None if rate is None else Decimal(str(round(float(rate), 6))),
+                rd_life=None if life is None else Decimal(int(life)),
+                rd_complete=None if life is None else bool(rc.get("complete")))
 
 
 def _mc_hist(cal: dict) -> dict:
@@ -437,6 +446,8 @@ def _fin_notes(annual_url: str, notes: list[str]) -> dict | None:
                      "受限资金不扣（保守）")
         return None
     notes += [f"年报附注：{m}（相应口径按保守处理）" for m in n.missing]
+    if n.rd_note:
+        notes.append(n.rd_note)
     return {"nca1y_fin": n.nca1y_fin, "statutory_reserve": n.statutory_reserve,
             "term_restricted": dict(n.term_restricted), "encumbered": dict(n.encumbered),
             # 研发投入表（spec 2026-11-24）：_calibrate 把这三项拆出去作 rd_disclosure，不进 fin_notes
@@ -480,6 +491,7 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str
         cal = C.calibrate(code, years, stmts=stmts, as_of=as_of, **kw)
     except getattr(D, "DataError", Exception) as e:
         raise DcfUnavailable(f"{code} 无法建模：{e}") from e
+    notes += list((cal.get("rdcap") or {}).get("notes") or [])     # 缺科目、研发历史不足（终审 I3）
     fb = cal.get("fin_bridge") or {}
     if fb.get("items") and fb.get("kind") == "restricted_only":
         # 只有受限资金扣除（终审 I3）：不是财务公司，不能说「加回」

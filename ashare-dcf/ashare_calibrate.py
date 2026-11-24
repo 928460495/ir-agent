@@ -175,28 +175,47 @@ def capitalize_rd(rd_hist: list, life: int) -> dict:
                 covered=len(rd), complete=len(rd) >= life + 1)
 
 
-def rd_history(inc, last: str) -> list[float]:
-    """年报期研发费用（亿元）升序，截至 last；缺失年跳过。A 股利润表 2018 年起单列研发费用，更早取不到。"""
+def _rd_series(inc, last: str) -> list[tuple[str, float]]:
+    """[(年报期, 研发费用亿元)] 升序，截至 last；缺失年跳过。"""
     out = []
-    for p in sorted(x for x in inc.index if str(x).endswith("1231") and str(x) <= last):
+    for p in sorted(str(x) for x in inc.index if str(x).endswith("1231") and str(x) <= last):
         v = _v(inc, "研发费用", p)
         if v is not None:
-            out.append(v)
+            out.append((p, v))
     return out
 
 
-def _rd_block(inc, last: str, o: dict, rd_life: int | None, disc: dict | None) -> dict:
-    """cal["rdcap"]：研发资本、基期无形部分与非无形部分、年报研发投入表（取到时）。金额单位亿元。"""
+def rd_history(inc, last: str) -> list[float]:
+    """年报期研发费用（亿元）升序，截至 last；缺失年跳过。A 股利润表 2018 年起单列研发费用，更早取不到。"""
+    return [v for _, v in _rd_series(inc, last)]
+
+
+def _rd_block(inc, last: str, o: dict, rd_life: int | None, disc: dict | None, bal=None) -> dict:
+    """cal["rdcap"]：研发资本、基期无形部分与非无形部分、年报研发投入表（取到时）。金额单位亿元。
+    by_period：每个年报期按「截至该年的研发历史」资本化的 {asset, amort} —— 比率页历史列的研发资本化 ROIC 用它，
+    不让历史列退回报表口径、与预测期混在一条线上（终审 I1）。notes：缺科目、历史不足的提示（终审 I3）。"""
     life = int(rd_life or RD_LIFE_DEFAULT)
-    hist = rd_history(inc, last)
+    ser = _rd_series(inc, last)
+    hist = [v for _, v in ser]
     r = capitalize_rd(hist, life)
+    by_period = {}
+    for k, (p, _) in enumerate(ser):
+        c = capitalize_rd(hist[:k + 1], life)
+        by_period[p] = dict(asset=c["asset"], amort=c["amort"])
+    notes = []
+    if bal is not None:
+        miss = [k for k in ("无形资产", "开发支出") if k not in bal.columns]
+        if miss:
+            notes.append("资产负债表缺「" + "」「".join(miss) + "」，按 0 计入投入资本（ROIC 可能偏高）")
+    if hist and not r["complete"]:
+        notes.append("研发历史年数不足摊销期加一年，研发资本被系统性低估（研发资本化 ROIC 偏高）")
     disc = disc or {}
     tot = disc.get("total"); cap = disc.get("capitalized"); rate = disc.get("rate")
     tot = None if tot is None else float(tot) / 1e8
     cap = None if cap is None else float(cap) / 1e8
     if rate is None and tot and cap is not None:
         rate = cap / tot
-    return dict(r, rd_hist=[round(x, 4) for x in hist][-12:], intan0=o["intan"],
+    return dict(r, by_period=by_period, notes=notes, rd_hist=[round(x, 4) for x in hist][-12:], intan0=o["intan"],
                 # 不取整：与期初 onca 精确相减，工作簿无形部分基期列才对得上
                 nonintan0=o["onca"] - o["intan"], total=tot, capitalized=cap,
                 rate=None if rate is None else float(rate))
@@ -623,7 +642,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
     itm_block, itm_skip = interim_block_why(inc, interim) if interim else (None, "")
     # fin_notes：ir-agent 读最近年报附注得到（一年内到期非流动资产明细、受限资产），只对最近年报期有效
     o = opening_balances(bal, last, fin_notes)
-    _rd = _rd_block(inc, last, o, rd_life, rd_disclosure)
+    _rd = _rd_block(inc, last, o, rd_life, rd_disclosure, bal)
     # 营运资本天数：优先用最近中期年化（最新信息），否则用最近年报
     def _wc(p, ann_factor):
         b = opening_balances(bal, p, fin_notes if p == last else None)
