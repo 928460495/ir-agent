@@ -71,6 +71,9 @@ BALANCE = {
     "current_assets": "流动资产合计",
     "fixed_asset": "固定资产净额",
     "construction_in_progress": "在建工程",
+    # 公司自行资本化的研发在这两项里 —— A 股投入资本要计入（spec 2026-11-24-rd-capitalization）
+    "intangible_asset": "无形资产",
+    "development_expense": "开发支出",
     "long_equity_invest": "长期股权投资",
     "investment_property": "投资性房地产",
     "other_noncurrent_finasset": "其他非流动金融资产",

@@ -156,6 +156,52 @@ def strip_fin_income(inc, bal, p_last):
     return out, adj
 
 
+# ── 研发资本化（spec 2026-11-24-rd-capitalization；Damodaran *R&D Expenses*）──────────
+# 与 us-dcf/valuation_lib.capitalize_rd 同式同键（两包不互相依赖，各留一份）。
+RD_LIFE_DEFAULT = 5
+
+
+def capitalize_rd(rd_hist: list, life: int) -> dict:
+    """把历年费用化研发还原成一项资产。rd_hist 按时间升序，最后一个是当期（None 跳过）。
+    · 研发资本 = 各年未摊销部分之和：t−i 年的支出还剩 (life−i)/life
+    · 当期摊销 = 过去 life 年各摊 1/life（当期支出当年不摊）
+    covered < life + 1 时研发资本被【系统性低估】（更早的支出取不到），complete=False 须提示。"""
+    rd = [float(x) for x in rd_hist if x is not None and x == x]
+    if not rd:
+        return dict(asset=0.0, amort=0.0, life=life, covered=0, complete=False)
+    asset = sum(rd[-1 - i] * (life - i) / life for i in range(min(life, len(rd))))
+    amort = sum(rd[-1 - i] / life for i in range(1, min(life + 1, len(rd))))
+    return dict(asset=round(asset, 4), amort=round(amort, 4), life=life,
+                covered=len(rd), complete=len(rd) >= life + 1)
+
+
+def rd_history(inc, last: str) -> list[float]:
+    """年报期研发费用（亿元）升序，截至 last；缺失年跳过。A 股利润表 2018 年起单列研发费用，更早取不到。"""
+    out = []
+    for p in sorted(x for x in inc.index if str(x).endswith("1231") and str(x) <= last):
+        v = _v(inc, "研发费用", p)
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def _rd_block(inc, last: str, o: dict, rd_life: int | None, disc: dict | None) -> dict:
+    """cal["rdcap"]：研发资本、基期无形部分与非无形部分、年报研发投入表（取到时）。金额单位亿元。"""
+    life = int(rd_life or RD_LIFE_DEFAULT)
+    hist = rd_history(inc, last)
+    r = capitalize_rd(hist, life)
+    disc = disc or {}
+    tot = disc.get("total"); cap = disc.get("capitalized"); rate = disc.get("rate")
+    tot = None if tot is None else float(tot) / 1e8
+    cap = None if cap is None else float(cap) / 1e8
+    if rate is None and tot and cap is not None:
+        rate = cap / tot
+    return dict(r, rd_hist=[round(x, 4) for x in hist][-12:], intan0=o["intan"],
+                # 不取整：与期初 onca 精确相减，工作簿无形部分基期列才对得上
+                nonintan0=o["onca"] - o["intan"], total=tot, capitalized=cap,
+                rate=None if rate is None else float(rate))
+
+
 def opening_balances(bal, p, fin_notes: dict | None = None) -> dict:
     """最近年报期初余额，8 项资产 + 8 项负债权益，保证恒等。
 
@@ -172,6 +218,8 @@ def opening_balances(bal, p, fin_notes: dict | None = None) -> dict:
     o["ppe"] = g("固定资产净额") or g("固定资产")
     o["cip"] = g("在建工程合计") or g("在建工程")
     o["onca"] = nca - o["ppe"] - o["cip"]
+    # 无形资产与开发支出（公司自行资本化的研发在这里）—— 在倒挤的 onca 之内，投入资本要单独算它
+    o["intan"] = g("无形资产") + g("开发支出")
     o["st"] = g("短期借款")
     o["ap"] = g("应付票据及应付账款") or (g("应付票据") + g("应付账款"))
     o["cur"] = g("一年内到期的非流动负债")
@@ -391,7 +439,8 @@ def _quote_at(code: str, q: dict, as_of: dt.date) -> dict:
 
 
 def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
-              as_of: dt.date | None = None, fin_notes: dict | None = None) -> dict:
+              as_of: dt.date | None = None, fin_notes: dict | None = None,
+              rd_life: int | None = None, rd_disclosure: dict | None = None) -> dict:
     """as_of：分析时点。早于今天时，价格取当时收盘、β 与无风险利率截至当时，
     折现起点也按当时算 —— 否则内在价值与「现价」比较时掺进了当时看不到的信息。
 
@@ -574,6 +623,7 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
     itm_block, itm_skip = interim_block_why(inc, interim) if interim else (None, "")
     # fin_notes：ir-agent 读最近年报附注得到（一年内到期非流动资产明细、受限资产），只对最近年报期有效
     o = opening_balances(bal, last, fin_notes)
+    _rd = _rd_block(inc, last, o, rd_life, rd_disclosure)
     # 营运资本天数：优先用最近中期年化（最新信息），否则用最近年报
     def _wc(p, ann_factor):
         b = opening_balances(bal, p, fin_notes if p == last else None)
@@ -712,7 +762,10 @@ def calibrate(code: str, nyears: int = 5, stmts: dict | None = None,
                  nonop=round(_v0(bal,"长期股权投资",last)+_v0(bal,"投资性房地产",last)+_v0(bal,"其他非流动金融资产",last), 4),
                  mi_mode=2,
                  # 终值 ROIC 默认收敛至 WACC + 溢价、终值 Beta 向 1（spec 2026-11-16）
-                 roic_mode=2, beta_term=1.0),
+                 roic_mode=2, beta_term=1.0,
+                 # 研发资本化（spec 2026-11-24）：默认开；年限由上游按申万行业给，缺省 5 年
+                 rd_cap=1, rd_life=_rd["life"]),
+        rdcap=_rd,
         rev=rev, cogs=cogs,
         # 财务公司 / 类现金金融资产的逐项明细（建表在 1_假设 列示；净额已并入交易性金融资产）
         fin_bridge=dict(fin_bridge(bal, last, fin_notes), rev_adj=round(_fin_rev_adj, 4)))

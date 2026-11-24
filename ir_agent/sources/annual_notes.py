@@ -38,6 +38,10 @@ class FinNotes:
     statutory_reserve: Decimal | None = None  # 受限资产表里「法定存款准备金」合计（元）
     term_restricted: dict = field(default_factory=dict)   # {科目: 金额}，定期 / 不能随时支取
     encumbered: dict = field(default_factory=dict)        # {科目: 金额}，质押 / 冻结 / 保证金等
+    # 管理层讨论与分析「研发投入」表（spec 2026-11-24-rd-capitalization §4.6）：金额元，比例为小数
+    rd_total: Decimal | None = None
+    rd_capitalized: Decimal | None = None
+    rd_cap_ratio: Decimal | None = None
     missing: list = field(default_factory=list)
 
 
@@ -159,6 +163,45 @@ def _restricted(block: str, n: FinNotes) -> None:
             n.encumbered[label] = n.encumbered.get(label, Decimal(0)) + amt
 
 
+# 研发投入表的两种版式：深市（研发投入金额 / 研发投入资本化的金额 / 资本化研发投入占研发投入的比例）、
+# 沪市（本期资本化研发投入 / 研发投入合计 / 研发投入资本化的比重（%））。标签后第一个数即本期值。
+_RD_TOTAL = (r"研发投入金额（元）", r"研发投入合计")
+_RD_CAP = (r"研发投入资本化的金额（元）", r"本期资本化研发投入")
+_RD_RATIO = (r"资本化研发投入占研发投入的比例", r"研发投入资本化的比重（%）")
+_TOKEN = re.compile(r"-?[\d,]+(?:\.\d+)?%?")
+
+
+def _first_after(text: str, labels: tuple) -> str | None:
+    for lab in labels:
+        i = text.find(lab)
+        if i < 0:
+            continue
+        m = _TOKEN.search(text, i + len(lab), i + len(lab) + 80)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _rd(pages: list[str], n: FinNotes) -> None:
+    text = next((p for p in pages if any(l in p for l in _RD_TOTAL + _RD_CAP)), None)
+    if text is None:
+        # 不进 missing：missing 是「附注缺失 → 相应口径按保守处理」，研发投入表缺失只是资本化率不披露（字段留 None）
+        return
+    unit = _unit(text)
+
+    def val(labels) -> Decimal | None:
+        tok = _first_after(text, labels)
+        return None if tok is None else _num(tok.rstrip("%"))
+
+    tot, cap, rat = val(_RD_TOTAL), val(_RD_CAP), val(_RD_RATIO)
+    n.rd_total = None if tot is None else tot * unit
+    n.rd_capitalized = None if cap is None else cap * unit
+    if rat is not None:                                    # 表里的比例是百分数
+        n.rd_cap_ratio = rat / Decimal(100)
+    elif n.rd_total and n.rd_capitalized is not None:
+        n.rd_cap_ratio = n.rd_capitalized / n.rd_total
+
+
 def extract_fin_notes(pages: list[str]) -> FinNotes:
     """`pages`：年报逐页文字。读不到的表如实记进 `missing`，对应字段保持 None —— 下游保守处理。"""
     n = FinNotes()
@@ -172,6 +215,7 @@ def extract_fin_notes(pages: list[str]) -> FinNotes:
         n.missing.append("受限资产：年报附注里没找到「所有权或使用权受限资产」表")
     else:
         _restricted(b, n)
+    _rd(pages, n)
     return n
 
 

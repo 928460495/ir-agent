@@ -79,6 +79,7 @@ _COMMON_BALANCE = {
     "FIXED_ASSET": "fixed_asset",
     "CIP": "construction_in_progress",
     "INTANGIBLE_ASSET": "intangible_asset",
+    "DEVELOP_EXPENSE": "development_expense",     # 开发支出（研发资本化，spec 2026-11-24）
     "USERIGHT_ASSET": "useright_asset",
     "SHARE_CAPITAL": "share_capital",
     "CAPITAL_RESERVE": "capital_reserve",

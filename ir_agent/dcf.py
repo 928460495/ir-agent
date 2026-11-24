@@ -173,6 +173,11 @@ class DcfResult:
     # 非经营性金融资产（财务公司等）净额，单位元（A 股；spec 2026-11-20）。茅台验收：研报写「净额已加回，其数额
     # 未列入可引事实，故不在此复述」—— 不进账本，撰写者就引用不了。
     nonop_fin_net: Decimal | None = None
+    # 年报「研发投入」表（A 股，spec 2026-11-24-rd-capitalization §4.6）：研发投入、资本化金额（元）与资本化率。
+    # 公司自行资本化比例是盈利质量信号；取不到为 None，不落账本。
+    rd_total: Decimal | None = None
+    rd_capitalized: Decimal | None = None
+    rd_cap_rate: Decimal | None = None
 
     @property
     def upside(self) -> Decimal | None:
@@ -202,6 +207,10 @@ class DcfResult:
         if self.wacc_term is not None:
             lines.append(f"  终值 WACC [[valuation.wacc_term{at}]]（终值 Beta 向一收敛；终值 ROIC 应与终值 WACC 比，"
                          "不是与上面明确期的 WACC 比 —— 高于终值 WACC 即终值期新增投资创造价值）")
+        if self.rd_cap_rate is not None:
+            lines.append(f"  研发：费用化部分已按行业摊销年限资本化（只影响 ROIC 与投入资本，不改现金流）；"
+                         f"公司自行资本化的比例 [[valuation.rd_cap_rate{at}]]（年报「研发投入」表），"
+                         "比例越高、当期利润里被推迟的研发费用越多")
         if self.nonop_fin_net:
             lines.append(f"  非经营性金融资产（财务公司等）净额 [[valuation.nonop_fin_net{at}]] 已按账面在股权桥加回"
                          "（拆出资金、买入返售、债权投资等，减吸收存款；不随营收增长、不进营运资本）")
@@ -344,6 +353,10 @@ def to_facts(res: DcfResult, as_of: date,
         out.append(f("valuation.wacc_term", res.wacc_term, "ratio"))
     if res.nonop_fin_net:
         out.append(f("valuation.nonop_fin_net", res.nonop_fin_net, "元"))
+    for key, val, unit in (("rd_total", res.rd_total, "元"), ("rd_capitalized", res.rd_capitalized, "元"),
+                           ("rd_cap_rate", res.rd_cap_rate, "ratio")):
+        if val is not None:
+            out.append(f(f"valuation.{key}", val, unit))
     # 蒙特卡洛：键都以 `valuation.` 开头 —— 辩论裁判的可引用清单按这个前缀收
     # （`full._catalog_periods` 的 PROMPT_SIDE），换前缀就会被判成伪造、回写删光。
     m = res.mc
@@ -359,6 +372,15 @@ def to_facts(res: DcfResult, as_of: date,
         out += [f(f"valuation.mc_swing_{i}", s, "元")
                 for i, (_, s) in enumerate(m.get("tornado") or [], 1)]
     return out
+
+
+def _rd_fields(rc: dict) -> dict:
+    """cal["rdcap"]（亿元）→ DcfResult 的研发投入三项（元 / 比例）。取不到的为 None。"""
+    def yuan(x):
+        return None if x is None else Decimal(str(round(float(x) * 1e8, 2)))
+    rate = rc.get("rate")
+    return dict(rd_total=yuan(rc.get("total")), rd_capitalized=yuan(rc.get("capitalized")),
+                rd_cap_rate=None if rate is None else Decimal(str(round(float(rate), 6))))
 
 
 def _mc_hist(cal: dict) -> dict:
@@ -416,10 +438,13 @@ def _fin_notes(annual_url: str, notes: list[str]) -> dict | None:
         return None
     notes += [f"年报附注：{m}（相应口径按保守处理）" for m in n.missing]
     return {"nca1y_fin": n.nca1y_fin, "statutory_reserve": n.statutory_reserve,
-            "term_restricted": dict(n.term_restricted), "encumbered": dict(n.encumbered)}
+            "term_restricted": dict(n.term_restricted), "encumbered": dict(n.encumbered),
+            # 研发投入表（spec 2026-11-24）：_calibrate 把这三项拆出去作 rd_disclosure，不进 fin_notes
+            "rd_total": n.rd_total, "rd_capitalized": n.rd_capitalized, "rd_cap_ratio": n.rd_cap_ratio}
 
 
-def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str = ""):
+def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str = "",
+               industry: str = ""):
     """取数 + 校准，不建模。返回 (cal, notes)。
 
     第一阶段只需要它: 校准值是 AI 填判断项的参照（历史均值、标准差、
@@ -442,6 +467,16 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str
         code = D.validate_code(code)
         fin_notes = _fin_notes(annual_url, notes) if annual_url else None
         kw = {"fin_notes": fin_notes} if fin_notes is not None else {}
+        # 研发资本化（spec 2026-11-24）：摊销年限按申万行业；资本化率取年报「研发投入」表
+        # 只在确有行业路径 / 确读到研发投入表时才传（缺省时 calibrate 取 5 年、资本化率未取到，与旧调用一致）
+        from ir_agent.rd_life import life_for_sw
+        if industry:
+            kw["rd_life"] = life_for_sw(industry)
+        if fin_notes is not None:
+            disc = {"total": fin_notes.pop("rd_total", None), "capitalized": fin_notes.pop("rd_capitalized", None),
+                    "rate": fin_notes.pop("rd_cap_ratio", None)}
+            if any(v is not None for v in disc.values()):
+                kw["rd_disclosure"] = disc
         cal = C.calibrate(code, years, stmts=stmts, as_of=as_of, **kw)
     except getattr(D, "DataError", Exception) as e:
         raise DcfUnavailable(f"{code} 无法建模：{e}") from e
@@ -457,11 +492,11 @@ def _calibrate(D, C, code: str, as_of: date, ledger, years: int, annual_url: str
 
 
 def calibrate_only(code: str, *, as_of: date, ledger=None, years: int = HORIZON,
-                   dirpath: Path | None = None, annual_url: str = "") -> dict:
+                   dirpath: Path | None = None, annual_url: str = "", industry: str = "") -> dict:
     """只校准不建模 —— 第一阶段用它拿到历史参照与预测期标签。"""
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
     D, C, _, _ = _load(dirpath)
-    return _calibrate(D, C, code, as_of, ledger, years, annual_url)[0]
+    return _calibrate(D, C, code, as_of, ledger, years, annual_url, industry)[0]
 
 
 _SCEN_CN = {"bull": "乐观", "base": "中性", "bear": "悲观"}
@@ -626,7 +661,7 @@ def _readback_check(judg: dict, inp: dict, tol: float = 1e-9, code: str = "") ->
 def run(code: str, out_dir: str | Path, *, as_of: date,
         ledger: FactLedger | None = None, years: int = HORIZON,
         dirpath: Path | None = None, assumptions=None,
-        approved_by: str = "", annual_url: str = "") -> DcfResult:
+        approved_by: str = "", annual_url: str = "", industry: str = "") -> DcfResult:
     """跑一遍 ashare-dcf，返回结果与全部警告。
 
     **账本给定时由它供数**，DCF 不再自行取数 —— 分析层与估值层用同一套
@@ -639,7 +674,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
     dirpath = dirpath or Path(os.environ.get(ENV_DIR) or DEFAULT_DIR)
     D, C, B, V = _load(dirpath)
 
-    cal, notes, stmts = _calibrate(D, C, code, as_of, ledger, years, annual_url)
+    cal, notes, stmts = _calibrate(D, C, code, as_of, ledger, years, annual_url, industry)
 
     if assumptions is not None:
         from ir_agent import assume
@@ -718,6 +753,7 @@ def run(code: str, out_dir: str | Path, *, as_of: date,
         wacc_term=(Decimal(str(dv["wacc_term"])) if dv.get("wacc_term") is not None else None),
         nonop_fin_net=(Decimal(str(round((cal.get("fin_bridge") or {}).get("net", 0) * 1e8, 2)))
                        if (cal.get("fin_bridge") or {}).get("kind") == "finance" else None),
+        **_rd_fields(cal.get("rdcap") or {}),
         warnings=[str(w) for w in warns],
         notes=notes + _asof_note(as_of, meta) + [
             f"行情源 {meta.get('quote_source')}　β {meta.get('beta')}"

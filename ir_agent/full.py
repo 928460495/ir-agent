@@ -139,7 +139,12 @@ def _load_external(code: str, r, as_of: date) -> tuple[str, str, str]:
 def _dcf_kw(r) -> dict:
     """估值层的额外参数：年报网址 —— 估值层读附注判定非经营性金融资产（spec 2026-11-20-nonop-financial-assets）。"""
     url = getattr(r, "annual_url", "") or ""
-    return {"annual_url": url} if url else {}
+    kw = {"annual_url": url} if url else {}
+    # 申万路径：研发资本的摊销年限按它映射（spec 2026-11-24）。取分析层已有的分类，不再联网
+    path = getattr(getattr(getattr(r, "peer_set", None), "classification", None), "used_path", "") or ""
+    if path:
+        kw["industry"] = path
+    return kw
 
 
 def _company_name(code: str) -> str:

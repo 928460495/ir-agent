@@ -131,6 +131,10 @@ def simulate(inp: dict, P: dict) -> dict:
     tsur=G["税金及附加率"]
     oth=G["其他收益 / 营收"]+G["其他经营损益 / 营收"]
     rev=np.full(n,o["基期营业总收入"]); ppe=np.full(n,o["固定资产净额"])
+    # 研发资本化（spec 2026-11-24）：与 verify.recompute 同式滚动其他非流动资产与研发资本
+    onca=np.full(n,o["其他非流动资产"]); RDSW=D.get("研发资本化开关",0.0)==1
+    RDL=D.get("研发摊销年限") or 5.0; rda=np.full(n,D.get("期初研发资本",0.0)); NI=D.get("基期非无形部分")
+    rd_live=np.array(full["rd"],dtype=float)
     nwc_prev=np.full(n, o["应收票据及应收账款"]+o["存货"]+o["其他流动资产"]
                         -o["应付票据及应付账款"]-o["其他流动负债"])
     MY=D["期中折现开关"]; pv=np.zeros(n); fcff1=None
@@ -148,6 +152,8 @@ def simulate(inp: dict, P: dict) -> dict:
         capex=rev*np.clip(cx_live[t]+dcx,0.0,None)+fcx
         ncx=-rev*G["其他经营损益 / 营收"]      # 非现金加回（与确定性模型一致）
         ppe=ppe+capex*(1-CXI)-dep-ncx*IPS  # 无形资本开支不进固定资产；减值按比例减记
+        onca=onca+capex*CXI-amt-ncx*(1-IPS)
+        rdx=rev*rd_live[t]; rdam=rda/RDL; rda=rda+rdx-rdam
         nwc=(rev*G["应收周转天数 DSO"]/365 + cogs*G["存货周转天数 DIO"]/365
              + rev*G["其他流动资产 / 营收"] - cogs*G["应付周转天数 DPO"]/365
              - rev*G["其他流动负债 / 营收"])
@@ -156,7 +162,10 @@ def simulate(inp: dict, P: dict) -> dict:
         pv+=fcff/(1+W)**(t+1-0.5*MY)
     tt=D["终值所得税率 t_term"]
     nopat_T=(ebit+ncx)*(1-tt)          # 正常化终值 EBIT
-    roic=(WT+D["终值 ROIC 收敛溢价"])*np.ones_like(nopat_T) if D["终值 ROIC 处理"]==2 else nopat_T/(nwc+ppe)
+    intan=np.maximum(0.0, onca-NI) if NI is not None else np.zeros(n)
+    ic=nwc+ppe+intan+(rda if RDSW else 0.0)
+    nopat_adj=nopat_T+((rdx-rdam) if RDSW else 0.0)   # 只用于 ROIC；终值现金流仍按报表口径
+    roic=(WT+D["终值 ROIC 收敛溢价"])*np.ones_like(nopat_T) if D["终值 ROIC 处理"]==2 else nopat_adj/ic
     rr=np.where(roic>0, gt/np.where(roic>0,roic,1.0), np.inf)
     # ROIC ≤ WACC 时增长不创造价值，Gordon 式 (1−g/ROIC) 会失真甚至变负。
     # 经济上正确的处理是降级为【无增长永续】TV = NOPAT / WACC。

@@ -423,11 +423,30 @@ def build(cal: dict, path: str) -> dict:
          "收敛后的终值 ROIC = 终值 WACC + 本溢价。取自上方「稳态与终值」区当前情景"),
         ("终值 Beta（向 1 收敛）",DC.get("beta_term") or 1.0,"0.000",
          "Damodaran：成熟公司 Beta 向 1 收敛。只用于终值（终值 WACC 的 Ke），明确期仍用上方 Beta")]
+    # 研发资本化（spec 2026-11-24）。校准结果没有 rdcap（旧校准）时开关记 0、无形部分记 0 —— 与改动前一致
+    RDC=cal.get("rdcap")
+    if RDC:
+        _cov=(f"研发历史 {RDC['covered']} 年，"
+              + ("覆盖摊销期" if RDC["complete"] else f"不足 {RDC['life']+1} 年，研发资本被系统性低估"))
+        DP+=[("研发资本化开关（1=开 0=关）",DC.get("rd_cap",1),"0",
+              "Damodaran：研发是投资不是费用。开启后 NOPAT 加回研发、扣摊销，投入资本加研发资本；"
+              "【不改 FCFF】（研发从费用挪到资本开支，现金流不变）。默认终值模式（收敛至 WACC+溢价）下每股价值不变"),
+             ("研发摊销年限（年）",DC.get("rd_life",5),"0","按申万行业映射（软件/传媒 3、电子与器械 5、制药/通信设备/汽车 10、其余 5），可改"),
+             ("期初研发资本",RDC["asset"],NUM,"历年费用化研发的未摊销部分之和。"+_cov),
+             ("基期非无形部分（长投、商誉等，预测期不变）",RDC["nonintan0"],NUM,
+              "基期其他非流动资产 −（无形资产 + 开发支出）。预测期该行增减全部归到无形部分"),
+             ("研发资本化率（年报）",RDC["rate"] if RDC.get("rate") is not None else "未取到",PCT2,
+              "年报「研发投入」表：资本化研发投入 ÷ 研发投入。公司自行资本化的部分已在无形资产与开发支出里，不重复计算")]
+    else:
+        DP+=[("研发资本化开关（1=开 0=关）",0,"0","旧校准结果没有研发资本化数据，按关闭处理"),
+             ("研发摊销年限（年）",5,"0",""),("期初研发资本",0,NUM,""),
+             ("基期非无形部分（长投、商誉等，预测期不变）","未取到（旧校准，无形部分记 0）",NUM,""),
+             ("研发资本化率（年报）","未取到",PCT2,"")]
     DCF_ROW=r
     for lbl,v,f,note in DP:
         ws.cell(r,1,lbl).font=Font(size=10); ws.cell(r,1).border=BX
-        cc=ws.cell(r,2,None if v is None else (v if isinstance(v,str) else round(float(v),6)))
-        cc.font=F_FX if (v is None or isinstance(v,str)) else F_IN
+        cc=ws.cell(r,2,None if v is None else (v if isinstance(v,str) else (round(float(v),6) if abs(float(v))>=1e-9 or v==0 else float(v))))
+        cc.font=F_FX if (v is None or (isinstance(v,str) and v.startswith("="))) else F_IN
         cc.number_format=f; ws.cell(r,6,note).font=Font(size=9,color="808080"); r+=1
     DR={s[0]:DCF_ROW+i for i,s in enumerate(DP)}
     for i in range(NJ,NY):      # 回填营收增速过渡期的收敛目标：永续增长率 g
@@ -837,7 +856,34 @@ def _sheets(wb, cal, path):
     eb(28,"负债和股东权益总计",None,lambda c,i:f"={c}24+{c}27",NUM,True)
     eb(29,"★ 平衡校验 = 资产 −（负债+权益）",None,lambda c,i:f"={c}16-{c}28",Z,True,"必须为 0",None,None,P_O)
     eb(30,"净负债（有息负债−现金−交易性金融资产）",None,lambda c,i:f"={c}18+{c}21+{c}22-{c}6-{c}7")
-    eb(31,"营运资本 NWC",None,lambda c,i:f"={c}8+{c}9+{c}10-{c}19-{c}20",NUM,False,"应收+存货+其他流动资产 − 应付 − 其他流动负债")
+    _h=lambda xs:[x or 0 for x in xs]
+    _nwc_h=[round(a+b+c-d-e,4) for a,b,c,d,e in zip(_h(hrow(BS,"应收票据及应收账款")),_h(hrow(BS,"存货")),
+             _h([bs_der("oca",p) for p in HP]),_h(hrow(BS,"应付票据及应付账款")),_h([bs_der("ocl",p) for p in HP]))]
+    # 历史列此前为空 → 比率页历史 ROIC 实为 EBIT(1−t)/固定资产（2026-11-24 研发资本化时补上）
+    emit(wbs,31,"营运资本 NWC",_nwc_h,lambda c,i:f"={c}8+{c}9+{c}10-{c}19-{c}20",NUM,False,
+         "应收+存货+其他流动资产 − 应付 − 其他流动负债")
+    # ---- 备查行（不进资产总计，不影响平衡）：研发资本化与投入资本（spec 2026-11-24）----
+    _BC=CL(1+len(PR["annual"]))                     # 基期（最近年报）列
+    _SW=f"{A}!$B${DR['研发资本化开关（1=开 0=关）']}"; _LF=f"{A}!$B${DR['研发摊销年限（年）']}"
+    _NI=f"{A}!$B${DR['基期非无形部分（长投、商誉等，预测期不变）']}"
+    _RDC=cal.get("rdcap")
+    emit(wbs,32,"〔备查〕研发摊销",[None]*NH,lambda c,i:f"={pc(c)}33/{_LF}",NUM,False,
+         "上期研发资本 ÷ 摊销年限（直线法近似逐年归集口径）",(round(_RDC["amort"],6) if _RDC else 0))
+    emit(wbs,33,"〔备查〕研发资本（Damodaran）",[None]*NH,lambda c,i:f"={pc(c)}33+{P}!{c}{RRD}-{c}32",NUM,False,
+         "期初 + 本期研发费用 − 本期摊销（基期值由「1_假设」的期初研发资本给定）",
+         f"={A}!B{DR['期初研发资本']}")
+    _ih=([round((H(BS,'无形资产',p) or 0)+(H(BS,'开发支出',p) or 0),4) for p in HP] if _RDC else [0]*NH)
+    emit(wbs,34,"〔备查〕无形资产与开发支出",_ih,
+         (lambda c,i:f"=MAX(0,{c}14-{_NI})") if _RDC else (lambda c,i:0),NUM,False,
+         "公司自行资本化的研发在这里。预测期 = MAX(0, 其他非流动资产 − 基期非无形部分)",
+         (f"=MAX(0,{_BC}14-{_NI})" if _RDC else 0))
+    _ich=[round(a+b+c,4) for a,b,c in zip(_nwc_h,_h(hrow(BS,"固定资产净额") if any(hrow(BS,"固定资产净额")) else hrow(BS,"固定资产")),_ih)]
+    emit(wbs,35,"〔备查〕投入资本 IC（报表口径）",_ich,lambda c,i:f"={c}31+{c}12+{c}34",NUM,True,
+         "营运资本 + 固定资产净额 + 无形资产与开发支出（在建工程、长投、商誉不计）",f"={_BC}31+{_BC}12+{_BC}34")
+    emit(wbs,36,"〔备查〕投入资本 IC（含研发资本）",[None]*NH,lambda c,i:f"={c}35+{c}33",NUM,True,None,
+         f"={_BC}35+{_BC}33")
+    emit(wbs,37,"〔备查〕生效投入资本 IC",[None]*NH,lambda c,i:f"=IF({_SW}=1,{c}36,{c}35)",NUM,True,
+         "研发资本化开关决定；供 DCF 终值与比率页使用",f"=IF({_SW}=1,{_BC}36,{_BC}35)")
 
     # ---------- 现金流量表（行号固定 6..25）----------
     wk=sheet("4_现金流量表","2E75B6")
@@ -909,7 +955,7 @@ def _sheets(wb, cal, path):
        "EBIT×(1−t) + 折旧摊销 − 资本开支 + 营运资本变动 + 非现金其他经营损益")
     for c in CC: wk[f"{c}22"].font=Font(size=10,color="808080",italic=True)
     cal["_ref"]=dict(RV=RV,RC=RC,RGP=RGP,ROP=ROP,RPBT=RPBT,RTAX=RTAX,
-                     RNI=RNI,RMI=RMI,RNIP=RNIP,REPS=REPS,REBIT=REBIT)
+                     RNI=RNI,RMI=RMI,RNIP=RNIP,REPS=REPS,REBIT=REBIT,RRD=RRD)
     return _dcf_sheet(wb,cal,path)
 
 def _dcf_sheet(wb, cal, path):
@@ -983,8 +1029,17 @@ def _dcf_sheet(wb, cal, path):
                  "故终值 ROIC 与终值 FCFF 均使用正常化口径")
     TNr=r; r=put(r,f"{YE[-1]} 营运资本 NWC",f"={B_}!{CC[-1]}31")
     TPr=r; r=put(r,f"{YE[-1]} 固定资产净额",f"={B_}!{CC[-1]}12")
-    ICr=r; r=put(r,"投入资本 IC = NWC + 固定资产",f"=B{TNr}+B{TPr}",NUM,True)
-    RBr=r; r=put(r,"终值 ROIC（计算值）= EBIT×(1−t_term) / IC",f"=B{TEr}*(1-B{TTr})/B{ICr}",PCT2,False,"把末年超额回报直接永续化")
+    _SWd=f"{A}!$B${DR['研发资本化开关（1=开 0=关）']}"
+    TIr=r; r=put(r,f"{YE[-1]} 无形资产与开发支出",f"={B_}!{CC[-1]}34")
+    ICRr=r; r=put(r,"报表口径投入资本 = NWC + 固定资产 + 无形资产与开发支出",f"=B{TNr}+B{TPr}+B{TIr}",NUM,True)
+    TRDr=r; r=put(r,f"{YE[-1]} 研发资本（Damodaran）",f"={B_}!{CC[-1]}33",NUM,False,
+                  "报表外调整项：不进资产总计，只用于投入资本与 ROIC")
+    ICr=r; r=put(r,"投入资本 IC（生效）",f"=IF({_SWd}=1,B{ICRr}+B{TRDr},B{ICRr})",NUM,True,
+                 "研发资本化开关打开时 = 报表口径 + 研发资本")
+    NAr=r; r=put(r,"调整后 NOPAT = EBIT×(1−t_term) + 研发 − 研发摊销",
+                 f"=B{TEr}*(1-B{TTr})+IF({_SWd}=1,{P}!{CC[-1]}{RF['RRD']}-{B_}!{CC[-1]}32,0)",NUM,False,
+                 "Damodaran：研发全额抵扣，税盾保留，故不是 (EBIT+研发−摊销)×(1−t)。终值 FCFF 仍按报表口径（资本化不改现金流）")
+    RBr=r; r=put(r,"终值 ROIC（计算值）= 调整后 NOPAT / IC",f"=B{NAr}/B{ICr}",PCT2,False,"把末年超额回报直接永续化")
     RCr=r; r=put(r,"终值 ROIC（收敛口径）",f"=B{WTr}+{A}!$B${DR['终值 ROIC 收敛溢价（模式2 用）']}",PCT2,False,
                  "竞争终将侵蚀超额回报：终值 ROIC = 终值 WACC + 溢价")
     ROr=r; r=put(r,"终值 ROIC（生效）",
@@ -1049,7 +1104,7 @@ def _dcf_sheet(wb, cal, path):
             # 终值 WACC = 本行 WACC −（Beta − 终值 Beta）× ERP ×（1 − Wd），与主模型同式
             wt=f"($A{r}-($B${BEr}-$B${BTr})*$B${ERPr}*(1-$B${WDr}))"
             roic=(f"IF({A}!$B${DR['终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）']}=2,"
-                  f"{wt}+{A}!$B${DR['终值 ROIC 收敛溢价（模式2 用）']},($B${TEr}*(1-$B${TTr})/$B${ICr}))")
+                  f"{wt}+{A}!$B${DR['终值 ROIC 收敛溢价（模式2 用）']},($B${NAr}/$B${ICr}))")   # 调整后 NOPAT / 生效 IC，与终值节同口径
             tf=(f"$B${TEr}*(1+{col}${SHROW})*(1-$B${TTr})"
                 f"*(1-{col}${SHROW}/({roic}))")
             tvpv=f"({tf})/({wt}-{col}${SHROW})/(1+$A{r})^({NY}-0.5*$B${MYr})"
@@ -1081,7 +1136,8 @@ def _engine(wb, cal, D_):
     R=cal["_rows"]; GR,OR_,DR,FN = R["GR"],R["OR_"],R["DR"],R["FN"]
     NY=R["NY"]; CX_ROW=R["CX_ROW"]; G_ROW=R["G_ROW"]; M_ROW=R["M_ROW"]; IT_=R.get("IT") or {}
     OPR=R["OPEX_ROW"]; NJ=R["NJ"]
-    A="'1_假设'"; E="'6_敏感性引擎'"; DS="'5_DCF'"
+    A="'1_假设'"; E="'6_敏感性引擎'"; DS="'5_DCF'"; P="'2_利润表'"; B_="'3_资产负债表'"
+    CC=R["CC"]; RF=cal["_ref"]
     w=wb.create_sheet("6_敏感性引擎"); w.sheet_properties.tabColor="7F7F7F"
     w.column_dimensions["A"].width=10
     for i in range(2,4): w.column_dimensions[CL(i)].width=11
@@ -1118,7 +1174,11 @@ def _engine(wb, cal, D_):
              ("终值ROIC模式",f"={A}!B{DR['终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）']}"),
              ("终值ROIC溢价",f"={A}!B{DR['终值 ROIC 收敛溢价（模式2 用）']}"),
              ("Beta",f"={DS}!B{D_['BE']}"),("终值Beta",f"={DS}!B{D_['BT']}"),
-             ("ERP",f"={DS}!B{D_['ER']}"),("债务权重",f"={DS}!B{D_['WD']}")]
+             ("ERP",f"={DS}!B{D_['ER']}"),("债务权重",f"={DS}!B{D_['WD']}"),
+             # 研发资本化：取主模型末年值的近似（本表不滚动无形部分与研发资本；只在终值模式 1 影响价值）
+             ("末年无形资产与开发支出",f"={B_}!{CC[-1]}34"),
+             ("末年研发资本（生效）",f"=IF({A}!$B${DR['研发资本化开关（1=开 0=关）']}=1,{B_}!{CC[-1]}33,0)"),
+             ("末年研发 NOPAT 调整",f"=IF({A}!$B${DR['研发资本化开关（1=开 0=关）']}=1,{P}!{CC[-1]}{RF['RRD']}-{B_}!{CC[-1]}32,0)")]
     _BY=f"{A}!$B${FN['募投资本开支建设期（年）']}"; _YR=f"{A}!$B${FN['到账年份序号（1=首个预测年）']}"
     _UC=f"{A}!$B${FN['投向 — 资本开支（亿元）']}"
     anchors += [(f"募投资本开支{t}",
@@ -1214,7 +1274,8 @@ def _engine(wb, cal, D_):
                 w[f"{SC['PV']}{r}"]=f"={pv}"
                 _tebit=(f"({yc(NY,2)}{r}+{yc(NY,0)}{r}*$B${AR_['非现金其他经营损益率']})")   # 正常化终值 EBIT
                 w[f"{SC['ROIC']}{r}"]=(f"=IF($B${AR_['终值ROIC模式']}=2,{wt}+$B${AR_['终值ROIC溢价']},"
-                                      f"{_tebit}*(1-$B${AR_['终值税率']})/({yc(NY,6)}{r}+{yc(NY,3)}{r}))")
+                                      f"({_tebit}*(1-$B${AR_['终值税率']})+$B${AR_['末年研发 NOPAT 调整']})"
+                                      f"/({yc(NY,6)}{r}+{yc(NY,3)}{r}+$B${AR_['末年无形资产与开发支出']}+$B${AR_['末年研发资本（生效）']}))")
                 w[f"{SC['RR']}{r}"]=f"={gtexp}/{SC['ROIC']}{r}"
                 w[f"{SC['TF']}{r}"]=f"={_tebit}*(1+{gtexp})*(1-$B${AR_['终值税率']})*(1-{SC['RR']}{r})"
                 w[f"{SC['TV']}{r}"]=f"={SC['TF']}{r}/({wt}-{gtexp})"
@@ -1302,7 +1363,7 @@ def _ratios(wb, cal, D_):
     HC,CC,NH,NY = R["HC"],R["CC"],R["NH"],R["NY"]
     HL,YE = PR["labels"],PR["proj"]
     ALL=HC+CC
-    P="'2_利润表'"; B_="'3_资产负债表'"; K="'4_现金流量表'"; DS="'5_DCF'"
+    A="'1_假设'"; P="'2_利润表'"; B_="'3_资产负债表'"; K="'4_现金流量表'"; DS="'5_DCF'"
     RV,RC,RGP,ROP,RPBT,RTAX,RNI,RMI,RNIP,REBIT = (RF[k] for k in
         ("RV","RC","RGP","ROP","RPBT","RTAX","RNI","RMI","RNIP","REBIT"))
     w=wb.create_sheet("7_财务比率与杜邦"); w.sheet_properties.tabColor="548235"
@@ -1403,11 +1464,26 @@ def _ratios(wb, cal, D_):
     r=line(r,"ROA（净利润 / 平均总资产）",
            lambda c,p,i,m=None: IE(f"({P}!{c}{RNI}{'*'+m if m else ''})/{avg(B_,16,c,p)}"),ann="num",
            ann_caveat=_ANN_CAVEAT_PROFIT)
+    _SWr=f"{A}!$B${R['DR']['研发资本化开关（1=开 0=关）']}"; _RRD=RF["RRD"]
+    _np=lambda c,m: f"({P}!{c}{REBIT}*(1-{DS}!$B${D_['TT']}){'*'+m if m else ''})"
+    _npa=lambda c,m: (f"(({P}!{c}{REBIT}*(1-{DS}!$B${D_['TT']})+{P}!{c}{_RRD}-{B_}!{c}32)"
+                      f"{'*'+m if m else ''})")
+    ROWS["roic_rep"]=r
+    r=line(r,"ROIC（报表口径）",
+           lambda c,p,i,m=None: IE(f"{_np(c,m)}/{B_}!{c}35"),PCT,False,
+           "EBIT×(1−t) ÷（营运资本 + 固定资产 + 无形资产与开发支出）",ann="num",ann_caveat=_ANN_CAVEAT_PROFIT)
+    ROWS["roic_rd"]=r
+    r=line(r,"ROIC（研发资本化）",
+           lambda c,p,i,m=None,_r=ROWS["roic_rep"]: IE(
+               f'IF({_SWr}<>1,{c}{_r},IF({B_}!{c}33="","",{_npa(c,m)}/({B_}!{c}35+{B_}!{c}33)))'),PCT,False,
+           "（EBIT×(1−t) + 研发 − 研发摊销）÷（报表口径投入资本 + 研发资本）。Damodaran 口径；"
+           "开关关闭时与报表口径相同；研发资本只有基期与预测期，更早的历史列留空",ann="num",ann_caveat=_ANN_CAVEAT_PROFIT)
     ROWS["roic"]=r
+    _rr,_rd=ROWS["roic_rep"],ROWS["roic_rd"]
     r=line(r,"ROIC（税后 / 投入资本）",
-           lambda c,p,i,m=None: IE(f"{P}!{c}{REBIT}{'*'+m if m else ''}*(1-{DS}!$B${D_['TT']})/({B_}!{c}31+{B_}!{c}12)"),PCT,True,
-           "投入资本 = 营运资本 NWC + 固定资产净额；与 DCF 终值 ROIC 同口径",ann="num",
-           ann_caveat=_ANN_CAVEAT_PROFIT)
+           lambda c,p,i,m=None: f'=IF(AND({_SWr}=1,{c}{_rd}<>""),{c}{_rd},{c}{_rr})',PCT,True,
+           "生效口径：研发资本化开关打开时取「研发资本化」行，否则取「报表口径」行；与 DCF 终值 ROIC 同口径",
+           ann="num",ann_caveat=_ANN_CAVEAT_PROFIT)      # 引用的两行已年化，这里只为中期列带上同一条批注
     ROWS["wacc"]=r
     r=line(r,"（对照）WACC", lambda c,p,i,m=None: f"={DS}!$B${D_['WC']}",PCT,False,"ROIC 持续低于 WACC 即为价值毁灭")
     r+=1

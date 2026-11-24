@@ -186,6 +186,11 @@ def read_inputs(path):
             return dflt
     dcf["终值 ROIC 处理"] = _opt("终值 ROIC 处理（1=沿用末年 2=收敛至 WACC+溢价）", 1.0)
     dcf["终值 Beta（向 1 收敛）"] = _opt("终值 Beta（向 1 收敛）", dcf["Beta（5年"])
+    # 研发资本化（spec 2026-11-24）。旧工作簿没有这几行：开关 0、无形部分恒 0 —— IC 退回旧口径
+    dcf["研发资本化开关"] = _opt("研发资本化开关（1=开 0=关）", 0.0)
+    dcf["研发摊销年限"] = _opt("研发摊销年限（年）", 5.0)
+    dcf["期初研发资本"] = _opt("期初研发资本", 0.0)
+    dcf["基期非无形部分"] = _opt("基期非无形部分（长投、商誉等，预测期不变）", None)
     def steady(lbl):
         return float(_cell_value(wb, a, f"{chr(ord('A')+scen)}{_find(am, lbl)}"))
     try:
@@ -309,6 +314,12 @@ def recompute(inp):
         _ncx=-rev*G["其他经营损益 / 营收"]; _ips=G["非现金减值减记中固定资产占比"]   # 减值按期初余额比例分摊减记
         ppe=o["ppe"]+capex*(1-_cxi)-dep-_ncx*_ips
         onca=o["onca"]+capex*_cxi-amt-_ncx*(1-_ips)
+        # 研发资本化（spec 2026-11-24）：研发资本滚动；无形部分 = MAX(0, 其他非流动资产 − 基期非无形部分)
+        _D=inp["dcf"]; rdx=rev*full["rd"][i]
+        rdam=o.get("rda", _D.get("期初研发资本", 0.0))/(_D.get("研发摊销年限") or 5.0)
+        rda=o.get("rda", _D.get("期初研发资本", 0.0))+rdx-rdam
+        _ni=_D.get("基期非无形部分")
+        intan=max(0.0, onca-_ni) if _ni is not None else 0.0
         dwc=-(ar-o["ar"])-(iv-o["inv"])-(oca-o["oca"])+(ap-o["ap"])+(ocl-o["ocl"])
         # 非现金其他经营损益（减值/公允价值变动/资产处置）已在 EBIT 中扣除但不耗现金，
         # 按全额加回 —— 不加回等于把同一笔成本算两次（资本开支一次、减值一次）。
@@ -336,9 +347,10 @@ def recompute(inp):
             ebit=ebit,dep=dep,amt=amt,da=dep+amt,ncx=ncx,onca=onca,capex=capex,fcff=fcff,ocf=ocf,cash=cash,ar=ar,inv=iv,oca=oca,ppe=ppe,
             ap=ap,ocl=ocl,st=st,lt=lt,ta=ta,tl=tl,eq=eq,mie=mie,te=eq+mie,check=ta-tl-eq-mie,
             nwc=ar+iv+oca-ap-ocl, fin_net=prc, rep_st=-rst, rep_lt=-rlt,
-            bb=bb, cum_bb=cum_bb))
+            bb=bb, cum_bb=cum_bb, rd=rdx, rdam=rdam, rda=rda, intan=intan,
+            ic_rep=ar+iv+oca-ap-ocl+ppe+intan))
         o.update(cash=cash,ar=ar,inv=iv,oca=oca,ppe=ppe,onca=onca,st=st,lt=lt,ap=ap,ocl=ocl,eq=eq,mi=mie,
-                 cum_bb=cum_bb)
+                 cum_bb=cum_bb,rda=rda)
     D=inp["dcf"]
     ke=D["无风险利率 Rf"]+D["Beta（5年"]*D["股权风险溢价 ERP"]
     w=(1-D["债务权重 D/(D+E)"])*ke+D["债务权重 D/(D+E)"]*D["债务成本 Kd"]*(1-t)
@@ -346,9 +358,13 @@ def recompute(inp):
     w_t=((1-D["债务权重 D/(D+E)"])*(D["无风险利率 Rf"]+D["终值 Beta（向 1 收敛）"]*D["股权风险溢价 ERP"])
          +D["债务权重 D/(D+E)"]*D["债务成本 Kd"]*(1-t))
     gt=D["永续增长率 g"]; tt=D["终值所得税率 t_term"]; my=D["期中折现开关"]
-    ic=rows[-1]["nwc"]+rows[-1]["ppe"]
+    sw=D.get("研发资本化开关",0.0)==1
+    ic_rep=rows[-1]["ic_rep"]
+    ic=ic_rep+(rows[-1]["rda"] if sw else 0.0)
     tebit=rows[-1]["ebit"]+rows[-1]["ncx"]      # 正常化：终值年 EBIT 同样含非现金减值
-    roic_calc=tebit*(1-tt)/ic
+    # 调整后 NOPAT：研发全额抵扣、税盾保留（Damodaran），故是 EBIT(1−t)+研发−摊销，不是 (EBIT+研发−摊销)(1−t)
+    nopat_adj=tebit*(1-tt)+((rows[-1]["rd"]-rows[-1]["rdam"]) if sw else 0.0)
+    roic_calc=nopat_adj/ic
     roic=(w_t+D["终值 ROIC 收敛溢价"]) if D["终值 ROIC 处理"]==2 else roic_calc
     rr=gt/roic
     tf=tebit*(1+gt)*(1-tt)*(1-rr); tv=tf/(w_t-gt)
@@ -361,7 +377,7 @@ def recompute(inp):
     gx=ev-nd+D["非经营资产（加回）"]+fin_pv
     mi_ded=src["少数股东权益"] if D["少数股东扣除方式"]==1 else gx*D["少数股东利润占比"]
     eqv=gx-mi_ded; ps=eqv/(src["总股本（亿股）"]+F["ns"])
-    return rows, dict(wacc=w,wacc_term=w_t,roic_calc=roic_calc,ke=ke,ic=ic,roic=roic,rr=rr,tf=tf,tv=tv,pv=pv,pvtv=pvtv,
+    return rows, dict(wacc=w,wacc_term=w_t,roic_calc=roic_calc,ke=ke,ic=ic,ic_rep=ic_rep,nopat_adj=nopat_adj,roic=roic,rr=rr,tf=tf,tv=tv,pv=pv,pvtv=pvtv,
                       ev0=ev0,ev=ev,nd=nd,gx=gx,mi=mi_ded,eq=eqv,ps=ps,fin_pv=fin_pv)
 
 def verify_all_scenarios(path, quiet=False, values=None):
@@ -436,6 +452,11 @@ def verify(path, quiet=False):
       ("偿还长贷","4_现金流量表",28,"rep_lt")]:
         for i,c in enumerate(CC): chk(nm,sh,f"{c}{rw}",rows[i][key])
     for i,c in enumerate(CC): chk("平衡校验","3_资产负债表",f"{c}29",0.0)
+    # 研发资本化备查行（11-24 起的工作簿才有；旧工作簿跳过）
+    if str(wb["3_资产负债表"].cell(33,1).value or "").startswith("〔备查〕研发资本"):
+        for nm,rw,key in (("研发摊销",32,"rdam"),("研发资本",33,"rda"),("无形资产与开发支出",34,"intan"),
+                          ("IC 报表口径",35,"ic_rep")):
+            for i,c in enumerate(CC): chk(nm,"3_资产负债表",f"{c}{rw}",rows[i][key])
     dm=_rowmap(wb["5_DCF"])
     for pfx,ref in [("WACC",dv["wacc"]),("股权成本 Ke",dv["ke"]),("投入资本 IC",dv["ic"]),
                     ("终值 ROIC（生效）",dv["roic"]),("终值 WACC",dv["wacc_term"]),
@@ -446,6 +467,9 @@ def verify(path, quiet=False):
                     ("减：少数股东权益",dv["mi"]),("归母股权价值",dv["eq"]),("每股内在价值",dv["ps"])]:
         try: chk(pfx,"5_DCF",f"B{_find(dm,pfx)}",ref)
         except KeyError: fails.append((pfx,"未找到行",None,ref))
+    for pfx,ref in (("调整后 NOPAT",dv["nopat_adj"]),("报表口径投入资本",dv["ic_rep"])):    # 旧工作簿无此两行
+        try: chk(pfx,"5_DCF",f"B{_find(dm,pfx)}",ref)
+        except KeyError: pass
     fr=_find(dm,"FCFF")
     for i in range(ny): chk("DCF-FCFF","5_DCF",f"{CL(2+i)}{fr}",rows[i]["fcff"])
     # 假设「生效值」必须等于利润表实际使用的增速/毛利率（防止假设改了报表不动）
