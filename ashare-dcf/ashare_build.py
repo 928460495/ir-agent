@@ -856,11 +856,10 @@ def _sheets(wb, cal, path):
     eb(28,"负债和股东权益总计",None,lambda c,i:f"={c}24+{c}27",NUM,True)
     eb(29,"★ 平衡校验 = 资产 −（负债+权益）",None,lambda c,i:f"={c}16-{c}28",Z,True,"必须为 0",None,None,P_O)
     eb(30,"净负债（有息负债−现金−交易性金融资产）",None,lambda c,i:f"={c}18+{c}21+{c}22-{c}6-{c}7")
-    _h=lambda xs:[x or 0 for x in xs]
-    _nwc_h=[round(a+b+c-d-e,4) for a,b,c,d,e in zip(_h(hrow(BS,"应收票据及应收账款")),_h(hrow(BS,"存货")),
-             _h([bs_der("oca",p) for p in HP]),_h(hrow(BS,"应付票据及应付账款")),_h([bs_der("ocl",p) for p in HP]))]
-    # 历史列此前为空 → 比率页历史 ROIC 实为 EBIT(1−t)/固定资产（2026-11-24 研发资本化时补上）
-    emit(wbs,31,"营运资本 NWC",_nwc_h,lambda c,i:f"={c}8+{c}9+{c}10-{c}19-{c}20",NUM,False,
+    # 历史列此前为空 → 比率页历史 ROIC 实为 EBIT(1−t)/固定资产（2026-11-24 研发资本化时补上）。
+    # **历史列写本列公式，不写静态原始值**：基期列的应收/存货/其他流动资产链接的是剔除财务公司金融资产后的
+    # 期初值，静态原始值（含拆出资金等）会让基期 IC 与首个预测年断崖（茅台实算 1825 → 1058 亿）
+    emit(wbs,31,"营运资本 NWC",[None]*NH,lambda c,i:f"={c}8+{c}9+{c}10-{c}19-{c}20",NUM,False,
          "应收+存货+其他流动资产 − 应付 − 其他流动负债")
     # ---- 备查行（不进资产总计，不影响平衡）：研发资本化与投入资本（spec 2026-11-24）----
     _BC=CL(1+len(PR["annual"]))                     # 基期（最近年报）列
@@ -877,9 +876,12 @@ def _sheets(wb, cal, path):
          (lambda c,i:f"=MAX(0,{c}14-{_NI})") if _RDC else (lambda c,i:0),NUM,False,
          "公司自行资本化的研发在这里。预测期 = MAX(0, 其他非流动资产 − 基期非无形部分)",
          (f"=MAX(0,{_BC}14-{_NI})" if _RDC else 0))
-    _ich=[round(a+b+c,4) for a,b,c in zip(_nwc_h,_h(hrow(BS,"固定资产净额") if any(hrow(BS,"固定资产净额")) else hrow(BS,"固定资产")),_ih)]
-    emit(wbs,35,"〔备查〕投入资本 IC（报表口径）",_ich,lambda c,i:f"={c}31+{c}12+{c}34",NUM,True,
-         "营运资本 + 固定资产净额 + 无形资产与开发支出（在建工程、长投、商誉不计）",f"={_BC}31+{_BC}12+{_BC}34")
+    emit(wbs,35,"〔备查〕投入资本 IC（报表口径）",[None]*NH,lambda c,i:f"={c}31+{c}12+{c}34",NUM,True,
+         "营运资本 + 固定资产净额 + 无形资产与开发支出（在建工程、长投、商誉不计）")
+    for _i in range(NH):                            # 历史列（含基期、中期列）也写本列公式
+        _c=CL(2+_i)
+        for _rw,_fx in ((31,f"={_c}8+{_c}9+{_c}10-{_c}19-{_c}20"),(35,f"={_c}31+{_c}12+{_c}34")):
+            _cc=wbs[f"{_c}{_rw}"]; _cc.value=_fx; _cc.number_format=NUM
     emit(wbs,36,"〔备查〕投入资本 IC（含研发资本）",[None]*NH,lambda c,i:f"={c}35+{c}33",NUM,True,None,
          f"={_BC}35+{_BC}33")
     emit(wbs,37,"〔备查〕生效投入资本 IC",[None]*NH,lambda c,i:f"=IF({_SW}=1,{c}36,{c}35)",NUM,True,

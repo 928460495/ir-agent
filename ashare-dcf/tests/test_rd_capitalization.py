@@ -277,3 +277,18 @@ def test_模式1下蒙特卡洛随开关变化(tmp_path):
         P = MC.defaults({}); P["n_paths"] = 200
         ps[sw] = float(MC.simulate(V.read_inputs(path), P)["ps"].mean())
     assert ps[1] != pytest.approx(ps[0], rel=1e-6)
+
+
+def test_营运资本历史列是本列公式_与上方各行同口径(tmp_path):
+    """茅台实算（2026-11-24）：基期列的应收/存货/其他流动资产链接的是剔除财务公司金融资产后的期初值，
+    营运资本若写静态原始值（含拆出资金等近千亿），投入资本在基期与首个预测年之间断崖（1825 → 1058 亿）。"""
+    import ashare_build as B
+    from openpyxl import load_workbook
+    cal = _fixture_cal()
+    out = str(tmp_path / "nwc.xlsx")
+    B.build(cal, out)
+    ws = load_workbook(out)["3_资产负债表"]
+    from openpyxl.utils import get_column_letter as CL
+    for i in range(cal["_rows"]["NH"]):
+        c = CL(2 + i)
+        assert ws[f"{c}31"].value == f"={c}8+{c}9+{c}10-{c}19-{c}20"
