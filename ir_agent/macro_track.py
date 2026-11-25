@@ -56,8 +56,9 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
 
     tracks = list(view.tracks)[:MACRO_TRACK_MAX]
     res = TrackResult(truncated=[t.indicator for t in list(view.tracks)[MACRO_TRACK_MAX:]])
-    # 上一轮检索失败（没有结论也没有出处）的指标当作新的，重跑时再搜一次 —— 一次超时不能永久冻结
-    prev = {i.indicator: i for i in (done.items if done else []) if i.conclusion or i.sources}
+    # 上一轮没有一篇打开的出处（检索失败，或文章全打不开）的指标当作新的，重跑时再搜一次 —— 一次超时
+    # 不能永久冻结；有结论没出处的读数也不能（NVDA 2026-11-25：英文页全被误判打不开）
+    prev = {i.indicator: i for i in (done.items if done else []) if i.sources}
     names = {t.indicator for t in tracks}
     res.removed = [i.indicator for i in (done.items if done else []) if i.indicator not in names]
     keep_urls = {u for k, i in prev.items() if k in names for u in i.sources}

@@ -207,8 +207,8 @@ def review(judge, *, rules: str, kinds: tuple, expected: list, draft: str,
             prompt = f"{base}\n---\n**上一次回答不完整**：{last}\n请补全后重新输出全部条目。\n"
             continue
         attempts.append((raw, ""))
-        return ReviewResult(verdicts=MR.annotate_quotes(verdicts, hay=hay,
-                                                        ledger=ledger, as_of=as_of),
+        return ReviewResult(verdicts=MR.annotate_quotes(verdicts, hay=hay, ledger=ledger,
+                                                        as_of=as_of, draft=draft),
                             attempts=attempts)
     err = ReviewIncomplete(last)
     err.attempts = attempts

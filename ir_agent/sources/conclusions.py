@@ -8,7 +8,7 @@
 的分析判断，要求逐字是错位的。
 
 **代码不判对错，只做四件机械的事**，结果全部是标注、交给门② 的人：
-1. 文章打不打得开（抓不到、或抓回的文本里一个中文字都没有）；
+1. 文章打不打得开（抓不到、或抓回的不是可读正文 —— 反爬校验页、乱码、空页）；
 2. 时点（晚于 as_of 的文章剔除；结论引的文章全被剔除就丢弃）—— 唯一会丢东西的一件；
 3. 结论里的每个数字在它引用的文章里有没有出处；
 4. 按代码实际抓到的最终域名分级，不按模型自报的机构名。
@@ -36,6 +36,11 @@ _URL = re.compile(r"https?://\S+")
 _CITE = re.compile(r"\d+")
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 _CJK = re.compile(r"[一-鿿]")
+_WORD = re.compile(r"(?<![^\s(\"'“‘])[A-Za-z][A-Za-z'’-]{1,20}(?=[\s.,;:!?)\"'”’]|$)")   # 空白隔开的单词
+MIN_WORDS = 20
+BLOCK_PAGE_MAX = 2500           # 反爬校验页很短；长正文里偶然出现这些措辞不算
+_BLOCKED = re.compile(r"enable javascript and cookies|checking your browser|access denied|verify (?:that )?you are (?:a )?human"
+                      r"|attention required|unusual traffic|are you a robot|captcha|ddos protection", re.I)
 _CN = "零一二三四五六七八九"
 _CN_ALL = "零一二三四五六七八九十百千万亿两"
 
@@ -221,10 +226,20 @@ def number_marks(claim: str, articles: list[Article]) -> list[NumberMark]:
             for n in nums]
 
 
+def _readable(text: str) -> bool:
+    """是不是可读正文。**不看语言**：此前要求有中文，美股的英文网页全被判打不开 —— NVDA 2026-11-25
+    四个宏观跟踪指标都有结论、出处全空。英文页要求有成句的单词，且不是短小的反爬校验页。"""
+    if _CJK.search(text):
+        return True
+    if len(_WORD.findall(text)) < MIN_WORDS:
+        return False
+    return not (len(text) < BLOCK_PAGE_MAX and _BLOCKED.search(text))
+
+
 def open_articles(items: list[Conclusion]) -> None:
     """逐篇抓回正文（同一篇只抓一次），再给每条结论标数字出处。
 
-    抓回的文本里一个中文字都没有（反爬挑战页、外文页面）记为打不开 ——
+    抓回的不是可读正文（反爬挑战页、乱码、空页，见 `_readable`）记为打不开 ——
     **措辞是「无从比对」，不是「结论未能核实」**：实验里捷配返回的是阿里云 WAF
     的 JS 挑战页，旧代码把它当正文、报成「转述未能核实」，那是说错话。
     **不绕过反爬**，人可以在浏览器里看。
@@ -243,8 +258,8 @@ def open_articles(items: list[Conclusion]) -> None:
             a.final_url = got.final_url
             a.degraded = got.host_check_degraded
             a.tier = tier_of_url(got.final_url)
-            if not _CJK.search(got.text or ""):
-                a.why_not = "抓回的文本里没有中文（反爬校验页或外文页面），无从比对"
+            if not _readable(got.text or ""):
+                a.why_not = "抓回的不是可读正文（反爬校验页或空页），无从比对"
                 continue
             a.opened, a.text = True, got.text
         c.marks = number_marks(c.claim, c.articles)

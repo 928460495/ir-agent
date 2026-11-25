@@ -249,18 +249,41 @@ def parse(raw: str, expected: list[tuple[str, str]],
     return [got[e] for e in expected]
 
 
-def annotate_quotes(verdicts: list[Verdict], *, hay: str, ledger, as_of) -> list[Verdict]:
-    """理由里引的原文「…」与账本占位符能否找到。**只标注，不改结论**（与多空
-    辩论同一处理）。"""
+_ELLIPSIS = re.compile(r"…+|\.{3,}")
+
+
+def _quote_in(q: str, hays: list[str]) -> bool:
+    """引文在不在任一段原文里。审核者常用省略号截短长句 —— 各片段按原文顺序都在就算。"""
     from ir_agent.sources.external import norm
 
-    h = norm(hay or "")
+    parts = [p for x in _ELLIPSIS.split(q) if (p := norm(x))]
+    if not parts:
+        return False
+    for h in hays:
+        at = 0
+        for p in parts:
+            i = h.find(p, at)
+            if i < 0:
+                break
+            at = i + len(p)
+        else:
+            return True
+    return False
+
+
+def annotate_quotes(verdicts: list[Verdict], *, hay: str, ledger, as_of, draft: str = "") -> list[Verdict]:
+    """理由里引的原文「…」与账本占位符能否找到。**只标注，不改结论**（与多空
+    辩论同一处理）。审核者也会用「」引被审的稿子（`draft`）——NVDA 2026-11-25 的 37 条「找不到」
+    多是引稿子原句或用省略号截短，没有一条是编造；稿子里的占位符不参与比对。"""
+    from ir_agent.sources.external import norm
+
+    hays = [norm(hay or ""), norm(draft or ""), norm(_REF.sub("", draft or ""))]
     out: list[Verdict] = []
     for v in verdicts:
         notes = []
         for q in _QUOTE.findall(v.why):
-            if norm(q) not in h:
-                notes.append(f"引文「{q[:20]}」在语料与年报里找不到")
+            if not _quote_in(q, hays):
+                notes.append(f"引文「{q[:20]}」在语料、年报与所审稿子里找不到")
         for key, per in _REF.findall(v.why):
             try:
                 ledger.get(key, per, as_of=as_of)
@@ -414,8 +437,8 @@ def review(judge, *, proposal: str, model, materials: str, extra: str,
             prompt = f"{base}\n---\n**上一次回答不完整**：{last}\n请补全后重新输出全部条目。\n"
             continue
         attempts.append((raw, ""))
-        return ReviewResult(verdicts=annotate_quotes(verdicts, hay=hay,
-                                                     ledger=ledger, as_of=as_of),
+        return ReviewResult(verdicts=annotate_quotes(verdicts, hay=hay, ledger=ledger,
+                                                     as_of=as_of, draft=proposal),
                             attempts=attempts)
     err = ReviewIncomplete(last)
     err.attempts = attempts

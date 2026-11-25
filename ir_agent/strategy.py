@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
 
@@ -138,12 +138,24 @@ MAPPABLE_DRIVERS = {
 }
 
 
+@dataclass(frozen=True)
+class EventReply:
+    """对一条重大公告的回应。"""
+
+    title: str
+    decision: str                       # 采用 / 不采用
+    note: str
+
+
 @dataclass
 class StrategyView:
     moats: list[MoatView] = field(default_factory=list)
     forces: list[ForceView] = field(default_factory=list)
     uncertainties: list[Uncertainty] = field(default_factory=list)
     unquantified: list[Force] = field(default_factory=list)
+    # 须逐条回应的重大公告（`material_events`，读数时按语料库定）与撰写者的回应
+    expected_events: list = field(default_factory=list)
+    events: list[EventReply] = field(default_factory=list)
     # 子项目四：代码读数时的事实、审核结论、各轮记录。
     read_notes: list[str] = field(default_factory=list)
     review: object = None
@@ -162,6 +174,9 @@ class StrategyView:
             lines.append("  关键不确定性 → 情景驱动因子")
             for u in self.uncertainties:
                 lines.append(f"    {u.describe()}")
+        if self.events:
+            lines.append("  重大公告回应")
+            lines += [f"    · {_plain_title(e.title)}　{e.decision}：{e.note}" for e in self.events]
         lines += Q.review_tail(self.review)
         return "\n".join(lines)
 
@@ -169,6 +184,69 @@ class StrategyView:
 class StrategyFailed(Exception):
     """战略分析无从进行（没有任何定性证据等）。**内容是否成立不再由代码驳回**
     （子项目四，spec 2026-10-17）：交给审核者，审核不过抛 `qual_review.ReviewStop`。"""
+
+
+# ── 重大公告 ──────────────────────────────────────────────────
+#
+# 美股 NVDA 2026-11-25 实跑：换 CEO 又复职、为客户租约作大额担保，都在语料库里，
+# 战略稿一个字没提 —— 审核者指出了，也只是「提醒」。资料给到了不等于被看过：列出清单、逐条要回应。
+
+EVENT_MONTHS, EVENT_MAX, EVENT_CHARS = 6, 8, 2500
+EVENT_DECISIONS = ("不采用", "采用")          # 长的在前：「不采用」含「采用」二字
+_EVENT_SERIES = re.compile(r"[\d\s（）()年月日份季度第一二三四半]+")
+
+
+def material_events(corpus, limit: int | None = EVENT_MAX) -> list:
+    """分析时点前六个月内、须逐条回应的公司公告，新的在前。取公告分类第一档（收购、对外投资、业绩预告、
+    经营数据），同一系列的定期简报只留最新一期。"""
+    as_of = getattr(corpus, "as_of", None)
+    if as_of is None:
+        return []
+    from ir_agent.sources.external import Tier
+
+    start = as_of - timedelta(days=round(EVENT_MONTHS * 30.5))
+    out, series = [], set()
+    for d in sorted((d for d in corpus.docs if d.tier is Tier.COMPANY and d.rank == 1
+                     and d.published >= start), key=lambda d: d.published, reverse=True):
+        key = _EVENT_SERIES.sub("", d.title)
+        if key in series:
+            continue
+        series.add(key)
+        out.append(d)
+    return out if limit is None else out[:limit]
+
+
+def events_block(corpus) -> str:
+    """提示词里的「重大公告」一段：要求、清单与各篇正文。没有公告给空串。"""
+    docs = material_events(corpus)
+    if not docs:
+        return ""
+    more = len(material_events(corpus, None)) - len(docs)
+    lines = ["**四、重大公告回应**（下列每一条都要有一行，标题照抄）",
+             "格式：`公告: <标题> | <采用|不采用> | <采用：影响上面哪一条判断、怎么影响；不采用：理由>`",
+             "采用的公告，其影响要在护城河、五力或不确定性里体现。"]
+    lines += [f"- {d.title}" for d in docs]
+    if more > 0:
+        lines.append(f"（另有更早的 {more} 条未列，不要求回应）")
+    lines.append("\n公告正文：")
+    for d in docs:
+        body = d.text.strip()
+        lines.append(f"  ——《{d.title}》\n  " + body[:EVENT_CHARS].replace("\n", "\n  ")
+                     + ("……" if len(body) > EVENT_CHARS else ""))
+    return "\n".join(lines)
+
+
+def _plain_title(title: str) -> str:
+    """摘要里的公告名：带账本外数字（如项目产能）的只留日期 —— 摘要会进撰写提示词。"""
+    from ir_agent.citation import audit_bare_numbers
+
+    if not audit_bare_numbers(title):
+        return title
+    return re.sub(r"\d[\d,.]*[万亿]?", "", title)
+
+
+def _event_key(s: str) -> str:
+    return re.sub(r"[\s「」《》\"“”]", "", s)
 
 
 # ── 量化锚点 ──────────────────────────────────────────────────
@@ -295,6 +373,8 @@ PROMPT = """基于下面的年报原文与账本事实，做战略分析。
 可选驱动因子：{drivers}
 格式：`不确定性: <描述> | <驱动因子> | <不利时该因子如何变化> | <依据>`
 
+{events}
+
 {basis_rules}
 
 **要求**
@@ -312,6 +392,7 @@ PROMPT = """基于下面的年报原文与账本事实，做战略分析。
 _MOAT = keyed("护城河")
 _FORCE = keyed("五力")
 _UNCERT = keyed("不确定性")
+_EVENT = keyed("公告")
 _QUOTE = re.compile(r"[「\"'“](.+?)[」\"'”]", re.DOTALL)
 _REF = re.compile(r"\[\[[^\]]+\]\]")
 
@@ -382,6 +463,23 @@ def parse(text: str, corpus=None) -> StrategyView:
                  + "、".join(MAPPABLE_DRIVERS) + "）")
         bases, cites = _b(p[3:], f"不确定性「{p[0]}」")
         view.uncertainties.append(Uncertainty(p[0], p[1], p[2], bases, cites))
+
+    view.expected_events = [d.title for d in material_events(corpus)]
+    by_key = {_event_key(t): t for t in view.expected_events}
+    for m in _EVENT.finditer(text):
+        p = _cells(m.group(1))
+        title = by_key.get(_event_key(p[0]))
+        if title is None:
+            note(f"公告「{p[0]}」不在须回应的清单里，没读进来")
+            continue
+        decision = pick(p[1], EVENT_DECISIONS) if len(p) > 1 else None
+        if decision is None:
+            note(f"公告「{title}」的处理「{p[1] if len(p) > 1 else ''}」不是 采用/不采用 之一，没读进来")
+            continue
+        reply = " | ".join(x for x in p[2:] if x)
+        if not reply:
+            note(f"公告「{title}」判了{decision}，没写影响或理由")
+        view.events.append(EventReply(title, decision, reply))
     return view
 
 
@@ -398,10 +496,15 @@ def facts(view: StrategyView, ledger: FactLedger, evidence: str, as_of: date,
     if len(view.uncertainties) < 2:
         out.append(f"关键不确定性只读到 {len(view.uncertainties)} 条（方法论要求至少两条 —— "
                    "少于两条，三情景就没有定性依据）")
+    done = {e.title for e in view.events}
+    lack = [t for t in view.expected_events if t not in done]
+    if lack:
+        out.append("以下重大公告没有回应：" + "、".join(lack))
     from ir_agent.citation import audit_prose
 
-    bad = audit_prose({f"不确定性「{u.what[:12]}」": u.what + u.direction
-                       for u in view.uncertainties})
+    bad = audit_prose({**{f"不确定性「{u.what[:12]}」": u.what + u.direction
+                          for u in view.uncertainties},
+                       **{f"公告「{e.title[:16]}」": e.note for e in view.events}})
     if bad:
         out.append("描述里有账本外的数字：" + "、".join(bad))
     items = (*view.moats, *view.forces, *view.uncertainties)
@@ -414,19 +517,20 @@ def facts(view: StrategyView, ledger: FactLedger, evidence: str, as_of: date,
     return out
 
 
-KINDS = ("护城河", "五力", "不确定性", "自洽")
+KINDS = ("护城河", "五力", "不确定性", "公告", "自洽")
 
 
 def checklist(view: StrategyView) -> list[tuple[str, str]]:
     """按方法论生成（用户决定 5）：护城河每条（一条都没有列「未给出」）、五力固定 5 条、
-    不确定性每条（不足 2 条补「未给出」到 2 条）、自洽一条。"""
+    不确定性每条（不足 2 条补「未给出」到 2 条）、须回应的重大公告每条、自洽一条。"""
     items = [("护城河", f"第{i}条 {m.kind.value}") for i, m in enumerate(view.moats, 1)] \
         or [("护城河", "护城河（未给出）")]
     items += [("五力", f.value) for f in Force]
     unc = [("不确定性", f"第{i}条 {u.what[:16]}")
            for i, u in enumerate(view.uncertainties, 1)]
     unc += [("不确定性", f"第{i}条（未给出）") for i in range(len(unc) + 1, 3)]
-    return items + unc + [("自洽", "护城河、五力与不确定性")]
+    ev = [("公告", f"第{i}条 {t[:24]}") for i, t in enumerate(view.expected_events, 1)]
+    return items + unc + ev + [("自洽", "护城河、五力与不确定性")]
 
 
 RULES = Q.make_rules("战略分析", """\
@@ -436,6 +540,8 @@ RULES = Q.make_rules("战略分析", """\
   不是强势；应收天数短、合同负债多才是对下游强势；毛利率分位也要对照。没给出的力判「未给出」。
 - 不确定性：是不是真正的关键变量；映射的驱动因子对不对（要能在情景分析里调）；「不利时
   如何变化」方向对不对。
+- 公告：每条重大公告有没有回应；采用的，影响说得对不对、有没有落到护城河 / 五力 / 不确定性里；不采用的，
+  理由成不成立。没回应、或明显影响估值判断却不采用且理由站不住的，判致命。
 - 自洽：护城河、五力、不确定性三部分是否彼此矛盾（例如宽护城河却五力全不利）。""")
 
 
@@ -448,14 +554,16 @@ def assess(client, ledger: FactLedger, period: str, as_of: date,
     annual = annual_text(sections)
     prompt = PROMPT.format(drivers="、".join(MAPPABLE_DRIVERS),
                            forces="|".join(f.value for f in Force),
-                           evidence=evidence, basis_rules=Q.BASIS_RULES,
+                           evidence=evidence, events=events_block(corpus), basis_rules=Q.BASIS_RULES,
                            review_note=Q.REVIEW_NOTE)
+    block = events_block(corpus)
+    materials = evidence + ("\n\n" + block if block else "")      # 审核者看得到同一批公告正文
     view, res, rounds = Q.run(
-        client, judge, name="战略分析", prompt=prompt, materials=evidence,
+        client, judge, name="战略分析", prompt=prompt, materials=materials,
         read=lambda raw: parse(raw, corpus),
         facts=lambda v: facts(v, ledger, annual, as_of, corpus),
         checklist=checklist, kinds=KINDS, rules=RULES, catalog=catalog,
-        hay=evidence, ledger=ledger, as_of=as_of, max_rounds=max_rounds)
+        hay=materials, ledger=ledger, as_of=as_of, max_rounds=max_rounds)
     view.unquantified = [f for f in Force
                          if f not in anchors(ledger, period, as_of, spot)]
     view.review, view.rounds = res, rounds

@@ -559,8 +559,9 @@ def company_exposure_facts(led: FactLedger, period: str, as_of: date) -> list[Fa
     """本公司对宏观的暴露（spec 2026-11-21-staged-collection §5.1），宏观敏感度段引用：
 
     - `company.dol`：本公司经营杠杆，与行业中位同一口径（`dol`）；
-    - `company.net_debt_ratio` =（有息负债 − 货币资金）÷ 归母净资产，为负即净现金 —— 净现金的公司受加息
-      影响小于净负债的公司。有息负债分量缺的按 0（同 `ratios._debt_of`）；现金或净资产取不到不给。"""
+    - `company.net_debt_ratio` =（有息负债 − 货币资金 − 短期投资（交易性金融资产 / 有价证券））÷ 归母净资产，为负即净现金 —— 净现金的公司受加息
+      影响小于净负债的公司。有息负债分量缺的按 0（同 `ratios._debt_of`）；现金或净资产取不到不给；短期投资没有的
+      按 0（NVDA 2026-11-25：只减现金显示 -1.36%，计入 520 亿美元有价证券后约 -34%）。"""
     from ir_agent.operators.aggregates import DEBT_PARTS
 
     out: list[Fact] = []
@@ -574,7 +575,8 @@ def company_exposure_facts(led: FactLedger, period: str, as_of: date) -> list[Fa
     cash, eq = _get(led, "cash_and_equivalents", period, as_of), _get(led, "equity_attr_parent", period, as_of)
     if cash is not None and eq is not None and eq > 0:
         debt = sum((v for k in DEBT_PARTS if (v := _get(led, k, period, as_of)) is not None), Decimal(0))
-        add("company.net_debt_ratio", (debt - cash) / eq, "ratio")
+        sti = _get(led, "trading_finasset", period, as_of) or Decimal(0)
+        add("company.net_debt_ratio", (debt - cash - sti) / eq, "ratio")
     return out
 
 

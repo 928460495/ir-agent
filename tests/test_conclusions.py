@@ -110,7 +110,7 @@ class TestOpenArticles:
             no="1", url=JIEPEI, publisher="捷配", published=date(2026, 3, 10))])
         open_articles([c])
         a = c.articles[0]
-        assert not a.opened and "没有中文" in a.why_not
+        assert not a.opened and "反爬" in a.why_not
         assert "代码无法打开" in c.flags()
         assert "未能核实" not in c.flags()
 
