@@ -59,6 +59,7 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
     # 上一轮没有一篇打开的出处（检索失败，或文章全打不开）的指标当作新的，重跑时再搜一次 —— 一次超时
     # 不能永久冻结；有结论没出处的读数也不能（NVDA 2026-11-25：英文页全被误判打不开）
     prev = {i.indicator: i for i in (done.items if done else []) if i.sources}
+    old_conclusions = {i.indicator: i.conclusion for i in (done.items if done else [])}
     names = {t.indicator for t in tracks}
     res.removed = [i.indicator for i in (done.items if done else []) if i.indicator not in names]
     keep_urls = {u for k, i in prev.items() if k in names for u in i.sources}
@@ -80,6 +81,7 @@ def track(client, view, *, industry: str, as_of: date, corpus, us: bool,
                                      industry, as_of)          # 本仓只做 A 股（us-ir-agent 传 us=）
         except Exception as e:                              # noqa: BLE001
             res.failed.append(f"{t.indicator}（{e.__class__.__name__}: {str(e)[:80]}）")
+            item.conclusion = old_conclusions.get(t.indicator, "")      # 重搜失败不丢上轮结论
             continue
         item.conclusion = "；".join(c.claim for c in got.items)
         for c in got.items:

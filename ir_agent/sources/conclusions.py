@@ -40,7 +40,8 @@ _WORD = re.compile(r"(?<![^\s(\"'“‘])[A-Za-z][A-Za-z'’-]{1,20}(?=[\s.,;:!?
 MIN_WORDS = 20
 BLOCK_PAGE_MAX = 2500           # 反爬校验页很短；长正文里偶然出现这些措辞不算
 _BLOCKED = re.compile(r"enable javascript and cookies|checking your browser|access denied|verify (?:that )?you are (?:a )?human"
-                      r"|attention required|unusual traffic|are you a robot|captcha|ddos protection", re.I)
+                      r"|attention required|unusual traffic|you(?:'re| are) (?:not )?a (?:robot|human)|are you a robot"
+                      r"|(?<!re)captcha|ddos protection|enable js and disable|undeclared automated tool", re.I)
 _CN = "零一二三四五六七八九"
 _CN_ALL = "零一二三四五六七八九十百千万亿两"
 

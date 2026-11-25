@@ -178,6 +178,9 @@ def _subject_rx(kind: str, subject: str) -> re.Pattern[str]:
     pat = re.escape(base).replace(r"\]\]", r"(?:@[^\]]*)?\]\]")
     if kind in ("公式", "合成"):
         pat += r"(?:\s*[=＝][^：:\n]*)?"
+    if kind == "公告" and (m := re.match(r"第\d+条", subject)):
+        # 公告标题很长、条目名截断过：审核者补全标题、加书名号、只写序号都按序号认（序号在清单里唯一）
+        pat = rf"(?:{pat}(?=\s*[：:])|{m.group(0)}(?!\d)[^\n]*?(?=[：:]\s*\**(?:{'|'.join(LEVELS)})))"
     return re.compile(pat)
 
 
@@ -250,6 +253,7 @@ def parse(raw: str, expected: list[tuple[str, str]],
 
 
 _ELLIPSIS = re.compile(r"…+|\.{3,}")
+MIN_FRAGMENT, QUOTE_SPAN = 4, 1000        # 省略号两侧片段的最短长度；整条引文在原文里的跨度上限
 
 
 def _quote_in(q: str, hays: list[str]) -> bool:
@@ -259,15 +263,22 @@ def _quote_in(q: str, hays: list[str]) -> bool:
     parts = [p for x in _ELLIPSIS.split(q) if (p := norm(x))]
     if not parts:
         return False
+    if len(parts) == 1:
+        return any(parts[0] in h for h in hays)
+    if min(map(len, parts)) < MIN_FRAGMENT:          # 「公司…毛利率…下降」这样的碎片在哪都凑得齐
+        return False
     for h in hays:
-        at = 0
-        for p in parts:
-            i = h.find(p, at)
-            if i < 0:
-                break
-            at = i + len(p)
-        else:
-            return True
+        start = h.find(parts[0])
+        while start >= 0:
+            at = start + len(parts[0])
+            for p in parts[1:]:
+                i = h.find(p, at, start + QUOTE_SPAN)
+                if i < 0:
+                    break
+                at = i + len(p)
+            else:
+                return True
+            start = h.find(parts[0], start + 1)
     return False
 
 

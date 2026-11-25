@@ -191,3 +191,58 @@ def test_无出处的跟踪指标重跑时再检索(monkeypatch):
                                  MT.TrackItem("乙", "d", "f", "有结论", ["https://x"])])
     MT.track(object(), view, industry="x", as_of=AS_OF, corpus=None, us=True, done=done)
     assert calls == ["甲"]
+
+
+
+# ── 终审（2026-11-25）──────────────────────────────────────────
+
+@pytest.mark.parametrize("a,b", [("关于对外投资的公告", "关于对外投资的公告"),
+                                 ("关于签订重大合同的公告（一）", "关于签订重大合同的公告（二）")])
+def test_I3_通用标题的不同公告不被去重(a, b):
+    from ir_agent import strategy
+    c = _corpus(_doc(a, date(2026, 10, 1), "x"), _doc(b, date(2026, 8, 1), "y"))
+    assert len(strategy.material_events(c)) == 2
+
+
+@pytest.mark.parametrize("head", [
+    "第1条 中国巨石关于巨石集团有限公司与巨石集团香港有限公司共同增资的公告",     # 补全了截断的标题
+    "第1条 《中国巨石关于巨石集团有限公司与巨石集团香港有限公司》",
+    "第1条",
+    "第1条 中国巨石关于（半角）(2026-11-12) 的公告：补充",
+])
+def test_I5_公告条目按序号认(head):
+    from ir_agent import methodology_review as R
+    exp = [("公告", "第1条 中国巨石关于巨石集团有限公司与巨石集团香港有限公"), ("公告", "第2条 另一条公告"), ("自洽", "x")]
+    vs = R.parse(f"[公告] {head}：提醒　理由　建议：补\n[公告] 第2条 另一条公告：通过\n[自洽] x：通过", exp,
+                 kinds=("公告", "自洽"))
+    assert [v.level for v in vs] == ["提醒", "通过", "通过"]
+
+
+def test_I5_撰写者标题全半角与竖线():
+    from ir_agent import strategy
+    piped, half = "关于收购甲|乙股权的公告（2026）", "关于对外投资的公告（一）"
+    c = _corpus(_doc(piped, date(2026, 10, 1), "x"), _doc(half, date(2026, 9, 1), "y"))
+    v = strategy.parse(f"公告: 关于对外投资的公告 (一) | 采用 | 影响一\n公告: {piped} | 不采用 | 理由二", c)
+    assert [(e.title, e.decision, e.note) for e in v.events] == [(half, "采用", "影响一"), (piped, "不采用", "理由二")]
+
+
+def test_M6_正文里的reCAPTCHA页脚不误伤(monkeypatch):
+    assert _open(monkeypatch, EN + " This site is protected by reCAPTCHA and the Google Privacy Policy.").articles[0].opened
+
+
+def test_M7_省略号片段太短或相距太远不算():
+    far = "revenue grew. " + "filler words here. " * 200 + "decline in guidance"
+    assert "找不到" in _note("「revenue grew … decline in guidance」", hay=far)
+    assert "找不到" in _note("「公司…毛利率…下降」", hay="公司本年毛利率有所下降")
+
+
+def test_M9_重搜失败时保留上轮结论(monkeypatch):
+    from ir_agent import macro_track as MT
+
+    def boom(*a, **k):
+        raise RuntimeError("超时")
+    monkeypatch.setattr(C, "search", boom)
+    view = SimpleNamespace(tracks=[SimpleNamespace(indicator="甲", driver="d", falsifier="f")])
+    res = MT.track(object(), view, industry="x", as_of=AS_OF, corpus=None, us=True,
+                   done=MT.TrackResult(items=[MT.TrackItem("甲", "d", "f", "上轮结论", [])]))
+    assert res.items[0].conclusion == "上轮结论" and res.failed
