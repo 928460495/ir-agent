@@ -2330,7 +2330,7 @@ def _readable_views(r, out: Path, md: dict, arts: dict, skipped: list | None = N
     # 阅读版是给人看的附带产物：出不来只记说明，**不能让已经花了钱的这一步崩掉**（终审 C1）
     try:
         views = readable.render_views(out, r.ledger, r.as_of, title=title, notes=skipped)
-        keep = frozenset(_worse_than_existing(out, views, skipped)) if keep_better else frozenset()
+        keep = _worse_than_existing(out, views, skipped) if keep_better else frozenset()
         for f in readable.write_readables(out, r.ledger, r.as_of, views=views, keep=keep):
             arts[f"{readable.LABELS[f.name[:-len(readable.SUFFIX)]]}（阅读版）"] = str(f)
         context = {k: readable.render_inline(v, r.ledger, r.as_of) if isinstance(v, str) else v
@@ -2340,19 +2340,23 @@ def _readable_views(r, out: Path, md: dict, arts: dict, skipped: list | None = N
     return dict(context=context, views=views, company=title)
 
 
-def _worse_than_existing(out: Path, views: dict, notes: list) -> list[str]:
-    """哪些阅读版这次排出来还不如已有的：占位符取不到（重出时没有估值事实），而已有那份是齐的。"""
+def _worse_than_existing(out: Path, views: dict, notes: list) -> frozenset[str]:
+    """哪些阅读版这次排出来不如已有的、该留着：新缺的**全是估值事实**（重出时没有建模），且源文件没在那之后改过。
+    其余情形一律重写 —— 人改过的稿不能还挂着旧阅读版（复核 R2）。"""
     from ir_agent import readable
 
-    got = []
+    rx = re.compile(r"\[\[(?:[^:\]]+:)?([\w.\-]+)@[^\]]+\]\]" + re.escape(readable._MISSING))
+    src = {stem: out / name for stem, name, _l, _b in readable.VIEWS}
+    got = set()
     for stem, (body, _foot) in views.items():
-        dst = out / f"{stem}{readable.SUFFIX}"
-        if not dst.exists():
+        dst, lack = out / f"{stem}{readable.SUFFIX}", rx.findall(body)
+        if not (lack and dst.exists() and src[stem].stat().st_mtime <= dst.stat().st_mtime):
             continue
-        if body.count(readable._MISSING) > dst.read_text(encoding="utf-8").count(readable._MISSING):
-            got.append(stem)
-            notes.append(f"{stem}{readable.SUFFIX} 保留原样：这次缺估值等事实，重出会出现「账本未取到」")
-    return got
+        if all(k.startswith(("valuation.", "rel", "beta")) for k in lack) \
+                and readable._MISSING not in dst.read_text(encoding="utf-8"):
+            got.add(stem)
+            notes.append(f"{stem}{readable.SUFFIX} 保留原样：这次没有建模，估值事实取不到")
+    return frozenset(got)
 
 
 def _safe_dashboard(r, out: Path, arts: dict, skipped: list, **kw) -> None:
@@ -2361,7 +2365,8 @@ def _safe_dashboard(r, out: Path, arts: dict, skipped: list, **kw) -> None:
         build_dashboard(r, path=out / "dashboard.html", **kw)
         arts["看板"] = str(out / "dashboard.html")
     except Exception as e:                                  # noqa: BLE001
-        skipped.append(f"看板未生成（{e.__class__.__name__}: {str(e)[:120]}）")
+        old = "；目录里的 dashboard.html 是上一次的" if (out / "dashboard.html").exists() else ""
+        skipped.append(f"看板未生成（{e.__class__.__name__}: {str(e)[:120]}）{old}")
 
 
 def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict, skipped: list | None = None) -> None:
@@ -2389,6 +2394,8 @@ def _audit_from_md(text: str, store=None):
     body, sep, tail = text.rpartition("\n---\n\n## 数据来源\n")
     if not sep:
         body, sep, tail = text.rpartition("\n## 数据来源\n")
+    if sep and "| 数值 | 字段@期间 |" not in tail:            # 正文自己的一节，不是附录
+        sep = ""
     if not sep:
         body = text
     notes, missing = [], []

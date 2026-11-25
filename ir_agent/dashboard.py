@@ -65,7 +65,7 @@ background:var(--rule);border:1px solid var(--rule)}
 .card{background:var(--card);border:1px solid var(--rule);padding:18px 22px;margin-bottom:14px;overflow-wrap:anywhere}
 .card>:first-child{margin-top:0}.card>:last-child{margin-bottom:0}
 .read p,.read li{max-width:46em;text-wrap:pretty}
-.read p{margin:0 0 12px}.read ul,.read ol{margin:0 0 14px;padding-left:1.4em}.read li{margin:3px 0}
+.read p{margin:0 0 12px}.read ul,.read ol{margin:0 0 14px;padding-left:1.4em}.read li{margin:3px 0}li.dot{list-style:disc}
 blockquote{margin:0 0 14px;padding:8px 14px;border-left:3px solid var(--rule);background:var(--soft);color:var(--dim)}
 blockquote p{margin:0 0 4px}blockquote p:last-child{margin:0}
 /* 数字来源：toggletip —— 点击、回车、悬停、聚焦都能打开，键盘与读屏可用 */

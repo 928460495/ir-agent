@@ -322,3 +322,95 @@ def test_M_模型自己写的脚注记号不挂来源():
 def test_M_一行上万个片段不出乱码():
     h = mdview.to_html("`x` " * 7000)
     assert not any("" <= c <= "" or "豈" <= c <= "﫿" for c in h) and h.count("x") >= 7000
+
+
+# ── 复核（第二轮）────────────────────────────────────────────
+
+def test_R1_分隔线后的说明不被折进审核意见():
+    rv = ReviewResult(verdicts=[Verdict("议价", "对下游", "提醒", "意见乙", "", "")])
+    out = fieldview.layout("value_chain", "议价: 下游 | 强 | 依据\n\n---\n\n交叉核对说明：很重要", rv)
+    for det in mdview.to_html(out, fold_heads=("审核意见",)).split("<details>")[1:]:
+        assert "交叉核对说明" not in det.split("</details>")[0]
+
+
+def test_R1_代码块里的井号不触发收尾():
+    rv = ReviewResult(verdicts=[Verdict("议价", "对下游", "提醒", "意见乙", "", "")])
+    out = fieldview.layout("value_chain", "议价: 下游 | 强\n```python\n# 注释\n---\nx = 1\n```\n后", rv)
+    code = out.split("```python")[1].split("```")[0]
+    assert "意见乙" not in code and "# 注释" in code
+
+
+def _older(p, secs):
+    import os
+    t = p.stat().st_mtime - secs
+    os.utime(p, (t, t))
+
+
+def test_R2_人改过源文件就重写_哪怕有占位符取不到(env):
+    r, out = env
+    (out / "strategy.md").write_text("护城河: 转换成本 | 窄 | 人工改为窄 [[valuation.x@2025FY]]", encoding="utf-8")
+    view = out / "strategy_阅读版.md"
+    view.write_text("旧的宽", encoding="utf-8")
+    _older(view, 100)
+    full.run_views("600519", r, AS_OF, out)
+    assert "窄" in view.read_text(encoding="utf-8")
+
+
+def test_R2_缺的不是估值事实就重写(env):
+    r, out = env
+    (out / "brief.md").write_text("见 [[gross_margn@2025FY]]", encoding="utf-8")
+    _older(out / "brief.md", 100)
+    view = out / "brief_阅读版.md"
+    view.write_text("旧", encoding="utf-8")
+    full.run_views("600519", r, AS_OF, out)
+    assert "账本未取到" in view.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("text,keep", [
+    ("[[revenue@2025FY]] 393.75 百万美元", "393.75 亿元"), ("[[revenue@2025FY]] 393.75 千元", "393.75 亿元"),
+    ("[[revenue@2025FY]] 393.75 亿股", "393.75 亿元"), ("[[pb@2025FY]]，1.0 倍以上", "1.04x"),
+    ("[[pb@2025FY]] 1.04 pct", "1.04x"), ("ROE [[roe@2025FY]]（15.30% 同业分位）", "15.30%"),
+    ("[[roe@2025FY]]，15.3% 分位", "15.30%")])
+def test_R3_单位没列全或后面是别的量时数值保留(text, keep):
+    led = _led(revenue=("39375000000", "元"), pb=("1.04", "x"), roe=("0.153", "ratio"))
+    out = readable.render_inline(text, led, AS_OF)
+    assert "（2025FY）" not in out and out.index(keep) < 14
+
+
+def test_R4_状态文件坏了报错退出(tmp_path, capsys):
+    from ir_agent import __main__ as cli
+    for bad in ("{坏", "[]"):
+        (tmp_path / "state.json").write_text(bad, encoding="utf-8")
+        assert cli.main(["600519", "--year", "2025", "--views", str(tmp_path)]) == 2
+        assert "state.json" in capsys.readouterr().err
+
+
+def test_R4_美股代码大小写不算不符(tmp_path, monkeypatch):
+    from ir_agent import __main__ as cli
+    (tmp_path / "state.json").write_text('{"code": "NVDA", "period": "2026FY", "as_of": "2026-11-25"}', encoding="utf-8")
+    monkeypatch.setattr(cli, "run", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(full, "run_views", lambda *a, **k: [])
+    assert cli.main(["nvda", "--year", "2026", "--views", str(tmp_path)]) == 0
+
+
+def test_R5_没有附录表时正文里的数据来源一节不截断():
+    a = full._audit_from_md("## 要点\n\n甲\n\n## 数据来源\n\n乙：来自年报", None)
+    assert "乙：来自年报" in a.rendered and a.footnotes == []
+
+
+def test_R6_编号列表里夹圆点不造编号():
+    h = mdview.to_html("1. 甲\n- 乙\n2. 丙")
+    ok_html(h)
+    assert h.count('value="') == 2 and "乙" in h and 'value="2"' in h
+
+
+def test_R7_标题里的成对粗体去干净():
+    assert "**" not in mdview.to_html("### **名称**：说明文字")
+
+
+def test_R8_看板失败时说明旧看板未更新(monkeypatch, tmp_path):
+    monkeypatch.setattr(full, "build_dashboard", lambda *a, **k: 1 / 0)
+    (tmp_path / "dashboard.html").write_text("旧", encoding="utf-8")
+    notes: list[str] = []
+    full._safe_dashboard(SimpleNamespace(), tmp_path, {}, notes)
+    assert any("上一次" in n for n in notes)

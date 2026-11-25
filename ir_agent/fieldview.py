@@ -67,6 +67,10 @@ class _Section:
     reviews: list = field(default_factory=list)
 
 
+class _Code(str):
+    """代码块里的一行：里面的 `#`、`---` 不是标题和分隔线。"""
+
+
 def _cells(body: str) -> list[str]:
     """按竖线分段；占位符 `[[…]]` 里不含竖线。"""
     return [p.strip() for p in body.split("|")]
@@ -153,7 +157,7 @@ def _scan(name: str, text: str) -> list:
     rx = {k: keyed(k) for k in _FIELDS[name]}
     out: list = []
     for ln in mdview._unwrap((text or "").replace("\r\n", "\n").split("\n")):
-        raw = ln[1:] if ln.startswith("\x00") else ln
+        raw = _Code(ln[1:]) if ln.startswith("\x00") else ln
         hit = None if ln.startswith("\x00") else next(
             ((k, m) for k, r in rx.items() if (m := r.match(raw))), None)
         out.append(_section(hit[0], hit[1].group(1).strip()) if hit else raw)
@@ -235,12 +239,12 @@ def layout(name: str, text: str, review, *, note: str = "", title: str = "") -> 
     for x in items:
         if isinstance(x, str):
             s = x.strip()
-            if mdview.HEADING_RX.match(s) or mdview._BOLD_LINE.match(s) or mdview._BRACKET_LINE.match(s):
+            if isinstance(x, _Code):
+                between = True
+            elif mdview.HEADING_RX.match(s) or mdview._BOLD_LINE.match(s) or mdview._BRACKET_LINE.match(s):
                 headed = True
                 flush()
-            elif mdview._RULE.match(x):
-                flush()
-            elif s:
+            elif s and not mdview._RULE.match(x):      # 分隔线不收尾：`normalize` 会去掉它，后文就落到审核意见下面
                 between = True
             body.append(x)
             continue

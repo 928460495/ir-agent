@@ -39,8 +39,10 @@ def _lookup(m: re.Match[str], ledger, as_of: date):
 
 
 # 占位符后面隔这些字就算「紧跟」：模型常写「[[CPI]] 为 3.72%」「[[营收]] 393.75亿」（历史产物里一成多如此）
-_UNITS = ("个百分点", "分位", "index", "美元", "%", "％", "亿", "万", "倍", "x", "X", "家", "元", "天", "年")
-_NEXT_NUM = re.compile(r"[\s（(，,]{0,2}(?:为|是|约|仅|即|＝|=)?\s?(-?\d[\d,]*(?:\.\d+)?)\s?(" + "|".join(_UNITS) + ")?")
+_UNITS = ("个百分点", "亿美元", "亿元", "万美元", "万元", "亿", "万", "分位", "index", "美元", "%", "％", "倍", "x", "X", "家", "元", "天")
+# 数字与单位之后必须到头：标点、空白、行尾，或这几个连接词。后面还连着别的字（「亿股」「倍以上」「% 分位」）就不是同一个量
+_NEXT_NUM = re.compile(r"[\s（(，,]{0,2}(?:为|是|约|仅|即|＝|=)?\s?(-?\d[\d,]*(?:\.\d+)?)\s?(" + "|".join(_UNITS) + ")?"
+                       r"(?=[，。；、：）)|\]」\n]|$|\s*(?:与|和|及|的|而|但|且|也|高于|低于|升至|降至|同比|对应|水平|偏|，))")
 _ALONE_BEFORE = re.compile(r"(?:^|[。！？；|\n])\s*$")
 _ALONE_AFTER = re.compile(r"^\s*(?:$|[。！？；|\n])")
 _SHOWN = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s?(.*)$")
@@ -60,12 +62,13 @@ def _same_number(shown: str, other: str, unit: str) -> bool:
     if mine in _PERCENT:
         fits = unit in _PERCENT
     elif mine[:1] in ("亿", "万"):
-        fits = unit == mine[:1]
+        fits = unit in (mine[:1], mine)
     elif mine == "x":
         fits = unit in ("x", "X", "倍")
     else:
         fits = mine.startswith(unit)
-    return fits and (a == b if dec == 0 else round(a, dec) == b)
+    # 个位数四舍五入太容易碰巧相等（1.04x 与 1.0 倍），要求完全相同
+    return fits and (a == b if dec == 0 or abs(a) < 10 else round(a, dec) == b)
 
 
 def _display(m: re.Match[str], fact, text: str) -> str:
@@ -73,7 +76,7 @@ def _display(m: re.Match[str], fact, text: str) -> str:
     shown, label = format_value(fact), fact_label(fact.key)
     if not label:
         return shown
-    nxt = _NEXT_NUM.match(text[m.end():m.end() + 24])
+    nxt = _NEXT_NUM.match(text[m.end():m.end() + 40])
     if nxt and nxt.start(1) <= 8 and _same_number(shown, nxt.group(1), nxt.group(2) or ""):
         # 前面已经写了这个名字（「高收益债利差 [[…]] 仅 3.63%」）：只留脚注
         return "" if text[max(0, m.start() - 60):m.start()].rstrip(" 　（(：:").endswith(label) else f"{label}（{fact.period}）"

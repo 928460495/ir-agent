@@ -104,10 +104,16 @@ def main(argv: list[str] | None = None) -> int:
     if a.views:
         # 产物目录属于哪家公司、哪一期、哪个时点，以它自己的 state.json 为准：对不上会拿别家的数盖掉它，
         # 或用分析时点之后才披露的数去配旧稿（前视）
-        st = json.loads((Path(a.views) / "state.json").read_text(encoding="utf-8"))
+        try:
+            st = json.loads((Path(a.views) / "state.json").read_text(encoding="utf-8"))
+            if not isinstance(st, dict):
+                raise ValueError("不是一个对象")
+        except ValueError as e:
+            print(f"--views {a.views}：state.json 读不了（{str(e)[:80]}）。", file=sys.stderr)
+            return 2
         for what, mine, theirs in (("代码", a.code, st.get("code")), ("报告期", f"{a.year}{a.period}", st.get("period")),
                                    ("分析时点", a.as_of, st.get("as_of"))):
-            if mine and theirs and str(mine) != str(theirs):
+            if mine and theirs and str(mine).upper() != str(theirs).upper():
                 print(f"--views {a.views}：{what}不符，目录是 {theirs}，命令给的是 {mine}。", file=sys.stderr)
                 return 2
         a.as_of = a.as_of or st.get("as_of")

@@ -105,7 +105,7 @@ def blocks(text: str) -> list[tuple[str, list[str]]]:
         if _RULE.match(ln):
             fresh[0] = True
             continue
-        if (h := HEADING_RX.match(s)) and (t := re.sub(r"\s#+$", "", h.group(2)).strip("*").strip()):
+        if (h := HEADING_RX.match(s)) and (t := re.sub(r"\*\*([^*]*)\*\*", r"\1", re.sub(r"\s#+$", "", h.group(2))).strip("*").strip()):
             put("head", [f"{h.group(1)} {t}"], False)
         elif (b := _BOLD_LINE.match(s)) and not _is_sentence(b.group(1)) and b.group(1).strip():
             put("head", [f"## {b.group(1).strip()}"], False)
@@ -242,7 +242,8 @@ def _ul(items: list[tuple[int, str, str]], notes, ids, fold_over: int) -> str:
         num = mark[:-1] if mark[:-1].isdigit() else ""
         if num and tag == "ul":                    # 圆点列表里夹的编号项：编号留在文字里
             num, body = "", f"{mark} {body}"
-        lis.append((f'<li value="{num}">' if num else "<li>") + inline(body, notes, ids) + (_ul(kids, notes, ids, fold_over) if kids else "") + "</li>")
+        plain = '<li class="dot">' if tag == "ol" else "<li>"      # 编号列表里夹的圆点项：不造编号
+        lis.append((f'<li value="{num}">' if num else plain) + inline(body, notes, ids) + (_ul(kids, notes, ids, fold_over) if kids else "") + "</li>")
     h = f"<{tag}>" + "".join(lis) + f"</{tag}>"
     return f"<details><summary>共 {len(lis)} 条，点开看</summary>{h}</details>" if fold_over and len(lis) > fold_over else h
 
