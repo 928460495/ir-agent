@@ -32,6 +32,16 @@ def market_of(code: str) -> str:
     raise UnsupportedMarket(f"无法识别代码 {code} 所属交易所。")
 
 
+def money_unit(code: str) -> str:
+    """金额事实的单位。本仓只做 A 股（美股在 us-ir-agent）。"""
+    return "元"
+
+
+def engine_name(code: str) -> str:
+    """估值引擎名。本仓只做 A 股。"""
+    return "ashare-dcf"
+
+
 def quote_symbol(code: str) -> str:
     """行情接口用的小写前缀符号，如 sh600519。"""
     return market_of(code).lower() + code

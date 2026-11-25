@@ -194,6 +194,8 @@ class StanceResult:
         return [e for e in self.evidence if e.side == side]
 
     def summary(self) -> str:
+        """辩论摘要。**结论不截断** —— 它不只给人看：A 轮喂给方法论预研、B 轮喂给简报撰写。此前截到
+        70 / 50 字，历史 151 条全被截断，后一步的模型只看到半句话（用户 2026-11-25）。"""
         lines = [f"多空辩论{self.round_}：多方 {len(self.by_side('多方'))} 条，"
                  f"空方 {len(self.by_side('空方'))} 条，"
                  f"平衡点 {len(self.balances)} 项"]
@@ -204,10 +206,10 @@ class StanceResult:
                          "（已标注，未阻断，需人工复核）")
         for b in self.balances:
             if b.mid is None:
-                lines.append(f"  · {b.subject}：{b.note.strip()[:70]}")
+                lines.append(f"  · {b.subject}：{' '.join(b.note.split())}")
             else:
                 lines.append(f"  · {b.subject}：空 {b.bear} / 平 {b.mid} / "
-                             f"多 {b.bull} —— {b.note.strip()[:50]}")
+                             f"多 {b.bull} —— {' '.join(b.note.split())}")
         for e in self.unverified:
             lines.append(f"  ⚠ [{e.side}] {e.subject}：{e.unverified}")
         if self.dropped:

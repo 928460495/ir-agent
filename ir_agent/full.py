@@ -1501,6 +1501,8 @@ def _qual_module(out: Path, *, prefix: str, label: str, corpus, parse, facts, ru
 
 def _qual_section(statuses: list) -> str:
     """门① `sources.md` 的「定性分析审核」一节（spec 六）。"""
+    from ir_agent import mdview
+
     if not statuses:
         return ""
     lines = ["", "## 定性分析审核", ""]
@@ -1511,7 +1513,8 @@ def _qual_section(statuses: list) -> str:
             head = "沿用上轮审核结论（" if s["state"] == "沿用审核结论" else ""
             lines.append(f"- {s['label']}：{head}第 {s['rounds']} 轮审核通过"
                          + ("）" if head else ""))
-        lines += [f"  - {x}" for x in s.get("flagged") or []]
+        for x in s.get("flagged") or []:
+            lines += [f"  {row}" for row in mdview.normalize(f"- {x}").rstrip("\n").split("\n")]
         if s.get("note"):
             lines.append(f"  - ⚠ {s['note']}")
     return "\n".join(lines) + "\n"
@@ -2301,16 +2304,33 @@ def _missing_snapshot_notes(res) -> list:
     return out
 
 
-def _readable_views(r, out: Path, md: dict, arts: dict) -> dict:
-    """写定性产物的只读阅读版（`readable`，用户 2026-11-22 选方案 A），返回看板用的上下文副本：
-    占位符换成账本数值。**原 `md` 不动** —— 它进 state.json 与后续撰写提示词，那里要的是占位符。
+def _display_title(r) -> str:
+    """阅读版与看板的标题：公司名 + 代码；公司名只用本轮已取到的，不为它联网。"""
+    code = getattr(r, "code", "") or ""
+    name = ""
+    try:
+        if (sid := (getattr(r, "sec_meta", None) or {}).get("submissions_sid")):
+            name = r.store.load(sid).payload.get("name") or ""
+        else:
+            name = r.peer_set.target_name or ""
+    except Exception:                                       # noqa: BLE001
+        name = ""
+    return " ".join(x for x in (name, code) if x)
+
+
+def _readable_views(r, out: Path, md: dict, arts: dict, skipped: list | None = None) -> dict:
+    """写本目录已有产物的只读阅读版（`readable`，用户 2026-11-22 选方案 A），返回 `build_dashboard` 的参数：
+    `context`（上下文副本，占位符换成账本数值）、`views`（阅读版正文与脚注）、`company`。**原 `md` 不动** —— 它进 state.json 与后续撰写提示词，那里要的是占位符。
     每次生成看板都重写，人改过源文件后下一次调用即刷新。"""
     from ir_agent import readable
 
-    for f in readable.write_readables(out, r.ledger, r.as_of):
+    title = _display_title(r)
+    views = readable.render_views(out, r.ledger, r.as_of, title=title, notes=skipped)
+    for f in readable.write_readables(out, r.ledger, r.as_of, views=views):
         arts[f"{readable.LABELS[f.name[:-len(readable.SUFFIX)]]}（阅读版）"] = str(f)
-    return {k: readable.render_inline(v, r.ledger, r.as_of) if isinstance(v, str) else v
-            for k, v in (md or {}).items()}
+    context = {k: readable.render_inline(v, r.ledger, r.as_of) if isinstance(v, str) else v
+               for k, v in (md or {}).items()}
+    return dict(context=context, views=views, company=title)
 
 
 def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
@@ -2321,11 +2341,50 @@ def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
     末尾生成 —— 拆函数时若没人接着做，它们会无声消失：没有任何测试断言
     这两个文件，全量绿不代表它们还在。
     """
-    build_dashboard(r, path=out / "dashboard.html", context=_readable_views(r, out, md, arts))
+    build_dashboard(r, path=out / "dashboard.html", **_readable_views(r, out, md, arts))
     arts["看板"] = str(out / "dashboard.html")
     build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
                    path=out / "model.xlsx", verdicts=r.verdicts)
     arts["工作簿"] = str(out / "model.xlsx")
+
+
+def _audit_from_md(text: str):
+    """落盘的简报 → 看板正文用的审计结果：正文取「数据来源」之前，脚注从那张表读回。"""
+    from ir_agent.audit import AuditResult
+    from ir_agent.citation import Footnote
+
+    body, _, tail = text.partition("\n## 数据来源")
+    notes = []
+    for ln in tail.split("\n"):
+        c = [x.strip() for x in ln.strip().strip("|").split("|")]
+        if len(c) == 5 and "@" in c[1]:
+            key, _, per = c[1].partition("@")
+            try:
+                notes.append(Footnote(len(notes) + 1, key, per, c[2], date.fromisoformat(c[3]), c[4], display=c[0]))
+            except ValueError:
+                continue
+    return AuditResult(rendered=re.sub(r"\n---\s*$", "", body.rstrip()), footnotes=notes)
+
+
+def run_views(code: str, r, as_of: date, out_dir: str | Path, *, snapshot_dir: str | Path = "snapshots",
+              notes: list[str] | None = None) -> list[Path]:
+    """不调模型，重新生成阅读版与看板（spec 2026-11-25-readable-layout §4.7）。不写 `state.json`。
+
+    已出研报的目录只更新阅读版：那份看板含估值卡片，不重跑建模就重出不了，不拿缺估值的盖掉它。"""
+    out = Path(out_dir)
+    notes = notes if notes is not None else []
+    md, _pr = _restore_state(out)
+    notes += _analyse_facts(code, r, as_of, snapshot_dir)[2]
+    notes += _restore_corpus(r, out, md, sections=False)
+    arts: dict[str, str] = {}
+    kw = _readable_views(r, out, md, arts, notes)
+    done = [Path(p) for p in arts.values()]
+    if (out / REPORT).exists():
+        notes.append("已出研报：看板含估值卡片，不重出（要更新看板请重跑 --value）")
+        return done
+    if (out / BRIEF).exists():
+        r.audit = _audit_from_md((out / BRIEF).read_text(encoding="utf-8"))
+    return [*done, build_dashboard(r, path=out / "dashboard.html", **kw)]
 
 
 def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
@@ -2584,6 +2643,13 @@ def _sign_header(path: Path, out: Path) -> None:
         path.write_text(line + body, encoding="utf-8")
 
 
+def _balance_context(sb) -> str:
+    """辩论② 的结论进简报撰写提示词。结论全文里有不少外部转述的数字（网页、研报），不在账本里 ——
+    写明不能照抄，否则撰写者抄进正文会被裸数字审计驳回。"""
+    return (f"**多空平衡点**（结论里没有占位符的数字是外部读数，正文不得照抄：改用占位符，或改成不带数字的说法）"
+            f"\n\n{sb.summary()}")
+
+
 def run_brief(code: str, r, as_of: date, out_dir: str | Path,
               verified_by: str, *, model: str | None = None,
               snapshot_dir: str | Path = "snapshots",
@@ -2689,7 +2755,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     body = None
     try:
         body, _ = write_body(cat, client, code=code, period=r.period, brief=True,
-                             context=f"**多空平衡点**\n\n{sb.summary()}",
+                             context=_balance_context(sb),
                              **{k: v or None
                                 for k, v in _prompt_bundle(pr).items()})
     except (AnalystRefused, ClaudeCliError) as e:
@@ -2782,6 +2848,7 @@ def run_assume(code: str, r, as_of: date, out_dir: str | Path,
     _save_state(out, code, r, as_of, md, pr, reviewed_by=reviewed_by)
     if ASSUMPTIONS_ART in arts:
         _sign_header(out / ASSUMPTIONS_MD, out)
+    _readable_views(r, out, md, arts, skipped)              # 门③ 的人读判断项阅读版
     # **按本轮登记的产物定状态，不看磁盘上有没有那个文件。** 上一轮残留的
     # assumptions.json 会让这一轮 `_propose_assumptions` 的失败伪装成成功 ——
     # 与「上一轮残留的 assumptions.md 把第一阶段的失败伪装成第二阶段的失败」
@@ -3204,7 +3271,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # **没写出研报就不算做完。** 见 `_report_stage`。
     stage = _report_stage(stage, arts)
 
-    build_dashboard(r, path=out / "dashboard.html", context=_readable_views(r, out, md, arts), dcf=dcf_res)
+    build_dashboard(r, path=out / "dashboard.html", dcf=dcf_res, **_readable_views(r, out, md, arts, skipped))
     arts["看板"] = str(out / "dashboard.html")
 
     reason = ""

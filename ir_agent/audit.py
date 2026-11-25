@@ -26,6 +26,9 @@ class AuditResult:
     footnotes: list[Footnote] = field(default_factory=list)
     bare_numbers: list[str] = field(default_factory=list)
     missing_snapshots: list[str] = field(default_factory=list)
+    # 渲染之前的原稿（带占位符）。看板按它给每处数字挂上各自的来源 —— 按显示值去正文里找，
+    # 同值的两个指标会挂错，重复出现的只挂得上第一处。
+    draft: str = ""
     # 渲染之后仍留在正文里的占位符形状 —— 见 `_LEFTOVER` 与 `audit()`。
     unrendered: list[str] = field(default_factory=list)
 
@@ -139,6 +142,6 @@ def audit(
         except KeyError:
             missing.append(n.source_id)
 
-    return AuditResult(rendered=rendered, footnotes=notes,
+    return AuditResult(draft=draft, rendered=rendered, footnotes=notes,
                        bare_numbers=bare, missing_snapshots=missing,
                        unrendered=left)

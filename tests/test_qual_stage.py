@@ -134,7 +134,7 @@ def test_门一清单的定性分析审核一节():
          "flagged": ["[议价] 对上游：提醒　x"], "note": "本轮语料库与审核时不同，1 处依据本轮核对不过"}])
     assert txt.startswith("\n## 定性分析审核")
     assert "宏观定性：第 1 轮审核通过" in txt and "战略分析：✎ 经人工修改，以签名确认的版本为准" in txt
-    assert "[议价] 对上游：提醒" in txt and "1 处依据本轮核对不过" in txt
+    assert "**[议价] 对上游**：提醒" in txt and "    - 理由：x" in txt and "1 处依据本轮核对不过" in txt
     assert full._qual_section([]) == ""
 
 
@@ -181,3 +181,18 @@ def test_沿用时语料库变了_转述文章不在也计入_不计假事实(tm
     assert st["state"] == "沿用审核结论" and "2 处" in st["note"], st
     _, st = call(_Corpus("东莞证券：玻纤行业深度报告", "新增文章"))
     assert st["note"] == "", st
+
+
+def test_来源清单的审核意见分条():
+    """一条几百字的意见拆成理由 / 引文核对 / 建议（spec 2026-11-25-readable-layout Task 6）。"""
+    line = "[五力] 供应商议价能力：提醒　" + "证据不足。" * 40 + "（⚠ 引文「x」在语料里找不到）　建议：" + "补证据。" * 20
+    s = full._qual_section([
+        {"label": "战略分析", "state": "审核通过", "rounds": 2, "flagged": [line], "note": "语料库变了"},
+        {"label": "宏观定性", "state": full.HUMAN_SIGNED, "rounds": 0, "flagged": [], "note": ""},
+        {"label": "产业链", "state": "沿用审核结论", "rounds": 1, "flagged": [], "note": ""}])
+    rows = s.split("\n")
+    assert "- 战略分析：第 2 轮审核通过" in rows and any(r.startswith("- 宏观定性：✎ 经人工修改") for r in rows)
+    assert "- 产业链：沿用上轮审核结论（第 1 轮审核通过）" in rows and "  - ⚠ 语料库变了" in rows
+    assert "  - **[五力] 供应商议价能力**：提醒" in rows
+    for lab in ("理由", "引文核对", "建议"):
+        assert any(r.startswith(f"    - {lab}：") for r in rows)

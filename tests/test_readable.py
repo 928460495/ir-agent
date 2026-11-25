@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from ir_agent import readable
 from ir_agent.ledger import Fact, FactLedger, Method
 
@@ -24,19 +26,61 @@ def _ledger():
 
 
 def test_render_replaces_placeholders_and_adds_footnotes():
-    text = "集中度高（[[industry.cr5@2025FY]]），营收 [[revenue@2025FY]]；再提一次 [[industry.cr5@2025FY]]"
-    out = readable.render_readable(text, _ledger(), AS_OF)
-    assert "[[" not in out.split("\n## 数字出处")[0]
-    assert "81.72%[^1]" in out and "393.75 亿元[^2]" in out
-    assert out.count("[^1]:") == 1                       # 同一引用只出一条脚注
-    assert "[^1]: industry.cr5@2025FY · 来源 calc_cr5 · 披露日 2026-04-30 · computed" in out
+    text = "集中度高（[[industry.cr5@2025FY]]），营收 [[revenue@2025FY]]；再提一次 [[industry.cr5@2025FY]] 的水平"
+    body, notes = readable.render_readable(text, _ledger(), AS_OF)
+    assert "[[" not in body and "81.72%[^1]" in body and "393.75 亿元[^2]" in body
+    assert sorted(notes) == ["1", "2"]                   # 同一引用只出一条脚注
+    out = readable.with_notes(body, notes)
+    assert out.count("[^1]:") == 1 and "## 数字出处" in out
 
 
 def test_render_keeps_unresolved_and_lookahead_marked():
-    text = "缺 [[nope.key@2025FY]]，未来 [[future@2026FY]]"
-    out = readable.render_readable(text, _ledger(), AS_OF)
-    assert "[[nope.key@2025FY]]（账本未取到）" in out
-    assert "[[future@2026FY]]（账本未取到）" in out
+    body, _ = readable.render_readable("缺 [[nope.key@2025FY]]，未来 [[future@2026FY]]", _ledger(), AS_OF)
+    assert "[[nope.key@2025FY]]（账本未取到）" in body
+    assert "[[future@2026FY]]（账本未取到）" in body
+
+
+@pytest.mark.parametrize("tail", ["为 81.72%", "81.72%", "（81.72%）", "约81.72%", "= 81.7%"])
+def test_后面就是同一个数时显示中文名(tail):
+    body, _ = readable.render_readable(f"[[industry.cr5@2025FY]] {tail}，偏高", _ledger(), AS_OF)
+    assert body.startswith("行业 CR5（2025FY）[^1]") and body.count("81.7") == 1
+
+
+def test_金额带单位重复时也只显示一次():
+    body, _ = readable.render_readable("[[revenue@2025FY]] 393.75亿，增长", _ledger(), AS_OF)
+    assert body.count("393.75") == 1
+
+
+def test_后面是别的数时仍显示数值():
+    body, _ = readable.render_readable("[[industry.cr5@2025FY]] 高于 60%", _ledger(), AS_OF)
+    assert body.startswith("81.72%[^1] 高于 60%")
+    body, _ = readable.render_readable("由 [[industry.cr5@2025FY]] 升至 91.72%", _ledger(), AS_OF)
+    assert "81.72%[^1]" in body
+
+
+@pytest.mark.parametrize("text", ["不作依据。[[industry.cr5@2025FY]]", "[[industry.cr5@2025FY]]", "甲 | [[industry.cr5@2025FY]] | 乙"])
+def test_孤零零的数补中文名(text):
+    body, _ = readable.render_readable(text, _ledger(), AS_OF)
+    assert "行业 CR5 81.72%[^1]" in body
+
+
+def test_并列占位符照常显示数值():
+    body, _ = readable.render_readable("见 [[industry.cr5@2025FY]]、[[revenue@2025FY]] 两项", _ledger(), AS_OF)
+    assert "见 81.72%[^1]、393.75 亿元[^2] 两项" in body
+
+
+def test_没有中文名时不硬造():
+    led = _ledger()
+    led.put(Fact(key="zzz.unknown", value=Decimal("5"), unit="x", period="2025FY", as_of=date(2026, 4, 30),
+                 source_id="q_1", method=Method.COMPUTED))
+    body, notes = readable.render_readable("见。[[zzz.unknown@2025FY]]", led, AS_OF)
+    assert body == "见。5.00x[^1]" and "zzz.unknown@2025FY" in notes["1"]
+
+
+def test_脚注中文并保留内部键():
+    _, notes = readable.render_readable("集中度 [[industry.cr5@2025FY]] 高", _ledger(), AS_OF)
+    assert notes["1"].startswith("行业 CR5（2025FY）· 来源 账本计算 · 披露日 2026-04-30")
+    assert "industry.cr5@2025FY" in notes["1"] and "calc_cr5" in notes["1"]
 
 
 def test_inline_has_values_without_footnotes():
@@ -50,7 +94,7 @@ def test_write_readables_only_for_existing_sources(tmp_path):
     f = tmp_path / "macro_view_阅读版.md"
     assert written == [f]
     body = f.read_text(encoding="utf-8")
-    assert body.startswith("> 只读阅读版") and "修改请改 `macro_view.md`" in body and "81.72%" in body
+    assert "> 只读阅读版" in body and "修改请改 `macro_view.md`" in body and "81.72%" in body
     assert (tmp_path / "macro_view.md").read_text(encoding="utf-8") == src      # 源文件不动
     assert not (tmp_path / "strategy_阅读版.md").exists()
 
@@ -86,3 +130,14 @@ def test_valuation_dashboard_also_uses_readable_views():
     from ir_agent import full
     src = inspect.getsource(full.run_valuation)
     assert "_readable_views(" in src and "context=md" not in src
+
+
+@pytest.mark.parametrize("text", ["行业 CR5 [[industry.cr5@2025FY]] 为 81.72%", "行业 CR5（[[industry.cr5@2025FY]]，81.72%）"])
+def test_前面已写中文名时不重复(text):
+    body, _ = readable.render_readable(text, _ledger(), AS_OF)
+    assert body.count("行业 CR5") == 1 and body.count("81.72") == 1 and "[^1]" in body
+
+
+def test_前面已写中文名且后面没有同值时显示数值():
+    body, _ = readable.render_readable("行业 CR5 [[industry.cr5@2025FY]]，偏高", _ledger(), AS_OF)
+    assert body == "行业 CR5 81.72%[^1]，偏高"

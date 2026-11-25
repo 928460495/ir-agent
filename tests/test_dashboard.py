@@ -106,14 +106,14 @@ class TestEscaping:
 
 
 
-def test_分析口径进看板且在正文之前(tmp_path, run_obj):
-    """读者应当先知道结论建立在什么样本上，再读结论本身。"""
+def test_正文在口径之前(tmp_path, run_obj):
+    """结论在前、口径在后（用户 2026-11-25；此前口径排在前面，研究正文落在一万多像素之后）。"""
     out = html(tmp_path, run_obj,
                context={"行业": "覆盖 12/18 家（67%）\n  ⚠ 低于 70%",
                         "宏观": "名义 GDP 同比 5.43%"})
     assert "分析口径" in out
-    assert "覆盖 12/18 家" in out and "名义 GDP 同比" in out
-    assert out.index("分析口径") < out.index("研究正文")
+    assert "覆盖 12/18 家" in out and "名义 GDP 同比" in out and "低于 70%" in out
+    assert out.index('id="sec-body"') < out.index('id="sec-context"')
 
 
 def test_口径为空时不留空壳(tmp_path, run_obj):
@@ -175,3 +175,118 @@ def test_健全性警告原样呈现(tmp_path, run_obj):
 
 def test_没有估值时不出空的估值区(tmp_path, run_obj):
     assert "ashare-dcf" not in html(tmp_path, run_obj)
+
+
+# ── 排版（spec 2026-11-25-readable-layout §4.6）─────────────────
+
+import re as _re
+
+
+def _visible(h):
+    """看得见的文字：去掉样式、脚本、来源气泡与标签。"""
+    h = _re.sub(r"<style.*?</style>|<script.*?</script>|<span [^>]*role=\"tooltip\".*?</span>", "", h, flags=_re.S)
+    return _re.sub(r"<[^>]+>", "\n", h)
+
+
+def _audit(run_obj, text):
+    from ir_agent.audit import audit
+    run_obj.audit = audit(text, run_obj.ledger, run_obj.store, as_of=run_obj.as_of)
+
+
+def test_正文Markdown已渲染(tmp_path, run_obj):
+    _audit(run_obj, "## 投资要点\n\n**粗体** 营收 [[revenue@2025FY]]：\n- 项一\n- 项二\n\n| 甲 | 乙 |\n| --- | --- |\n| 子 | 丑 |")
+    h = html(tmp_path, run_obj)
+    assert "<strong>粗体</strong>" in h and "<li>项一" in h and "<td>子</td>" in h
+    v = _visible(h)
+    assert "**" not in v and not any(x.lstrip().startswith(("- ", "|")) for x in v.split("\n"))
+
+
+def test_同一数字每次都可点(tmp_path, run_obj):
+    _audit(run_obj, "营收 [[revenue@2025FY]]，再提 [[revenue@2025FY]]。")
+    body = html(tmp_path, run_obj).split('id="sec-body"')[1].split("<section")[0]
+    assert body.count('class="num"') == 2
+
+
+def test_同值不同指标各有各的来源(tmp_path, run_obj):
+    from ir_agent.ledger import Fact, Method
+    run_obj.ledger.put(Fact(key="net_profit_attr_parent", value=D("200"), unit="元", currency="CNY", period="2025FY",
+                            as_of=date(2026, 4, 20), source_id="em_g_x", method=Method.REPORTED))
+    _audit(run_obj, "净利润 [[net_profit@2025FY]]，归母 [[net_profit_attr_parent@2025FY]]。")
+    h = html(tmp_path, run_obj)
+    assert "net_profit@2025FY" in h and "net_profit_attr_parent@2025FY" in h.split('id="sec-src"')[0]
+
+
+def test_长名单折叠_结论仍在外面(tmp_path, run_obj):
+    ctx = "行业集中度较高\n" + "\n".join(f"  – 剔除 公司{i}：非本市场" for i in range(60))
+    h = html(tmp_path, run_obj, context={"行业": ctx})
+    assert "共 60 条" in h and "剔除 公司59" in h
+    assert h.index("行业集中度较高") < h.index("共 60 条")
+
+
+def test_嵌套的长名单也折叠(tmp_path, run_obj):
+    ctx = "  · 样本\n" + "\n".join(f"      – 剔除 公司{i}" for i in range(30))
+    assert "共 30 条" in html(tmp_path, run_obj, context={"行业": ctx})
+
+
+def test_估值标题与币种(tmp_path, run_obj):
+    cn = html(tmp_path, run_obj, dcf=_Dcf())
+    assert "ashare-dcf 三表模型" in cn and "45.60</b> 元" in cn
+
+
+def test_关键数字按账本有无(tmp_path, run_obj):
+    h = html(tmp_path, run_obj)
+    box = h.split('class="figs"')[1].split("</section>")[0]
+    assert box.count('class="fig"') == 2 and "营业收入" in box and "ROE" in box
+    run_obj.ledger._facts.clear()
+    assert 'class="figs"' not in html(tmp_path, run_obj)
+
+
+def test_关键数字不提前看(tmp_path, run_obj):
+    from ir_agent.ledger import Fact, Method
+    run_obj.ledger.put(Fact(key="pb", value=D("9"), unit="x", period="2026-07-01", as_of=date(2026, 7, 1),
+                            source_id="q", method=Method.REPORTED))          # 分析时点 2026-06-01 之后
+    assert "9.00x" not in html(tmp_path, run_obj)
+
+
+def test_目录锚点都存在(tmp_path, run_obj):
+    _audit(run_obj, "## 投资要点\n\n营收 [[revenue@2025FY]]。\n\n## 风险提示\n\n无。")
+    h = html(tmp_path, run_obj, context={"行业": "甲"}, dcf=_Dcf())
+    hrefs = _re.findall(r'href="#([^"]+)"', h)
+    assert len(hrefs) >= 4 and all(f'id="{x}"' in h for x in hrefs)
+    ids = _re.findall(r'\bid="([^"]+)"', h)
+    assert len(ids) == len(set(ids))
+
+
+def test_公司名进抬头(tmp_path, run_obj):
+    assert "贵州茅台 600519" in html(tmp_path, run_obj, company="贵州茅台 600519")
+
+
+def test_三个定性模块用阅读版_审核意见折叠(tmp_path, run_obj):
+    md = "# 战略\n\n## 护城河\n\n### 转换成本 —— 宽\n\n依据甲\n\n#### 审核意见：提醒\n\n- 理由：证据偏薄\n\n### 无形资产 —— 窄\n\n依据乙"
+    h = html(tmp_path, run_obj, context={"战略": "  护城河　转换成本"}, views={"strategy": (md, {})})
+    sec = h.split('id="sec-strategy"')[1].split("</section>")[0]
+    assert "转换成本 —— 宽" in sec and "<summary>审核意见：提醒</summary>" in sec
+    det = sec.split("<summary>审核意见：提醒</summary>")[1].split("</details>")[0]
+    assert "证据偏薄" in det and "无形资产" not in det
+    assert "依据乙" in sec
+
+
+def test_程序核对提示不随阅读版丢失(tmp_path, run_obj):
+    h = html(tmp_path, run_obj, context={"产业链": "产业链\n  ⚠ 议价与账本方向相反\n  审核遗留（x）：\n    · [议价] 下游：提醒　甲"},
+             views={"value_chain": ("# 产业链\n\n### 上游 —— 强\n", {})})
+    assert "议价与账本方向相反" in h
+
+
+def test_定性模块没有阅读版时用原摘要_都没有就写明(tmp_path, run_obj):
+    h = html(tmp_path, run_obj, context={"战略": "护城河判断原摘要", "宏观定性": "", "产业链": ""}, views={})
+    assert "护城河判断原摘要" in h and "本轮未取到" in h
+
+
+def test_正文不用pre(tmp_path, run_obj):
+    h = html(tmp_path, run_obj, context={"行业": "甲\n  · 乙"}, dcf=_Dcf())
+    assert "<pre" not in h
+
+
+def test_什么都没有也能生成(tmp_path, run_obj):
+    h = html(tmp_path, run_obj, context={}, views={})
+    assert h.lstrip().startswith("<!doctype html") and "三表勾稽" in h

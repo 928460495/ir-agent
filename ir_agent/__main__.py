@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import date
+from pathlib import Path
 
 from ir_agent.pipeline import run, unresolved_disagreements
 
@@ -45,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "（需 --reviewed-by）")
     p.add_argument("--value", metavar="DIR", default=None,
                    help="第二阶段：读回已核实的判断项 → 三表 DCF 建模 → 完整研报")
+    p.add_argument("--views", metavar="DIR", default=None,
+                   help="不调模型，重新生成该目录的阅读版与看板（不需要签名）")
     p.add_argument("--verified-by", default=None,
                    help="资料来源核验人署名（--brief 必需）")
     p.add_argument("--reviewed-by", default=None,
@@ -81,6 +84,8 @@ def _check_args(a) -> str:
         if getattr(a, flag) and not getattr(a, sig):
             return (f"--{flag} 需同时给出 --{sig.replace('_', '-')} <署名> "
                     f"—— {why}。")
+    if a.views and not (Path(a.views) / "state.json").exists():
+        return f"--views {a.views}：目录里没有 state.json，不是本程序的产物目录。"
     if a.assume and a.accept_manual:
         return ("--accept-manual 只对 --brief 有意义 —— 两轮多空辩论都在那一次"
                 "调用里，--assume 没有可读回的 stance_*.json。")
@@ -103,6 +108,15 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                      # noqa: BLE001
         print(f"运行失败: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
+
+    if a.views:
+        from ir_agent.full import run_views
+        notes: list[str] = []
+        for f in run_views(a.code, r, as_of, a.views, snapshot_dir=a.snapshots, notes=notes):
+            print(f"  ✓ {f}")
+        for n in notes:
+            print(f"  · {n}")
+        return 0
 
     if a.analyse:
         from ir_agent.full import report, run_analyse
