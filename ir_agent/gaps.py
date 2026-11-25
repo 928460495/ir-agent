@@ -398,9 +398,61 @@ def _via_note(core: str, f: Factor) -> str:
     return ""
 
 
+def _from_web(client, f: Factor, corpus, industry: str, as_of: date) -> FactorData:
+    """④ 联网：模型综合结论 + 引用文章。没有结果返回 MISSING，不抛。"""
+    try:
+        got = conclusions.search(client, f.label, f.key, industry, as_of)
+    except WebUnavailable as e:
+        # 能力边界不是故障，整轮研究不该因此停摆。措辞里显式写
+        # 「不能联网」而不是只转述异常原文。
+        return FactorData(
+            factor=f, status=MISSING,
+            note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
+
+    # ── ④：模型综合结论 + 引用文章（spec 2026-10-13 ②）─────
+    # 结论可以综合、可以改写；代码只做了机械比对，结果全是标注。
+    # 有结论就落 EXTERNAL（决定 A：带 ⚠ 的也能作依据，门③ 那一行
+    # 带标记），交给门② 的人复核（决定 B）。
+    if not got.items:
+        why = "；".join(got.dropped) or "没搜到可用的结论"
+        return FactorData(factor=f, status=MISSING,
+                          note=f"{why} —— 取值为估计")
+    arts: list[Article] = []
+    for c in got.items:
+        for a in c.articles:
+            if all(a is not x for x in arts):
+                arts.append(a)
+    for a in arts:
+        if a.opened:
+            # **入库的是代码抓回的全文，不是模型的结论。** 辩论② 与
+            # 撰写简报引的是文章原文 ——「不得引用本系统的分析结论」
+            # 那条规矩照样成立。
+            corpus.add_if_visible(Document(
+                doc_id=f"web_{f.key}_{len(corpus.docs)}",
+                url=a.final_url, title=f"{f.label}：文章{a.no}",
+                publisher=a.publisher, tier=a.tier,
+                published=a.published, retrieved=as_of,
+                text=a.text, prompt_limit=TEXT_LIMIT,
+                date_source="model"))
+    flagged = sum(1 for c in got.items if c.flags())
+    note = (f"{len(got.items)} 条模型综合结论，待人工复核"
+            + (f"（其中 {flagged} 条带 ⚠）" if flagged else ""))
+    if got.dropped:
+        note += "；" + "；".join(got.dropped)
+    degraded = any(a.degraded for a in arts)
+    if degraded:
+        n = sum(1 for a in arts if a.degraded)
+        note += (f"；其中 {n} 篇文章抓取时主机安全校验降级（本机 DNS "
+                 "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮"
+                 "依赖代理侧")
+    return FactorData(factor=f, status=EXTERNAL, findings=got.items, note=note,
+                      host_check_degraded=degraded)
+
+
 def collect(client, decomps: list[Decomposition], ledger: FactLedger,
             corpus, industry: str, as_of: date,
-            sections=None, annual_url: str = "") -> dict[str, FactorData]:
+            sections=None, annual_url: str = "",
+            pending: frozenset[str] = frozenset()) -> dict[str, FactorData]:
     """逐因子采集。已在账本的跳过；缺的依次尝试②年报、③研报、④外部网络。
 
     ②或③命中就不再往下走——先近后远，同时省一次联网调用。`sections`/
@@ -414,6 +466,24 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
     现有调用方。
     """
     out: dict[str, FactorData] = {}
+
+    def keep(fd: FactorData, core: str) -> None:
+        """②②.5③ 命中的处理。**审核判「待采集」、又只靠模型检索词命中的，照样联网**（用户 2026-11-26）：
+        那样的命中常是巧合 —— NVDA「存储涨幅」命中的是采购承诺那句，与价格无关；历史 55 个待采集因子
+        有 21 个因此没联网。联网有结论就以结论为准，命中的原文留作线索；没有就保留原命中并说明。"""
+        f = fd.factor
+        if f.key not in pending or not _via_note(core, f):
+            out[f.key] = fd
+            return
+        got = _from_web(client, f, corpus, industry, as_of)
+        if got.status != EXTERNAL:
+            fd.note += f"（审核判「待采集」，已联网：{got.note}）"
+            out[f.key] = fd
+            return
+        got.note += f"；另有检索词命中的线索：{fd.note}"
+        got.source_url, got.source_retrieved, got.source_excerpt = fd.source_url, fd.source_retrieved, fd.source_excerpt
+        out[f.key] = got
+
     # `decomps` 可以是旧分解式列表或 `FormulaModel`；水平模式下同一因子被两条
     # 公式共用，按 key 去重（`flat_factors`）。
     factors = flat_factors(decomps)
@@ -435,7 +505,7 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
         hit = _match_annual(sections, f.label, f.search_term)
         if hit is not None:
             excerpt, src, core = hit
-            out[f.key] = FactorData(
+            keep(FactorData(
                 factor=f, status=ANNUAL,
                 note=f"「{excerpt}」——{src}"
                      "（文字依据，是否给出具体数值待人工确认）"
@@ -444,83 +514,34 @@ def collect(client, decomps: list[Decomposition], ledger: FactLedger,
                 # 与 note 里包在「」中的那段是同一份文字——note 是
                 # 拼给人看的，这里是给 assume._match_excerpt 用的，
                 # 两者必须来自同一个 excerpt 变量，不能事后各改各的。
-                source_excerpt=excerpt)
+                source_excerpt=excerpt), core)
             continue
 
         hit = _match_announce(corpus, f.label, f.search_term)
         if hit is not None:
             excerpt, doc, core = hit
-            out[f.key] = FactorData(
+            keep(FactorData(
                 factor=f, status=ANNOUNCE,
                 note=f"「{excerpt}」——{doc.cite()}"
                      "（文字依据，是否给出具体数值待人工确认）"
                      + _via_note(core, f),
                 source_url=doc.url, source_retrieved=doc.retrieved,
-                source_excerpt=excerpt)
+                source_excerpt=excerpt), core)
             continue
 
         hit = _match_report(corpus, f.label, f.search_term)
         if hit is not None:
             excerpt, doc, core = hit
-            out[f.key] = FactorData(
+            keep(FactorData(
                 factor=f, status=REPORT,
                 note=f"「{excerpt}」——{doc.cite()}"
                      "（文字依据，是否给出具体数值待人工确认）"
                      + _via_note(core, f),
                 source_url=doc.url, source_retrieved=doc.retrieved,
-                source_excerpt=excerpt)
+                source_excerpt=excerpt), core)
             continue
 
-        try:
-            got = conclusions.search(client, f.label, f.key, industry, as_of)
-        except WebUnavailable as e:
-            # 能力边界不是故障，整轮研究不该因此停摆。措辞里显式写
-            # 「不能联网」而不是只转述异常原文。
-            out[f.key] = FactorData(
-                factor=f, status=MISSING,
-                note=f"不能联网 —— {e} —— 取值为估计，无数据支撑")
-            continue
-
-        # ── ④：模型综合结论 + 引用文章（spec 2026-10-13 ②）─────
-        # 结论可以综合、可以改写；代码只做了机械比对，结果全是标注。
-        # 有结论就落 EXTERNAL（决定 A：带 ⚠ 的也能作依据，门③ 那一行
-        # 带标记），交给门② 的人复核（决定 B）。
-        if not got.items:
-            why = "；".join(got.dropped) or "没搜到可用的结论"
-            out[f.key] = FactorData(factor=f, status=MISSING,
-                                    note=f"{why} —— 取值为估计")
-            continue
-        arts: list[Article] = []
-        for c in got.items:
-            for a in c.articles:
-                if all(a is not x for x in arts):
-                    arts.append(a)
-        for a in arts:
-            if a.opened:
-                # **入库的是代码抓回的全文，不是模型的结论。** 辩论② 与
-                # 撰写简报引的是文章原文 ——「不得引用本系统的分析结论」
-                # 那条规矩照样成立。
-                corpus.add_if_visible(Document(
-                    doc_id=f"web_{f.key}_{len(corpus.docs)}",
-                    url=a.final_url, title=f"{f.label}：文章{a.no}",
-                    publisher=a.publisher, tier=a.tier,
-                    published=a.published, retrieved=as_of,
-                    text=a.text, prompt_limit=TEXT_LIMIT,
-                    date_source="model"))
-        flagged = sum(1 for c in got.items if c.flags())
-        note = (f"{len(got.items)} 条模型综合结论，待人工复核"
-                + (f"（其中 {flagged} 条带 ⚠）" if flagged else ""))
-        if got.dropped:
-            note += "；" + "；".join(got.dropped)
-        degraded = any(a.degraded for a in arts)
-        if degraded:
-            n = sum(1 for a in arts if a.degraded)
-            note += (f"；其中 {n} 篇文章抓取时主机安全校验降级（本机 DNS "
-                     "被代理劫持，IP 层校验无从进行）——内网地址拦截本轮"
-                     "依赖代理侧")
-        out[f.key] = FactorData(factor=f, status=EXTERNAL,
-                                findings=got.items, note=note,
-                                host_check_degraded=degraded)
+        out[f.key] = _from_web(client, f, corpus, industry, as_of)
     return out
 
 

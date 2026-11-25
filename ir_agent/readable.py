@@ -197,7 +197,7 @@ def stance_markdown(d: dict) -> str:
     lines: list[str] = []
     if d.get("manual"):
         lines += [f"> ⚠ 本轮多空输入由 {d['manual']} **人工补写**", ""]
-    lines += ["## 平衡点", ""]
+    lines += [f"⚠ {x}" for x in d.get("doubts") or []] + ["## 平衡点", ""]
     for b in d.get("balances") or []:
         tri = "" if b.get("mid") is None else f" —— 空 {b.get('bear')} / 平 {b.get('mid')} / 多 {b.get('bull')}"
         lines += [f"### {b.get('subject', '')}{tri}", "", " ".join(str(b.get("note") or "").split()), ""]

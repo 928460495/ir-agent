@@ -1293,10 +1293,10 @@ def _match_excerpt(fd: FactorData | None, quote: str) -> bool:
     这里直接用它，不再看 `note` 一眼——展示文本与机器取值的数据源
     彻底分开，才不会再被 note 格式的任何改动连累。
 
-    只对 ANNUAL/ANNOUNCE/REPORT 三种状态生效——DISCLOSED/MISSING/EXTERNAL
-    没有这个字段（默认空串），该走别的出口（findings 或"无数据"）。
+    对 ANNUAL/ANNOUNCE/REPORT 生效；EXTERNAL 只在「待采集」因子联网后留有线索原文时
+    才有这个字段（2026-11-26）。DISCLOSED/MISSING 没有（默认空串），走别的出口。
     """
-    if fd is None or fd.status not in (gaps.ANNUAL, gaps.ANNOUNCE, gaps.REPORT):
+    if fd is None or fd.status not in (gaps.ANNUAL, gaps.ANNOUNCE, gaps.REPORT, gaps.EXTERNAL):
         return False
     qn = _norm(quote)
     return bool(qn) and bool(fd.source_excerpt) and qn in _norm(fd.source_excerpt)

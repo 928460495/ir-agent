@@ -1633,8 +1633,23 @@ def _read_drivers(out: Path):
                       "退回不分解模式，判断项仍按营收增速/毛利率两项填写")
 
 
+def _pending_factors(out: Path, meth) -> frozenset[str]:
+    """方法论审核判「待采集」的因子键。读不到审核记录给空集（按原来的阶梯采集）。"""
+    from ir_agent.methodology_review import ReviewResult
+
+    try:
+        rv = ReviewResult.from_json(json.loads((out / DRIVERS_REVIEW_JSON).read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+    want = [v.subject for v in rv.verdicts if v.kind == "因子" and v.level == "待采集"]
+    return frozenset(f.key for f in meth.factors()
+                     if any(s == f.label or s == f"{f.short}（{f.label}）" or (f.short and s.split("（", 1)[0] == f.short)
+                            for s in want))
+
+
 def _collect_factors(r, as_of: date, client, md: dict, decomps,
-                     industry: str, skipped: list[str]) -> dict:
+                     industry: str, skipped: list[str],
+                     pending: frozenset[str] = frozenset()) -> dict:
     """按分解式定向采集因子数据。整段从 `run_analysis` 原样搬出。
 
     **`_refresh_external_md` 必须留在 `finally` 里，不能紧跟在 try 块成功
@@ -1656,7 +1671,7 @@ def _collect_factors(r, as_of: date, client, md: dict, decomps,
         factor_data = gaps.collect(
             client, decomps, r.ledger, r.corpus or Corpus(as_of=as_of),
             industry, as_of, sections=getattr(r, "sections", None),
-            annual_url=getattr(r, "annual_url", ""))
+            annual_url=getattr(r, "annual_url", ""), pending=pending)
         md["因子数据"] = gaps.summary(factor_data)
     except Exception as e:                                  # noqa: BLE001
         skipped.append(f"因子数据采集（{e.__class__.__name__}: {e}）")
@@ -2521,7 +2536,7 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
 
 
 def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
-                  as_of, accept_manual, by, skipped, refresh=False):
+                  as_of, accept_manual, by, skipped, refresh=False, brief="", units=None):
     """跑一轮多空辩论，或读回已有产物 / 人工补写。失败则落盘模板，返回 None。
 
     **不存在「跳过」**：每份研报的多空输入要么来自模型、要么来自人。
@@ -2550,6 +2565,7 @@ def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
                     raise stance.StanceFailed("；".join(probs))
                 skipped.append(f"多空辩论{round_}：沿用已有产物"
                                f"（要重抽加 --refresh-stance）")
+            res.doubts = stance.unit_doubts(res.balances, units or {})      # 人补写的、沿用的也核对量级
         except (stance.StanceFailed, ValueError, KeyError) as e:
             skipped.append(f"多空辩论{round_} 已有产物不可用（{str(e)[:160]}）"
                            f"—— 请修正 {path}，或加 --refresh-stance 重抽")
@@ -2564,7 +2580,8 @@ def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
     try:
         res = stance.run_stance(client, round_=round_, subjects=subjects,
                                 context=ctx, catalog=cat, ledger=r.ledger,
-                                as_of=as_of, corpus=getattr(r, "corpus", None))
+                                as_of=as_of, corpus=getattr(r, "corpus", None),
+                                brief=brief, units=units)
     except stance.StanceFailed as e:
         _dump_refused(out, getattr(e, "raw", ""), f"stance_{low}_failed_raw.md")
         (out / f"stance_{low}.template.json").write_text(
@@ -2713,7 +2730,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     """
     # `assume` 必须在这里导入：`full.py` 顶部没有它（全仓库都在函数内导），
     # 下面 `list(assume.DRIVERS)` 不导就是 NameError。
-    from ir_agent import assume
+    from ir_agent import assume, stance
 
     if not verified_by.strip():
         raise SystemExit("必须署名核验人 —— 资料来源要有人核验过才谈得上可用。")
@@ -2779,7 +2796,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     if meth is not None:
         factor_data = _collect_factors(r, as_of, research_client, md,
                                        meth.model, meth.industry,
-                                       skipped)
+                                       skipped, _pending_factors(out, meth))
         # 落盘给第三次调用。空字典也写 —— 让「采过、一个都没采到」与「没落盘」
         # 在第三次调用里可区分。
         from ir_agent import gaps
@@ -2793,7 +2810,9 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
     sb = _stance_round(client, out, STANCE_B, "B", subjects,
                        ctx + "\n\n【因子采集】\n" + _factor_ctx(factor_data),
                        cat, r, as_of, accept_manual, verified_by, skipped,
-                       refresh=refresh_stance)
+                       refresh=refresh_stance,
+                       brief=stance.factor_brief(meth) if meth is not None else "",
+                       units={f.label: f.unit for f in meth.factors()} if meth is not None else {})
     if sb is None:
         o = _stop_for_manual(code, r, as_of, out, arts, skipped, client,
                              round_="B")

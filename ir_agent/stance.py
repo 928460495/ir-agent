@@ -185,6 +185,8 @@ class StanceResult:
     # 因格式错误被跳过的证据行（段数不对、侧别写错）。**跳过要说出来**，
     # 否则读的人以为模型只采了这么多。
     dropped: list[str] = field(default_factory=list)
+    # 代码核对量级得到的疑点（`unit_doubts`）。**只标注，不驳回** —— 交判断项审核者
+    doubts: list[str] = field(default_factory=list)
 
     @property
     def unverified(self) -> list[Evidence]:
@@ -212,6 +214,7 @@ class StanceResult:
                              f"多 {b.bull} —— {' '.join(b.note.split())}")
         for e in self.unverified:
             lines.append(f"  ⚠ [{e.side}] {e.subject}：{e.unverified}")
+        lines += [f"  ⚠ {x}" for x in self.doubts]
         if self.dropped:
             lines.append(f"  ⚠ {len(self.dropped)} 行因格式错误被跳过：")
             lines += [f"    – {x}" for x in self.dropped]
@@ -227,6 +230,7 @@ class StanceResult:
                           "unverified": e.unverified,
                           "source": e.source} for e in self.evidence],
             "dropped": list(self.dropped),
+            "doubts": list(self.doubts),
             "balances": [{"subject": b.subject,
                           "bear": None if b.bear is None else str(b.bear),
                           "mid": None if b.mid is None else str(b.mid),
@@ -263,7 +267,8 @@ class StanceResult:
                                 note=x.get("note", "")))
         return cls(round_=d.get("round", ""), evidence=evs, balances=bals,
                    manual=d.get("manual", ""),
-                   dropped=list(d.get("dropped") or []))
+                   dropped=list(d.get("dropped") or []),
+                   doubts=list(d.get("doubts") or []))
 
 
 def check_interval(balances: list[Balance]) -> list[str]:
@@ -400,8 +405,14 @@ _JUDGE_B = """你的角色是**裁决者**。多空两侧各自挑出了材料�
   平衡｜<因子>｜<空方值>｜<平衡值>｜<多方值>｜<理由>
 
 **硬性约束：平衡值必须落在空方值与多方值之间**（端点可取）。你不能自己造一个
-区间外的数 —— 平衡点要对两侧可问责。数值写成 0.08 或 8% 这类可解析的形式，
-不要写「约」「左右」。
+区间外的数 —— 平衡点要对两侧可问责。
+
+**每个因子按它自己标明的单位填**（见上面的因子清单，取值会直接代入分解式）：
+pp 填百分点数字本身，+1.4 个百分点写 1.4 或 1.4pp，不写 0.014，也不写 1.4%；
+变化率、比例写 8% 或 0.08；其他单位按原数写。
+**取值是全年口径的年度值**：单季同比、环比、累计数要先换算成全年；换算不了就
+在理由里写明，不要直接填。分解式写明的陷阱逐条对照，与陷阱冲突的取值不要用。
+数值要能直接解析，不要写「约」「左右」。
 """
 
 
@@ -420,6 +431,47 @@ def _corpus_block(corpus) -> str:
     for d in docs:
         lines.append(f"  ——【{TIER_LABEL[d.tier]}】{d.cite()}")
         lines.append("  " + d.for_prompt().replace("\n", "\n  "))
+    return "\n".join(lines)
+
+
+PP_UNITS = frozenset({"pp", "百分点", "个百分点", "pct"})
+PP_TINY = Decimal("0.2")          # 三档绝对值都小于它的百分点因子，多半是按小数填的
+_HOW = {"变化率": "+8% 写 8% 或 0.08", "%": "+8% 写 8% 或 0.08", "百分比": "+8% 写 8% 或 0.08",
+        "比例": "55% 写 55% 或 0.55"}
+
+
+def unit_doubts(balances: list[Balance], units: dict[str, str]) -> list[str]:
+    """百分点因子的量级核对。**只报疑点**：真有 0.1 个百分点的变动，由判断项审核者判。"""
+    out = []
+    for b in balances:
+        if b.mid is None or units.get(b.subject) not in PP_UNITS:
+            continue
+        top = max(abs(b.bear), abs(b.mid), abs(b.bull))
+        if 0 < top < PP_TINY:
+            out.append(f"「{b.subject}」单位是{units[b.subject]}，三档 {b.bear} / {b.mid} / {b.bull} 疑似按小数填写"
+                       f"（若本意是 {(top * 100).normalize():f} 个百分点，应写 {(top * 100).normalize():f}）"
+                       "—— 代码没有改动，由判断项审核者判断")
+    return out
+
+
+def factor_brief(meth) -> str:
+    """辩论② 要看的分解式：每个因子的单位、填法、数据线索，两条公式，作者写明的陷阱。"""
+    lines = ["**分解式**（取值直接代入下面的公式，口径与单位必须一致）"]
+    model = getattr(meth, "model", None)
+    for target in ("revenue", "gross_margin"):
+        text = model.describe(target) if model is not None else ""
+        if text:
+            lines.append(f"- {text}")
+    for c in getattr(model, "constants", None) or []:
+        lines.append(f"- 常量 {c.name} = {c.value}")
+    lines += ["", "**因子清单**（逐个按单位填）"]
+    for f in meth.factors():
+        how = ("填百分点数字本身，+1.4 个百分点写 1.4 或 1.4pp，不写 0.014，也不写 1.4%" if f.unit in PP_UNITS
+               else _HOW.get(f.unit, "按原数填"))
+        lines.append(f"- {f.label}｜单位 {f.unit}｜{how}" + (f"｜数据线索：{f.source_hint}" if f.source_hint else ""))
+    if getattr(meth, "pitfalls", None):
+        lines += ["", "**分解式作者写明的陷阱**（取值前逐条对照）"]
+        lines += [f"- {x}" for x in meth.pitfalls]
     return "\n".join(lines)
 
 
@@ -442,11 +494,15 @@ def template_json(round_: str, subjects: list[str]) -> dict:
 
 def run_stance(client, *, round_: str, subjects: list[str], context: str,
                catalog, ledger, as_of, body: str = "", corpus=None,
-               max_attempts: int = 3) -> StanceResult:
+               max_attempts: int = 3, brief: str = "",
+               units: dict[str, str] | None = None) -> StanceResult:
     """跑一轮多空辩论：多方采证 → 空方采证 → 裁决平衡点。
 
     `round_` 为 "A" 时裁决只给文字结论（预研之前没有因子）；为 "B" 时给三档
     数值并强制区间校验。
+
+    `brief` 是分解式（`factor_brief`），只在 B 轮给，三个角色都看；`units` 用于核对
+    百分点因子的量级。
 
     失败抛 `StanceFailed`，`raw` 带最后一次输出 —— 调用方据此落盘，人工补写
     时有底本可改。
@@ -468,7 +524,8 @@ def run_stance(client, *, round_: str, subjects: list[str], context: str,
     # 按档排好的文档，双方拿同一份。
     docs = _corpus_block(corpus)
     ctx = (f"\n**本轮要覆盖的{'因子' if round_ == 'B' else '主题'}**\n{topics}\n"
-           f"\n**可用事实**\n{facts}\n"
+           + (f"\n{brief}\n" if brief and round_ == "B" else "")
+           + f"\n**可用事实**\n{facts}\n"
            + (f"\n**语料库原文**\n{docs}\n" if docs else "")
            + f"\n**本系统的定性分析结论**（供参考；**它们不是证据**，"
              f"请引上面的原文或事实）\n{context}\n")
@@ -508,7 +565,7 @@ def run_stance(client, *, round_: str, subjects: list[str], context: str,
         probs = check_interval(bals)
         if not probs:
             return StanceResult(round_=round_, evidence=evs, balances=bals,
-                                dropped=dropped)
+                                dropped=dropped, doubts=unit_doubts(bals, units or {}))
         last = "；".join(probs)
         prompt = f"{base}\n---\n**上一稿被驳回**：{last}\n请据此重写全部行。\n"
     raise StanceFailed(f"连续 {max_attempts} 次给不出可用的平衡点：{last}", raw=raw)

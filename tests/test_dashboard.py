@@ -290,3 +290,10 @@ def test_正文不用pre(tmp_path, run_obj):
 def test_什么都没有也能生成(tmp_path, run_obj):
     h = html(tmp_path, run_obj, context={}, views={})
     assert h.lstrip().startswith("<!doctype html") and "三表勾稽" in h
+
+
+def test_关键数字宽屏四列窄屏两列(tmp_path, run_obj):
+    """八格在七列宽度下排成 7+1、右边留一块灰（NVDA 2026-11-26）。窄屏规则要排在后面才生效。"""
+    css = html(tmp_path, run_obj).split("<style>")[1].split("</style>")[0]
+    wide, narrow = css.index("repeat(4,minmax(0,1fr))"), css.index("{.figs{grid-template-columns:repeat(2,minmax(0,1fr))")
+    assert wide < narrow

@@ -57,8 +57,9 @@ h5,h6{font-size:.92rem;margin:18px 0 6px;color:var(--dim)}
 .light.ok{color:var(--ok);border-color:var(--ok)}
 .light.warn{color:var(--warn);border-color:var(--warn)}
 .light.bad{color:var(--bad);border-color:var(--bad);font-weight:700}
-.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;margin:0 0 28px;
+.figs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:0 0 28px;
 background:var(--rule);border:1px solid var(--rule)}
+@media(max-width:899px){.figs{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .fig{background:var(--card);padding:12px 14px}
 .fig b{display:block;font-size:1.1rem;overflow-wrap:normal;word-break:keep-all;font-variant-numeric:tabular-nums}
 .fig span{color:var(--dim);font-size:.78rem}
