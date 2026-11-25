@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -99,6 +100,17 @@ def main(argv: list[str] | None = None) -> int:
     if (err := _check_args(a)):
         print(err, file=sys.stderr)
         return 2
+
+    if a.views:
+        # 产物目录属于哪家公司、哪一期、哪个时点，以它自己的 state.json 为准：对不上会拿别家的数盖掉它，
+        # 或用分析时点之后才披露的数去配旧稿（前视）
+        st = json.loads((Path(a.views) / "state.json").read_text(encoding="utf-8"))
+        for what, mine, theirs in (("代码", a.code, st.get("code")), ("报告期", f"{a.year}{a.period}", st.get("period")),
+                                   ("分析时点", a.as_of, st.get("as_of"))):
+            if mine and theirs and str(mine) != str(theirs):
+                print(f"--views {a.views}：{what}不符，目录是 {theirs}，命令给的是 {mine}。", file=sys.stderr)
+                return 2
+        a.as_of = a.as_of or st.get("as_of")
 
     as_of = date.fromisoformat(a.as_of) if a.as_of else date.today()
 

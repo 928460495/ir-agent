@@ -127,9 +127,9 @@ def _marked(audit) -> tuple[str, dict[str, str]]:
         n = by.get((m.group(2), m.group(3)))
         return f"{n.display}[^{n.marker}]" if n is not None else m.group(0)
     if audit.draft:
-        return REF_RE.sub(sub, audit.draft), notes
+        return REF_RE.sub(sub, re.sub(r"\[\^(?=\w)", "[＾", audit.draft)), notes
     # 没有原稿（由落盘的成稿重出）：按显示值找，同值的几个指标把来源都列出来
-    text, by_val = audit.rendered, {}
+    text, by_val = re.sub(r"\[\^(?=\w)", "[＾", audit.rendered), {}
     for n in audit.footnotes:
         if n.display:
             by_val.setdefault(n.display, []).append(str(n.marker))
@@ -203,7 +203,11 @@ def build_dashboard(
                    f"三表勾稽 {'通过' if rec.ok else '失败'}"
                    f"（{rec.checks_run}/{len(rec.results)} 项）"))
     tr = a.traceability
-    lights.append(("ok" if tr == 1 else "bad", f"数字可溯源率 {tr:.0%}"))
+    if getattr(a, "partial", False):
+        lights.append(("warn" if tr == 1 else "bad", "由落盘成稿重出：裸数字未重新核对"
+                       + ("" if tr == 1 else f"，另有 {len(a.missing_snapshots)} 条引用缺快照、{len(a.unrendered)} 处占位符未落地")))
+    else:
+        lights.append(("ok" if tr == 1 else "bad", f"数字可溯源率 {tr:.0%}"))
     if a.bare_numbers:
         lights.append(("bad", f"裸数字 {len(a.bare_numbers)} 处"))
     if dcf is not None:

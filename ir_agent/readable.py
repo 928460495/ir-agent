@@ -39,21 +39,33 @@ def _lookup(m: re.Match[str], ledger, as_of: date):
 
 
 # 占位符后面隔这些字就算「紧跟」：模型常写「[[CPI]] 为 3.72%」「[[营收]] 393.75亿」（历史产物里一成多如此）
-_NEXT_NUM = re.compile(r"[\s（(，,]{0,2}(?:为|是|约|仅|即|＝|=)?\s?(-?\d[\d,]*(?:\.\d+)?)")
+_UNITS = ("个百分点", "分位", "index", "美元", "%", "％", "亿", "万", "倍", "x", "X", "家", "元", "天", "年")
+_NEXT_NUM = re.compile(r"[\s（(，,]{0,2}(?:为|是|约|仅|即|＝|=)?\s?(-?\d[\d,]*(?:\.\d+)?)\s?(" + "|".join(_UNITS) + ")?")
 _ALONE_BEFORE = re.compile(r"(?:^|[。！？；|\n])\s*$")
 _ALONE_AFTER = re.compile(r"^\s*(?:$|[。！？；|\n])")
+_SHOWN = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s?(.*)$")
+_PERCENT = ("%", "％")
 
 
-def _same_number(shown: str, other: str) -> bool:
-    """「81.72%」与「81.7」算同一个数：按较短那个的小数位四舍五入后相等。"""
-    m = re.match(r"-?\d[\d,]*(?:\.\d+)?", shown)
+def _same_number(shown: str, other: str, unit: str) -> bool:
+    """「81.72%」与「81.7%」是同一个数。**宁可重复显示，不可吞掉数值**：单位要对得上；没写单位的要有两位小数
+    且完全相同；整数只有数与单位都相同才算（「75.20%」与「75 分位」、「23.12x」与「23 年」都不是）。"""
+    m = _SHOWN.match(shown)
     if not m:
         return False
-    a, b = Decimal(m.group(0).replace(",", "")), Decimal(other.replace(",", ""))
-    places = min(-a.as_tuple().exponent, -b.as_tuple().exponent)
-    if abs(a) < 10 and places < 1:                     # 「1」与「1.04x」不算同一个数
-        return a == b
-    return round(a, places) == round(b, places)
+    a, b, mine = Decimal(m.group(1).replace(",", "")), Decimal(other.replace(",", "")), m.group(2)
+    dec = max(-b.as_tuple().exponent, 0)
+    if not unit:
+        return mine not in _PERCENT and dec >= 2 and a == b
+    if mine in _PERCENT:
+        fits = unit in _PERCENT
+    elif mine[:1] in ("亿", "万"):
+        fits = unit == mine[:1]
+    elif mine == "x":
+        fits = unit in ("x", "X", "倍")
+    else:
+        fits = mine.startswith(unit)
+    return fits and (a == b if dec == 0 else round(a, dec) == b)
 
 
 def _display(m: re.Match[str], fact, text: str) -> str:
@@ -62,10 +74,11 @@ def _display(m: re.Match[str], fact, text: str) -> str:
     if not label:
         return shown
     nxt = _NEXT_NUM.match(text[m.end():m.end() + 24])
-    if nxt and nxt.start(1) <= 8 and _same_number(shown, nxt.group(1)):
+    if nxt and nxt.start(1) <= 8 and _same_number(shown, nxt.group(1), nxt.group(2) or ""):
         # 前面已经写了这个名字（「高收益债利差 [[…]] 仅 3.63%」）：只留脚注
-        return "" if text[:m.start()].rstrip(" 　（(：:").endswith(label) else f"{label}（{fact.period}）"
-    if _ALONE_BEFORE.search(text[:m.start()]) and _ALONE_AFTER.match(text[m.end():]):
+        return "" if text[max(0, m.start() - 60):m.start()].rstrip(" 　（(：:").endswith(label) else f"{label}（{fact.period}）"
+    if _ALONE_BEFORE.search(text[max(0, m.start() - 20):m.start()] if m.start() > 20 else text[:m.start()]) \
+            and _ALONE_AFTER.match(text[m.end():m.end() + 20]):
         return f"{label} {shown}"
     return shown
 
@@ -82,7 +95,8 @@ def render_inline(text: str, ledger, as_of: date) -> str:
 
 def render_readable(text: str, ledger, as_of: date) -> tuple[str, dict[str, str]]:
     """占位符 → 数值或中文名 + `[^n]`。返回（正文, 脚注号 → 来源说明）；同一引用只编一个号。"""
-    text = text or ""
+    # 模型自己写的「[^1]」不是本程序的脚注，改成全角，免得挂上不相干的来源
+    text = re.sub(r"\[\^(?=\w)", "[＾", text or "")
     seen: dict[tuple[str, str, str], str] = {}
     notes: dict[str, str] = {}
 
@@ -139,11 +153,14 @@ def _merge_same_columns(text: str) -> str:
         for c, name in enumerate(head):
             if name not in ("理由", "依据") or any(len(r) != len(head) for r in body):
                 continue
-            real = list(dict.fromkeys(r[c] for r in body if r[c] not in ("同上", "—", "")))
-            if len(real) <= 1:
+            col = [r[c] for r in body]
+            real = list(dict.fromkeys(x for x in col if x not in ("同上", "—", "")))
+            if not real:                               # 一条理由都没写：列拿掉，但要说出来
                 drop.add(c)
-                if real:
-                    below.append(f"- {name}（各年相同）：{real[0]}")
+                below.append(f"- {name}：未填写")
+            elif len(real) == 1 and all(x in (real[0], "同上") for x in col):
+                drop.add(c)
+                below.append(f"- {name}（各年相同）：{real[0]}")
         keep = [c for c in range(len(head)) if c not in drop]
         fmt = lambda r: "| " + " | ".join(r[c] for c in keep) + " |"
         out.append("\n".join([fmt(head), fmt(["---"] * len(head)), *map(fmt, body)]) if drop else "\n".join(lines))
@@ -251,7 +268,7 @@ def _field_doc(name: str):
             if rec.get("fingerprint") == Q.fingerprint(raw):
                 review, note = ReviewResult.from_json(rec), ""
             else:
-                note = "这份稿经人工修改，以签名确认的版本为准；改动前的审核意见不再列出"
+                note = "这份稿在审核之后经人工修改，签名后以本版为准；改动前的审核意见不再列出"
         doc = fieldview.layout(name, raw, review, note=note, title=title)
         return doc + _track_section(out) if name == "macro_view" else doc
     return build
@@ -307,13 +324,16 @@ def render_views(out: Path | str, ledger, as_of: date, *, title: str = "", notes
 
 
 def write_readables(out: Path | str, ledger, as_of: date, *, title: str = "",
-                    notes: list[str] | None = None, views: dict | None = None) -> list[Path]:
+                    notes: list[str] | None = None, views: dict | None = None,
+                    keep: frozenset[str] = frozenset()) -> list[Path]:
     """为目录里已有的源文件各写一份阅读版；源文件已不在（或这次没排出来）的，删掉过时的。返回写出的文件。
     `views` 给出时直接落盘（看板与阅读版共用一次渲染）。"""
     out = Path(out)
     got = render_views(out, ledger, as_of, title=title, notes=notes) if views is None else views
     written: list[Path] = []
     for stem, name, _label, _b in VIEWS:
+        if stem in keep:                               # 这次排得不如已有的（缺估值事实）：已有的留着
+            continue
         dst = out / f"{stem}{SUFFIX}"
         if stem not in got:
             dst.unlink(missing_ok=True)

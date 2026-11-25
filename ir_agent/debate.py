@@ -97,9 +97,9 @@ class DebateResult:
                  f"{self.upheld_count} 项成立（{self.rounds} 轮）"]
         for c in self.challenges:
             mark = "✗ 成立" if c.upheld else "· 不成立" if c.verdict else "· 未裁决"
-            lines.append(f"  {mark}　[{c.kind.value}] {" ".join(c.passage.split())}")
+            lines.append(f"  {mark}　[{c.kind.value}] {' '.join(c.passage.split())}")
             if c.upheld and c.rationale:
-                lines.append(f"        {" ".join(c.rationale.split())}")
+                lines.append(f"        {' '.join(c.rationale.split())}")
         # 放宽审计的说明排在末尾、逐条列出 —— 放行不等于不说。
         for n in dict.fromkeys(self.notes):
             lines.append(f"  ⚠ {n}")

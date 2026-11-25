@@ -54,7 +54,7 @@ _GROUP = {"传导": "传导路径", "跟踪": "跟踪指标", "排除": "排除�
 _CH = ("利率", "信贷", "资产价格与财富", "汇率", "预期与信心", "财政", "监管与产业政策", "大宗商品与成本", "外需与贸易")
 
 # 原文 + 出处：「…」——某机构《题》（日期）
-_CITE = re.compile(r"[「“]([^」”]+)[」”]\s*(?:——|—|--)\s*([^；;。「“\n]*?(?:《[^》]*》)?(?:[（(][^（）()]*[）)])?)(?=[；;。\s]*(?:[「“]|$)|[；;。])")
+_CITE = re.compile(r"[「“]([^」”]{1,1500})[」”]\s{0,4}(?:——|—|--)\s{0,4}([^；;。「“\n]{0,300}?(?:《[^》]{0,300}》)?(?:[（(][^（）()]{0,200}[）)])?)(?=[；;。\s]*(?:[「“]|$)|[；;。])")
 
 
 @dataclass
@@ -172,19 +172,25 @@ def _attach(secs: list[_Section], review) -> list:
         pool = [s for s in secs if s.kind == kind]
         m = re.match(r"第\s*(\d+)\s*条\s*", v.subject)
         key = _norm(re.sub(r"^对(?=上游|下游)", "", v.subject[m.end():] if m else v.subject))
-        same = [s for s in pool if kind in ("政策取向", "行业规模") or (
-            key and (_norm(s.name).startswith(key) or (_norm(s.name) and key.startswith(_norm(s.name)))))]
-        if kind == "环节":
-            same = [s for s in pool if s.cells and s.cells[0].startswith(v.subject)][-1:]
-        hit = same[0] if same else None
-        if hit is None and m and kind != "补充" and 0 < int(m.group(1)) <= len(pool):
-            hit = pool[int(m.group(1)) - 1]
+        hit = None
+        if kind in ("政策取向", "行业规模"):
+            hit = pool[0] if pool else None
+        elif kind == "环节":
+            hit = next((s for s in reversed(pool) if s.cells and s.cells[0].startswith(v.subject)), None)
+        elif v.kind != "补充":
+            nth = pool[int(m.group(1)) - 1] if m and 0 < int(m.group(1)) <= len(pool) else None
+            like = lambda s: bool(key and _norm(s.name)) and (_norm(s.name).startswith(key) or key.startswith(_norm(s.name)))
+            # 序号与名称都对 → 名称完全相同 → 名称互为前缀（取最长）→ 只有序号
+            exact = [s for s in pool if key and _norm(s.name) == key]
+            near = sorted((s for s in pool if like(s)), key=lambda s: -len(_norm(s.name)))
+            hit = (nth if nth is not None and (nth in exact or (like(nth) and not exact)) else None) \
+                or next(iter(exact), None) or next(iter(near), None) or nth
         (hit.reviews if hit else rest).append(v)
     return rest
 
 
-def _review_lines(v, head: str = "####") -> list[str]:
-    out = [f"{head} {REVIEW_HEAD}：{v.level}", ""]
+def _review_lines(v, head: str = "####", about: str = "") -> list[str]:
+    out = [f"{head} {REVIEW_HEAD}：{v.level}" + (f" —— {about}" if about else ""), ""]
     for lab, val in (("理由", v.why), ("引文核对", f"⚠ {v.quote_note.lstrip('⚠ ')}" if v.quote_note else ""), ("建议", v.suggest)):
         if val:
             out.append(f"- {lab}：{' '.join(val.split())}")
@@ -217,19 +223,33 @@ def layout(name: str, text: str, review, *, note: str = "", title: str = "") -> 
         head += [""]
     body: list[str] = []
     group, headed = "", False
+    owed, between = None, False                    # 还没写出的审核意见属于哪个小节；其间有没有补充说明
+
+    def flush() -> None:
+        """审核意见写在该条目的补充说明之后、下一条之前 —— 写在前面，说明会被当成审核者的话、在看板里被折叠。"""
+        nonlocal owed, between
+        for v in (owed.reviews if owed else []):
+            body.extend(["", *_review_lines(v, about=_short(owed.name or owed.kind) if between else "")])
+        owed, between = None, False
+
     for x in items:
         if isinstance(x, str):
             s = x.strip()
             if mdview.HEADING_RX.match(s) or mdview._BOLD_LINE.match(s) or mdview._BRACKET_LINE.match(s):
                 headed = True
+                flush()
+            elif mdview._RULE.match(x):
+                flush()
+            elif s:
+                between = True
             body.append(x)
             continue
+        flush()
         if x.kind != group and not headed:
             body += ["", f"## {_GROUP.get(x.kind, x.kind)}", ""]
-        group, headed = x.kind, False
+        group, headed, owed = x.kind, False, x
         body += ["", *x.lines]
-        for v in x.reviews:
-            body += _review_lines(v)
+    flush()
     if rest:
         body += ["", f"## 其他{REVIEW_HEAD}", ""]
         for v in rest:

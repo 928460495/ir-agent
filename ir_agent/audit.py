@@ -29,6 +29,8 @@ class AuditResult:
     # 渲染之前的原稿（带占位符）。看板按它给每处数字挂上各自的来源 —— 按显示值去正文里找，
     # 同值的两个指标会挂错，重复出现的只挂得上第一处。
     draft: str = ""
+    # 由落盘的成稿重出（`--views`）：裸数字没有重新核对，看板上要写明，不能亮绿灯
+    partial: bool = False
     # 渲染之后仍留在正文里的占位符形状 —— 见 `_LEFTOVER` 与 `audit()`。
     unrendered: list[str] = field(default_factory=list)
 

@@ -23,7 +23,7 @@ def test_跟随系统字号_不用像素写死正文字号(tmp_path, run_obj):
 
 def test_数字来源是可操作的提示_不靠title(tmp_path, run_obj):
     h = html(tmp_path, run_obj)
-    btns = re.findall(r'<button type="button" class="num" interestfor="(src-\d+)" '
+    btns = re.findall(r'<button type="button" class="num" interestfor="(src-[\w-]+)" '
                       r'popovertarget="\1" popovertargetaction="show" aria-expanded="false">', h)
     assert btns, h[:2000]
     for i in btns:
@@ -100,7 +100,7 @@ def test_表头保持单行(tmp_path, run_obj):
 def test_数字与紧随的中文标点不断开(tmp_path, run_obj):
     """浏览器实测（375px）：「38.92 亿元」后的「，」被挤到下一行行首。"""
     h = html(tmp_path, run_obj)
-    assert re.search(r'<span class="nw"><button[^>]*class="num".*?</button><span id="src-\d+"[^>]*>[^<]*</span>[，。]</span>', h), \
+    assert re.search(r'<span class="nw"><button[^>]*class="num".*?</button><span id="src-[\w-]+"[^>]*>[^<]*</span>[，。]</span>', h), \
         re.findall(r"</span>.{0,3}", h)[:5]
-    assert re.search(r"\.nw\{white-space:nowrap\}", h)
+    assert re.search(r"\.nw\{white-space:nowrap", h)
     assert re.search(r"\.tip\{[^}]*white-space:normal", h)       # 提示框在 .nw 里，不能继承 nowrap

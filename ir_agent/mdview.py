@@ -19,16 +19,19 @@ REVIEW_RX = re.compile(rf"^\s*(?:[-*•·]\s*)?\[(?P<kind>[^\]\[|]{{1,8}})\]\s*(
 _SUGGEST = re.compile(r"[\s　]*建议\s*[:：]\s*")
 _QUOTE_NOTE = re.compile(r"（(⚠[^（）]*(?:（[^（）]*）[^（）]*)*)）\s*$", re.S)
 
-HEADING_RX = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
+HEADING_RX = re.compile(r"^(#{1,6})\s+(\S.*)$")
 _BOLD_LINE = re.compile(r"^\*\*([^*]{1,30})\*\*[:：]?$")
 _BRACKET_LINE = re.compile(r"^【([^】]{1,30})】$")
 _RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
-_FENCE = re.compile(r"^\s*```(.*)$")
+_FENCE = re.compile(r"^\s*```(\w*)\s*$")          # 围栏行上另有文字的不算围栏，按普通行排（不丢字）
 _ITEM = re.compile(r"^(\s*)(?:[-*•·]|(\d{1,2})[.、)）])\s+(.*)$")
-_DOT_ITEM = re.compile(r"^(\s*)[·•–]\s*(\S.*)$")
+_DOT_ITEM = re.compile(r"^(\s*)(?:[·•]|–(?!\d))\s*(\S.*)$")      # 「–5.3%」是负号不是列表
 _TABLE = re.compile(r"^\s*\|.*\|\s*$")
 _FIELD_LIKE = re.compile(r"^[`*\s]*[一-鿿]{2,6}[*\s]*[:：]")
 _WRAPPED = re.compile(r"^\s*`([^`]+)`\s*$")
+
+
+MAX_NEST = 8                      # 列表最多嵌这么多级，再深的并到这一级
 
 
 def _review(m: re.Match[str]) -> list[str]:
@@ -51,12 +54,15 @@ def _is_sentence(s: str) -> bool:
 def _unwrap(lines: list[str]) -> list[str]:
     """去掉包住字段行的围栏与整行反引号；没收尾的围栏当普通文本；其他围栏原样。"""
     out: list[str] = []
+    bare = [k for k, x in enumerate(lines) if (f := _FENCE.match(x)) and not f.group(1)]
     i = 0
     while i < len(lines):
         m = _FENCE.match(lines[i])
         if m:
-            j = next((k for k in range(i + 1, len(lines)) if _FENCE.match(lines[k])), None)
-            if j is None:                                  # 没收尾：丢掉围栏行本身，内容照排
+            while bare and bare[0] <= i:
+                bare.pop(0)
+            j = bare[0] if bare else None
+            if j is None:                                  # 没收尾：丢掉裸围栏行，内容照排
                 if m.group(1).strip():
                     out.append(lines[i])
                 i += 1
@@ -87,7 +93,7 @@ def blocks(text: str) -> list[tuple[str, list[str]]]:
         fresh[0] = False
 
     fresh = [True]
-    for ln in _unwrap((text or "").replace("\r\n", "\n").split("\n")):
+    for ln in _unwrap((text or "").replace("\x00", "").replace("\r\n", "\n").split("\n")):
         if ln.startswith("\x00"):
             put("code", [ln[1:]], True)
             continue
@@ -99,11 +105,11 @@ def blocks(text: str) -> list[tuple[str, list[str]]]:
         if _RULE.match(ln):
             fresh[0] = True
             continue
-        if (h := HEADING_RX.match(s)):
-            put("head", [f"{h.group(1)} {h.group(2).strip('*').strip()}"], False)
-        elif (b := _BOLD_LINE.match(s)) and not _is_sentence(b.group(1)):
+        if (h := HEADING_RX.match(s)) and (t := re.sub(r"\s#+$", "", h.group(2)).strip("*").strip()):
+            put("head", [f"{h.group(1)} {t}"], False)
+        elif (b := _BOLD_LINE.match(s)) and not _is_sentence(b.group(1)) and b.group(1).strip():
             put("head", [f"## {b.group(1).strip()}"], False)
-        elif (b := _BRACKET_LINE.match(s)):
+        elif (b := _BRACKET_LINE.match(s)) and b.group(1).strip():
             put("head", [f"## {b.group(1).strip()}"], False)
         elif _TABLE.match(ln):
             put("table", [s], True)
@@ -140,7 +146,7 @@ def _list_lines(items: list) -> list[str]:
             levels.pop()
         if not levels or levels[-1] < ind:
             levels.append(ind)
-        out.append("  " * (len(levels) - 1) + f"{mark} {body}")
+        out.append("  " * min(len(levels) - 1, MAX_NEST) + f"{mark} {body}")
     return out
 
 
@@ -154,13 +160,17 @@ def normalize(text: str) -> str:
 
 # ── HTML ──────────────────────────────────────────────────────
 
-_URL_RX = re.compile(r"https?://[^\s<>\"'「」（）()《》，。；、）】]+")
-_LINK = re.compile(r"\[([^\]\[]+)\]\((https?://[^\s)]+)\)")
-_INLINE_CODE = re.compile(r"`([^`]+)`")
-_BOLD = re.compile(r"\*\*(?=\S)([^*]+?)(?<=\S)\*\*")
-_FOOT = re.compile(r"\[\^(\w+)\]")
+# 行内记号一次扫完，不做多趟替换：多趟替换时后一趟会把前一趟生成的片段吞进网址里，造出可执行的属性
+_TOKEN = re.compile(
+    r"`(?P<code>[^`\n]{1,2000})`"
+    r"|\[(?P<lab>[^\]\[\n]{1,500})\]\((?P<href>https?://[^\s()<>\"'`\[\]]{1,2000})\)"
+    r"|(?P<url>https?://[^\s<>\"'`*\[\]「」（）()《》，。；、）】]{1,2000})"
+    r"|\[\^(?P<foot>\w{1,8})\]"
+    r"|\*\*(?=\S)(?P<bold>[^*\n]{1,3000}?)(?<=\S)\*\*")
 # 脚注紧跟的显示值：数字连同单位（单位多种多样，不逐个列）；前面是字母的（CR5）不是数值
 _VALUE = re.compile(r"(?<![A-Za-z\d.,])(-?\d[\d,]*(?:\.\d+)?(?:\s?[^\s\d，。；：、（）()|/*]{0,6})?)$")
+_TAIL = 60                        # 只在脚注前这么多字里找数值
+_BIND = "，。、；：！？）」』》%"    # 紧随数字的标点与它绑在一行，免得「，」挤到下一行行首
 
 
 def _e(x) -> str:
@@ -184,40 +194,39 @@ def source_button(value: str, tip: str, sid: str) -> str:
 
 
 def inline(text: str, notes: dict[str, str], ids: _Ids) -> str:
-    """一行文字 → HTML。先把认得的片段换成私用区占位符，其余整体转义，最后展开。"""
-    keep: list[str] = []
-
-    def stash(h: str) -> str:
-        keep.append(h)
-        return chr(0xE000 + len(keep) - 1)
-
-    def foot(s: str) -> str:
-        out, at = [], 0
-        for m in _FOOT.finditer(s):
-            tip = notes.get(m.group(1))
+    """一行文字 → HTML。认得的记号逐个展开，其余整段转义；网址只放行 http/https。"""
+    out: list[str] = []
+    plain, at = "", 0                     # plain：上一个记号之后、还没写出去的普通文字
+    for m in _TOKEN.finditer(text):
+        if m.start() < at:
+            continue                      # 脚注把紧随的标点并走了
+        plain += text[at:m.start()]
+        at = m.end()
+        kind = m.lastgroup if m.lastgroup != "lab" else "href"
+        if kind == "foot":
+            tip = notes.get(m.group("foot"))
             if tip is None:
+                plain += m.group(0)
                 continue
-            before = s[at:m.start()]
-            v = _VALUE.search(before)
-            shown = v.group(1) if v else f"[{m.group(1)}]"
-            out.append(before[:v.start()] if v else before)
-            btn, at = source_button(_e(shown), _e(tip), f"src-{ids.next()}"), m.end()
-            if s[at:at + 1] and s[at] in "，。、；：！？）」』》%":      # 紧随的标点与数字绑在一行，免得「，」挤到下一行行首
-                btn, at = f'<span class="nw">{btn}{_e(s[at])}</span>', at + 1
-            out.append(stash(btn))
-        return "".join(out) + s[at:]
-
-    s = "".join(c for c in text if not 0xE000 <= ord(c) <= 0xF8FF)
-    s = _INLINE_CODE.sub(lambda m: stash(f"<code>{_e(m.group(1))}</code>"), s)
-    s = _LINK.sub(lambda m: stash(f'<a href="{_e(m.group(2))}" rel="noopener noreferrer">{_e(m.group(1))}</a>'), s)
-    s = _URL_RX.sub(lambda m: stash(f'<a href="{_e(m.group(0))}" rel="noopener noreferrer">{_e(m.group(0))}</a>'), s)
-    s = foot(s)
-    s = _BOLD.sub(lambda m: stash("<strong>") + m.group(1) + stash("</strong>"), s)
-    out = _e(s)
-    for _ in range(3):                                  # 占位符可能嵌套（粗体里有链接）
-        out = re.sub(r"[\ue000-\uf8ff]", lambda m: keep[ord(m.group(0)) - 0xE000]
-                     if ord(m.group(0)) - 0xE000 < len(keep) else "", out)
-    return out
+            v = _VALUE.search(plain[-_TAIL:])
+            shown = v.group(1) if v else f"[{m.group('foot')}]"
+            out.append(_e(plain[:len(plain) - len(v.group(1))] if v else plain))
+            btn = source_button(_e(shown), _e(tip), f"src-{ids.next()}")
+            if text[at:at + 1] and text[at] in _BIND:
+                btn, at = f'<span class="nw">{btn}{_e(text[at])}</span>', at + 1
+            out.append(btn)
+        else:
+            out.append(_e(plain))
+            if kind == "code":
+                out.append(f"<code>{_e(m.group('code'))}</code>")
+            elif kind == "bold":
+                out.append(f"<strong>{inline(m.group('bold'), notes, ids)}</strong>")
+            else:
+                url = m.group("href") or m.group("url")
+                label = re.sub(r"[*`]", "", m.group("lab")) if m.group("lab") else url
+                out.append(f'<a href="{_e(url)}" rel="noopener noreferrer">{_e(label)}</a>')
+        plain = ""
+    return "".join(out) + _e(plain + text[at:])
 
 
 def _ul(items: list[tuple[int, str, str]], notes, ids, fold_over: int) -> str:
@@ -229,18 +238,23 @@ def _ul(items: list[tuple[int, str, str]], notes, ids, fold_over: int) -> str:
     tag = "ol" if items[0][1][:-1].isdigit() else "ul"
     lis = []
     for a, b in zip(starts, [*starts[1:], len(items)]):
-        kids = items[a + 1:b]
-        lis.append(f"<li>{inline(items[a][2], notes, ids)}" + (_ul(kids, notes, ids, fold_over) if kids else "") + "</li>")
+        kids, mark, body = items[a + 1:b], items[a][1], items[a][2]
+        num = mark[:-1] if mark[:-1].isdigit() else ""
+        if num and tag == "ul":                    # 圆点列表里夹的编号项：编号留在文字里
+            num, body = "", f"{mark} {body}"
+        lis.append((f'<li value="{num}">' if num else "<li>") + inline(body, notes, ids) + (_ul(kids, notes, ids, fold_over) if kids else "") + "</li>")
     h = f"<{tag}>" + "".join(lis) + f"</{tag}>"
     return f"<details><summary>共 {len(lis)} 条，点开看</summary>{h}</details>" if fold_over and len(lis) > fold_over else h
 
 
 def _cells(row: str) -> list[str]:
-    return [c.strip() for c in row.strip().strip("|").split("|")]
+    s = row.strip()
+    s = s[1:] if s.startswith("|") else s
+    return [c.strip() for c in (s[:-1] if s.endswith("|") else s).split("|")]
 
 
 def _table(rows: list[str], notes, ids) -> str:
-    if len(rows) < 2 or not re.fullmatch(r"\|?(?:\s*:?-{2,}:?\s*\|?)+", rows[1].strip()):
+    if len(rows) < 2 or not all(re.fullmatch(r":?-+:?", c) for c in _cells(rows[1])):
         return "".join(f"<p>{inline(r, notes, ids)}</p>" for r in rows)
     head = "".join(f'<th scope="col">{inline(c, notes, ids)}</th>' for c in _cells(rows[0]))
     body = "".join("<tr>" + "".join(f"<td>{inline(c, notes, ids)}</td>" for c in _cells(r)) + "</tr>" for r in rows[2:])

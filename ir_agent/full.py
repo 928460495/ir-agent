@@ -2318,22 +2318,53 @@ def _display_title(r) -> str:
     return " ".join(x for x in (name, code) if x)
 
 
-def _readable_views(r, out: Path, md: dict, arts: dict, skipped: list | None = None) -> dict:
+def _readable_views(r, out: Path, md: dict, arts: dict, skipped: list | None = None, *,
+                    keep_better: bool = False) -> dict:
     """写本目录已有产物的只读阅读版（`readable`，用户 2026-11-22 选方案 A），返回 `build_dashboard` 的参数：
     `context`（上下文副本，占位符换成账本数值）、`views`（阅读版正文与脚注）、`company`。**原 `md` 不动** —— 它进 state.json 与后续撰写提示词，那里要的是占位符。
     每次生成看板都重写，人改过源文件后下一次调用即刷新。"""
     from ir_agent import readable
 
-    title = _display_title(r)
-    views = readable.render_views(out, r.ledger, r.as_of, title=title, notes=skipped)
-    for f in readable.write_readables(out, r.ledger, r.as_of, views=views):
-        arts[f"{readable.LABELS[f.name[:-len(readable.SUFFIX)]]}（阅读版）"] = str(f)
-    context = {k: readable.render_inline(v, r.ledger, r.as_of) if isinstance(v, str) else v
-               for k, v in (md or {}).items()}
+    title, views, context = _display_title(r), {}, dict(md or {})
+    skipped = skipped if skipped is not None else []
+    # 阅读版是给人看的附带产物：出不来只记说明，**不能让已经花了钱的这一步崩掉**（终审 C1）
+    try:
+        views = readable.render_views(out, r.ledger, r.as_of, title=title, notes=skipped)
+        keep = frozenset(_worse_than_existing(out, views, skipped)) if keep_better else frozenset()
+        for f in readable.write_readables(out, r.ledger, r.as_of, views=views, keep=keep):
+            arts[f"{readable.LABELS[f.name[:-len(readable.SUFFIX)]]}（阅读版）"] = str(f)
+        context = {k: readable.render_inline(v, r.ledger, r.as_of) if isinstance(v, str) else v
+                   for k, v in context.items()}
+    except Exception as e:                                  # noqa: BLE001
+        skipped.append(f"阅读版未生成（{e.__class__.__name__}: {str(e)[:120]}）")
     return dict(context=context, views=views, company=title)
 
 
-def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
+def _worse_than_existing(out: Path, views: dict, notes: list) -> list[str]:
+    """哪些阅读版这次排出来还不如已有的：占位符取不到（重出时没有估值事实），而已有那份是齐的。"""
+    from ir_agent import readable
+
+    got = []
+    for stem, (body, _foot) in views.items():
+        dst = out / f"{stem}{readable.SUFFIX}"
+        if not dst.exists():
+            continue
+        if body.count(readable._MISSING) > dst.read_text(encoding="utf-8").count(readable._MISSING):
+            got.append(stem)
+            notes.append(f"{stem}{readable.SUFFIX} 保留原样：这次缺估值等事实，重出会出现「账本未取到」")
+    return got
+
+
+def _safe_dashboard(r, out: Path, arts: dict, skipped: list, **kw) -> None:
+    """看板失败只记说明，不中断阶段。"""
+    try:
+        build_dashboard(r, path=out / "dashboard.html", **kw)
+        arts["看板"] = str(out / "dashboard.html")
+    except Exception as e:                                  # noqa: BLE001
+        skipped.append(f"看板未生成（{e.__class__.__name__}: {str(e)[:120]}）")
+
+
+def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict, skipped: list | None = None) -> None:
     """看板与工作簿。**第①②两次调用各生成一次**（spec ④）。
 
     它们不调模型、成本近零。门① 核来源的人需要一个交叉核对的入口；第②次
@@ -2341,21 +2372,27 @@ def _write_dashboard(r, out: Path, md: dict, code: str, arts: dict) -> None:
     末尾生成 —— 拆函数时若没人接着做，它们会无声消失：没有任何测试断言
     这两个文件，全量绿不代表它们还在。
     """
-    build_dashboard(r, path=out / "dashboard.html", **_readable_views(r, out, md, arts))
-    arts["看板"] = str(out / "dashboard.html")
+    skipped = skipped if skipped is not None else []
+    _safe_dashboard(r, out, arts, skipped, **_readable_views(r, out, md, arts, skipped))
     build_workbook(r.ledger, code=code, period=r.period, as_of=r.as_of,
                    path=out / "model.xlsx", verdicts=r.verdicts)
     arts["工作簿"] = str(out / "model.xlsx")
 
 
-def _audit_from_md(text: str):
-    """落盘的简报 → 看板正文用的审计结果：正文取「数据来源」之前，脚注从那张表读回。"""
-    from ir_agent.audit import AuditResult
+def _audit_from_md(text: str, store=None):
+    """落盘的简报 → 看板正文用的审计结果：正文取文末「数据来源」之前，脚注从那张表读回。
+    缺快照与没落地的占位符重新核对；裸数字没有原稿核不了，记 `partial`。"""
+    from ir_agent.audit import _LEFTOVER, AuditResult
     from ir_agent.citation import Footnote
+    from ir_agent.ledger import Method
 
-    body, _, tail = text.partition("\n## 数据来源")
-    notes = []
-    for ln in tail.split("\n"):
+    body, sep, tail = text.rpartition("\n---\n\n## 数据来源\n")
+    if not sep:
+        body, sep, tail = text.rpartition("\n## 数据来源\n")
+    if not sep:
+        body = text
+    notes, missing = [], []
+    for ln in tail.split("\n") if sep else []:
         c = [x.strip() for x in ln.strip().strip("|").split("|")]
         if len(c) == 5 and "@" in c[1]:
             key, _, per = c[1].partition("@")
@@ -2363,7 +2400,13 @@ def _audit_from_md(text: str):
                 notes.append(Footnote(len(notes) + 1, key, per, c[2], date.fromisoformat(c[3]), c[4], display=c[0]))
             except ValueError:
                 continue
-    return AuditResult(rendered=re.sub(r"\n---\s*$", "", body.rstrip()), footnotes=notes)
+            if c[4] != Method.COMPUTED.value and store is not None:
+                try:
+                    store.load(c[2])
+                except Exception:                           # noqa: BLE001
+                    missing.append(c[2])
+    return AuditResult(rendered=body.rstrip(), footnotes=notes, missing_snapshots=missing,
+                       unrendered=list(dict.fromkeys(_LEFTOVER.findall(body))), partial=True)
 
 
 def run_views(code: str, r, as_of: date, out_dir: str | Path, *, snapshot_dir: str | Path = "snapshots",
@@ -2377,14 +2420,15 @@ def run_views(code: str, r, as_of: date, out_dir: str | Path, *, snapshot_dir: s
     notes += _analyse_facts(code, r, as_of, snapshot_dir)[2]
     notes += _restore_corpus(r, out, md, sections=False)
     arts: dict[str, str] = {}
-    kw = _readable_views(r, out, md, arts, notes)
+    kw = _readable_views(r, out, md, arts, notes, keep_better=True)
     done = [Path(p) for p in arts.values()]
-    if (out / REPORT).exists():
-        notes.append("已出研报：看板含估值卡片，不重出（要更新看板请重跑 --value）")
+    if (out / REPORT).exists() or any(out.glob("*_DCF_*.xlsx")):
+        notes.append("已建过估值模型：看板含估值卡片与验算警示，不重出（要更新看板请重跑 --value）")
         return done
     if (out / BRIEF).exists():
-        r.audit = _audit_from_md((out / BRIEF).read_text(encoding="utf-8"))
-    return [*done, build_dashboard(r, path=out / "dashboard.html", **kw)]
+        r.audit = _audit_from_md((out / BRIEF).read_text(encoding="utf-8"), r.store)
+    _safe_dashboard(r, out, arts, notes, **kw)
+    return [*done, *([Path(arts["看板"])] if "看板" in arts else [])]
 
 
 def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
@@ -2461,7 +2505,7 @@ def run_analyse(code: str, r, as_of: date, out_dir: str | Path, *,
     for bad in missing_files(rows):
         skipped.append(f"来源清单：{bad}")
 
-    _write_dashboard(r, out, md, code, arts)
+    _write_dashboard(r, out, md, code, arts, skipped)
     skipped += _media_tier_note(getattr(r, "corpus", None))
     _save_state(out, code, r, as_of, md, pr, qual_unreviewed=unreviewed)
     return ResearchOutcome(
@@ -2773,7 +2817,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
                               if meth is not None else None))
         arts["待核清单"] = str(out / REVIEW_MD)
 
-    _write_dashboard(r, out, md, code, arts)
+    _write_dashboard(r, out, md, code, arts, skipped)
     skipped += _media_tier_note(getattr(r, "corpus", None))
     _save_state(out, code, r, as_of, md, pr, verified_by=verified_by)
     if body:
@@ -3271,8 +3315,7 @@ def run_valuation(code: str, r, as_of: date, out_dir: str | Path,
     # **没写出研报就不算做完。** 见 `_report_stage`。
     stage = _report_stage(stage, arts)
 
-    build_dashboard(r, path=out / "dashboard.html", dcf=dcf_res, **_readable_views(r, out, md, arts, skipped))
-    arts["看板"] = str(out / "dashboard.html")
+    _safe_dashboard(r, out, arts, skipped, dcf=dcf_res, **_readable_views(r, out, md, arts, skipped))
 
     reason = ""
     if dcf_res is not None:
