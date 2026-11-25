@@ -247,7 +247,7 @@ def test_产业链摘要与矛盾提示安全():
     from ir_agent import value_chain as VC
 
     led = FactLedger()
-    _fact(led, "payable_days.percentile", "0.17")
+    _fact(led, "payable_days.percentile", "17")
     q = "上游由数万家农户分散种植"
     v = VC.parse("\n".join([f"环节: {r.value} | n | note | 「{q}」"
                             for r in VC.Role]

@@ -66,7 +66,7 @@ BARGAIN_ANCHORS: dict[Role, tuple[str, bool]] = {
     Role.DOWNSTREAM: ("receivable_days.percentile", False),
 }
 
-MEDIAN = Decimal("0.5")   # 唯一的分界线: 比典型同业更好还是更差
+MEDIAN = Decimal(50)   # 唯一的分界线: 比典型同业更好还是更差（刻度同 comps.percentile_of 的 0–100）
 
 _LINK = keyed("环节")
 _POWER = keyed("议价")
@@ -218,8 +218,7 @@ def cross_check(view: ChainView, ledger: FactLedger, period: str,
             pct = ledger.get(key, period, as_of=as_of).value
         except (KeyError, LookAheadError):
             continue
-        is_high = pct > MEDIAN
-        if is_high is should_be_high:
+        if pct == MEDIAN or (pct > MEDIAN) is should_be_high:   # 恰在中位数：两个方向都不成立相反
             continue
         word = "高于" if should_be_high else "低于"
         out.append(

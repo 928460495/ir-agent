@@ -132,29 +132,57 @@ def test_发布日晚于as_of的研报进不了语料库():
 
 def test_对上游议价强但付款比同业还快():
     """说能占用上游资金，可应付天数低于同业中位数 —— 方向相反。"""
-    led = _led(payable_days__percentile="0.17")
+    led = _led(payable_days__percentile="17")
     c = VC.cross_check(VC.parse(_out()), led, P, AS_OF)
     assert len(c) == 1 and "上游" in c[0] and "方向相反" in c[0]
     assert "[[payable_days.percentile@2025FY]]" in c[0]
 
 
 def test_对下游议价强且收款快则无矛盾():
-    led = _led(payable_days__percentile="0.80",
-               receivable_days__percentile="0.05")
+    led = _led(payable_days__percentile="80",
+               receivable_days__percentile="5")
     assert VC.cross_check(VC.parse(_out()), led, P, AS_OF) == []
 
 
 def test_只在方向相反时才报不另设阈值():
     """「相差多少才算显著」在材料里没有依据，因此不判 ——
     只报方向相反，把分位数摆出来让读者掂量。"""
-    assert VC.MEDIAN == D("0.5")
-    led = _led(payable_days__percentile="0.51")
+    assert VC.MEDIAN == D(50)
+    led = _led(payable_days__percentile="51")
+    assert VC.cross_check(VC.parse(_out()), led, P, AS_OF) == []
+
+
+def test_低分位应收支持对下游强势_不报相反():
+    """茅台实跑：应收天数 17 分位（低于同业中位数），此前按 0–1 刻度比较，被误报方向相反。"""
+    led = _led(receivable_days__percentile="17")
+    assert VC.cross_check(VC.parse(_out()), led, P, AS_OF) == []
+
+
+def test_高分位应收与对下游强势相反():
+    c = VC.cross_check(VC.parse(_out()), _led(receivable_days__percentile="83"), P, AS_OF)
+    assert len(c) == 1 and "下游" in c[0] and "低于" in c[0]
+
+
+def test_分界线与comps的分位刻度一致():
+    """刻度由供数方算出来，不手写 —— comps 若改刻度，这里会红。"""
+    from ir_agent.comps import percentile_of
+    pop = [D(x) for x in (10, 20, 30, 40, 50)]
+    assert percentile_of(D(30), pop) == VC.MEDIAN
+    low, high = percentile_of(D(20), pop), percentile_of(D(40), pop)
+    assert VC.cross_check(VC.parse(_out()), _led(payable_days__percentile=high,
+                                                receivable_days__percentile=low), P, AS_OF) == []
+    assert len(VC.cross_check(VC.parse(_out()), _led(payable_days__percentile=low,
+                                                    receivable_days__percentile=high), P, AS_OF)) == 2
+
+
+def test_恰在中位数两个方向都不报():
+    led = _led(payable_days__percentile="50", receivable_days__percentile="50")
     assert VC.cross_check(VC.parse(_out()), led, P, AS_OF) == []
 
 
 def test_不声称强势时不做交叉检查():
     v = VC.parse(_out(powers=["议价: 上游 | 弱", "议价: 下游 | 均衡"]))
-    assert VC.cross_check(v, _led(payable_days__percentile="0.1"), P, AS_OF) == []
+    assert VC.cross_check(v, _led(payable_days__percentile="10"), P, AS_OF) == []
 
 
 def test_账本无该分位数时跳过():
@@ -192,7 +220,7 @@ def test_无外部资料时提示词明说覆盖有限():
 
 
 def test_提示词带上可交叉印证的分位数():
-    txt = VC.for_prompt(_corpus(), _led(payable_days__percentile="0.2"),
+    txt = VC.for_prompt(_corpus(), _led(payable_days__percentile="20"),
                         P, AS_OF)
     assert "[[payable_days.percentile@2025FY]]" in txt
 
@@ -259,7 +287,7 @@ def test_审核清单按方法论生成():
 
 def test_端到端带出矛盾():
     v, _ = VC.analyse(_Client(_out()), _corpus(),
-                      _led(payable_days__percentile="0.17"), P, AS_OF, judge=Judge())
+                      _led(payable_days__percentile="17"), P, AS_OF, judge=Judge())
     assert v.conflicts and "⚠" in v.summary()
 
 
