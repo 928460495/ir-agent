@@ -230,7 +230,8 @@ def facts_for_judge(a, *, balances=(), ledger=None, as_of=None, anchor=None,
                   f"（{b.note}）" for b in bal]
         if m is not None:
             from ir_agent.stance import unit_doubts
-            lines += [f"- ⚠ {x}" for x in unit_doubts(bal, {f.label: f.unit for f in m.factors})]
+            lines += [f"- ⚠ {x}" for x in unit_doubts(bal, {**{f.short: f.unit for f in m.factors if f.short},
+                                                              **{f.label: f.unit for f in m.factors}})]
     if a.method_review:
         lines += ["", "【方法论审核遗留】"] + list(a.method_review)
     if m is not None and ledger is not None:

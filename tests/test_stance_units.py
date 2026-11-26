@@ -120,3 +120,110 @@ def test_流程里辩论二传了分解式与单位():
     from ir_agent import full
     src = inspect.getsource(full.run_brief)
     assert "factor_brief(meth)" in src and "units=" in src
+
+
+# ── 终审（2026-11-26）I1–I5 与小项 ─────────────────────────────
+
+def test_I1_相对基期累计的按定义填_不被换算():
+    t = S._JUDGE_B
+    assert "累计数要先换算成全年" not in t
+    assert "相对基期累计" in t and "年初至今" in t
+
+
+def test_I1_分解式写明模式():
+    _Meth.model.mode = "变化"
+    try:
+        assert "模式：变化" in S.factor_brief(_Meth())
+    finally:
+        del _Meth.model.mode
+
+
+def test_I2_因子清单带短名_平衡行照抄完整名():
+    t = S.factor_brief(_Meth())
+    assert "毛利变动（毛利率累计变动）" in t and "销量（销量同比增速）" in t
+    assert "照抄完整名" in t
+
+
+def test_I2_清单里不出现证据行分隔符():
+    class M(_Meth):
+        pitfalls = ["a｜b|c"]
+
+        def factors(self):
+            return [Factor("f9", "x", "pp", "年报｜分部表", short="x")]
+    assert "｜" not in S.factor_brief(M()) and "|" not in S.factor_brief(M())
+
+
+@pytest.mark.parametrize("subject", ["关税", "毛利变动", "毛利率累计变动（相对基期）", " 毛利率累计变动 "])
+def test_I3_裁决者缩写因子名也核对得到(subject):
+    units = S.units_of(_Meth())
+    units["关税影响毛利率累计变动"] = "pp"
+    b = S.Balance(subject, D("-0.015"), D("-0.005"), D("0.003"), "")
+    assert any("疑似按小数" in d for d in S.unit_doubts([b], units)), subject
+
+
+def test_I3_对不上任何因子的平衡点要说出来():
+    out = S.unit_doubts([S.Balance("完全无关", D("1"), D("2"), D("3"), "")], S.units_of(_Meth()))
+    assert len(out) == 1 and "对不上" in out[0]
+
+
+def test_I3_前缀同时命中单位不同的因子不乱判():
+    units = {"毛利甲": "pp", "毛利乙": "变化率"}
+    out = S.unit_doubts([S.Balance("毛利", D("0.01"), D("0.01"), D("0.01"), "")], units)
+    assert len(out) == 1 and "对不上" in out[0]
+
+
+@pytest.mark.parametrize("unit,vals,n", [("变化率（小数）", ("6", "8", "10"), 1), ("变化率", ("6", "8", "10"), 1),
+                                         ("比例", ("40", "45", "50"), 1), ("变化率（小数）", ("0.5", "1.0", "1.5"), 0),
+                                         ("万吨", ("40", "45", "50"), 0)])
+def test_I4_变化率比例填成百分数也标(unit, vals, n):
+    out = S.unit_doubts([S.Balance("x", *map(D, vals), "")], {"x": unit})
+    assert len(out) == n and (n == 0 or "百分数" in out[0])
+
+
+def test_I4_小数单位给出明确填法():
+    class M(_Meth):
+        def factors(self):
+            return [Factor("f8", "出货变化", "变化率（小数）", "", short="出货")]
+    t = S.factor_brief(M())
+    assert "出货（出货变化）｜单位 变化率（小数）" not in t        # 分隔符已换
+    assert "不写 8" in t and "按原数填" not in t
+
+
+def test_I5_阅读版按当前分解式重算疑点(tmp_path):
+    from ir_agent import readable
+    from ir_agent import methodology
+    (tmp_path / "drivers.md").write_text(methodology.to_markdown(methodology.parse(_DRIVERS)), encoding="utf-8")
+    bal = {"subject": "毛利率累计变动", "bear": "-0.3", "mid": "1.4", "bull": "2", "note": ""}
+    src = tmp_path / "stance_b.json"
+    src.write_text(json.dumps({"round": "B", "evidence": [], "balances": [bal],
+                               "doubts": ["「毛利率累计变动」疑似按小数填写（旧）"]}, ensure_ascii=False), encoding="utf-8")
+    assert "疑似按小数" not in readable._stance_doc(src, tmp_path, "t")       # 人改对了，旧疑点不再显示
+    bal.update(bear="-0.003", mid="0.014", bull="0.02")
+    src.write_text(json.dumps({"round": "B", "evidence": [], "balances": [bal]}, ensure_ascii=False), encoding="utf-8")
+    assert "疑似按小数" in readable._stance_doc(src, tmp_path, "t")           # 旧文件没有 doubts 也照样核对
+
+
+def test_小项_空端点不崩():
+    b = S.Balance("x", None, D("0.01"), None, "")
+    assert len(S.unit_doubts([b], {"x": "pp"})) == 1
+
+
+def test_小项_两标量回退也有单位说明():
+    t = S.factor_brief(None)
+    assert "营收增速" in t and "毛利率" in t and "不写 8" in t
+    assert S.units_of(None) == {"营收增速": "变化率", "毛利率": "比例"}
+
+
+_DRIVERS = """模式: 变化
+因子: 毛利变动 | 毛利率累计变动 | pp | 8-K | 毛利率
+因子: 销量 | 销量同比增速 | 变化率 | 年报 | 销量
+公式: 营收 = 上期(营收) * (1 + 销量)
+公式: 毛利率 = 上期(毛利率) + 毛利变动 / 100
+"""
+
+
+def test_I3_主名相同_括号嵌套或逗号补充也认得():
+    units = {"公司覆铜板销量增速相对行业出货增速的超额，按 (1+公司销量增速)/(1+行业需求增速)−1": "变化率（小数）"}
+    b = S.Balance("公司覆铜板销量增速相对行业出货增速的超额（(1+公司销量)/(1+行业需求)−1）", D("6"), D("8"), D("10"), "")
+    out = S.unit_doubts([b], units)
+    assert len(out) == 1 and "百分数" in out[0]

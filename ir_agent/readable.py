@@ -287,8 +287,26 @@ def _plain(pre=lambda t: t):
     return build
 
 
+def _current_doubts(d: dict, folder: Path) -> list[str] | None:
+    """按**当前** drivers.md 重算辩论② 的量级疑点。JSON 里存的是当时的结果：人改对了取值，
+    旧疑点还在；旧文件没有这一栏，疑点又看不到。分解式读不回时返回 None（沿用存的）。"""
+    from ir_agent import methodology, stance
+
+    if d.get("round") != "B":
+        return None
+    path = folder / "drivers.md"
+    try:
+        meth = methodology.from_markdown(path.read_text(encoding="utf-8")) if path.exists() else None
+        return stance.unit_doubts(stance.StanceResult.from_json(d).balances, stance.units_of(meth))
+    except (methodology.MethodologyFailed, ValueError, KeyError, TypeError, ArithmeticError):
+        return None
+
+
 def _stance_doc(src: Path, out: Path, title: str) -> str:
-    return f"# {title}\n\n" + mdview.normalize(stance_markdown(json.loads(src.read_text(encoding="utf-8"))))
+    d = json.loads(src.read_text(encoding="utf-8"))
+    if (now := _current_doubts(d, src.parent)) is not None:
+        d["doubts"] = now
+    return f"# {title}\n\n" + mdview.normalize(stance_markdown(d))
 
 
 # (阅读版名, 源文件, 中文名, 排版)。按四道门的顺序（spec 2026-11-25-readable-layout §4.5）

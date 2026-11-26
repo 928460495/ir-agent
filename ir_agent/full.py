@@ -2566,7 +2566,7 @@ def _stance_round(client, out, fname, round_, subjects, ctx, cat, r,
                 skipped.append(f"多空辩论{round_}：沿用已有产物"
                                f"（要重抽加 --refresh-stance）")
             res.doubts = stance.unit_doubts(res.balances, units or {})      # 人补写的、沿用的也核对量级
-        except (stance.StanceFailed, ValueError, KeyError) as e:
+        except (stance.StanceFailed, ValueError, KeyError, TypeError) as e:
             skipped.append(f"多空辩论{round_} 已有产物不可用（{str(e)[:160]}）"
                            f"—— 请修正 {path}，或加 --refresh-stance 重抽")
             return None
@@ -2811,8 +2811,7 @@ def run_brief(code: str, r, as_of: date, out_dir: str | Path,
                        ctx + "\n\n【因子采集】\n" + _factor_ctx(factor_data),
                        cat, r, as_of, accept_manual, verified_by, skipped,
                        refresh=refresh_stance,
-                       brief=stance.factor_brief(meth) if meth is not None else "",
-                       units={f.label: f.unit for f in meth.factors()} if meth is not None else {})
+                       brief=stance.factor_brief(meth), units=stance.units_of(meth))
     if sb is None:
         o = _stop_for_manual(code, r, as_of, out, arts, skipped, client,
                              round_="B")

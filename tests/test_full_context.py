@@ -4263,7 +4263,7 @@ def test_公式化分解式从第二次调用一路传到判断项(tmp_path, mon
 
     collected: dict = {}
 
-    def collect(r, as_of, client, md, decomps, industry, skipped):
+    def collect(r, as_of, client, md, decomps, industry, skipped, pending=frozenset()):
         collected["decomps"] = decomps
         return {f.key: gaps.FactorData(factor=f, status=gaps.MISSING, note="无")
                 for f in meth.factors()}

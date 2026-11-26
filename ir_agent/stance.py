@@ -410,8 +410,9 @@ _JUDGE_B = """你的角色是**裁决者**。多空两侧各自挑出了材料�
 **每个因子按它自己标明的单位填**（见上面的因子清单，取值会直接代入分解式）：
 pp 填百分点数字本身，+1.4 个百分点写 1.4 或 1.4pp，不写 0.014，也不写 1.4%；
 变化率、比例写 8% 或 0.08；其他单位按原数写。
-**取值是全年口径的年度值**：单季同比、环比、累计数要先换算成全年；换算不了就
-在理由里写明，不要直接填。分解式写明的陷阱逐条对照，与陷阱冲突的取值不要用。
+**取值是全年口径的年度值**：单季同比、环比、年初至今的数要先换算成全年；换算
+不了就在理由里写明，不要直接填。因子完整名写明「相对基期累计」的，按定义填相对
+基期的累计值，不要再换算。分解式写明的陷阱逐条对照，与陷阱冲突的取值不要用。
 数值要能直接解析，不要写「约」「左右」。
 """
 
@@ -436,42 +437,120 @@ def _corpus_block(corpus) -> str:
 
 PP_UNITS = frozenset({"pp", "百分点", "个百分点", "pct"})
 PP_TINY = Decimal("0.2")          # 三档绝对值都小于它的百分点因子，多半是按小数填的
-_HOW = {"变化率": "+8% 写 8% 或 0.08", "%": "+8% 写 8% 或 0.08", "百分比": "+8% 写 8% 或 0.08",
-        "比例": "55% 写 55% 或 0.55"}
+RATE_BIG = Decimal("5")           # 变化率、比例三档绝对值都不小于它（500%），多半是按百分数填的
+FALLBACK_UNITS = {"营收增速": "变化率", "毛利率": "比例"}      # 不分解时辩论② 的两项（`assume.DRIVERS`）
+_PP_HOW = "填百分点数字本身，+1.4 个百分点写 1.4 或 1.4pp，不写 0.014，也不写 1.4%"
 
 
-def unit_doubts(balances: list[Balance], units: dict[str, str]) -> list[str]:
-    """百分点因子的量级核对。**只报疑点**：真有 0.1 个百分点的变动，由判断项审核者判。"""
-    out = []
-    for b in balances:
-        if b.mid is None or units.get(b.subject) not in PP_UNITS:
-            continue
-        top = max(abs(b.bear), abs(b.mid), abs(b.bull))
-        if 0 < top < PP_TINY:
-            out.append(f"「{b.subject}」单位是{units[b.subject]}，三档 {b.bear} / {b.mid} / {b.bull} 疑似按小数填写"
-                       f"（若本意是 {(top * 100).normalize():f} 个百分点，应写 {(top * 100).normalize():f}）"
-                       "—— 代码没有改动，由判断项审核者判断")
+def _is_rate(unit: str) -> bool:
+    """按小数参与计算的单位：变化率（含「变化率（小数）」）、比例、百分比。"""
+    return unit in ("%", "百分比", "比例") or unit.startswith("变化率") or "小数" in unit
+
+
+def _how(unit: str) -> str:
+    if unit in PP_UNITS:
+        return _PP_HOW
+    if unit == "比例":
+        return "55% 写 55% 或 0.55，不写 55"
+    if _is_rate(unit):
+        return "+8% 写 8% 或 0.08，不写 8"
+    return f"按原数填（单位 {unit}）"
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[（(][^）)]*[）)]|\s+", "", s or "")
+
+
+def units_of(meth) -> dict[str, str]:
+    """辩论② 各因子的单位，完整名与短名都能查。没有分解式时是两项回退。"""
+    if meth is None:
+        return dict(FALLBACK_UNITS)
+    out: dict[str, str] = {}
+    for f in meth.factors():
+        out[f.label] = f.unit
+        if getattr(f, "short", ""):
+            out.setdefault(f.short, f.unit)
     return out
 
 
+def _unit_for(subject: str, units: dict[str, str]) -> str | None:
+    """平衡点的因子名 → 单位。裁决者常把完整名缩写：依次试原文、去括号、短名、前缀；
+    前缀同时命中单位不同的因子就当对不上，不猜。"""
+    if subject in units:
+        return units[subject]
+    n = _norm(subject)
+    if not n:
+        return None
+    hit = {u for k, u in units.items() if _norm(k) == n}
+    if not hit and len(n) >= 2:
+        hit = {u for k, u in units.items()
+               if len(_norm(k)) >= 2 and (_norm(k).startswith(n) or n.startswith(_norm(k)))}
+    if not hit:                       # 主名（首个标点前）相同：括号嵌套、逗号后的补充说明不影响
+        c = _core(subject)
+        hit = {u for k, u in units.items() if len(c) >= 4 and _core(k) == c}
+    return hit.pop() if len(hit) == 1 else None
+
+
+def _core(s: str) -> str:
+    return re.split(r"[，,（(；;：:]", (s or "").strip(), maxsplit=1)[0].replace(" ", "")
+
+
+def unit_doubts(balances: list[Balance], units: dict[str, str]) -> list[str]:
+    """平衡点的量级核对。**只报疑点，不驳回**：真有 0.1 个百分点的变动、真有五倍的增长，由判断项审核者判。"""
+    if not units:
+        return []
+    out = []
+    for b in balances:
+        if b.mid is None:
+            continue
+        unit = _unit_for(b.subject, units)
+        if unit is None:
+            out.append(f"平衡点「{b.subject}」对不上分解式里的任何因子，单位无从核对 —— 由判断项审核者对照因子清单")
+            continue
+        vals = [v for v in (b.bear, b.mid, b.bull) if v is not None]
+        top = max(abs(v) for v in vals)
+        tri = " / ".join("—" if v is None else str(v) for v in (b.bear, b.mid, b.bull))
+        if unit in PP_UNITS and 0 < top < PP_TINY:
+            t = f"{(top * 100).normalize():f}"
+            out.append(f"「{b.subject}」单位是{unit}，三档 {tri} 疑似按小数填写"
+                       f"（若本意是 {t} 个百分点，应写 {t}）—— 代码没有改动，由判断项审核者判断")
+        elif _is_rate(unit) and min(abs(v) for v in vals) >= RATE_BIG:
+            t = f"{top.normalize():f}"
+            out.append(f"「{b.subject}」单位是{unit}，三档 {tri} 疑似按百分数填写"
+                       f"（若本意是 {t}%，应写 {t}% 或 {(top / 100).normalize():f}）—— 代码没有改动，由判断项审核者判断")
+    return out
+
+
+def _clean(s) -> str:
+    """简报里不能出现证据行的分隔符：辩论者照抄时会被当成格式错误的证据行。"""
+    return str(s).replace("｜", "/").replace("|", "/")
+
+
 def factor_brief(meth) -> str:
-    """辩论② 要看的分解式：每个因子的单位、填法、数据线索，两条公式，作者写明的陷阱。"""
-    lines = ["**分解式**（取值直接代入下面的公式，口径与单位必须一致）"]
+    """辩论② 要看的分解式：模式、两条公式、常量，每个因子的短名、单位、填法与数据线索，作者写明的陷阱。"""
+    if meth is None:
+        return "\n".join(["**本轮两项**（不分解，逐项按单位填）"]
+                         + [f"- {k}；单位 {u}；{_how(u)}" for k, u in FALLBACK_UNITS.items()])
     model = getattr(meth, "model", None)
+    lines = ["**分解式**（取值直接代入下面的公式，口径与单位必须一致）"]
+    mode = getattr(model, "mode", "")
+    if mode:
+        lines.append(f"- 模式：{mode}" + ("（因子是相对基期的变动）" if mode == "变化" else "（因子是当年的水平值）"
+                                         if mode == "水平" else ""))
     for target in ("revenue", "gross_margin"):
         text = model.describe(target) if model is not None else ""
         if text:
-            lines.append(f"- {text}")
+            lines.append(f"- {_clean(text)}")
     for c in getattr(model, "constants", None) or []:
-        lines.append(f"- 常量 {c.name} = {c.value}")
-    lines += ["", "**因子清单**（逐个按单位填）"]
+        lines.append(f"- 常量 {_clean(c.name)} = {c.value}")
+    lines += ["", "**因子清单**（公式里用短名；平衡行的因子名照抄完整名，逐个按单位填）"]
     for f in meth.factors():
-        how = ("填百分点数字本身，+1.4 个百分点写 1.4 或 1.4pp，不写 0.014，也不写 1.4%" if f.unit in PP_UNITS
-               else _HOW.get(f.unit, "按原数填"))
-        lines.append(f"- {f.label}｜单位 {f.unit}｜{how}" + (f"｜数据线索：{f.source_hint}" if f.source_hint else ""))
+        name = f"{f.short}（{f.label}）" if getattr(f, "short", "") and f.short != f.label else f.label
+        lines.append(f"- {_clean(name)}；单位 {f.unit}；{_how(f.unit)}"
+                     + (f"；数据线索：{_clean(f.source_hint)}" if f.source_hint else ""))
     if getattr(meth, "pitfalls", None):
         lines += ["", "**分解式作者写明的陷阱**（取值前逐条对照）"]
-        lines += [f"- {x}" for x in meth.pitfalls]
+        lines += [f"- {_clean(x)}" for x in meth.pitfalls]
     return "\n".join(lines)
 
 
