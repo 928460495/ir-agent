@@ -411,8 +411,8 @@ _JUDGE_B = """你的角色是**裁决者**。多空两侧各自挑出了材料�
 pp 填百分点数字本身，+1.4 个百分点写 1.4 或 1.4pp，不写 0.014，也不写 1.4%；
 变化率、比例写 8% 或 0.08；其他单位按原数写。
 **取值是全年口径的年度值**：单季同比、环比、年初至今的数要先换算成全年；换算
-不了就在理由里写明，不要直接填。因子完整名写明「相对基期累计」的，按定义填相对
-基期的累计值，不要再换算。分解式写明的陷阱逐条对照，与陷阱冲突的取值不要用。
+不了就在理由里写明，不要直接填。每条公式下注明了其中的因子是相对上一年的逐年
+变动还是相对基期的累计值，照公式下注明的参照点填；相对基期累计的不要再换算。分解式写明的陷阱逐条对照，与陷阱冲突的取值不要用。
 数值要能直接解析，不要写「约」「左右」。
 """
 
@@ -526,6 +526,19 @@ def _clean(s) -> str:
     return str(s).replace("｜", "/").replace("|", "/")
 
 
+def _reference(formula: str) -> str:
+    """公式本身决定因子的参照点：`上期(…)` 是逐年变动，`基期(…)` 是相对基期累计。不能按模式名猜 ——
+    「变化」只说明因子是变动量；历史 13 份变化模式里营收公式 11 份用的是上期。"""
+    prev, base = "上期(" in formula, "基期(" in formula
+    if prev and base:
+        return "这条式子同时用到上期与基期，因子按各自完整名的定义填"
+    if base:
+        return "这条式子里的因子是相对基期的累计值，按定义填，不要再换算成每年的变动"
+    if prev:
+        return "这条式子里的因子是相对上一年的逐年变动（每年各填当年的变动），不要填累计值"
+    return ""
+
+
 def factor_brief(meth) -> str:
     """辩论② 要看的分解式：模式、两条公式、常量，每个因子的短名、单位、填法与数据线索，作者写明的陷阱。"""
     if meth is None:
@@ -535,12 +548,14 @@ def factor_brief(meth) -> str:
     lines = ["**分解式**（取值直接代入下面的公式，口径与单位必须一致）"]
     mode = getattr(model, "mode", "")
     if mode:
-        lines.append(f"- 模式：{mode}" + ("（因子是相对基期的变动）" if mode == "变化" else "（因子是当年的水平值）"
-                                         if mode == "水平" else ""))
+        lines.append(f"- 模式：{mode}" + {"变化": "（因子是变动量，参照点见每条公式下的注明）",
+                                         "水平": "（因子是当年的水平值）"}.get(mode, ""))
     for target in ("revenue", "gross_margin"):
         text = model.describe(target) if model is not None else ""
         if text:
             lines.append(f"- {_clean(text)}")
+            if mode == "变化" and (ref := _reference(text)):
+                lines.append(f"  {ref}")
     for c in getattr(model, "constants", None) or []:
         lines.append(f"- 常量 {_clean(c.name)} = {c.value}")
     lines += ["", "**因子清单**（公式里用短名；平衡行的因子名照抄完整名，逐个按单位填）"]

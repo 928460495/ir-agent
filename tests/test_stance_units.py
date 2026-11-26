@@ -127,15 +127,35 @@ def test_流程里辩论二传了分解式与单位():
 def test_I1_相对基期累计的按定义填_不被换算():
     t = S._JUDGE_B
     assert "累计数要先换算成全年" not in t
-    assert "相对基期累计" in t and "年初至今" in t
+    assert "年初至今" in t and "公式下注明的参照点" in t
 
 
-def test_I1_分解式写明模式():
-    _Meth.model.mode = "变化"
-    try:
-        assert "模式：变化" in S.factor_brief(_Meth())
-    finally:
-        del _Meth.model.mode
+class _Formulas(_Meth):
+    def __init__(self, mode, rev, gm):
+        class M(_Model):
+            pass
+        M.mode = mode
+        M.describe = lambda self, t: {"revenue": rev, "gross_margin": gm}[t]
+        self.model = M()
+
+
+@pytest.mark.parametrize("rev,gm,want,never", [
+    ("营收 = 上期(营收) × (1 + 销量)", "毛利率 = 上期(毛利率) + 毛利变动 / 100", "相对上一年的逐年变动", "相对基期的累计值"),
+    ("营收 = 基期(营收) × (1 + 销量)", "毛利率 = 基期(毛利率) + 毛利变动 / 100", "相对基期的累计值", "相对上一年的逐年变动"),
+])
+def test_I1_参照点按公式注明_不按模式猜(rev, gm, want, never):
+    t = S.factor_brief(_Formulas("变化", rev, gm))
+    assert t.count(want) == 2 and never not in t
+    assert "因子是相对基期的变动" not in t
+
+
+def test_I1_两种参照点混用与水平模式():
+    t = S.factor_brief(_Formulas("变化", "营收 = 上期(营收) × (1 + 销量)", "毛利率 = 基期(毛利率) + 毛利变动 / 100"))
+    assert "相对上一年的逐年变动" in t and "相对基期的累计值" in t
+    t = S.factor_brief(_Formulas("变化", "营收 = 上期(营收) × (1 + 销量) + 基期(营收) × 0", "毛利率 = 1 - 成本"))
+    assert "同时用到上期与基期" in t
+    t = S.factor_brief(_Formulas("水平", "营收 = 产能 × 单价", "毛利率 = 1 - 成本 / 单价"))
+    assert "当年的水平值" in t and "逐年变动" not in t
 
 
 def test_I2_因子清单带短名_平衡行照抄完整名():
